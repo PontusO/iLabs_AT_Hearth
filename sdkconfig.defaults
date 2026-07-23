@@ -1,0 +1,8 @@
+# iLabs AT Matter (ESP32-C6) - shared build defaults.
+
+# 1 ms tick to match the ESP-NOW firmware's timing conventions.
+CONFIG_FREERTOS_HZ=1000
+
+# Keep boot output modest on the console UART; the AT link is on its own
+# UART (see main/include/mt_at_config.h -> at_core_config.h).
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

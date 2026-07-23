@@ -1,0 +1,11 @@
+# iLabs AT Matter - ESP32-C6 overrides.
+#
+# Same board wiring as the ESP-NOW firmware: the AT link (UART1) is on
+# GPIO16/17, which are also the C6's default UART0 console pins. Move the
+# console TX to GPIO2 (and park RX on the unused GPIO4) so the boot/log
+# output never shares a pin with the AT stream.
+CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+CONFIG_ESP_CONSOLE_UART_CUSTOM_NUM_0=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_TX_GPIO=2
+CONFIG_ESP_CONSOLE_UART_RX_GPIO=4
