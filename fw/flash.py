@@ -44,6 +44,7 @@ sys.path already. `rich` is used for nicer output if installed (pip install rich
 
 import argparse
 import getpass
+import json
 import os
 import re
 import shutil
@@ -588,23 +589,57 @@ def _connect_with_recovery(esptool, board, port):
             f"Last {ROM_BAUD} error: {e}; last {FLASH_BAUD} error: {last_err}")
 
 
+def load_flash_plan(build_dir):
+    """Resolve the ESP flash images for build_dir.
+
+    Prefer the IDF-generated flasher_args.json — it carries the exact offsets
+    for whatever partition table the build uses (e.g. esp-matter's custom 4 MB
+    dual-OTA layout, app at 0x20000, plus otadata). Fall back to the fixed
+    single-app layout (FLASH_IMAGES) only when no json is present.
+
+    Returns (images, settings): images is a list of (offset, abspath) sorted by
+    offset; settings is the flash_settings dict (mode/freq/size) or None.
+    """
+    fa = os.path.join(build_dir, "flasher_args.json")
+    if os.path.isfile(fa):
+        try:
+            with open(fa) as f:
+                data = json.load(f)
+            files = data.get("flash_files", {})
+            images = sorted(
+                ((int(off, 16), os.path.join(build_dir, rel))
+                 for off, rel in files.items()),
+                key=lambda t: t[0],
+            )
+            if images:
+                return images, (data.get("flash_settings") or None)
+        except (ValueError, OSError) as e:
+            cprint(f"  (could not parse {fa}: {e}; using built-in layout)",
+                   style="yellow")
+    return [(addr, os.path.join(build_dir, rel)) for addr, rel in FLASH_IMAGES], None
+
+
 def do_flash(esptool, board, port, build_dir, keep_baud=False):
     from esptool.logger import log
+    images, settings = load_flash_plan(build_dir)
+    settings = settings or {}
     addr_data = []
     plan = []
-    for i, (addr, rel) in enumerate(FLASH_IMAGES):
-        path = os.path.join(build_dir, rel)
+    for i, (addr, path) in enumerate(images):
         if not os.path.isfile(path):
             die(f"missing firmware image: {path}\n"
                 f"  build the firmware first (idf.py build), or point --build-dir "
                 f"at the right build folder.")
         addr_data.append((addr, path))
         plan.append({
-            "name": os.path.splitext(os.path.basename(rel))[0],
+            "name": os.path.splitext(os.path.basename(path))[0],
             "base": addr,
             "size": os.path.getsize(path),
             "color": _PART_PALETTE[i % len(_PART_PALETTE)],
         })
+    flash_mode = settings.get("flash_mode", board["flash_mode"])
+    flash_freq = settings.get("flash_freq", board["flash_freq"])
+    flash_size = settings.get("flash_size", board["flash_size"])
 
     if keep_baud:
         cprint(f"\nConnecting to {board['chip']} on {port} at {ROM_BAUD} "
@@ -625,9 +660,9 @@ def do_flash(esptool, board, port, build_dir, keep_baud=False):
             esptool.write_flash(
                 esp,
                 addr_data,
-                flash_mode=board["flash_mode"],
-                flash_freq=board["flash_freq"],
-                flash_size=board["flash_size"],
+                flash_mode=flash_mode,
+                flash_freq=flash_freq,
+                flash_size=flash_size,
             )
         finally:
             if hasattr(log, "end_plan"):
@@ -804,11 +839,14 @@ def main():
             stage1_copy_bridge(board, dry_run=True)
         port = args.port or "<auto-detected ttyACM*/cu.usbmodem*>"
         cprint(f"[dry-run] would flash on {port}:", style="yellow")
-        for addr, rel in FLASH_IMAGES:
-            cprint(f"[dry-run]   0x{addr:05x}  {os.path.join(args.build_dir, rel)}",
-                   style="dim")
-        cprint(f"[dry-run]   chip={board['chip']} mode={board['flash_mode']} "
-               f"freq={board['flash_freq']} size={board['flash_size']} "
+        dr_images, dr_settings = load_flash_plan(args.build_dir)
+        dr_settings = dr_settings or {}
+        for addr, path in dr_images:
+            cprint(f"[dry-run]   0x{addr:05x}  {path}", style="dim")
+        cprint(f"[dry-run]   chip={board['chip']} "
+               f"mode={dr_settings.get('flash_mode', board['flash_mode'])} "
+               f"freq={dr_settings.get('flash_freq', board['flash_freq'])} "
+               f"size={dr_settings.get('flash_size', board['flash_size'])} "
                f"after={RESET_AFTER}", style="dim")
         cprint(f"[dry-run]   baud: try {FLASH_BAUD} x{BAUD_RETRIES} "
                f"(verified round-trip), else fall back to {ROM_BAUD}", style="dim")
