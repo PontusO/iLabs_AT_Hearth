@@ -1,15 +1,24 @@
 /*
- * mt_at.h - Matter AT command surface for the shared at_core engine.
+ * mt_at.h - Matter AT+MT command interface entry point.
+ *
+ * Kept C++-safe (extern "C" guard, no at_core headers pulled in) so the C++
+ * app entry point can start the AT interface without name-mangling issues.
+ * The command handlers, engine config and the at_core includes stay inside
+ * mt_at.c (compiled as C).
  */
 
 #pragma once
 
-#include "at_parser.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-/* Engine config for the Matter personality (error prefix "+MTERR", code
- * space, line length, parser task tuning). Passed to at_parser_start(). */
-extern const at_engine_cfg_t mt_at_engine_cfg;
+/*
+ * Bring up the AT+MT interface (AT UART + parser + command table) and emit
+ * the "+MTREADY" boot marker. Call once at boot, after esp_matter::start().
+ */
+void mt_at_start(void);
 
-/* Register the AT+MT... command table with the engine. Call before
- * at_parser_start(). */
-void mt_at_register(void);
+#ifdef __cplusplus
+}
+#endif
