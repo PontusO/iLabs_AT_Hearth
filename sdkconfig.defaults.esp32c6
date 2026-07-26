@@ -1,11 +1,8 @@
-# iLabs AT Matter - ESP32-C6 overrides.
+# iLabs AT Matter - ESP32-C6 target.
 #
-# Same board wiring as the ESP-NOW firmware: the AT link (UART1) is on
-# GPIO16/17, which are also the C6's default UART0 console pins. Move the
-# console TX to GPIO2 (and park RX on the unused GPIO4) so the boot/log
-# output never shares a pin with the AT stream.
-CONFIG_ESP_CONSOLE_UART_CUSTOM=y
-CONFIG_ESP_CONSOLE_UART_CUSTOM_NUM_0=y
-CONFIG_ESP_CONSOLE_UART_NUM=0
-CONFIG_ESP_CONSOLE_UART_TX_GPIO=2
-CONFIG_ESP_CONSOLE_UART_RX_GPIO=4
+# B2 keeps the console (and CHIP shell) on the default UART0 pins (GPIO16/17),
+# which is where the RP2350 host bridge is wired - so Matter bring-up logs and
+# `matter device factoryreset` are reachable exactly like the stock esp-matter
+# light. When the AT+MT interface is wired in (B4), the console moves off to
+# GPIO2 and the AT link takes UART1 on GPIO16/17 (as in the ESP-NOW firmware).
+CONFIG_IDF_TARGET="esp32c6"

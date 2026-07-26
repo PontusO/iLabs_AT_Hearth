@@ -1,17 +1,14 @@
-# C6-only: the Matter personality is scoped to the ESP32-C6 target.
-if(NOT IDF_TARGET STREQUAL "esp32c6")
-    message(FATAL_ERROR
-        "iLabs_AT_Matter targets the ESP32-C6 only (IDF_TARGET=${IDF_TARGET})")
-endif()
-
-# The AT engine + UART transport come from the shared at_core component
-# (pulled in via EXTRA_COMPONENT_DIRS in the top-level CMakeLists.txt).
+# B2: Matter-only bring-up. Only main.cpp is built for now; the AT command
+# surface (mt_at.c on the shared at_core) is dormant and returns in B4, so it is
+# intentionally left out of SRCS here.
 idf_component_register(
     SRCS
-        "main.c"
-        "mt_at.c"
+        "main.cpp"
     INCLUDE_DIRS
         "include"
     PRIV_REQUIRES
-        at_core
+        esp_matter
+        nvs_flash
 )
+
+target_compile_options(${COMPONENT_LIB} PRIVATE "-DCHIP_HAVE_CONFIG_H")
