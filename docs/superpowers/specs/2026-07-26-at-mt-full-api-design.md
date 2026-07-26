@@ -188,6 +188,9 @@ the sketch is the declaration of intent, but it does not do so silently.
 
 ### 5.5 The unconfigured state
 
+**Provisional**: the no-commissioning-window behaviour below depends on open
+question P2 (§12.1). Read it as intent until P2 concludes.
+
 A factory-fresh C6, or one whose composition was cleared, has no endpoints. It:
 
 - starts the Matter stack with the Root Node only,
@@ -297,6 +300,17 @@ producing an identical endpoint reconcile as identical, which they are.
 This drift is also a live risk for phase C4: a host library written against the
 arduino-esp32 class surface talks to a firmware built on a different esp-matter
 revision than the one those classes were written for.
+
+**Accepted while prototyping; a release blocker.** For prototyping, working
+around the drift per device type as we add it is fine, and that is the agreed
+position. It does not survive delivery: shipping a host library whose class
+surface is defined by esp_matter 1.4.1 against firmware pinned to v1.5.1 means
+every future core or SDK bump can silently rename a namespace out from under a
+device type that used to work. Before anything is delivered we need a settled
+answer on which revision is normative and how the two are kept in step, whether
+that is pinning the Arduino core, tracking a single esp-matter, or declaring our
+own device type names and mapping them internally. Recorded here so the decision
+is made deliberately rather than discovered during a release.
 
 ## 7. Attribute layer
 
@@ -436,14 +450,13 @@ D2, D3, D4, D5 and D7 are added to the decision log in `ARCHITECTURE.md`.
 Continues the repository's phase lettering (Phase A: `at_core` extraction; Phase
 B: Matter bring-up and the initial `AT+MT` command set).
 
-### 12.1 C1 preconditions
+### 12.1 C1 preconditions and open questions
 
-Two assumptions in this design are load-bearing and unverified. Both are cheap
-to settle with a spike, and both must be settled **before** any composition code
-is written, because a negative result changes the design rather than the
-implementation.
+Two assumptions in this design are load-bearing and unverified. They are handled
+differently: P1 blocks, P2 is tracked.
 
-**P1: endpoint IDs are assigned sequentially in creation order, and stably.**
+**P1 (blocking): endpoint IDs are assigned sequentially in creation order, and
+stably.**
 §5.3 depends on rebuilding the composition in stored order reproducing the same
 endpoint IDs on every boot. Persisted attribute values and the controller's
 cached Descriptor `PartsList` are both keyed on endpoint ID, so if esp-matter
@@ -453,12 +466,12 @@ recording the IDs, power-cycling, and comparing. Also confirm the behaviour when
 an endpoint fails to create mid-sequence: a partial build must not silently shift
 the IDs of everything after it.
 
-**P2: the boot commissioning window can be suppressed.** §5.5 requires an
-unconfigured device to open no commissioning window, but CHIP auto-opens one at
-boot when the node is uncommissioned. The likely mechanism is building with
-`CHIP_DEVICE_CONFIG_ENABLE_PAIRING_AUTOSTART` disabled and having the firmware
-open the window itself once a composition exists. That is inference, not a
-verified fact about this esp-matter revision.
+**P2 (tracked, not blocking): the boot commissioning window can be suppressed.**
+§5.5 requires an unconfigured device to open no commissioning window, but CHIP
+auto-opens one at boot when the node is uncommissioned. The likely mechanism is
+building with `CHIP_DEVICE_CONFIG_ENABLE_PAIRING_AUTOSTART` disabled and having
+the firmware open the window itself once a composition exists. That is
+inference, not a verified fact about this esp-matter revision.
 
 P2 has a consequence beyond §5.5 even when it succeeds: with autostart off, a
 **configured but uncommissioned** device also stops opening its own window, so
@@ -468,11 +481,27 @@ device", as `AT_MT_SPEC.md` §3.5 currently describes it, to part of the normal
 path. If P2 fails, §5.5 needs redesigning, most likely by letting the window open
 and having the host clear the composition, which is a worse story.
 
+**How P2 is handled.** It does not gate the composition work: nothing in
+`AT+MTEP`, the NVS store, the boot rebuild or the device type table depends on
+the answer. So C1 proceeds, with the window policy isolated behind a single
+function (`mt_matter_boot_window_policy()`) called at the end of the §5.3 boot
+sequence, and observations recorded as they come up:
+
+| Date | Observation |
+|---|---|
+| 2026-07-26 | Raised. `CHIP_DEVICE_CONFIG_ENABLE_PAIRING_AUTOSTART` identified as the likely knob, unverified against esp-matter v1.5.1. |
+
+The conclusion is a deliberate, targeted effort rather than a discovery made
+mid-implementation, and it has a deadline: **P2 must be settled before the
+`TESTING.md` Phase 2 assertions for §5.5 are written** (phase C5), because those
+assertions encode whichever answer we land on. Until then §5.5 is provisional
+and should be read as intent, not as settled behaviour.
+
 ### 12.2 Phases
 
 | Phase | Deliverable |
 |---|---|
-| **C1** | Spikes P1 and P2 (§12.1) first, then endpoint composition: `AT+MTEP` / `MTEPCLEAR` / `MTEPAPPLY`, NVS persistence, boot rebuild, unconfigured-state gating, and the four slice device types. |
+| **C1** | Spike P1 (§12.1) first, then endpoint composition: `AT+MTEP` / `MTEPCLEAR` / `MTEPAPPLY`, NVS persistence, boot rebuild, unconfigured-state gating behind the P2 seam, and the four slice device types. |
 | **C2** | `AT+MTATTR` mode parameter and the `+MTERR` code allocation across all existing handlers. |
 | **C3** | Event mask, `+MTEVT`, removal of `+MTCOMMISSION`, `+MTIDENT`, and the resulting `AT_MT_SPEC.md` edits. |
 | **C4** | `iLabs_Matter` host library: `ATLink` extraction, `ArduinoMatter`, `MatterEndPoint`, and the four endpoint classes. |
