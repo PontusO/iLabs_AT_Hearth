@@ -19,6 +19,8 @@
 
 #include <esp_matter.h>
 
+#include "mt_at.h"
+
 static const char *TAG = "mt_main";
 
 using namespace esp_matter;
@@ -101,6 +103,10 @@ extern "C" void app_main(void)
         return;
     }
 
-    ESP_LOGI(TAG, "iLabs AT Matter (B2): Matter started, on/off light ready on endpoint %u",
-             s_light_endpoint_id);
+    ESP_LOGI(TAG, "Matter started, on/off light ready on endpoint %u", s_light_endpoint_id);
+
+    /* Bring up the AT+MT host interface (AT UART + parser). Runs alongside
+     * Matter; the host drives Matter over AT from B4.2 onward. */
+    mt_at_start();
+    ESP_LOGI(TAG, "iLabs AT Matter: AT+MT interface up");
 }

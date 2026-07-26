@@ -82,7 +82,7 @@ static const at_command_t s_cmds[] = {
 
 /* Engine config for the Matter personality: "+MTERR" code space, the
  * Matter line length, and the parser task tuning. */
-const at_engine_cfg_t mt_at_engine_cfg = {
+static const at_engine_cfg_t s_engine_cfg = {
     .line_max        = MT_AT_LINE_MAX,
     .err_prefix      = "+MTERR",
     .err_generic     = MT_ERR_GENERIC,
@@ -92,7 +92,19 @@ const at_engine_cfg_t mt_at_engine_cfg = {
     .task_prio       = MT_PARSER_TASK_PRIO,
 };
 
-void mt_at_register(void)
+/*
+ * Bring up the AT+MT interface: install the AT UART (UART1 on the host-bridge
+ * pins - the console lives on its own UART, see sdkconfig.defaults.esp32c6),
+ * register the command table, start the parser engine, and emit the boot
+ * marker. Called from app_main() after esp_matter::start(). C linkage so the
+ * C++ entry point can call it without pulling at_core's C headers into C++.
+ */
+void mt_at_start(void)
 {
+    at_uart_init();
     at_register_commands(s_cmds, sizeof(s_cmds) / sizeof(s_cmds[0]));
+    at_parser_start(&s_engine_cfg);
+
+    /* Boot marker so the host can synchronize after a reset (mirrors +ENREADY). */
+    at_uart_write_line("+MTREADY");
 }
