@@ -15,6 +15,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -152,6 +153,63 @@ static int cmd_mtreset(at_type_t type, char *args)
     return AT_R_DONE;
 }
 
+/* ---- data model (B4.3) ------------------------------------------------ */
+
+/* Parse an unsigned token, hex ("0x..") or decimal. */
+static bool parse_u(const char *s, unsigned long *out)
+{
+    if (!s || *s == '\0') {
+        return false;
+    }
+    char *end;
+    unsigned long v = strtoul(s, &end, 0);
+    if (*end != '\0') {
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+/*
+ * AT+MTATTR=<ep>,<cluster>,<attr>       -> read  -> +MTATTR:<ep>,<cluster>,<attr>,<val>
+ * AT+MTATTR=<ep>,<cluster>,<attr>,<val> -> write -> OK
+ *
+ * <cluster>/<attr> accept hex (0x0006) or decimal; <val> is an integer. A
+ * controller-driven change to the light endpoint is reported asynchronously as
+ * a +MTATTR URC (from the attribute callback in main.cpp).
+ */
+static int cmd_mtattr(at_type_t type, char *args)
+{
+    char *f[4];
+    int n = at_split_args(args, f, 4);
+    if (type != AT_SET || n < 3) {
+        return MT_R_ERROR;
+    }
+
+    unsigned long ep, cluster, attr;
+    if (!parse_u(f[0], &ep) || !parse_u(f[1], &cluster) || !parse_u(f[2], &attr)) {
+        return MT_R_ERROR;
+    }
+
+    if (n == 3) {
+        long v;
+        if (mt_matter_attr_read((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr, &v) != 0) {
+            return MT_R_ERROR;
+        }
+        at_uart_write_line("+MTATTR:%lu,%lu,%lu,%ld", ep, cluster, attr, v);
+        return AT_R_OK;
+    }
+
+    unsigned long val;
+    if (!parse_u(f[3], &val)) {
+        return MT_R_ERROR;
+    }
+    if (mt_matter_attr_write((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr, (long)val) != 0) {
+        return MT_R_ERROR;
+    }
+    return AT_R_OK;
+}
+
 /* ---- dispatch table & registration ------------------------------------ */
 
 static const at_command_t s_cmds[] = {
@@ -164,6 +222,7 @@ static const at_command_t s_cmds[] = {
     { "MTCOMMISSION", cmd_mtcommission },
     { "MTCODES",      cmd_mtcodes     },
     { "MTRESET",      cmd_mtreset     },
+    { "MTATTR",       cmd_mtattr      },
 };
 
 /* Engine config for the Matter personality: "+MTERR" code space, the

@@ -42,6 +42,14 @@ void mt_matter_factory_reset(void);
 /* Endpoint id of the on/off light. */
 uint16_t mt_matter_endpoint_id(void);
 
+/* Read an integer-valued attribute into *out. Returns 0 on success, -1 on
+ * failure (not found, or a non-integer type). */
+int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out);
+
+/* Write an integer-valued attribute (interpreted per the attribute's current
+ * type). Returns 0 on success, -1 on failure. */
+int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long val);
+
 #ifdef __cplusplus
 }
 #endif
