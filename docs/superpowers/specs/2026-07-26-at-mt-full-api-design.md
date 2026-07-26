@@ -37,7 +37,7 @@ mechanical rather than interpretive.
 
 ## 2. What the reference API actually needs
 
-A census of the attribute value types used across all 21 endpoint classes in
+A census of the attribute value types used across all 20 endpoint classes in
 `src/MatterEndpoints/*.cpp`:
 
 | Union field | Uses |
@@ -81,7 +81,7 @@ bool MatterOnOffLight::begin(bool initialState) {
 |---|---|---|
 | D1 | Mirror the arduino-esp32 `Matter` API, not the Silicon Labs one | Same underlying esp-matter stack; matches the `ESP32_NOW.h` precedent set by `iLabs_ESP-NOW`. |
 | D2 | Endpoint composition persists in the C6's NVS | The C6 must rejoin its fabric after a power cut without waiting on the host. See §5.3. |
-| D3 | Device types are identified by their standard Matter device type IDs | Makes the firmware table one line per type and the host mapping one constant per class. Keeps the remaining 17 types as data, not code. |
+| D3 | Device types are identified by their standard Matter device type IDs, read from `esp_matter` rather than transcribed | Every `esp_matter` endpoint namespace exposes `get_device_type_id()`, so the firmware table derives its IDs from the SDK and cannot drift from it. Keeps the remaining device types as table entries, not design work. See §6. |
 | D4 | No `AT+MTSTART` command | The C6 rebuilds from NVS and starts itself at boot, which D2 requires anyway. See §5.3. |
 | D5 | An unconfigured C6 opens no commissioning window | Prevents commissioning an empty node and then mutating the data model underneath a live fabric. See §5.5. |
 | D6 | Events are subscribed by bit mask | ~30 event codes on a 115200 link shared with attribute traffic; most are stack chatter no sketch acts on. |
@@ -201,25 +201,102 @@ forbids. First boot is host-driven; every boot after that is autonomous.
 
 ## 6. Device type table
 
-One firmware table maps a Matter device type ID to its `esp_matter` create
-function. Slice entries:
+### 6.1 Shape
 
-| Device type ID | Device type | esp_matter namespace | Types exercised |
+One firmware table maps a Matter device type ID to a creation thunk. The ID is
+**not transcribed**: every `esp_matter` endpoint namespace exposes
+`get_device_type_id()`, so the table reads it from the SDK and cannot drift from
+whatever esp-matter revision we build against.
+
+A thunk per type is required because each namespace has its own `config_t`, so
+the `create()` calls do not share a signature:
+
+```cpp
+static endpoint_t *mk_on_off_light(node_t *n) {
+    on_off_light::config_t c;
+    return on_off_light::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static const mt_devtype_t s_devtypes[] = {
+    { on_off_light::get_device_type_id(),            mk_on_off_light },
+    { dimmable_light::get_device_type_id(),          mk_dimmable_light },
+    { color_temperature_light::get_device_type_id(), mk_color_temp_light },
+    { temperature_sensor::get_device_type_id(),      mk_temperature_sensor },
+};
+```
+
+So the cost per device type is a four-line thunk plus one table row, not one
+line. The point stands that adding types is mechanical rather than design work,
+but it is not free.
+
+### 6.2 Verified mapping
+
+Verified against **esp-matter release/v1.5 (v1.5.1, commit `21aa3d1`)**, which is
+what this firmware builds against, and against the 20 endpoint classes in
+arduino-esp32 **3.3.8** `libraries/Matter`. IDs come from
+`components/esp_matter/data_model/esp_matter_endpoint.h`; the namespace each
+Arduino class uses comes from its `::create(node::get()` call site.
+
+Slice entries, all four confirmed present in v1.5.1:
+
+| Device type ID | Arduino class | esp_matter namespace | Types exercised |
 |---|---|---|---|
-| `0x0100` | On/Off Light | `on_off_light` | `bool`, bidirectional writes |
-| `0x0101` | Dimmable Light | `dimmable_light` | `u8`, two clusters on one endpoint |
-| `0x010C` | Colour Temperature Light | `color_temperature_light` | `u16`, three clusters on one endpoint |
-| `0x0302` | Temperature Sensor | `temperature_sensor` | `i16`, read-only device-to-controller |
+| `0x0100` | `MatterOnOffLight` | `on_off_light` | `bool`, bidirectional writes |
+| `0x0101` | `MatterDimmableLight` | `dimmable_light` | `u8`, two clusters on one endpoint |
+| `0x010C` | `MatterColorTemperatureLight` | `color_temperature_light` | `u16`, three clusters on one endpoint |
+| `0x0302` | `MatterTemperatureSensor` | `temperature_sensor` | `i16`, read-only device-to-controller |
 
 Between them these cover `bool`, `u8`, `u16` and `i16`, single and multi-cluster
 endpoints, and both data directions. `u32` appears almost entirely in read-only
 metadata such as FeatureMap and arrives free with the table.
 
-The remaining 17 types (plug-in units, generic switch, door lock, the other
-sensors, fan, thermostat, window covering, air quality, leak/freeze/rain
-detectors, temperature controlled cabinet) are table entries added later. Their
-device type IDs must be checked against the Matter Device Library Specification
-as each is added rather than taken from this document.
+Remaining types, mapping clean, added as table rows:
+
+| Device type ID | Arduino class | esp_matter namespace (v1.5.1) |
+|---|---|---|
+| `0x000F` | `MatterGenericSwitch` | `generic_switch` |
+| `0x0015` | `MatterContactSensor` | `contact_sensor` |
+| `0x002B` | `MatterFan` | `fan` |
+| `0x0041` | `MatterWaterFreezeDetector` | `water_freeze_detector` |
+| `0x0043` | `MatterWaterLeakDetector` | `water_leak_detector` |
+| `0x0044` | `MatterRainSensor` | `rain_sensor` |
+| `0x0071` | `MatterTemperatureControlledCabinet` | `temperature_controlled_cabinet` |
+| `0x0107` | `MatterOccupancySensor` | `occupancy_sensor` |
+| `0x0305` | `MatterPressureSensor` | `pressure_sensor` |
+| `0x0307` | `MatterHumiditySensor` | `humidity_sensor` |
+
+### 6.3 Namespace drift between esp-matter revisions
+
+arduino-esp32 3.3.8 bundles **esp_matter 1.4.1**; this firmware pins **v1.5.1**.
+Several namespaces were renamed between them, so the Arduino library's call
+sites are not a usable guide to our namespace names:
+
+| Arduino class | Namespace in 1.4.1 | Namespace in v1.5.1 | Device type ID |
+|---|---|---|---|
+| `MatterOnOffPlugin` | `on_off_plugin_unit` | `on_off_plug_in_unit` | `0x010A` |
+| `MatterDimmablePlugin` | `dimmable_plugin_unit` | `dimmable_plug_in_unit` | `0x010B` |
+| `MatterWindowCovering` | `window_covering_device` | `window_covering` | `0x0202` |
+
+Three Arduino classes call namespaces that exist in **neither** revision. Their
+`::create()` targets are referenced only by the Arduino library's own sources,
+which means those three classes do not build against the esp_matter that
+arduino-esp32 3.3.8 ships with either:
+
+| Arduino class | Namespace it calls | Status | Likely target |
+|---|---|---|---|
+| `MatterColorLight` | `rgb_color_light` | Not in 1.4.1 or v1.5.1 | `extended_color_light`, `0x010D` |
+| `MatterEnhancedColorLight` | `enhanced_color_light` | Not in 1.4.1 or v1.5.1 | `extended_color_light`, `0x010D` |
+| `MatterThermostat` | `multi_mode_thermostat` | Not in 1.4.1 or v1.5.1 | `thermostat`, `0x0301` |
+
+These three must be resolved before they are scheduled, not while implementing
+them. The "likely target" column is inference from the class behaviour and is
+explicitly unverified. Note that `MatterColorLight` and `MatterEnhancedColorLight`
+would both resolve to `0x010D`; that is harmless, since two host classes
+producing an identical endpoint reconcile as identical, which they are.
+
+This drift is also a live risk for phase C4: a host library written against the
+arduino-esp32 class surface talks to a firmware built on a different esp-matter
+revision than the one those classes were written for.
 
 ## 7. Attribute layer
 
@@ -359,9 +436,43 @@ D2, D3, D4, D5 and D7 are added to the decision log in `ARCHITECTURE.md`.
 Continues the repository's phase lettering (Phase A: `at_core` extraction; Phase
 B: Matter bring-up and the initial `AT+MT` command set).
 
+### 12.1 C1 preconditions
+
+Two assumptions in this design are load-bearing and unverified. Both are cheap
+to settle with a spike, and both must be settled **before** any composition code
+is written, because a negative result changes the design rather than the
+implementation.
+
+**P1: endpoint IDs are assigned sequentially in creation order, and stably.**
+§5.3 depends on rebuilding the composition in stored order reproducing the same
+endpoint IDs on every boot. Persisted attribute values and the controller's
+cached Descriptor `PartsList` are both keyed on endpoint ID, so if esp-matter
+ever renumbers, reuses, or reserves IDs differently across boots, the whole
+persistence scheme is unsound. Verify by building a three-endpoint composition,
+recording the IDs, power-cycling, and comparing. Also confirm the behaviour when
+an endpoint fails to create mid-sequence: a partial build must not silently shift
+the IDs of everything after it.
+
+**P2: the boot commissioning window can be suppressed.** §5.5 requires an
+unconfigured device to open no commissioning window, but CHIP auto-opens one at
+boot when the node is uncommissioned. The likely mechanism is building with
+`CHIP_DEVICE_CONFIG_ENABLE_PAIRING_AUTOSTART` disabled and having the firmware
+open the window itself once a composition exists. That is inference, not a
+verified fact about this esp-matter revision.
+
+P2 has a consequence beyond §5.5 even when it succeeds: with autostart off, a
+**configured but uncommissioned** device also stops opening its own window, so
+the firmware must open one explicitly at the end of the §5.3 boot sequence. That
+promotes `AT+MTCOMMISSION` from "reopen a window on an already-commissioned
+device", as `AT_MT_SPEC.md` §3.5 currently describes it, to part of the normal
+path. If P2 fails, §5.5 needs redesigning, most likely by letting the window open
+and having the host clear the composition, which is a worse story.
+
+### 12.2 Phases
+
 | Phase | Deliverable |
 |---|---|
-| **C1** | Endpoint composition: `AT+MTEP` / `MTEPCLEAR` / `MTEPAPPLY`, NVS persistence, boot rebuild, unconfigured-state gating, and the four slice device types. |
+| **C1** | Spikes P1 and P2 (§12.1) first, then endpoint composition: `AT+MTEP` / `MTEPCLEAR` / `MTEPAPPLY`, NVS persistence, boot rebuild, unconfigured-state gating, and the four slice device types. |
 | **C2** | `AT+MTATTR` mode parameter and the `+MTERR` code allocation across all existing handlers. |
 | **C3** | Event mask, `+MTEVT`, removal of `+MTCOMMISSION`, `+MTIDENT`, and the resulting `AT_MT_SPEC.md` edits. |
 | **C4** | `iLabs_Matter` host library: `ATLink` extraction, `ArduinoMatter`, `MatterEndPoint`, and the four endpoint classes. |
@@ -372,7 +483,8 @@ with a terminal and `chip-tool` before any host library exists.
 
 ## 13. Out of scope
 
-- The remaining 17 device types. Data entries against the C1 table.
+- The remaining 16 device types (§6.2), plus the three needing resolution in
+  §6.3. Table rows against the C1 table, not design work.
 - `AT+MTATTRX` implementation. Lands with Temperature Controlled Cabinet.
 - Thread transport. Deferred per `ARCHITECTURE.md`.
 - `AT+MTOTA`. Covered by `FIRMWARE_UPDATE_SPEC.md`.
