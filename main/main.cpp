@@ -12,6 +12,7 @@
  */
 
 #include <inttypes.h>
+#include <stdio.h>
 
 #include <esp_err.h>
 #include <esp_log.h>
@@ -32,6 +33,54 @@ using namespace esp_matter;
 using namespace esp_matter::endpoint;
 
 static uint16_t s_light_endpoint_id = 0;
+
+/*
+ * Map an esp_matter attribute value to/from a plain integer for the AT+MTATTR
+ * command (host sends/receives integers; strings/floats/arrays are unsupported).
+ */
+static bool attr_val_to_long(const esp_matter_attr_val_t *v, long *out)
+{
+    switch (v->type) {
+    case ESP_MATTER_VAL_TYPE_BOOLEAN:  *out = v->val.b;   return true;
+    case ESP_MATTER_VAL_TYPE_INTEGER:  *out = v->val.i;   return true;
+    case ESP_MATTER_VAL_TYPE_INT8:     *out = v->val.i8;  return true;
+    case ESP_MATTER_VAL_TYPE_UINT8:
+    case ESP_MATTER_VAL_TYPE_ENUM8:
+    case ESP_MATTER_VAL_TYPE_BITMAP8:  *out = v->val.u8;  return true;
+    case ESP_MATTER_VAL_TYPE_INT16:    *out = v->val.i16; return true;
+    case ESP_MATTER_VAL_TYPE_UINT16:
+    case ESP_MATTER_VAL_TYPE_ENUM16:
+    case ESP_MATTER_VAL_TYPE_BITMAP16: *out = v->val.u16; return true;
+    case ESP_MATTER_VAL_TYPE_INT32:    *out = v->val.i32; return true;
+    case ESP_MATTER_VAL_TYPE_UINT32:
+    case ESP_MATTER_VAL_TYPE_BITMAP32: *out = (long)v->val.u32; return true;
+    case ESP_MATTER_VAL_TYPE_INT64:    *out = (long)v->val.i64; return true;
+    case ESP_MATTER_VAL_TYPE_UINT64:   *out = (long)v->val.u64; return true;
+    default: return false;
+    }
+}
+
+static bool long_to_attr_val(esp_matter_attr_val_t *v, long in)
+{
+    switch (v->type) {
+    case ESP_MATTER_VAL_TYPE_BOOLEAN:  v->val.b   = (bool)in;     return true;
+    case ESP_MATTER_VAL_TYPE_INTEGER:  v->val.i   = (int)in;      return true;
+    case ESP_MATTER_VAL_TYPE_INT8:     v->val.i8  = (int8_t)in;   return true;
+    case ESP_MATTER_VAL_TYPE_UINT8:
+    case ESP_MATTER_VAL_TYPE_ENUM8:
+    case ESP_MATTER_VAL_TYPE_BITMAP8:  v->val.u8  = (uint8_t)in;  return true;
+    case ESP_MATTER_VAL_TYPE_INT16:    v->val.i16 = (int16_t)in;  return true;
+    case ESP_MATTER_VAL_TYPE_UINT16:
+    case ESP_MATTER_VAL_TYPE_ENUM16:
+    case ESP_MATTER_VAL_TYPE_BITMAP16: v->val.u16 = (uint16_t)in; return true;
+    case ESP_MATTER_VAL_TYPE_INT32:    v->val.i32 = (int32_t)in;  return true;
+    case ESP_MATTER_VAL_TYPE_UINT32:
+    case ESP_MATTER_VAL_TYPE_BITMAP32: v->val.u32 = (uint32_t)in; return true;
+    case ESP_MATTER_VAL_TYPE_INT64:    v->val.i64 = (int64_t)in;  return true;
+    case ESP_MATTER_VAL_TYPE_UINT64:   v->val.u64 = (uint64_t)in; return true;
+    default: return false;
+    }
+}
 
 /* Platform events (commissioning lifecycle). */
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
@@ -77,9 +126,17 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
                                          uint32_t cluster_id, uint32_t attribute_id,
                                          esp_matter_attr_val_t *val, void *priv_data)
 {
-    if (type == attribute::POST_UPDATE) {
-        ESP_LOGI(TAG, "attr update: ep=%u cluster=0x%04" PRIx32 " attr=0x%04" PRIx32,
-                 endpoint_id, cluster_id, attribute_id);
+    /* Surface attribute changes on our light endpoint to the host as a
+     * +MTATTR URC (so a controller-driven toggle is visible over AT). The
+     * root endpoint (0) is skipped to keep boot-time init noise off the link. */
+    if (type == attribute::POST_UPDATE && endpoint_id == s_light_endpoint_id) {
+        long v;
+        if (attr_val_to_long(val, &v)) {
+            char line[64];
+            snprintf(line, sizeof(line), "+MTATTR:%u,%lu,%lu,%ld", endpoint_id,
+                     (unsigned long)cluster_id, (unsigned long)attribute_id, v);
+            mt_at_urc(line);
+        }
     }
     return ESP_OK;
 }
@@ -133,6 +190,29 @@ extern "C" void mt_matter_factory_reset(void)
 extern "C" uint16_t mt_matter_endpoint_id(void)
 {
     return s_light_endpoint_id;
+}
+
+extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out)
+{
+    esp_matter_attr_val_t val;
+    if (esp_matter::attribute::get_val(ep, cluster, attr, &val) != ESP_OK) {
+        return -1;
+    }
+    return attr_val_to_long(&val, out) ? 0 : -1;
+}
+
+extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long in)
+{
+    /* Read the current value to learn the attribute's type, then set the new
+     * integer into the matching union field and push the update. */
+    esp_matter_attr_val_t val;
+    if (esp_matter::attribute::get_val(ep, cluster, attr, &val) != ESP_OK) {
+        return -1;
+    }
+    if (!long_to_attr_val(&val, in)) {
+        return -1;
+    }
+    return (esp_matter::attribute::update(ep, cluster, attr, &val) == ESP_OK) ? 0 : -1;
 }
 
 /* --------------------------------------------------------------------------- */
