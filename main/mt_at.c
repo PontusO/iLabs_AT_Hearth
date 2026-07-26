@@ -16,10 +16,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "at_uart.h"
 #include "at_parser.h"
 #include "mt_at_config.h"
 #include "mt_at.h"
+#include "mt_matter.h"
 
 /* +MTERR:<n> code space (mirrors the ESP-NOW layout: 1..99 carry a code,
  * >= MT_ERR_GENERIC is a plain "ERROR"). Real codes are assigned in B4. */
@@ -71,13 +75,95 @@ static int cmd_ver(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/* ---- Matter lifecycle & commissioning (B4.2) -------------------------- */
+
+/* AT+MTSTATE? -> +MTSTATE:<state>,<fabric_count>  (state: 0 uninit, 1
+ * commissioning, 2 operational). */
+static int cmd_mtstate(at_type_t type, char *args)
+{
+    (void)args;
+    if (type != AT_QUERY) {
+        return MT_R_ERROR;
+    }
+    at_uart_write_line("+MTSTATE:%d,%d", mt_matter_state(), mt_matter_fabric_count());
+    return AT_R_OK;
+}
+
+/* AT+MTFABRICS? -> +MTFABRICS:<count> */
+static int cmd_mtfabrics(at_type_t type, char *args)
+{
+    (void)args;
+    if (type != AT_QUERY) {
+        return MT_R_ERROR;
+    }
+    at_uart_write_line("+MTFABRICS:%d", mt_matter_fabric_count());
+    return AT_R_OK;
+}
+
+/*
+ * AT+MTCOMMISSION[=<timeout_s>] -> open a basic commissioning window.
+ * Default 300 s; the +MTCOMMISSION:STARTED/COMPLETE/FAILED URCs report progress
+ * from the platform event callback.
+ */
+static int cmd_mtcommission(at_type_t type, char *args)
+{
+    unsigned timeout = 300;
+    if (type == AT_SET) {
+        if (!at_parse_uint(args, &timeout) || timeout < 30 || timeout > 900) {
+            return MT_R_ERROR;
+        }
+    } else if (type != AT_EXEC) {
+        return MT_R_ERROR;
+    }
+    if (mt_matter_open_commissioning((int)timeout) != 0) {
+        return MT_R_ERROR;
+    }
+    return AT_R_OK;
+}
+
+/* AT+MTCODES? -> +MTCODES:<qr_payload>,<manual_pairing_code> */
+static int cmd_mtcodes(at_type_t type, char *args)
+{
+    (void)args;
+    if (type != AT_QUERY) {
+        return MT_R_ERROR;
+    }
+    char qr[96];
+    char manual[32];
+    if (mt_matter_onboarding_codes(qr, sizeof(qr), manual, sizeof(manual)) != 0) {
+        return MT_R_ERROR;
+    }
+    at_uart_write_line("+MTCODES:%s,%s", qr, manual);
+    return AT_R_OK;
+}
+
+/* AT+MTRESET -> factory reset (erase Matter data) and reboot. */
+static int cmd_mtreset(at_type_t type, char *args)
+{
+    (void)args;
+    if (type != AT_EXEC) {
+        return MT_R_ERROR;
+    }
+    /* Acknowledge, drain the UART, then reset - the device reboots and the host
+     * resynchronizes on the next "+MTREADY". */
+    at_uart_write_line("OK");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    mt_matter_factory_reset();
+    return AT_R_DONE;
+}
+
 /* ---- dispatch table & registration ------------------------------------ */
 
 static const at_command_t s_cmds[] = {
-    { "CGMI",  cmd_cgmi },
-    { "CGMM",  cmd_cgmm },
-    { "CGMR",  cmd_cgmr },
-    { "MTVER", cmd_ver  },
+    { "CGMI",         cmd_cgmi        },
+    { "CGMM",         cmd_cgmm        },
+    { "CGMR",         cmd_cgmr        },
+    { "MTVER",        cmd_ver         },
+    { "MTSTATE",      cmd_mtstate     },
+    { "MTFABRICS",    cmd_mtfabrics   },
+    { "MTCOMMISSION", cmd_mtcommission },
+    { "MTCODES",      cmd_mtcodes     },
+    { "MTRESET",      cmd_mtreset     },
 };
 
 /* Engine config for the Matter personality: "+MTERR" code space, the
@@ -107,4 +193,9 @@ void mt_at_start(void)
 
     /* Boot marker so the host can synchronize after a reset (mirrors +ENREADY). */
     at_uart_write_line("+MTREADY");
+}
+
+void mt_at_urc(const char *line)
+{
+    at_uart_write_line("%s", line);
 }
