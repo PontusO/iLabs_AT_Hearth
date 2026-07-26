@@ -19,7 +19,12 @@
 
 #include <esp_matter.h>
 
+#include <app/server/Server.h>
+#include <app/server/CommissioningWindowManager.h>
+#include <setup_payload/OnboardingCodesUtil.h>
+
 #include "mt_at.h"
+#include "mt_matter.h"
 
 static const char *TAG = "mt_main";
 
@@ -32,14 +37,20 @@ static uint16_t s_light_endpoint_id = 0;
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
     switch (event->Type) {
+    case chip::DeviceLayer::DeviceEventType::kCommissioningWindowOpened:
+        ESP_LOGI(TAG, "Commissioning window opened");
+        mt_at_urc("+MTCOMMISSION:STARTED");
+        break;
     case chip::DeviceLayer::DeviceEventType::kCommissioningSessionStarted:
         ESP_LOGI(TAG, "Commissioning session started");
         break;
     case chip::DeviceLayer::DeviceEventType::kCommissioningComplete:
         ESP_LOGI(TAG, "Commissioning complete");
+        mt_at_urc("+MTCOMMISSION:COMPLETE");
         break;
     case chip::DeviceLayer::DeviceEventType::kFailSafeTimerExpired:
         ESP_LOGI(TAG, "Commissioning failed (fail-safe timer expired)");
+        mt_at_urc("+MTCOMMISSION:FAILED");
         break;
     case chip::DeviceLayer::DeviceEventType::kBLEDeinitialized:
         ESP_LOGI(TAG, "BLE deinitialized and memory reclaimed");
@@ -72,6 +83,59 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
     }
     return ESP_OK;
 }
+
+/* ---- C-linkage bridge for the AT+MT command handlers (see mt_matter.h) ---- */
+
+extern "C" int mt_matter_fabric_count(void)
+{
+    return chip::Server::GetInstance().GetFabricTable().FabricCount();
+}
+
+extern "C" int mt_matter_state(void)
+{
+    if (chip::Server::GetInstance().GetCommissioningWindowManager().IsCommissioningWindowOpen()) {
+        return MT_STATE_COMMISSIONING;
+    }
+    if (chip::Server::GetInstance().GetFabricTable().FabricCount() > 0) {
+        return MT_STATE_OPERATIONAL;
+    }
+    return MT_STATE_UNINIT;
+}
+
+extern "C" int mt_matter_open_commissioning(int timeout_s)
+{
+    CHIP_ERROR err = chip::Server::GetInstance().GetCommissioningWindowManager()
+        .OpenBasicCommissioningWindow(chip::System::Clock::Seconds32(timeout_s),
+                                      chip::CommissioningWindowAdvertisement::kAllSupported);
+    return (err == CHIP_NO_ERROR) ? 0 : -1;
+}
+
+extern "C" int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual, size_t manual_len)
+{
+    chip::MutableCharSpan qrSpan(qr, qr_len);
+    chip::MutableCharSpan manSpan(manual, manual_len);
+    chip::RendezvousInformationFlags rendezvous(chip::RendezvousInformationFlag::kBLE);
+    if (GetQRCode(qrSpan, rendezvous) != CHIP_NO_ERROR ||
+        GetManualPairingCode(manSpan, rendezvous) != CHIP_NO_ERROR) {
+        return -1;
+    }
+    /* MutableCharSpan is not guaranteed null-terminated; terminate in bounds. */
+    qr[qrSpan.size() < qr_len ? qrSpan.size() : qr_len - 1] = '\0';
+    manual[manSpan.size() < manual_len ? manSpan.size() : manual_len - 1] = '\0';
+    return 0;
+}
+
+extern "C" void mt_matter_factory_reset(void)
+{
+    esp_matter::factory_reset();
+}
+
+extern "C" uint16_t mt_matter_endpoint_id(void)
+{
+    return s_light_endpoint_id;
+}
+
+/* --------------------------------------------------------------------------- */
 
 extern "C" void app_main(void)
 {

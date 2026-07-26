@@ -19,6 +19,12 @@ extern "C" {
  */
 void mt_at_start(void);
 
+/*
+ * Emit a single URC line (e.g. "+MTCOMMISSION:COMPLETE") over the AT link.
+ * Safe to call from the Matter task; used by the C++ event callbacks.
+ */
+void mt_at_urc(const char *line);
+
 #ifdef __cplusplus
 }
 #endif
