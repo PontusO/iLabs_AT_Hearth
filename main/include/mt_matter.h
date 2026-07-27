@@ -39,8 +39,21 @@ int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual, size_t man
 /* Erase all Matter data and reboot. */
 void mt_matter_factory_reset(void);
 
-/* Endpoint id of the on/off light. */
-uint16_t mt_matter_endpoint_id(void);
+/* ---- live composition (built at boot from the stored composition) ------ */
+
+/* Number of endpoints this device currently presents, excluding the Root
+ * Node on endpoint 0. Zero means unconfigured (design spec section 5.5). */
+uint16_t mt_matter_endpoint_count(void);
+
+/*
+ * Describe the index'th live endpoint in creation order. Writes its Matter
+ * device type ID and assigned endpoint ID. Returns 0 on success, -1 when
+ * index is out of range.
+ */
+int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id);
+
+/* Record an endpoint in the live table as the boot rebuild creates it. */
+void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id);
 
 /* Read an integer-valued attribute into *out. Returns 0 on success, -1 on
  * failure (not found, or a non-integer type). */
