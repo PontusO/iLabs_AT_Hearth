@@ -18,15 +18,49 @@
 - Existing C style: 4-space indent, `/* */` block comments, `snake_case`, brace on the same line for control flow and on its own line for functions.
 - `mt_at.c` is **C**. Anything touching `esp_matter` or CHIP must live in a `.cpp` file and be reached through a C-linkage bridge declared in a header under `main/include/`.
 - Maximum **16 endpoints** (`MT_COMP_MAX_ENDPOINTS`), a RAM-driven cap.
+- `CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT` must be **>= `MT_COMP_MAX_ENDPOINTS`**
+  or endpoints past the cap are refused at `endpoint::create()` and the
+  composition is silently truncated. Set to 16 in `sdkconfig.defaults` by commit
+  `7ea5fc9`; it was 2, inherited from the esp-matter light example.
+- The composition must be built **before `esp_matter::start()`**. esp-matter
+  persists `min_unused_endpoint_id` only for endpoints created after start, so
+  building before start is what makes endpoint IDs reproducible across boots.
+  See the design spec §5.3 and §12.1.
 - Device type IDs are **read from esp_matter** via `<ns>::get_device_type_id()`, never transcribed as literals (§6.1).
 - `+MTERR` codes used by this phase: `1` bad parameter, `6` unknown device type, `7` persistence failure, `9` not ready, `10` composition change rejected (§10). Retrofitting the existing handlers to the new codes is phase C2, not this plan.
 - **Never `git push`.** Commit only.
 
 ---
 
-### Task 1: P1 spike, endpoint ID stability
+### Task 1: P1 spike, endpoint ID stability. DONE (2026-07-27)
 
-Blocking precondition from §12.1. A negative result changes the design, so nothing else in this plan starts until this passes. Requires physical hardware and the BOOTSEL button, so it needs a human at the bench.
+**PASSED.** Six cold power cycles all reported `+MTSPIKE:1,2,3` for an on/off
+light, dimmable light and temperature sensor created in that order. Recorded in
+design spec §12.1 by commit `65852f1`; spike reverted from `main.cpp`.
+
+Two bugs surfaced on the way, both fixed and committed before the spike could
+even run, and neither related to endpoint IDs:
+
+- **`b7d9b0e`**: `mt_at_urc()` could be called from an esp_matter callback during
+  `esp_matter::start()`, before `mt_at_start()` had created the AT UART's TX
+  mutex. Taking a NULL semaphore asserted and rebooted, forever. Latent in
+  committed B4.3 since B4.2 added `mt_at_urc()`; it needs the device commissioned
+  **and** the OnOff state to change at init, which is why bring-up missed it.
+  Task 5 builds on the guarded version.
+- **`7ea5fc9`**: `CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT` was 2, so every
+  endpoint past the first was refused. This plan had no task for it; the
+  constraint is now in Global Constraints above.
+
+**Step 5 (partial-create behaviour) was answered from source instead**, which is
+a stronger answer than the spike would have given. In
+`esp_matter/data_model/esp_matter_data_model.cpp`, `endpoint::create()` assigns
+`endpoint_id = min_unused_endpoint_id++` at line 1668, and every failure path
+(null node 1655, endpoint cap 1658, allocation failure 1665) returns before it.
+**A failed create consumes no endpoint ID**, so an endpoint after a failed one
+slides down into its place. Task 6 Step 3 must abort the whole rebuild, which is
+what it already does.
+
+The original task steps are kept below for the record. Do not re-run them.
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-07-26-at-mt-full-api-design.md` (record the result in §12.1)
@@ -1210,7 +1244,12 @@ with the composition rebuild:
     ESP_LOGI(TAG, "composition rebuilt: %u endpoint(s)", mt_matter_endpoint_count());
 ```
 
-If Task 1 Step 5 established that a failed create does **not** shift subsequent IDs, this abort is stricter than necessary but still correct. Leave it: the cost is a rebuild that refuses to run half-configured, and the alternative risks silent corruption.
+This abort is **required**, not merely cautious. Task 1 established from
+`esp_matter_data_model.cpp:1668` that `endpoint::create()` increments
+`min_unused_endpoint_id` only after every failure path has returned, so a failed
+create consumes no ID and every endpoint after it shifts down by one. Skipping a
+failed entry would therefore hand the wrong endpoint IDs to a commissioned
+device, silently corrupting its data model.
 
 - [ ] **Step 4: Call the window policy after the stack starts**
 

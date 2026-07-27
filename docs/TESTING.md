@@ -48,7 +48,20 @@ What the suite is a tripwire for, in priority order:
 | 1 | USB-C cable | Power + the bridged AT link to the PC |
 | 1 | Linux PC | Runs the harness, `chip-tool`, and BlueZ. Needs a working Bluetooth adapter for BLE commissioning. |
 | 1 | 2.4 GHz WiFi AP | The C6 is WiFi-only (Thread is deferred, see `ARCHITECTURE.md`). The PC and the C6 must land on the **same L2 segment**, or operational discovery over mDNS fails. |
-| 1 | USB-TTL probe (optional) | On C6 **GPIO2** for the console/log UART. Not required by the harness, but it is where the CHIP stack explains itself when a test fails. |
+| 0 | USB-TTL probe (superseded) | The RP2350 bridge sketch now carries a software UART on the pin C6 **GPIO2** is wired to, so the console arrives over the same USB cable as the AT link. No probe needed. |
+
+**Keep the two streams separate.** The bridge exposes the C6 console (GPIO2) and
+the AT link (GPIO16/17), and they must reach the harness as distinct streams. A
+merged stream interleaves them character by character:
+
+```
+WIFI_EVENT_STA_CON+NMETCRTEEADD
+```
+
+which is `WIFI_EVENT_STA_CON` from the console and `+MTREADY` from the AT link in
+one buffer. Every URC assertion in Phases 1 and 2 would fail intermittently and
+look like a firmware fault. The harness reads the AT stream only; the console
+stream is for diagnosis when something fails.
 
 Unlike the ESP-NOW rig there is no second board and no board-to-board spacing
 requirement, but there **is** a network requirement: client isolation / AP
@@ -315,12 +328,37 @@ Set the light on, reset the board **without** a factory reset (RP2350-driven
 reset, the same path `fw/flash.py` uses), wait for `+MTREADY`, and assert the
 fabric count and the attribute value both survived.
 
-**2.9 Commissioning window expiry (slow, opt-in)**
+**2.9 Cold boot with a state change at init (regression, real bug)**
+Set the light **on**, then **remove power** rather than resetting, and assert the
+device reaches `+MTREADY` within 15 s. Then assert `AT+MTATTR=1,6,0` reads `0`.
+
+This looks like a duplicate of 2.8 and is not. A commissioned device whose OnOff
+state must change at init applies `StartUpOnOff` **during**
+`esp_matter::start()`, which fires `app_attribute_update_cb`, which calls
+`mt_at_urc()`. `app_main` runs `esp_matter::start()` before `mt_at_start()`, so
+at that moment the AT UART and its TX mutex do not exist yet. Before commit
+`b7d9b0e` this asserted in `xSemaphoreTake(NULL)` and rebooted, forever:
+
+```
+I (1488) chip[ZCL]: Toggle ep1 on/off from state 1 to 0
+assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))
+```
+
+The bug shipped in B4.3 and survived bring-up because it needs the device
+commissioned **and** the state to actually change at init. 2.8 misses it because
+a warm reset preserves the state, so nothing changes and no URC fires. Only a
+cold boot with a pending state change reaches the path.
+
+The `AT+MTATTR` read is not decoration: it proves the toggle actually fired. If
+it reads `1`, no state change occurred and the test proved nothing, so treat
+that as an inconclusive run rather than a pass.
+
+**2.10 Commissioning window expiry (slow, opt-in)**
 `AT+MTCOMMISSION=30` with no controller attaching: assert `+MTCOMMISSION:FAILED`
 arrives after the fail-safe expires, and that `AT+MTSTATE?` returns to `2`. Gated
 behind `--include-slow` because of the ~90 s wall clock.
 
-**2.10 Factory reset clears everything**
+**2.11 Factory reset clears everything**
 `AT+MTRESET`, then `AT+MTFABRICS?` is `0`, `chip-tool` can no longer reach the old
 node ID, and the device is advertising as commissionable again. This leaves the
 rig in the factory-fresh state that 2.1 expects, so re-runs are clean.
@@ -336,6 +374,8 @@ rig in the factory-fresh state that 2.1 expects, so re-runs are clean.
 | 2.3 commissions but 2.4/2.5 fail | Operational discovery over mDNS. Check AP client isolation and that the PC and C6 are on the same segment. This is the single most common false alarm on a new bench. |
 | A `+MTATTR` URC never arrives, but the read agrees | The attribute callback or `mt_at_urc()` path, not the data model. |
 | Everything after 2.1 fails | Factory reset left the device in a bad state. Power-cycle and re-run before investigating. |
+| 2.9 boot-loops, or any boot loop with `rst:0xc (SW_CPU)` every ~2 s | Something raised a URC before `mt_at_start()` ran. Check the GPIO2 console for `assert failed: xQueueSemaphoreTake`. The guard added in `b7d9b0e` covers `mt_at_urc()`; a new call site that writes the AT UART directly from an esp_matter callback would reintroduce it. |
+| The console shows only ROM output (`ESP-ROM:`, `load:`, `entry`) and nothing else | You are reading GPIO16/17, not GPIO2. The ROM prints on the C6's default UART0 pins and knows nothing about the custom console pin, so the bridge port carries ROM chatter only. Bootloader and app logs are on GPIO2. |
 
 The console UART on GPIO2 carries the CHIP stack's own explanation for every
 Phase 2 failure. Capture it alongside the report when filing anything.
@@ -358,7 +398,7 @@ two suites is itself a finding.
 |---|---|
 | **T1** | `test/mt_regression.py` with `ATLink`, the URC queue, `check()`, the report and the JSON baseline. Phase 0 and Phase 1 only. No `chip-tool` dependency, so it runs on any bench in seconds. |
 | **T2** | Phase 2.1–2.5 (reset, commission, both attribute directions). This is where the `chip-tool` subprocess wrapper and its output parsing land. |
-| **T3** | Phase 2.6–2.10 (multi-fabric, persistence, expiry, final reset). |
+| **T3** | Phase 2.6–2.11 (multi-fabric, persistence, cold-boot URC regression, expiry, final reset). |
 | **T4** | Optional: fold Phase 1 into an RP2350 sketch once a host library exists, so the AT conformance half can run on the real host MCU the way the ESP-NOW suite does. |
 
 T1 is worth having on its own: it is the part that runs after every edit to
