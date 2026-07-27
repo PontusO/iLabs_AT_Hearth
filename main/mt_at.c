@@ -244,11 +244,15 @@ static const at_engine_cfg_t s_engine_cfg = {
  * marker. Called from app_main() after esp_matter::start(). C linkage so the
  * C++ entry point can call it without pulling at_core's C headers into C++.
  */
+/* Set once the AT UART (and its TX mutex) exist. See mt_at_urc(). */
+static volatile bool s_at_up = false;
+
 void mt_at_start(void)
 {
     at_uart_init();
     at_register_commands(s_cmds, sizeof(s_cmds) / sizeof(s_cmds[0]));
     at_parser_start(&s_engine_cfg);
+    s_at_up = true;
 
     /* Boot marker so the host can synchronize after a reset (mirrors +ENREADY). */
     at_uart_write_line("+MTREADY");
@@ -256,5 +260,19 @@ void mt_at_start(void)
 
 void mt_at_urc(const char *line)
 {
+    /*
+     * URCs can fire from esp_matter callbacks during esp_matter::start(),
+     * which app_main runs BEFORE mt_at_start(). At that point at_uart_init()
+     * has not created the TX mutex, and at_uart_write_line() would take a NULL
+     * semaphore: "assert failed: xQueueSemaphoreTake queue.c:1709 ((pxQueue))",
+     * then panic and reboot, forever. A commissioned device restoring its
+     * OnOff state at boot hits this on every boot.
+     *
+     * Drop pre-init URCs. They are undeliverable by definition, the host is
+     * not listening yet, and it resynchronizes on the +MTREADY that follows.
+     */
+    if (!s_at_up) {
+        return;
+    }
     at_uart_write_line("%s", line);
 }
