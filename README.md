@@ -106,3 +106,89 @@ in the sibling repo.
 ## License
 
 MIT - see [LICENSE](LICENSE). Copyright (c) 2026 Pontus Oldberg.
+
+One exception: `fw/flash.py` is **LGPL-2.1-or-later**, because it imports
+esptool's Python API in-process. See the SBOM below.
+
+## Software Bill of Materials
+
+Recorded 2026-07-27 for firmware v0.1.0. Two separate concerns, and the
+distinction matters: what is **linked into the firmware image** you flash, and
+what is **host tooling** that never reaches the device.
+
+### 1. First-party
+
+| Component | Where | Licence |
+|---|---|---|
+| Hearth application (`main/`) | this repo | MIT |
+| `at_core` AT engine | `iLabs_AT_ESP-now/components/at_core`, pulled cross-repo via `EXTRA_COMPONENT_DIRS` | MIT |
+| `fw/flash.py` two-stage flasher | this repo | **LGPL-2.1-or-later** |
+| `fw/RP2350USB2Serial.ino.uf2` | this repo, prebuilt | MIT |
+
+### 2. Linked into the firmware image
+
+Everything here is permissive. **No copyleft licence reaches the image.**
+
+| Component | Version | Licence |
+|---|---|---|
+| ESP-IDF | v5.4.1 | Apache-2.0 |
+| esp-matter | release/v1.5 (`21aa3d1`) | Apache-2.0 |
+| connectedhomeip (CHIP) | `b87051a9` | Apache-2.0 |
+| Mbed TLS | bundled with ESP-IDF | Apache-2.0 **OR** GPL-2.0-or-later, recipient's choice. **Taken here under Apache-2.0.** |
+| nlassert, nlio | CHIP third-party | Apache-2.0 |
+| Espressif WiFi / Bluetooth libraries | bundled with ESP-IDF | Espressif proprietary, binary redistribution permitted on Espressif silicon. Not open source. |
+| GCC runtime (`libgcc`) | RISC-V toolchain | GPL-3.0 **with GCC Runtime Library Exception**, which exempts compiled output |
+
+Managed components resolved into the build tree (`managed_components/`). The
+linker drops the ones the application does not reference, so not all of these
+are present in the final image:
+
+| Component | Version | Licence |
+|---|---|---|
+| `esp-serial-flasher` | 0.0.11 | Apache-2.0 |
+| `esp_secure_cert_mgr` | 2.9.2 | Apache-2.0 |
+| `esp_delta_ota` | 1.1.4 | Apache-2.0 |
+| `esp_encrypted_img` | 2.3.0 | Apache-2.0 |
+| `esp_insights` | 1.3.4 | Apache-2.0 |
+| `esp_diagnostics` | 1.3.3 | Apache-2.0 |
+| `esp_diag_data_store` | 1.1.1 | Apache-2.0 |
+| `esp_rcp_update` | 1.3.1 | Apache-2.0 |
+| `mdns` | 1.11.3 | Apache-2.0 |
+| `json_generator` | 1.1.2 | Apache-2.0 |
+| `json_parser` | 1.0.3 | Apache-2.0 |
+| `rmaker_common` | 1.8.5 | Apache-2.0 |
+| `rmaker_cmd_resp`, `rmaker_common_events`, `rmaker_console`, `rmaker_system_ctrl`, `rmaker_time_sync`, `rmaker_work_queue` | 1.0.x | Apache-2.0 |
+| `button` | 4.2.0 | Apache-2.0 |
+| `cmake_utilities` | 1.1.1 | Apache-2.0 |
+| `led_strip` | 1.0.0 | Apache-2.0 |
+| `cbor` (TinyCBOR) | 0.6.1~4 | MIT |
+| `jsmn` | 1.1.0 | MIT |
+
+### 3. Host tooling (never reaches the device)
+
+| Component | Licence | Note |
+|---|---|---|
+| esptool (iLabs fork, adds `RP2040Reset`) | **GPL-2.0-or-later** | Imported in-process by `fw/flash.py`. Redistributing the fork carries GPL source obligations. |
+| pyserial | BSD-3-Clause | |
+| rich (optional) | MIT | |
+| `chip-tool` | Apache-2.0 | Test controller only |
+
+### Obligations when distributing
+
+- **Apache-2.0 (§4):** ship the licence text, retain attribution notices, mark
+  files you modified, and reproduce any upstream `NOTICE` contents. In practice
+  one third-party notices file accompanying the binary.
+- **MIT:** retain the copyright and permission notice.
+- **`fw/flash.py`:** LGPL-2.1-or-later on its own; a combination distributed
+  with esptool is GPL-2.0-or-later. If you would rather ship the flasher under
+  MIT, invoke esptool as a subprocess instead of importing it, which makes the
+  two mere aggregation.
+- **Espressif blobs:** redistributable in binary form as part of a product using
+  Espressif silicon, per Espressif's licence.
+
+### Not a licensing matter
+
+Matter is a trademark of the Connectivity Standards Alliance. Apache-2.0 grants
+rights to the connectedhomeip *code*; it grants no trademark rights and implies
+no certification. This firmware is not certified, uses development test
+credentials (VID `0xFFF1`), and is not branded as a Matter product.
