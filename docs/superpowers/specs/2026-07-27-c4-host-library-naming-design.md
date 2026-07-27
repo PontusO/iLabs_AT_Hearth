@@ -81,7 +81,28 @@ IDE path also produces the parity line.
 Matter appears in `sentence` and `paragraph` only as the protocol spoken, which
 is the same descriptive use the firmware documentation already makes.
 
-### 4.1 Header shadowing
+### 4.1 Where the repo lives
+
+`Dropbox/Arduino/libraries/iLabs_Hearth`, a git repo in place inside the
+sketchbook. Initialised, branch `main`.
+
+This was briefly treated as a problem on the grounds that `iLabs_ESP-NOW` is a
+repo under `~/Data/src/git/` and absent from the sketchbook, and that running
+git inside a Dropbox-synced tree risks `.git` corruption. Measurement said
+otherwise: **50 of the 219 entries in that sketchbook are already git repos**,
+including `iLabs_ST87M01` and `iLabs_nrf52_adrastea`, none carrying Dropbox
+ignore attributes, and the arrangement has held since 2024. `iLabs_ESP-NOW` is
+the outlier, not the convention.
+
+A symlink from `src/git` into `libraries/` was considered and rejected. There
+are **zero symlinks** among those 219 entries, so it would be unprecedented
+here, and Dropbox follows directory symlinks and syncs the target's contents,
+so it would not have kept `.git` out of Dropbox in any case.
+
+The one real consequence is that the working tree collects Dropbox artefacts,
+so `.gitignore` carries `*conflicted copy*` patterns the sibling does not need.
+
+### 4.2 Header shadowing
 
 The library ships `src/Matter.h` while the esp32 core also ships a `Matter`
 library. These are kept apart by `architectures=`: ours declares `rp2040`, the
@@ -183,12 +204,7 @@ versioning decision rather than a naming one.
   Challenger.** Needed before `Matter.begin()` can be zero-configuration.
 - **§7.2's revision-drift resolution**: pin the core, or own the table. The
   table approach is now tractable, but it is still a decision.
-- **Where the repo lives.** `iLabs_ESP-NOW` is a git repo at `~/Data/src/git/`
-  and is not present in the Arduino sketchbook. The `iLabs_Hearth` placeholder
-  was created inside the Dropbox-synced sketchbook instead. Running git inside a
-  Dropbox-synced tree risks `.git` corruption when two machines sync mid
-  operation, which is presumably why the sibling does not. Decide before
-  `git init`.
+(Repo location was listed here as open and is now settled. See §4.1.)
 
 ## 9. Out of scope
 
