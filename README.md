@@ -1,8 +1,8 @@
-# iLabs_AT_Matter
+# iLabs_AT_Hearth
 
 An AT command stack for the ESP32-C6 coprocessor.
 
-`iLabs_AT_Matter` turns an ESP32-C6 into a **Matter co-processor** that a host
+`iLabs_AT_Hearth` turns an ESP32-C6 into a **Matter co-processor** that a host
 MCU drives over a simple UART AT interface (`AT+MT...`), the same way
 [`iLabs_AT_ESP-now`](https://github.com/PontusO/iLabs_AT_ESP-now) exposes ESP-NOW
 over `AT+EN...`. The two firmwares are **single-purpose images that share one
@@ -23,7 +23,7 @@ and the full `AT+MT` command set arrive in Phase B2-B4 of the
 ```
                  components/at_core           (lives in iLabs_AT_ESP-now)
                   ╱                ╲            engine + at_uart + link_mgr
-   iLabs_AT_ESP-now/main         iLabs_AT_Matter/main
+   iLabs_AT_ESP-now/main         iLabs_AT_Hearth/main
    AT+EN...  (ESP-NOW)           AT+MT...  (Matter, C6-only)
 ```
 
@@ -42,7 +42,7 @@ source of truth, and a future single-binary merge stays mechanical.
   ```
   src/git/
     iLabs_AT_ESP-now/     <- provides components/at_core
-    iLabs_AT_Matter/      <- this repo
+    iLabs_AT_Hearth/      <- this repo
   ```
 - **esp-matter** (`release/v1.5`) - only needed once the Matter stack lands
   (Phase B2); the current skeleton builds without it.

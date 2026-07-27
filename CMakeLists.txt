@@ -13,7 +13,7 @@ if(NOT DEFINED ENV{ESP_MATTER_DEVICE_PATH})
         set(ENV{ESP_MATTER_DEVICE_PATH} $ENV{ESP_MATTER_PATH}/device_hal/device/esp32c6_devkit_c)
     else()
         message(FATAL_ERROR
-            "iLabs_AT_Matter targets the ESP32-C6 only (IDF_TARGET=${IDF_TARGET})")
+            "iLabs_AT_Hearth targets the ESP32-C6 only (IDF_TARGET=${IDF_TARGET})")
     endif()
 endif()
 
@@ -34,7 +34,7 @@ set(EXTRA_COMPONENT_DIRS
     "${ESP_MATTER_PATH}/device_hal/device"
     ${extra_components_dirs_append})
 
-project(ilabs_at_matter)
+project(ilabs_at_hearth)
 
 idf_build_set_property(CXX_COMPILE_OPTIONS "-std=gnu++17;-Os;-DCHIP_HAVE_CONFIG_H;-Wno-overloaded-virtual" APPEND)
 idf_build_set_property(C_COMPILE_OPTIONS "-Os" APPEND)
