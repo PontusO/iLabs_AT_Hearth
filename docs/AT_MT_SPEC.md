@@ -1,4 +1,4 @@
-# AT+MT Command Specification (iLabs AT Matter, ESP32-C6)
+# AT+MT Command Specification (iLabs AT Hearth, ESP32-C6)
 
 Status: **draft, tracks the implementation** (Phase B4). This is the host ↔ C6
 contract for the Matter personality. It mirrors the ESP-NOW firmware's `AT+EN`
@@ -42,7 +42,7 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTVER?` | query | `+MTVER:<fw_version>` → `OK` |
 | `AT+MTSTATE?` | query | `+MTSTATE:<state>,<fabrics>` → `OK` |
 | `AT+MTFABRICS?` | query | `+MTFABRICS:<count>` → `OK` |
-| `AT+MTCOMMISSION[=<timeout_s>]` | exec/set | `OK` (window opened; `+MTCOMMISSION` URCs) |
+| `AT+MTCOMMISSION[=<timeout_s>]` | exec/set | `OK` (window opened; commissioning event bits) |
 | `AT+MTCODES?` | query | `+MTCODES:<qr>,<manual>` → `OK` |
 | `AT+MTRESET` | exec | `OK` → Matter reset (fabrics/credentials) + reboot |
 | `AT+MTFRESET` | exec | `OK` → full factory reset (adds the composition) + reboot |
@@ -60,7 +60,7 @@ flashed at a time (mode-switch by host reflash).
 
 ### 3.1 Identity: `AT+CGMI` / `AT+CGMM` / `AT+CGMR`
 LTE-modem-style (3GPP TS 27.007) execute commands. Each prints one identity
-line then `OK`: manufacturer (`iLabs Electronics`), model (`ESP32-C6 Matter`),
+line then `OK`: manufacturer (`iLabs Electronics`), model (`ESP32-C6 Hearth`),
 firmware revision (= `AT+MTVER?`'s first field).
 
 ### 3.2 `AT+MTVER?`
@@ -80,7 +80,7 @@ Opens a **basic commissioning window** (BLE + DNS-SD advertising) so a
 controller can commission (or additionally commission) the device.
 - `<timeout_s>`: optional window lifetime, 30–900 s (default 300).
 - Returns `OK` once the window request is accepted.
-- Progress is reported asynchronously via the `+MTCOMMISSION:*` URCs (§4).
+- Progress is reported asynchronously via the commissioning event bits 0, 3 and 5 (§3.11), which are in the default event mask.
 - Note: a factory-fresh device opens a window automatically at boot; this
   command is for (re)opening one on an already-commissioned device.
 

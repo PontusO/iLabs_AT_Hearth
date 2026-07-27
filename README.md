@@ -86,7 +86,7 @@ boot.
 | `AT` | `OK` |
 | `ATE0` / `ATE1` | echo off / on, `OK` |
 | `AT+CGMI` | `iLabs Electronics` |
-| `AT+CGMM` | `ESP32-C6 Matter` |
+| `AT+CGMM` | `ESP32-C6 Hearth` |
 | `AT+CGMR` | firmware version |
 | `AT+MTVER?` | `+MTVER:<version>` |
 | unknown `AT+...` | `+MTERR:8`, `ERROR` |

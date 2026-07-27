@@ -1,4 +1,4 @@
-# Architecture & Design Decisions — iLabs AT Matter (ESP32-C6)
+# Architecture & Design Decisions — iLabs AT Hearth (ESP32-C6)
 
 Status: **living document.** Consolidates the design of the Matter co-processor
 firmware and the decisions taken during Phase B. The phased build plan and the

@@ -1,4 +1,4 @@
-# iLabs AT Matter: regression test plan
+# iLabs AT Hearth: regression test plan
 
 Status: **plan** (the harness described here is not written yet; see §10 for the
 build-out order). This is the Matter counterpart to the ESP-NOW firmware's
@@ -149,7 +149,7 @@ Not scored, but a hard gate: if these fail, the rest of the report is noise.
 
 - Port opens at 115200 8N1.
 - `AT` answers `OK` within 1 s (the parser task is alive).
-- `AT+CGMM` reports `ESP32-C6 Matter`. If it reports `ESP32-C6 ESP-NOW` the board
+- `AT+CGMM` reports `ESP32-C6 Hearth`. If it reports `ESP32-C6 ESP-NOW` the board
   is running the **wrong personality**, which is the single most likely operator
   error on a bench that carries both firmwares. Abort with that message rather
   than emitting 40 failures.
@@ -173,7 +173,7 @@ can therefore run on a commissioned device without disturbing it.
 | `AT` | `OK` |
 | `ATE1` then `ATE0` | `OK` each; echo observed on and off (the harness reads echo-aware) |
 | `AT+CGMI` | `iLabs Electronics` then `OK` |
-| `AT+CGMM` | `ESP32-C6 Matter` then `OK` |
+| `AT+CGMM` | `ESP32-C6 Hearth` then `OK` |
 | `AT+CGMR` | version line then `OK`, equal to `AT+MTVER?`'s field |
 | `AT+MTVER?` | line starts `+MTVER:` then `OK` |
 | `AT+MTSTATE?` | matches `+MTSTATE:<0\|1\|2>,<n>` then `OK` |
