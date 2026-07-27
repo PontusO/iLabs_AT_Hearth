@@ -3,7 +3,7 @@
 Status: **living document.** Consolidates the design of the Matter co-processor
 firmware and the decisions taken during Phase B. The phased build plan and the
 merge strategy live in the
-[ESP-NOW + Matter integration plan](https://github.com/PontusO/iLabs_AT_ESP-now/blob/main/docs/matter-integration-plan.md);
+[ESP-NOW + Matter integration plan](hearth-integration-plan.md);
 this document is the Matter-firmware view and the decision record.
 
 ## 1. What this is

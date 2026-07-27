@@ -348,4 +348,4 @@ allocated here and kept semantically stable for a future merged binary.
 conventions, and disjoint command namespaces. Only one personality is flashed
 at a time; the host reflashes the C6 to switch. This keeps a future single
 binary (registering both command tables) a mechanical merge. See the
-[ESP-NOW + Matter integration plan](https://github.com/PontusO/iLabs_AT_ESP-now/blob/main/docs/matter-integration-plan.md).
+[ESP-NOW + Matter integration plan](hearth-integration-plan.md).

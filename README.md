@@ -11,12 +11,17 @@ combined ESP-NOW + Matter binary (see *Design* below for why).
 
 ## Status
 
-**Early scaffold (Phase B1).** This repo currently contains a working AT
-skeleton that proves the shared `at_core` engine drives a second personality: it
-answers a tiny `AT+MT...` table over the same UART, with its own `+MTERR` error
-namespace. **No Matter stack is wired up yet** - commissioning, the data model
-and the full `AT+MT` command set arrive in Phase B2-B4 of the
-[integration plan](https://github.com/PontusO/iLabs_AT_ESP-now/blob/main/docs/matter-integration-plan.md).
+**Working, hardware-verified, not yet certified or released.** The Matter stack
+runs, the device commissions and is controllable from a Matter controller, and
+the host drives the whole lifecycle over `AT+MT`: commissioning, fabric
+accounting, attribute read/write in both directions, a host-declared endpoint
+composition persisted across power cuts, and a subscribable platform event
+stream.
+
+Phases A and B are complete. Phase C, the protocol work needed to support an
+arduino-esp32-parity host library, is C1 to C3 done and C4 (the host library
+itself) next. See `CLAUDE.md` for current state and open questions, and the
+[integration plan](docs/hearth-integration-plan.md) for the original roadmap.
 
 ## Architecture
 
@@ -35,7 +40,9 @@ source of truth, and a future single-binary merge stays mechanical.
 
 ## Requirements
 
-- **ESP-IDF v5.5.4** (the version esp-matter `release/v1.5` targets).
+- **ESP-IDF v5.4.1**, the version esp-matter `release/v1.5` validates against.
+  Not v5.5.4, which the ESP-NOW firmware uses: esp-matter fails to build on it
+  at `chip_gn`.
 - **[`iLabs_AT_ESP-now`](https://github.com/PontusO/iLabs_AT_ESP-now) checked out
   as a sibling directory** - it provides `components/at_core`, referenced via
   `EXTRA_COMPONENT_DIRS` in the top-level `CMakeLists.txt`:
@@ -44,8 +51,8 @@ source of truth, and a future single-binary merge stays mechanical.
     iLabs_AT_ESP-now/     <- provides components/at_core
     iLabs_AT_Hearth/      <- this repo
   ```
-- **esp-matter** (`release/v1.5`) - only needed once the Matter stack lands
-  (Phase B2); the current skeleton builds without it.
+- **esp-matter** `release/v1.5`. Source both `export.sh` scripts before
+  building, IDF first.
 - **Target: ESP32-C6 only.** The build fails fast on any other target.
 
 ## Repository layout
@@ -55,20 +62,27 @@ CMakeLists.txt              EXTRA_COMPONENT_DIRS -> ../iLabs_AT_ESP-now/componen
 sdkconfig.defaults          shared build defaults
 sdkconfig.defaults.esp32c6  C6 overrides (console TX moved off the AT UART pins)
 main/
-  main.c                    boot: AT UART -> register AT+MT table -> start parser
-  mt_at.c                   AT+MT command handlers + "+MTERR" engine config
-  include/
-    mt_at_config.h          identity, line length, parser task tuning
-    mt_at.h
+  main.cpp                  C++: esp_matter runtime, callbacks, app_main,
+                            and the mt_matter_* C-linkage bridge
+  mt_at.c                   C: AT+MT handlers, event mask, "+MTERR" code space
+  mt_composition.c          C: composition codec (pure, host-testable)
+  mt_comp_store.c           C: NVS persistence for the composition
+  mt_devtypes.cpp           C++: device type ID -> esp_matter create thunks
+  include/                  mt_at.h, mt_matter.h, mt_at_config.h,
+                            mt_composition.h, mt_comp_store.h, mt_devtypes.h
+test/host/                  gcc unit tests for the pure-C parts
+fw/flash.py                 two-stage flasher (RP2350 bridge, then the C6)
 ```
 
 ## Build
 
 ```sh
-. $IDF_PATH/export.sh
-idf.py set-target esp32c6
-idf.py build
-idf.py -p /dev/ttyACM0 flash monitor
+source ~/esp/esp-idf-v5.4.1/export.sh
+source ~/esp/esp-matter/export.sh
+idf.py -B build_b4 build
+
+python3 fw/flash.py --build-dir build_b4    # board in BOOTSEL
+make -C test/host run                       # host unit tests, no hardware
 ```
 
 ## AT interface
@@ -79,29 +93,21 @@ Conventions are shared with the ESP-NOW firmware: `AT+CMD?` query,
 URCs (`+MT...`) may arrive at any time; the firmware emits `+MTREADY` once on
 boot.
 
-**Implemented today (skeleton):**
-
-| Command | Reply |
-|---|---|
-| `AT` | `OK` |
-| `ATE0` / `ATE1` | echo off / on, `OK` |
-| `AT+CGMI` | `iLabs Electronics` |
-| `AT+CGMM` | `ESP32-C6 Hearth` |
-| `AT+CGMR` | firmware version |
-| `AT+MTVER?` | `+MTVER:<version>` |
-| unknown `AT+...` | `+MTERR:8`, `ERROR` |
-
-**Planned (Phase B4):** `AT+MTINIT`, `AT+MTRESET`, `AT+MTSTATE?`,
-`AT+MTCOMMISSION` (+ `+MTCOMMISSION:STARTED|COMPLETE|FAILED` URCs), `AT+MTCODES?`,
-`AT+MTFABRICS?`, `AT+MTEP` (endpoint create), `AT+MTATTR` (attribute get/set,
-with `+MTATTR:...` URCs on controller-driven writes).
+See [`docs/AT_MT_SPEC.md`](docs/AT_MT_SPEC.md) for the authoritative command
+reference. In brief: identity (`AT+CGMI/CGMM/CGMR`, `AT+MTVER?`), lifecycle
+(`AT+MTSTATE?`, `AT+MTFABRICS?`, `AT+MTCOMMISSION`, `AT+MTCODES?`),
+resets (`AT+MTRESET` keeps the endpoint composition, `AT+MTFRESET` erases it),
+the data model (`AT+MTATTR` read/write with publish modes), the host-declared
+endpoint composition (`AT+MTEP` / `AT+MTEPCLEAR` / `AT+MTEPAPPLY`), event
+subscription (`AT+MTEVT`), and the transport query (`AT+MTNET?`).
 
 ## Design
 
-The two-firmware-one-engine approach, the C6-only Matter-over-WiFi scope, the
-mode-switch-by-reflash model, and the phased roadmap are documented in the
-[ESP-NOW + Matter integration plan](https://github.com/PontusO/iLabs_AT_ESP-now/blob/main/docs/matter-integration-plan.md)
-in the sibling repo.
+The two-firmware-one-engine approach, the C6-only Matter-over-WiFi scope and the
+mode-switch-by-reflash model are recorded in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), with the original roadmap in the
+[integration plan](docs/hearth-integration-plan.md). `CLAUDE.md` carries the
+build environment and the non-obvious constraints.
 
 ## License
 
