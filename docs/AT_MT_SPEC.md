@@ -47,10 +47,14 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTRESET` | exec | `OK` → factory reset + reboot |
 | `AT+MTATTR=<ep>,<cl>,<attr>` | set (3) | `+MTATTR:<ep>,<cl>,<attr>,<val>` → `OK` (read) |
 | `AT+MTATTR=<ep>,<cl>,<attr>,<val>` | set (4) | `OK` (write) |
+| `AT+MTEP?` | query | `+MTEP:<idx>,<ep_id>,<devtype>` per endpoint → `OK` |
+| `AT+MTEP=<devtype>` | set | `OK` (append to the staged composition) |
+| `AT+MTEPCLEAR` | exec | `OK` (begin staging an empty composition) |
+| `AT+MTEPAPPLY` | exec | `OK` → persist + reboot |
 
 ## 3. Command reference
 
-### 3.1 Identity — `AT+CGMI` / `AT+CGMM` / `AT+CGMR`
+### 3.1 Identity: `AT+CGMI` / `AT+CGMM` / `AT+CGMR`
 LTE-modem-style (3GPP TS 27.007) execute commands. Each prints one identity
 line then `OK`: manufacturer (`iLabs Electronics`), model (`ESP32-C6 Matter`),
 firmware revision (= `AT+MTVER?`'s first field).
@@ -65,7 +69,7 @@ firmware revision (= `AT+MTVER?`'s first field).
 - `<fabrics>`: number of commissioned fabrics.
 
 ### 3.4 `AT+MTFABRICS?`
-`+MTFABRICS:<count>` — number of commissioned fabrics.
+`+MTFABRICS:<count>`: number of commissioned fabrics.
 
 ### 3.5 `AT+MTCOMMISSION[=<timeout_s>]`
 Opens a **basic commissioning window** (BLE + DNS-SD advertising) so a
@@ -86,10 +90,21 @@ vendor/product IDs.
 ### 3.7 `AT+MTRESET`
 Factory-resets the device (erases all Matter data: fabrics, credentials,
 attribute persistence) and reboots. Emits `OK`, then reboots; the host
-resynchronizes on the next `+MTREADY`. After reset the device is factory-fresh
-and opens a commissioning window automatically.
+resynchronizes on the next `+MTREADY`.
 
-### 3.8 `AT+MTATTR` — data model access
+**The endpoint composition survives a factory reset.** `esp_matter::factory_reset()`
+erases only esp-matter's own NVS namespace, whereas the composition lives in the
+`mt_ep` namespace of the default partition (§3.9). This is deliberate: the
+composition is a product definition supplied by the host firmware, not user
+data, so a board that is "a dimmable light plus a temperature sensor" is still
+that after a reset, and comes back immediately commissionable with the right
+data model rather than inert. To return a device to unconfigured, apply an empty
+composition: `AT+MTEPCLEAR` followed by `AT+MTEPAPPLY`.
+
+After reset the device opens a commissioning window automatically, subject to
+the unconfigured-device policy still being settled (design spec §12.1, P2).
+
+### 3.8 `AT+MTATTR`: data model access
 Read or write a single Matter attribute.
 - **Read:** `AT+MTATTR=<ep>,<cluster>,<attr>` (3 params)
   → `+MTATTR:<ep>,<cluster>,<attr>,<val>` → `OK`
@@ -104,11 +119,54 @@ A write echoes a `+MTATTR` URC (the attribute callback confirming the change),
 then `OK`. A controller-driven change to the light endpoint also raises a
 `+MTATTR` URC (§4) so the host observes external state changes.
 
-Example — the on/off light (endpoint 1, OnOff cluster `0x0006`, attribute `0x0000`):
+Example, the on/off light (endpoint 1, OnOff cluster `0x0006`, attribute `0x0000`):
 ```
 AT+MTATTR=1,6,0        -> +MTATTR:1,6,0,0   (read: off)
 AT+MTATTR=1,6,0,1      -> OK                 (turn on)
 AT+MTATTR=1,6,0        -> +MTATTR:1,6,0,1
+```
+
+### 3.9 `AT+MTEP` / `AT+MTEPCLEAR` / `AT+MTEPAPPLY`: endpoint composition
+
+The host declares which endpoints the device presents. The composition is
+persisted in NVS and rebuilt by the firmware at every boot, so the device
+rejoins its fabric after a power cut without host involvement.
+
+- `AT+MTEP?` lists the **live** composition, one line per endpoint:
+  `+MTEP:<index>,<endpoint_id>,<device_type>`. Zero lines means the device is
+  unconfigured. It never reports a staged composition.
+- `AT+MTEPCLEAR` opens a staging session holding an empty composition.
+- `AT+MTEP=<device_type>` appends one endpoint. `<device_type>` is a standard
+  Matter device type ID, hex or decimal. Rejected with `+MTERR:10` outside a
+  staging session or past the 16-endpoint cap, and with `+MTERR:6` for a device
+  type this firmware does not implement. A rejected append consumes no slot.
+- `AT+MTEPAPPLY` persists the staged composition, emits `OK`, and reboots. The
+  host resynchronizes on the next `+MTREADY`.
+
+Staging lives in RAM, so a reboot discards an open session and leaves the stored
+composition untouched rather than half-written.
+
+Endpoint IDs are assigned sequentially from 1 in declaration order and are
+stable across boots, because the composition is rebuilt before the Matter stack
+starts. Applying a composition therefore always reboots rather than taking
+effect in place.
+
+An **unconfigured** device (no stored composition) presents only the Root Node.
+Changing the composition of a commissioned device invalidates controller caches
+and may require re-commissioning.
+
+Device types implemented so far: `0x0100` On/Off Light, `0x0101` Dimmable Light,
+`0x010C` Colour Temperature Light, `0x0302` Temperature Sensor.
+
+Example:
+```
+AT+MTEPCLEAR           -> OK
+AT+MTEP=0x0100         -> OK
+AT+MTEP=0x0302         -> OK
+AT+MTEPAPPLY           -> OK, then reboot and +MTREADY
+AT+MTEP?               -> +MTEP:0,1,0x0100
+                          +MTEP:1,2,0x0302
+                          OK
 ```
 
 ## 4. Unsolicited result codes (URCs)
@@ -121,15 +179,25 @@ AT+MTATTR=1,6,0        -> +MTATTR:1,6,0,1
 | `+MTCOMMISSION:FAILED` | Commissioning failed (fail-safe timer expired). |
 | `+MTATTR:<ep>,<cluster>,<attr>,<val>` | An attribute on the light endpoint changed (controller-driven or local). The root endpoint (0) is intentionally not reported, to keep boot-time init noise off the link. |
 
-## 5. Error codes — `+MTERR:<n>`
+## 5. Error codes: `+MTERR:<n>`
 
 On a specific fault the firmware prints `+MTERR:<n>` then `ERROR`. Generic
 faults print a bare `ERROR` (no `+MTERR` line).
 
 | Code | Meaning |
 |---|---|
+| `1` | Bad parameter or out of range. |
+| `6` | Unknown or unsupported device type. |
+| `7` | Persistence (NVS) failure. |
 | `8` | Unknown / unsupported command (version-skew detection). |
+| `9` | Not ready: no composition declared, or the stack is not started. |
+| `10` | Composition change rejected: nothing staged, or the endpoint limit was reached. |
 | (bare `ERROR`) | Bad parameters, wrong command form, or a runtime failure. |
+
+Codes `2` to `5` (unknown endpoint, cluster, attribute, and unsupported
+attribute type) are allocated in the design spec and land in phase C2, when the
+existing handlers are retrofitted to them. Until then those faults return a bare
+`ERROR`.
 
 **Code-space policy (integration-plan contract C2):** `+MTERR` and `+ENERR`
 have distinct prefixes, so each may use the `1–99` range independently; codes
@@ -138,7 +206,7 @@ allocated here and kept semantically stable for a future merged binary.
 
 ## 6. Commissioning credentials
 
-- **Development / bring-up:** esp-matter test credentials — discriminator
+- **Development / bring-up:** esp-matter test credentials: discriminator
   `3840`, setup passcode `20202021`. `AT+MTCODES?` returns the matching QR and
   manual codes. Suitable for `chip-tool` and phone controllers on a test fabric.
 - **Production:** per-device Device Attestation Certificate + passcode
@@ -148,8 +216,9 @@ allocated here and kept semantically stable for a future merged binary.
 ## 7. Data model (v1)
 
 - Transport: **Matter-over-WiFi** (2.4 GHz). BLE is used for commissioning only.
-- One endpoint: an **on/off light** on endpoint `1` (OnOff cluster `0x0006`).
-  Endpoint `0` is the mandatory Root Node.
+- Endpoints are **declared by the host** over `AT+MTEP` and persisted on the
+  device (§3.9). Endpoint `0` is the mandatory Root Node. A factory-fresh device
+  presents no application endpoints until the host declares them.
 - `AT+MTATTR` provides generic integer attribute read/write across the data
   model.
 
@@ -158,8 +227,11 @@ allocated here and kept semantically stable for a future merged binary.
 - `AT+MTOTA=<url>` (or an `AT+`-namespaced HTTP-download command): fetch a
   firmware image over the C6's WiFi and stream it to the host for a
   host-driven serial-flash update. See `FIRMWARE_UPDATE_SPEC.md`.
-- `AT+MTEP=<devtype>`: create additional endpoints at runtime.
-- Additional `+MTERR` codes for specific Matter faults.
+- `AT+MTATTRX`: read/write array, octet-string and character-string attributes,
+  hex-encoded. Specified in the design spec; implemented with the first device
+  type that needs it.
+- `+MTERR` codes `2` to `5` for specific attribute faults (phase C2).
+- Additional device types for the table in §3.9 (phase C-later).
 
 ## 9. Relationship to `AT+EN`
 
