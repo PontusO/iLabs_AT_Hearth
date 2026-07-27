@@ -24,8 +24,11 @@ CONFIG_ENABLE_WIFI_AP=n
 CONFIG_LWIP_HOOK_IP6_ROUTE_DEFAULT=y
 CONFIG_LWIP_HOOK_ND6_GET_GW_DEFAULT=y
 
-# This example only use 2 dynamic endpoints
-CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=2
+# Endpoint composition (C1): the host declares up to MT_COMP_MAX_ENDPOINTS (16)
+# endpoints over AT+MTEP, so the dynamic endpoint cap must be at least that.
+# Was 2, inherited from the esp-matter light example this project started from,
+# which silently refused every endpoint past the first.
+CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=16
 
 # Button
 CONFIG_BUTTON_PERIOD_TIME_MS=20
