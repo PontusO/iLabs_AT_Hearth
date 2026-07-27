@@ -25,14 +25,15 @@
 #include <setup_payload/OnboardingCodesUtil.h>
 
 #include "mt_at.h"
+#include "mt_comp_store.h"
+#include "mt_composition.h"
+#include "mt_devtypes.h"
 #include "mt_matter.h"
 
 static const char *TAG = "mt_main";
 
 using namespace esp_matter;
 using namespace esp_matter::endpoint;
-
-static uint16_t s_light_endpoint_id = 0;
 
 /*
  * Map an esp_matter attribute value to/from a plain integer for the AT+MTATTR
@@ -126,10 +127,10 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
                                          uint32_t cluster_id, uint32_t attribute_id,
                                          esp_matter_attr_val_t *val, void *priv_data)
 {
-    /* Surface attribute changes on our light endpoint to the host as a
+    /* Surface attribute changes on any endpoint we built to the host as a
      * +MTATTR URC (so a controller-driven toggle is visible over AT). The
      * root endpoint (0) is skipped to keep boot-time init noise off the link. */
-    if (type == attribute::POST_UPDATE && endpoint_id == s_light_endpoint_id) {
+    if (type == attribute::POST_UPDATE && endpoint_id != 0) {
         long v;
         if (attr_val_to_long(val, &v)) {
             char line[64];
@@ -187,9 +188,34 @@ extern "C" void mt_matter_factory_reset(void)
     esp_matter::factory_reset();
 }
 
-extern "C" uint16_t mt_matter_endpoint_id(void)
+/* The live composition, filled in by the boot rebuild in app_main. */
+static uint32_t s_live_devtype[MT_COMP_MAX_ENDPOINTS];
+static uint16_t s_live_ep_id[MT_COMP_MAX_ENDPOINTS];
+static uint16_t s_live_count = 0;
+
+extern "C" uint16_t mt_matter_endpoint_count(void)
 {
-    return s_light_endpoint_id;
+    return s_live_count;
+}
+
+extern "C" int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id)
+{
+    if (index >= s_live_count || !devtype || !ep_id) {
+        return -1;
+    }
+    *devtype = s_live_devtype[index];
+    *ep_id   = s_live_ep_id[index];
+    return 0;
+}
+
+extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id)
+{
+    if (s_live_count >= MT_COMP_MAX_ENDPOINTS) {
+        return;
+    }
+    s_live_devtype[s_live_count] = devtype;
+    s_live_ep_id[s_live_count]   = ep_id;
+    s_live_count++;
 }
 
 extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out)
@@ -217,6 +243,27 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
 
 /* --------------------------------------------------------------------------- */
 
+/*
+ * Boot commissioning-window policy. Isolated here because open question P2
+ * (design spec section 12.1) is unresolved: an unconfigured device is
+ * specified not to advertise, but CHIP auto-opens a window at boot when the
+ * node is uncommissioned, and whether that is cleanly suppressible on this
+ * esp-matter revision is not yet established.
+ *
+ * Until P2 concludes this only logs what it would do. Do not scatter window
+ * decisions elsewhere: this function is the single place that changes when
+ * P2 lands.
+ */
+static void mt_boot_window_policy(bool configured)
+{
+    if (configured) {
+        ESP_LOGI(TAG, "boot window policy: configured device, default CHIP behaviour");
+    } else {
+        ESP_LOGW(TAG, "boot window policy: UNCONFIGURED, spec section 5.5 wants no "
+                      "commissioning window here (open question P2)");
+    }
+}
+
 extern "C" void app_main(void)
 {
     /* Platform NVS (fabric/credentials/attribute persistence live here). */
@@ -229,16 +276,46 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Failed to create Matter node");
         return;
     }
+    (void)node; /* mt_devtype_create() reaches the node via node::get() */
 
-    /* One on/off-light endpoint - the simplest controllable device type. */
-    on_off_light::config_t light_config;
-    endpoint_t *endpoint = on_off_light::create(node, &light_config, ENDPOINT_FLAG_NONE, nullptr);
-    if (endpoint == nullptr) {
-        ESP_LOGE(TAG, "Failed to create on_off_light endpoint");
-        return;
+    /*
+     * Rebuild the endpoint composition the host declared over AT+MTEP. The
+     * device does this unaided so it rejoins its fabric after a power cut
+     * without waiting on the host (design spec section 5.3).
+     *
+     * This must happen BEFORE esp_matter::start(): esp_matter persists its
+     * endpoint-id counter only for endpoints created after start, so building
+     * here is what makes the ids reproducible on every boot.
+     */
+    mt_composition_t comp;
+    int rc = mt_comp_store_load(&comp);
+    if (rc < 0) {
+        ESP_LOGE(TAG, "composition load failed, starting unconfigured");
+        comp.count = 0;
+    } else if (rc == 1) {
+        ESP_LOGI(TAG, "no stored composition, starting unconfigured");
+        comp.count = 0;
     }
-    s_light_endpoint_id = endpoint::get_id(endpoint);
-    ESP_LOGI(TAG, "on/off light endpoint created, id=%u", s_light_endpoint_id);
+
+    for (uint16_t i = 0; i < comp.count; i++) {
+        uint16_t ep_id = 0;
+        if (mt_devtype_create(comp.devtype[i], &ep_id) != 0) {
+            /*
+             * Abort the whole rebuild rather than skipping the failed entry.
+             * endpoint::create() increments the id counter only after every
+             * failure path has returned, so a failed create consumes no id and
+             * every endpoint after it shifts down by one, silently handing a
+             * commissioned device the wrong data model. See design spec 12.1.
+             */
+            ESP_LOGE(TAG, "endpoint %u (0x%04X) failed, aborting rebuild",
+                     i, (unsigned)comp.devtype[i]);
+            comp.count = 0;
+            break;
+        }
+        mt_matter_record_endpoint(comp.devtype[i], ep_id);
+    }
+
+    ESP_LOGI(TAG, "composition rebuilt: %u endpoint(s)", mt_matter_endpoint_count());
 
     /* Bring up the Matter stack (BLE commissioning + WiFi transport). */
     esp_err_t err = esp_matter::start(app_event_cb);
@@ -247,7 +324,8 @@ extern "C" void app_main(void)
         return;
     }
 
-    ESP_LOGI(TAG, "Matter started, on/off light ready on endpoint %u", s_light_endpoint_id);
+    mt_boot_window_policy(mt_matter_endpoint_count() > 0);
+    ESP_LOGI(TAG, "Matter started with %u endpoint(s)", mt_matter_endpoint_count());
 
     /* Bring up the AT+MT host interface (AT UART + parser). Runs alongside
      * Matter; the host drives Matter over AT from B4.2 onward. */

@@ -20,16 +20,26 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_system.h"
+
 #include "at_uart.h"
 #include "at_parser.h"
 #include "mt_at_config.h"
 #include "mt_at.h"
+#include "mt_comp_store.h"
+#include "mt_composition.h"
+#include "mt_devtypes.h"
 #include "mt_matter.h"
 
 /* +MTERR:<n> code space (mirrors the ESP-NOW layout: 1..99 carry a code,
  * >= MT_ERR_GENERIC is a plain "ERROR"). Real codes are assigned in B4. */
-#define MT_ERR_UNSUPPORTED  8   /* unknown/unsupported command */
-#define MT_ERR_GENERIC      100 /* plain ERROR, no +MTERR line  */
+#define MT_ERR_BAD_PARAM    1   /* bad parameter or out of range          */
+#define MT_ERR_DEVTYPE      6   /* unknown or unsupported device type     */
+#define MT_ERR_PERSIST      7   /* NVS persistence failure                */
+#define MT_ERR_UNSUPPORTED  8   /* unknown/unsupported command            */
+#define MT_ERR_NOT_READY    9   /* no composition, or stack not started   */
+#define MT_ERR_COMP_REJECT  10  /* nothing staged, or endpoint cap hit    */
+#define MT_ERR_GENERIC      100 /* plain ERROR, no +MTERR line            */
 #define MT_R_ERROR          MT_ERR_GENERIC
 
 /* ---- identity (3GPP TS 27.007 style, mirrors the ESP-NOW image) ------- */
@@ -210,6 +220,93 @@ static int cmd_mtattr(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/* ---- endpoint composition staging (C1) -------------------------------- *
+ * AT+MTEPCLEAR opens a staging session, AT+MTEP= appends to it, and
+ * AT+MTEPAPPLY persists it and reboots. Staging lives in RAM only, so an
+ * interrupted host leaves the stored composition untouched rather than
+ * half-written.                                                            */
+
+static mt_composition_t s_staged;
+static bool             s_staging = false;
+
+/* AT+MTEPCLEAR -> begin staging an empty composition. */
+static int cmd_mtepclear(at_type_t type, char *args)
+{
+    (void)args;
+    if (type != AT_EXEC) {
+        return MT_R_ERROR;
+    }
+    s_staged.count = 0;
+    s_staging = true;
+    return AT_R_OK;
+}
+
+/*
+ * AT+MTEP?            -> +MTEP:<index>,<endpoint_id>,<device_type> per endpoint
+ * AT+MTEP=<devtype>   -> append one endpoint to the staged composition
+ *
+ * The query always reports the LIVE composition, never the staged one.
+ */
+static int cmd_mtep(at_type_t type, char *args)
+{
+    if (type == AT_QUERY) {
+        uint16_t n = mt_matter_endpoint_count();
+        for (uint16_t i = 0; i < n; i++) {
+            uint32_t devtype;
+            uint16_t ep_id;
+            if (mt_matter_endpoint_info(i, &devtype, &ep_id) == 0) {
+                at_uart_write_line("+MTEP:%u,%u,0x%04lX", i, ep_id, (unsigned long)devtype);
+            }
+        }
+        return AT_R_OK;
+    }
+
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (!s_staging) {
+        return MT_ERR_COMP_REJECT;
+    }
+    if (s_staged.count >= MT_COMP_MAX_ENDPOINTS) {
+        return MT_ERR_COMP_REJECT;
+    }
+
+    unsigned long devtype;
+    if (!parse_u(args, &devtype)) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!mt_devtype_is_known((uint32_t)devtype)) {
+        return MT_ERR_DEVTYPE;
+    }
+
+    s_staged.devtype[s_staged.count++] = (uint32_t)devtype;
+    return AT_R_OK;
+}
+
+/* AT+MTEPAPPLY -> persist the staged composition, then reboot. */
+static int cmd_mtepapply(at_type_t type, char *args)
+{
+    (void)args;
+    if (type != AT_EXEC) {
+        return MT_R_ERROR;
+    }
+    if (!s_staging) {
+        return MT_ERR_COMP_REJECT;
+    }
+    if (mt_comp_store_save(&s_staged) != 0) {
+        return MT_ERR_PERSIST;
+    }
+
+    s_staging = false;
+
+    /* Acknowledge, drain the UART, then reboot. The host resynchronizes on
+     * the next "+MTREADY", exactly as it does after AT+MTRESET. */
+    at_uart_write_line("OK");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
+    return AT_R_DONE;
+}
+
 /* ---- dispatch table & registration ------------------------------------ */
 
 static const at_command_t s_cmds[] = {
@@ -223,6 +320,9 @@ static const at_command_t s_cmds[] = {
     { "MTCODES",      cmd_mtcodes     },
     { "MTRESET",      cmd_mtreset     },
     { "MTATTR",       cmd_mtattr      },
+    { "MTEP",         cmd_mtep        },
+    { "MTEPCLEAR",    cmd_mtepclear   },
+    { "MTEPAPPLY",    cmd_mtepapply   },
 };
 
 /* Engine config for the Matter personality: "+MTERR" code space, the
