@@ -13,7 +13,7 @@
 #    Lesser General Public License for more details.
 #
 """
-iLabs Matter AT firmware flasher (ESP32-C6) — flashes the local IDF build.
+iLabs Hearth AT firmware flasher (ESP32-C6) — flashes the local IDF build.
 
 The Matter co-processor is the ESP32-C6 on the Challenger RP2350 WiFi6/BLE5
 board. The C6 has no USB of its own, so this drives the full two-stage flash:
@@ -788,7 +788,7 @@ def wait_for_bridge_back(explicit_port, prev_port, timeout=30.0):
 def main():
     global BAUD_RETRIES, PORT_SETTLE_S
     ap = argparse.ArgumentParser(
-        description="iLabs Matter AT firmware flasher (ESP32-C6, from the IDF build).")
+        description="iLabs Hearth AT firmware flasher (ESP32-C6, from the IDF build).")
     ap.add_argument("--board", help="board index (1..N) or directory name")
     ap.add_argument("--port", help="serial port of the RP bridge "
                     "(default: auto-detect the port that appears after the UF2 copy)")

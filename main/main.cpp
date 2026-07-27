@@ -1,14 +1,13 @@
 /*
- * main.cpp - iLabs AT Matter, Phase B2 bring-up.
+ * main.cpp - iLabs AT Hearth: the esp_matter runtime and the C-linkage bridge
+ * the AT command handlers call into.
  *
- * B2 goal: prove the esp_matter runtime runs inside this firmware and
- * commissions like the stock esp-matter light. A single on/off-light endpoint,
- * Matter-over-WiFi, built on the shared design (IDF v5.4.1 + esp-matter).
+ * Holds app_main (endpoint composition rebuild, then esp_matter::start, then
+ * the AT interface), the platform and attribute callbacks that turn CHIP events
+ * into URCs, and the mt_matter_* wrappers declared in mt_matter.h. Everything
+ * C++ stays here; mt_at.c is plain C and never sees an esp_matter header.
  *
- * The AT+MT interface (at_core / mt_at) is intentionally NOT started here yet -
- * it returns in B4, together with the console/AT UART split. For B2 the console
- * and CHIP shell stay on the host-bridge UART so bring-up mirrors the stock
- * light: commission with chip-tool, toggle the OnOff attribute.
+ * Built on IDF v5.4.1 + esp-matter release/v1.5, WiFi transport, ESP32-C6.
  */
 
 #include <inttypes.h>
@@ -485,5 +484,5 @@ extern "C" void app_main(void)
     /* Bring up the AT+MT host interface (AT UART + parser). Runs alongside
      * Matter; the host drives Matter over AT from B4.2 onward. */
     mt_at_start();
-    ESP_LOGI(TAG, "iLabs AT Matter: AT+MT interface up");
+    ESP_LOGI(TAG, "iLabs AT Hearth: AT+MT interface up");
 }

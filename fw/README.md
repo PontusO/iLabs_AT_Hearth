@@ -1,4 +1,4 @@
-# iLabs Matter AT firmware flasher
+# iLabs Hearth AT firmware flasher
 
 `flash.py` flashes the **Matter AT firmware** onto the ESP32-C6 on the
 **Challenger RP2350 WiFi6/BLE5** board. It is the same elegant two-stage flasher
