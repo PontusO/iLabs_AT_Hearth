@@ -93,7 +93,7 @@ bool MatterOnOffLight::begin(bool initialState) {
 ```
 sketch (unmodified arduino-esp32 Matter source)
   |
-  +- iLabs_Matter        arduino-pico host library, mirrors class names verbatim
+  +- iLabs_Hearth        arduino-pico host library, mirrors class names verbatim
        |
        +- ATLink         shared line-protocol transport (host-side twin of at_core)
             |
@@ -569,7 +569,7 @@ and should be read as intent, not as settled behaviour.
 | **C1** | Spike P1 (§12.1) first, then endpoint composition: `AT+MTEP` / `MTEPCLEAR` / `MTEPAPPLY`, NVS persistence, boot rebuild, unconfigured-state gating behind the P2 seam, and the four slice device types. |
 | **C2** | `AT+MTATTR` mode parameter and the `+MTERR` code allocation across all existing handlers. |
 | **C3** | Event mask, `+MTEVT`, removal of `+MTCOMMISSION`, `+MTIDENT`, `AT+MTNET?` (§8.1), and the resulting `AT_MT_SPEC.md` edits. |
-| **C4** | `iLabs_Matter` host library: `ATLink` extraction, `ArduinoMatter`, `MatterEndPoint`, and the four endpoint classes. |
+| **C4** | `iLabs_Hearth` host library: `ATLink` extraction, `ArduinoMatter`, `MatterEndPoint`, and the four endpoint classes. |
 | **C5** | `TESTING.md` update and the regression harness (T1 and T2) covering the new surface. |
 
 C1 through C3 are firmware-only and independently useful: they can be verified
@@ -601,3 +601,8 @@ with a terminal and `chip-tool` before any host library exists.
   `MatterComposedLights` example uses ordinary endpoints, so nothing here blocks
   it, but endpoint parent/child relationships are not modelled.
 - Per-device commissioning credentials. Still the esp-matter test DAC.
+- **`HearthLink` / `ATLink` de-duplication.** §4 planned one shared `ATLink`
+  component. C4 instead built `HearthLink` as `iLabs_Hearth`'s own copy, so the
+  host library and `iLabs_ESP-NOW` now carry two copies of one line protocol.
+  Merging them is worthwhile, but doing so means retesting `iLabs_ESP-NOW`
+  against its two-board rig, which is why C4 copied rather than shared.
