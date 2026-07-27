@@ -7,3 +7,7 @@ dependencies.lock
 .vscode/
 __pycache__/
 *.pyc
+
+# host unit-test binaries (test/host/Makefile)
+test/host/test_*
+!test/host/test_*.c
