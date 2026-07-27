@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #
 #    Copyright (c) 2026 P. Oldberg <pontus@ilabs.se>
+#    SPDX-License-Identifier: LGPL-2.1-or-later
 #
 #    This library is free software; you can redistribute it and/or
 #    modify it under the terms of the GNU Lesser General Public
@@ -11,6 +12,16 @@
 #    but WITHOUT ANY WARRANTY; without even the implied warranty of
 #    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
 #    Lesser General Public License for more details.
+#
+#    NOTE ON LINKAGE. This file is the one part of the project that is not MIT.
+#    It imports esptool (GPL-2.0-or-later) in-process and calls its API
+#    directly, rather than invoking it as a subprocess. A combined work
+#    distributed with esptool is therefore covered by GPL-2.0-or-later;
+#    LGPL-2.1 section 3 permits this file to be taken under GPL-2 for that
+#    purpose. Recipients may still use this file alone under the LGPL.
+#
+#    The firmware image is unaffected. esptool merely writes it to flash and
+#    contributes no code to it: see the SBOM in the repository README.
 #
 """
 iLabs Hearth AT firmware flasher (ESP32-C6) — flashes the local IDF build.
