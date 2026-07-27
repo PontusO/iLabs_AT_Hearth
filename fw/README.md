@@ -11,7 +11,7 @@ The C6 has no USB of its own; the RP2350 host bridges it. So `flash.py` runs:
    device (put the board in **BOOTSEL** mode). The RP2350 reboots as a
    USB-to-serial bridge for the C6.
 2. **Flash:** writes the C6 images (`bootloader.bin`, `partition-table.bin`,
-   `ilabs_at_matter.bin`) over that serial link via esptool's Python API, with a
+   `ilabs_at_hearth.bin`) over that serial link via esptool's Python API, with a
    progress bar. Recovers across bridge watchdog resets and baud fallbacks.
 
 Unlike the ESP-NOW library (which ships prebuilt `bin/` bundles), this reads the

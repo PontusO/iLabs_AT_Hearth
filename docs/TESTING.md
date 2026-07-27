@@ -44,7 +44,7 @@ What the suite is a tripwire for, in priority order:
 
 | Qty | Item | Notes |
 |----|------|-------|
-| 1 | **Challenger RP2350 WiFi6/BLE5** | The C6 runs the `iLabs_AT_Matter` firmware; the RP2350 runs the `RP2350USB2Serial` bridge (already shipped as `fw/RP2350USB2Serial.ino.uf2`). |
+| 1 | **Challenger RP2350 WiFi6/BLE5** | The C6 runs the `iLabs_AT_Hearth` firmware; the RP2350 runs the `RP2350USB2Serial` bridge (already shipped as `fw/RP2350USB2Serial.ino.uf2`). |
 | 1 | USB-C cable | Power + the bridged AT link to the PC |
 | 1 | Linux PC | Runs the harness, `chip-tool`, and BlueZ. Needs a working Bluetooth adapter for BLE commissioning. |
 | 1 | 2.4 GHz WiFi AP | The C6 is WiFi-only (Thread is deferred, see `ARCHITECTURE.md`). The PC and the C6 must land on the **same L2 segment**, or operational discovery over mDNS fails. |

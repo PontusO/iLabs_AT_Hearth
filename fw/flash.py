@@ -122,7 +122,7 @@ BOARDS = [
 # to that build directory (override it with --build-dir).
 REPO_ROOT = os.path.dirname(HERE)                 # fw/ -> repo root
 DEFAULT_BUILD_DIR = os.path.join(REPO_ROOT, "build")
-APP_BIN = "ilabs_at_matter.bin"
+APP_BIN = "ilabs_at_hearth.bin"
 
 FLASH_IMAGES = [
     (0x0000,  "bootloader/bootloader.bin"),

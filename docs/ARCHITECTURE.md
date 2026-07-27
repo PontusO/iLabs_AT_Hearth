@@ -8,7 +8,7 @@ this document is the Matter-firmware view and the decision record.
 
 ## 1. What this is
 
-`iLabs_AT_Matter` turns an ESP32-C6 into a **Matter co-processor** driven by a
+`iLabs_AT_Hearth` turns an ESP32-C6 into a **Matter co-processor** driven by a
 host MCU (RP2350) over a UART AT interface (`AT+MT…`, see `AT_MT_SPEC.md`). It is
 the sibling of `iLabs_AT_ESP-now`, which exposes ESP-NOW over `AT+EN…`.
 

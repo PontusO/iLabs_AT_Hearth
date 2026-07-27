@@ -86,7 +86,7 @@ In `main/main.cpp`, immediately after the existing `on_off_light::create(...)` b
 - [ ] **Step 2: Build and flash**
 
 ```bash
-cd /home/pontus/Data/src/git/iLabs_AT_Matter
+cd /home/pontus/Data/src/git/iLabs_AT_Hearth
 idf.py build
 python3 fw/flash.py            # board in BOOTSEL
 ```
@@ -378,7 +378,7 @@ clean:
 - [ ] **Step 3: Run the tests to verify they fail**
 
 ```bash
-cd /home/pontus/Data/src/git/iLabs_AT_Matter
+cd /home/pontus/Data/src/git/iLabs_AT_Hearth
 make -C test/host run
 ```
 
@@ -651,7 +651,7 @@ Modify `main/CMakeLists.txt`. Replace the `SRCS` block so it reads:
 - [ ] **Step 4: Build**
 
 ```bash
-cd /home/pontus/Data/src/git/iLabs_AT_Matter
+cd /home/pontus/Data/src/git/iLabs_AT_Hearth
 idf.py build
 ```
 
