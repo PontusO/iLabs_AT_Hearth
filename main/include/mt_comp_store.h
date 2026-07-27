@@ -28,6 +28,15 @@ int mt_comp_store_load(mt_composition_t *out);
 /* Persist comp. Returns 0 on success, -1 on an encode or NVS failure. */
 int mt_comp_store_save(const mt_composition_t *comp);
 
+/*
+ * Erase the stored composition, returning the device to unconfigured. Backs
+ * AT+MTFRESET; AT+MTRESET deliberately does not call this, since the
+ * composition is a product definition rather than user data (spec section 3.7).
+ *
+ * Returns 0 on success or when nothing was stored, -1 on an NVS failure.
+ */
+int mt_comp_store_erase(void);
+
 #ifdef __cplusplus
 }
 #endif

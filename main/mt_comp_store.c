@@ -86,3 +86,33 @@ int mt_comp_store_save(const mt_composition_t *comp)
     ESP_LOGI(TAG, "saved composition: %u endpoint(s)", comp->count);
     return 0;
 }
+
+int mt_comp_store_erase(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(MT_COMP_NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return 0; /* nothing stored: already unconfigured */
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open failed: %s", esp_err_to_name(err));
+        return -1;
+    }
+
+    err = nvs_erase_key(h, MT_COMP_NVS_KEY);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK; /* namespace exists but no composition in it */
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "erasing composition failed: %s", esp_err_to_name(err));
+        return -1;
+    }
+
+    ESP_LOGI(TAG, "composition erased, device is unconfigured");
+    return 0;
+}
