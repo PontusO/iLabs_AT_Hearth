@@ -40,6 +40,21 @@ int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual, size_t man
 /* Erase all Matter data and reboot. */
 void mt_matter_factory_reset(void);
 
+/* ---- network transport (C3) -------------------------------------------- */
+
+typedef enum {
+    MT_NET_WIFI   = 0,
+    MT_NET_THREAD = 1,
+} mt_net_transport_t;
+
+/*
+ * Report the operational transport, whether it is compiled in and started, and
+ * whether it is currently connected. Transport is fixed at build time
+ * (ENABLE_MATTER_OVER_THREAD), so this tells the host which image it has.
+ * Returns 0 on success.
+ */
+int mt_matter_net_info(int *transport, int *enabled, int *connected);
+
 /* ---- live composition (built at boot from the stored composition) ------ */
 
 /* Number of endpoints this device currently presents, excluding the Root

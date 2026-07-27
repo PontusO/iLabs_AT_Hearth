@@ -83,38 +83,138 @@ static bool long_to_attr_val(esp_matter_attr_val_t *v, long in)
     }
 }
 
-/* Platform events (commissioning lifecycle). */
+/*
+ * Platform events. Each CHIP event we surface maps to a bit in the AT event
+ * mask (mt_at.h); mt_at_event() drops the ones the host has not subscribed to,
+ * so this switch can stay exhaustive without flooding a 115200 link.
+ */
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
+    using namespace chip::DeviceLayer;
+
     switch (event->Type) {
-    case chip::DeviceLayer::DeviceEventType::kCommissioningWindowOpened:
+    /* Commissioning. */
+    case DeviceEventType::kCommissioningWindowOpened:
         ESP_LOGI(TAG, "Commissioning window opened");
-        mt_at_urc("+MTCOMMISSION:STARTED");
+        mt_at_event(MT_EVT_COMMISSION_WINDOW_OPEN, nullptr);
         break;
-    case chip::DeviceLayer::DeviceEventType::kCommissioningSessionStarted:
+    case DeviceEventType::kCommissioningWindowClosed:
+        mt_at_event(MT_EVT_COMMISSION_WINDOW_CLOSED, nullptr);
+        break;
+    case DeviceEventType::kCommissioningSessionStarted:
         ESP_LOGI(TAG, "Commissioning session started");
+        mt_at_event(MT_EVT_COMMISSION_SESSION_STARTED, nullptr);
         break;
-    case chip::DeviceLayer::DeviceEventType::kCommissioningComplete:
+    case DeviceEventType::kCommissioningSessionStopped:
+        mt_at_event(MT_EVT_COMMISSION_SESSION_STOPPED, nullptr);
+        break;
+    case DeviceEventType::kCommissioningComplete:
         ESP_LOGI(TAG, "Commissioning complete");
-        mt_at_urc("+MTCOMMISSION:COMPLETE");
+        mt_at_event(MT_EVT_COMMISSION_COMPLETE, nullptr);
         break;
-    case chip::DeviceLayer::DeviceEventType::kFailSafeTimerExpired:
+    case DeviceEventType::kFailSafeTimerExpired:
         ESP_LOGI(TAG, "Commissioning failed (fail-safe timer expired)");
-        mt_at_urc("+MTCOMMISSION:FAILED");
+        mt_at_event(MT_EVT_FAIL_SAFE_EXPIRED, nullptr);
         break;
-    case chip::DeviceLayer::DeviceEventType::kBLEDeinitialized:
+
+    /* Fabric. */
+    case DeviceEventType::kFabricWillBeRemoved:
+        mt_at_event(MT_EVT_FABRIC_WILL_BE_REMOVED, nullptr);
+        break;
+    case DeviceEventType::kFabricRemoved:
+        mt_at_event(MT_EVT_FABRIC_REMOVED, nullptr);
+        break;
+    case DeviceEventType::kFabricCommitted:
+        mt_at_event(MT_EVT_FABRIC_COMMITTED, nullptr);
+        break;
+    case DeviceEventType::kFabricUpdated:
+        mt_at_event(MT_EVT_FABRIC_UPDATED, nullptr);
+        break;
+
+    /* Connectivity. The detail field carries up/down where CHIP gives it. */
+    case DeviceEventType::kWiFiConnectivityChange:
+        mt_at_event(MT_EVT_WIFI_CONNECTIVITY,
+                    event->WiFiConnectivityChange.Result == kConnectivity_Established ? "1" : "0");
+        break;
+    case DeviceEventType::kInternetConnectivityChange:
+        mt_at_event(MT_EVT_INTERNET_CONNECTIVITY,
+                    event->InternetConnectivityChange.IPv4 == kConnectivity_Established ? "1" : "0");
+        break;
+    case DeviceEventType::kInterfaceIpAddressChanged:
+        mt_at_event(MT_EVT_INTERFACE_IP_CHANGED, nullptr);
+        break;
+    case DeviceEventType::kOperationalNetworkStarted:
+        mt_at_event(MT_EVT_OPERATIONAL_NETWORK_STARTED, nullptr);
+        break;
+    case DeviceEventType::kDnssdInitialized:
+        mt_at_event(MT_EVT_DNSSD_INITIALIZED, nullptr);
+        break;
+    case DeviceEventType::kServerReady:
+        mt_at_event(MT_EVT_SERVER_READY, nullptr);
+        break;
+
+    /* BLE. */
+    case DeviceEventType::kCHIPoBLEConnectionEstablished:
+        mt_at_event(MT_EVT_BLE_CONNECTED, nullptr);
+        break;
+    case DeviceEventType::kCHIPoBLEConnectionClosed:
+        mt_at_event(MT_EVT_BLE_DISCONNECTED, nullptr);
+        break;
+    case DeviceEventType::kCHIPoBLEAdvertisingChange:
+        mt_at_event(MT_EVT_BLE_ADVERTISING_CHANGE, nullptr);
+        break;
+    case DeviceEventType::kBLEDeinitialized:
         ESP_LOGI(TAG, "BLE deinitialized and memory reclaimed");
+        mt_at_event(MT_EVT_BLE_DEINITIALIZED, nullptr);
         break;
+
+    /* Misc. */
+    case DeviceEventType::kOtaStateChanged:
+        mt_at_event(MT_EVT_OTA_STATE_CHANGED, nullptr);
+        break;
+    case DeviceEventType::kBindingsChangedViaCluster:
+        mt_at_event(MT_EVT_BINDINGS_CHANGED, nullptr);
+        break;
+    case DeviceEventType::kTimeSyncChange:
+        mt_at_event(MT_EVT_TIME_SYNC_CHANGE, nullptr);
+        break;
+
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+    case DeviceEventType::kThreadConnectivityChange:
+        mt_at_event(MT_EVT_THREAD_CONNECTIVITY,
+                    event->ThreadConnectivityChange.Result == kConnectivity_Established ? "1" : "0");
+        break;
+    case DeviceEventType::kThreadStateChange:
+        mt_at_event(MT_EVT_THREAD_STATE_CHANGE, nullptr);
+        break;
+    case DeviceEventType::kThreadInterfaceStateChange:
+        mt_at_event(MT_EVT_THREAD_IF_STATE_CHANGE, nullptr);
+        break;
+#endif
+
     default:
         break;
     }
 }
 
-/* Identify cluster (no physical indicator on this board yet). */
+/*
+ * Identify cluster (no physical indicator on this board yet). Surfaced to the
+ * host as +MTIDENT so a sketch can blink whatever it likes: this backs the
+ * per-endpoint onIdentify() callback in the reference API.
+ */
 static esp_err_t app_identification_cb(identification::callback_type_t type, uint16_t endpoint_id,
                                        uint8_t effect_id, uint8_t effect_variant, void *priv_data)
 {
     ESP_LOGI(TAG, "Identify: type=%u effect=%u variant=%u", type, effect_id, effect_variant);
+
+    /* START/STOP map to the on/off form; EFFECT is not carried (the reference
+     * API's callback is a plain bool too). */
+    if (type == identification::START || type == identification::STOP) {
+        char line[32];
+        snprintf(line, sizeof(line), "+MTIDENT:%u,%d", endpoint_id,
+                 type == identification::START ? 1 : 0);
+        mt_at_urc(line);
+    }
     return ESP_OK;
 }
 
@@ -186,6 +286,23 @@ extern "C" int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual,
 extern "C" void mt_matter_factory_reset(void)
 {
     esp_matter::factory_reset();
+}
+
+extern "C" int mt_matter_net_info(int *transport, int *enabled, int *connected)
+{
+    if (!transport || !enabled || !connected) {
+        return -1;
+    }
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+    *transport = MT_NET_THREAD;
+    *enabled   = 1;
+    *connected = chip::DeviceLayer::ConnectivityMgr().IsThreadAttached() ? 1 : 0;
+#else
+    *transport = MT_NET_WIFI;
+    *enabled   = 1;
+    *connected = chip::DeviceLayer::ConnectivityMgr().IsWiFiStationConnected() ? 1 : 0;
+#endif
+    return 0;
 }
 
 /* The live composition, filled in by the boot rebuild in app_main. */

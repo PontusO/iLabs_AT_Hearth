@@ -1,10 +1,11 @@
 /*
- * mt_at.c - Matter AT command handlers and registration (skeleton).
+ * mt_at.c - Matter AT command handlers and registration.
  *
- * Phase B1: this proves the shared at_core engine drives a second AT
- * personality with its own "+MTERR" code space, before any Matter code is
- * added. It mirrors the ESP-NOW firmware's en_at.c. The real AT+MT...
- * lifecycle/commissioning/data-model commands land in Phase B4.
+ * Runs on the shared at_core engine with its own "+MTERR" code space, mirroring
+ * the ESP-NOW firmware's en_at.c. Covers identity, the Matter lifecycle, the
+ * data model, the host-declared endpoint composition, and event subscription.
+ * Anything touching esp_matter or CHIP goes through the C-linkage bridge in
+ * mt_matter.h, so this stays a plain C translation unit.
  *
  * Handler return convention (see at_parser.h):
  *   AT_R_OK    - engine prints "OK"
@@ -117,8 +118,8 @@ static int cmd_mtfabrics(at_type_t type, char *args)
 
 /*
  * AT+MTCOMMISSION[=<timeout_s>] -> open a basic commissioning window.
- * Default 300 s; the +MTCOMMISSION:STARTED/COMPLETE/FAILED URCs report progress
- * from the platform event callback.
+ * Default 300 s. Progress is reported by the commissioning event bits (0, 3, 5),
+ * which are in the default event mask, from the platform event callback.
  */
 static int cmd_mtcommission(at_type_t type, char *args)
 {
@@ -288,6 +289,70 @@ static int cmd_mtattr(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/* ---- event subscription (C3) ------------------------------------------ */
+
+static uint32_t s_evt_mask = MT_EVT_MASK_DEFAULT;
+
+/*
+ * AT+MTEVT?          -> +MTEVTMASK:0x........
+ * AT+MTEVT=<hexmask> -> subscribe to that set of event bits
+ *
+ * The query deliberately answers "+MTEVTMASK", not "+MTEVT": URCs may arrive
+ * between a command and its terminal response, so a "+MTEVT:<n>" reply would be
+ * indistinguishable from an event that happened to land at that moment.
+ */
+static int cmd_mtevt(at_type_t type, char *args)
+{
+    if (type == AT_QUERY) {
+        at_uart_write_line("+MTEVTMASK:0x%08lX", (unsigned long)s_evt_mask);
+        return AT_R_OK;
+    }
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+
+    unsigned long mask;
+    if (!parse_u(args, &mask) || mask > 0xFFFFFFFFUL) {
+        return MT_ERR_BAD_PARAM;
+    }
+    s_evt_mask = (uint32_t)mask;
+    return AT_R_OK;
+}
+
+void mt_at_event(int bit, const char *detail)
+{
+    if (bit < 0 || bit > 31) {
+        return;
+    }
+    if ((s_evt_mask & (1UL << bit)) == 0) {
+        return;
+    }
+    if (detail) {
+        at_uart_write_line("+MTEVT:%d,%s", bit, detail);
+    } else {
+        at_uart_write_line("+MTEVT:%d", bit);
+    }
+}
+
+/* ---- network transport query (C3) ------------------------------------- */
+
+/* AT+MTNET? -> +MTNET:<transport>,<enabled>,<connected> */
+static int cmd_mtnet(at_type_t type, char *args)
+{
+    (void)args;
+    if (type != AT_QUERY) {
+        return MT_R_ERROR;
+    }
+    int transport = 0, enabled = 0, connected = 0;
+    if (mt_matter_net_info(&transport, &enabled, &connected) != 0) {
+        return MT_R_ERROR;
+    }
+    at_uart_write_line("+MTNET:%s,%d,%d",
+                       transport == MT_NET_THREAD ? "THREAD" : "WIFI",
+                       enabled, connected);
+    return AT_R_OK;
+}
+
 /* ---- endpoint composition staging (C1) -------------------------------- *
  * AT+MTEPCLEAR opens a staging session, AT+MTEP= appends to it, and
  * AT+MTEPAPPLY persists it and reboots. Staging lives in RAM only, so an
@@ -392,6 +457,8 @@ static const at_command_t s_cmds[] = {
     { "MTEP",         cmd_mtep        },
     { "MTEPCLEAR",    cmd_mtepclear   },
     { "MTEPAPPLY",    cmd_mtepapply   },
+    { "MTEVT",        cmd_mtevt       },
+    { "MTNET",        cmd_mtnet       },
 };
 
 /* Engine config for the Matter personality: "+MTERR" code space, the
