@@ -5,6 +5,8 @@ idf_component_register(
     SRCS
         "main.cpp"
         "mt_at.c"
+        "mt_composition.c"
+        "mt_comp_store.c"
     INCLUDE_DIRS
         "include"
     PRIV_REQUIRES
