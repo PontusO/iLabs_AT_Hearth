@@ -167,6 +167,18 @@ boot. **This is a load-bearing invariant**: persisted attribute values and the
 controller's cached Descriptor `PartsList` are both keyed on endpoint ID. Any
 future change to creation order or to the table must preserve it.
 
+**Step 3 must run before step 4, and this is not merely conventional.**
+esp-matter persists its `min_unused_endpoint_id` counter, but only for endpoints
+created after `esp_matter::start()` (§12.1, P1 verdict). Creating the composition
+before start keeps the counter in RAM, so every boot allocates from the same base
+and reproduces the same IDs. If a future change ever applied a composition live
+instead of rebooting, the counter would persist, IDs would climb monotonically on
+every change, and this invariant would break immediately. That is the second,
+independent reason `AT+MTEPAPPLY` reboots rather than applying in place: the
+first is Matter data-model stability (§5.1).
+
+Verified on hardware 2026-07-27: six cold power cycles, identical IDs each time.
+
 ### 5.4 Host reconcile flow
 
 `Matter.begin()` in the host library:
@@ -455,8 +467,13 @@ B: Matter bring-up and the initial `AT+MT` command set).
 Two assumptions in this design are load-bearing and unverified. They are handled
 differently: P1 blocks, P2 is tracked.
 
-**P1 (blocking): endpoint IDs are assigned sequentially in creation order, and
-stably.**
+**P1: PASSED (2026-07-27).** Six cold power cycles on the C6 all reported
+`+MTSPIKE:1,2,3` for an on/off light, dimmable light and temperature sensor
+created in that order. Confirmed mechanically as well as empirically, see the
+verdict note after the description below.
+
+**P1 (was blocking): endpoint IDs are assigned sequentially in creation order,
+and stably.**
 §5.3 depends on rebuilding the composition in stored order reproducing the same
 endpoint IDs on every boot. Persisted attribute values and the controller's
 cached Descriptor `PartsList` are both keyed on endpoint ID, so if esp-matter
@@ -465,6 +482,23 @@ persistence scheme is unsound. Verify by building a three-endpoint composition,
 recording the IDs, power-cycling, and comparing. Also confirm the behaviour when
 an endpoint fails to create mid-sequence: a partial build must not silently shift
 the IDs of everything after it.
+
+**Verdict and mechanism (2026-07-27).** Read from
+`esp_matter/data_model/esp_matter_data_model.cpp` at v1.5.1:
+
+- `endpoint::create()` assigns `endpoint->endpoint_id =
+  current_node->min_unused_endpoint_id++` at line 1668. Every failure path (null
+  node 1655, endpoint cap 1658, allocation failure 1665) returns **before** that
+  line, so **a failed create consumes no endpoint ID**. An endpoint after a
+  failed one therefore slides down into its ID. The boot rebuild in §5.3 must
+  abort the whole composition on any single failure rather than skipping the
+  failed entry, which is what the C1 plan already specifies.
+- `min_unused_endpoint_id` is persisted to NVS, but `store_min_unused_endpoint_id()`
+  (line 1678) and `read_min_unused_endpoint_id()` (line 175) are both gated on
+  `esp_matter::is_started()`. Endpoints created **before** `esp_matter::start()`
+  increment the counter in RAM only, so every boot starts from the same base and
+  reproduces the same IDs. Endpoints created **after** start persist the counter,
+  and their IDs climb monotonically across reboots and are never reused.
 
 **P2 (tracked, not blocking): the boot commissioning window can be suppressed.**
 §5.5 requires an unconfigured device to open no commissioning window, but CHIP
