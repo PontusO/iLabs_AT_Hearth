@@ -34,6 +34,10 @@
 /* +MTERR:<n> code space (mirrors the ESP-NOW layout: 1..99 carry a code,
  * >= MT_ERR_GENERIC is a plain "ERROR"). Real codes are assigned in B4. */
 #define MT_ERR_BAD_PARAM    1   /* bad parameter or out of range          */
+#define MT_ERR_NO_ENDPOINT  2   /* unknown endpoint                       */
+#define MT_ERR_NO_CLUSTER   3   /* unknown cluster                        */
+#define MT_ERR_NO_ATTRIBUTE 4   /* unknown attribute                      */
+#define MT_ERR_ATTR_TYPE    5   /* attribute type unsupported here        */
 #define MT_ERR_DEVTYPE      6   /* unknown or unsupported device type     */
 #define MT_ERR_PERSIST      7   /* NVS persistence failure                */
 #define MT_ERR_UNSUPPORTED  8   /* unknown/unsupported command            */
@@ -121,7 +125,7 @@ static int cmd_mtcommission(at_type_t type, char *args)
     unsigned timeout = 300;
     if (type == AT_SET) {
         if (!at_parse_uint(args, &timeout) || timeout < 30 || timeout > 900) {
-            return MT_R_ERROR;
+            return MT_ERR_BAD_PARAM;
         }
     } else if (type != AT_EXEC) {
         return MT_R_ERROR;
@@ -212,31 +216,55 @@ static bool parse_u(const char *s, unsigned long *out)
     return true;
 }
 
+/* Map a bridge attribute result onto this personality's +MTERR code space. */
+static int attr_err_to_mterr(int r)
+{
+    switch (r) {
+    case MT_ATTR_ERR_ENDPOINT:  return MT_ERR_NO_ENDPOINT;
+    case MT_ATTR_ERR_CLUSTER:   return MT_ERR_NO_CLUSTER;
+    case MT_ATTR_ERR_ATTRIBUTE: return MT_ERR_NO_ATTRIBUTE;
+    case MT_ATTR_ERR_TYPE:      return MT_ERR_ATTR_TYPE;
+    default:                    return MT_R_ERROR;
+    }
+}
+
 /*
- * AT+MTATTR=<ep>,<cluster>,<attr>       -> read  -> +MTATTR:<ep>,<cluster>,<attr>,<val>
- * AT+MTATTR=<ep>,<cluster>,<attr>,<val> -> write -> OK
+ * AT+MTATTR=<ep>,<cluster>,<attr>              -> read
+ *     -> +MTATTR:<ep>,<cluster>,<attr>,<val>
+ * AT+MTATTR=<ep>,<cluster>,<attr>,<val>[,<mode>] -> write -> OK
  *
- * <cluster>/<attr> accept hex (0x0006) or decimal; <val> is an integer. A
- * controller-driven change to the light endpoint is reported asynchronously as
- * a +MTATTR URC (from the attribute callback in main.cpp).
+ * <cluster>/<attr> accept hex (0x0006) or decimal; <val> is an integer.
+ *
+ * <mode> selects how the write is published, default 1:
+ *   1  attribute::update() - subscribers and bound devices see the change
+ *   0  attribute::set_val() - local only, no report
+ * Mode 0 exists so a host reflecting a change that came FROM a controller does
+ * not echo it back and loop.
+ *
+ * A controller-driven change is reported asynchronously as a +MTATTR URC (from
+ * the attribute callback in main.cpp).
  */
 static int cmd_mtattr(at_type_t type, char *args)
 {
-    char *f[4];
-    int n = at_split_args(args, f, 4);
-    if (type != AT_SET || n < 3) {
+    char *f[5];
+    int n = at_split_args(args, f, 5);
+    if (type != AT_SET) {
         return MT_R_ERROR;
+    }
+    if (n < 3) {
+        return MT_ERR_BAD_PARAM;
     }
 
     unsigned long ep, cluster, attr;
     if (!parse_u(f[0], &ep) || !parse_u(f[1], &cluster) || !parse_u(f[2], &attr)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
 
     if (n == 3) {
         long v;
-        if (mt_matter_attr_read((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr, &v) != 0) {
-            return MT_R_ERROR;
+        int r = mt_matter_attr_read((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr, &v);
+        if (r != MT_ATTR_OK) {
+            return attr_err_to_mterr(r);
         }
         at_uart_write_line("+MTATTR:%lu,%lu,%lu,%ld", ep, cluster, attr, v);
         return AT_R_OK;
@@ -244,10 +272,18 @@ static int cmd_mtattr(at_type_t type, char *args)
 
     unsigned long val;
     if (!parse_u(f[3], &val)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
-    if (mt_matter_attr_write((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr, (long)val) != 0) {
-        return MT_R_ERROR;
+
+    unsigned long mode = 1;
+    if (n == 5 && (!parse_u(f[4], &mode) || mode > 1)) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    int r = mt_matter_attr_write((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr,
+                                 (long)val, mode != 0);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
     }
     return AT_R_OK;
 }

@@ -112,12 +112,28 @@ the unconfigured-device policy still being settled (design spec §12.1, P2).
 Read or write a single Matter attribute.
 - **Read:** `AT+MTATTR=<ep>,<cluster>,<attr>` (3 params)
   → `+MTATTR:<ep>,<cluster>,<attr>,<val>` → `OK`
-- **Write:** `AT+MTATTR=<ep>,<cluster>,<attr>,<val>` (4 params) → `OK`
+- **Write:** `AT+MTATTR=<ep>,<cluster>,<attr>,<val>[,<mode>]` (4 or 5 params) → `OK`
 
 `<cluster>` and `<attr>` accept hex (`0x0006`) or decimal. `<val>` is an
 integer; it is interpreted according to the attribute's own type
 (bool/enum/bitmap/intN/uintN). String/array/float attributes are not
-supported over this command (returns `ERROR`).
+supported over this command (`+MTERR:5`).
+
+`<mode>` selects how a write is published, default `1`:
+
+| Mode | Behaviour |
+|---|---|
+| `1` | Subscribers and bound devices see the change. The normal case for a host-driven change. |
+| `0` | The value changes locally with no report. |
+
+Mode `0` exists so a host that is **reflecting** a change which came from a
+controller does not echo it back to the fabric and loop. It corresponds to
+`setAttributeVal` in the arduino-esp32 Matter API, against `updateAttributeVal`
+for mode `1`.
+
+A failed access reports which level was wrong: `+MTERR:2` unknown endpoint,
+`+MTERR:3` unknown cluster, `+MTERR:4` unknown attribute, `+MTERR:5` an
+attribute whose type this command cannot carry.
 
 A write echoes a `+MTATTR` URC (the attribute callback confirming the change),
 then `OK`. A controller-driven change to the light endpoint also raises a
@@ -216,18 +232,23 @@ faults print a bare `ERROR` (no `+MTERR` line).
 
 | Code | Meaning |
 |---|---|
-| `1` | Bad parameter or out of range. |
+| `1` | Bad parameter: malformed, out of range, or the wrong number of them. |
+| `2` | Unknown endpoint. |
+| `3` | Unknown cluster on that endpoint. |
+| `4` | Unknown attribute in that cluster. |
+| `5` | Attribute type not supported by this command (string, array, float). |
 | `6` | Unknown or unsupported device type. |
 | `7` | Persistence (NVS) failure. |
 | `8` | Unknown / unsupported command (version-skew detection). |
 | `9` | Not ready: no composition declared, or the stack is not started. |
 | `10` | Composition change rejected: nothing staged, or the endpoint limit was reached. |
-| (bare `ERROR`) | Bad parameters, wrong command form, or a runtime failure. |
+| (bare `ERROR`) | **Wrong command form**, or an unclassified runtime failure. |
 
-Codes `2` to `5` (unknown endpoint, cluster, attribute, and unsupported
-attribute type) are allocated in the design spec and land in phase C2, when the
-existing handlers are retrofitted to them. Until then those faults return a bare
-`ERROR`.
+**A bare `ERROR` now means the command form was wrong**, for example a SET on a
+query-only command or a QUERY on an exec-only one. Bad *parameter values* carry
+`+MTERR:1` and a failed data-model lookup carries `2` to `5`, so a host can tell
+"you asked the wrong way" from "you asked for something that is not there".
+Before phase C2 both collapsed into a bare `ERROR`.
 
 **Code-space policy (integration-plan contract C2):** `+MTERR` and `+ENERR`
 have distinct prefixes, so each may use the `1–99` range independently; codes

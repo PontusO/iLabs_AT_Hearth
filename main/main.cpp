@@ -218,27 +218,65 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id)
     s_live_count++;
 }
 
-extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out)
+/*
+ * Walk endpoint -> cluster -> attribute so a failure can say WHICH level was
+ * missing. esp_matter::attribute::get_val() collapses all three into one error,
+ * which leaves the host unable to tell a typo in the endpoint from a typo in
+ * the cluster.
+ */
+static mt_attr_result_t attr_locate(uint16_t ep, uint32_t cluster, uint32_t attr,
+                                    esp_matter::attribute_t **out)
 {
-    esp_matter_attr_val_t val;
-    if (esp_matter::attribute::get_val(ep, cluster, attr, &val) != ESP_OK) {
-        return -1;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
     }
-    return attr_val_to_long(&val, out) ? 0 : -1;
+    if (esp_matter::cluster::get(ep, cluster) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    esp_matter::attribute_t *a = esp_matter::attribute::get(ep, cluster, attr);
+    if (a == nullptr) {
+        return MT_ATTR_ERR_ATTRIBUTE;
+    }
+    *out = a;
+    return MT_ATTR_OK;
 }
 
-extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long in)
+extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out)
 {
-    /* Read the current value to learn the attribute's type, then set the new
-     * integer into the matching union field and push the update. */
+    esp_matter::attribute_t *a = nullptr;
+    mt_attr_result_t r = attr_locate(ep, cluster, attr, &a);
+    if (r != MT_ATTR_OK) {
+        return r;
+    }
+
     esp_matter_attr_val_t val;
-    if (esp_matter::attribute::get_val(ep, cluster, attr, &val) != ESP_OK) {
-        return -1;
+    if (esp_matter::attribute::get_val(a, &val) != ESP_OK) {
+        return MT_ATTR_ERR_FAILED;
+    }
+    return attr_val_to_long(&val, out) ? MT_ATTR_OK : MT_ATTR_ERR_TYPE;
+}
+
+extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long in, bool notify)
+{
+    esp_matter::attribute_t *a = nullptr;
+    mt_attr_result_t r = attr_locate(ep, cluster, attr, &a);
+    if (r != MT_ATTR_OK) {
+        return r;
+    }
+
+    /* Read the current value to learn the attribute's type, then set the new
+     * integer into the matching union field and push it. */
+    esp_matter_attr_val_t val;
+    if (esp_matter::attribute::get_val(a, &val) != ESP_OK) {
+        return MT_ATTR_ERR_FAILED;
     }
     if (!long_to_attr_val(&val, in)) {
-        return -1;
+        return MT_ATTR_ERR_TYPE;
     }
-    return (esp_matter::attribute::update(ep, cluster, attr, &val) == ESP_OK) ? 0 : -1;
+
+    esp_err_t err = notify ? esp_matter::attribute::update(ep, cluster, attr, &val)
+                           : esp_matter::attribute::set_val(a, &val);
+    return (err == ESP_OK) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }
 
 /* --------------------------------------------------------------------------- */

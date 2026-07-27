@@ -235,11 +235,11 @@ opens, so they are state-safe):
 
 | Command | Expected |
 |---|---|
-| `AT+MTCOMMISSION=29` | bare `ERROR` (below the 30 s minimum) |
-| `AT+MTCOMMISSION=901` | bare `ERROR` (above the 900 s maximum) |
-| `AT+MTCOMMISSION=abc` | bare `ERROR` (not an integer) |
-| `AT+MTCOMMISSION=` | bare `ERROR` (empty argument) |
-| `AT+MTCOMMISSION=300x` | bare `ERROR` (trailing garbage after the integer) |
+| `AT+MTCOMMISSION=29` | `+MTERR:1` (below the 30 s minimum) |
+| `AT+MTCOMMISSION=901` | `+MTERR:1` (above the 900 s maximum) |
+| `AT+MTCOMMISSION=abc` | `+MTERR:1` (not an integer) |
+| `AT+MTCOMMISSION=` | `+MTERR:1` (empty argument) |
+| `AT+MTCOMMISSION=300x` | `+MTERR:1` (trailing garbage after the integer) |
 
 Follow each with `AT+MTSTATE?` and assert the state is unchanged, which is the
 assertion that actually proves "rejected before any side effect".
@@ -248,28 +248,43 @@ assertion that actually proves "rejected before any side effect".
 
 | Command | Expected |
 |---|---|
-| `AT+MTATTR=1,6` | bare `ERROR` (fewer than 3 parameters) |
-| `AT+MTATTR=1,6,0,1,2` | bare `ERROR` (more than 4 parameters: `at_split_args` returns -1) |
-| `AT+MTATTR=x,6,0` | bare `ERROR` (endpoint not numeric) |
-| `AT+MTATTR=1,zz,0` | bare `ERROR` (cluster not numeric) |
-| `AT+MTATTR=1,6,0,z` | bare `ERROR` (value not numeric) |
-| `AT+MTATTR=99,6,0` | bare `ERROR` (unknown endpoint) |
-| `AT+MTATTR=1,0xFFFF,0` | bare `ERROR` (unknown cluster) |
-| `AT+MTATTR=1,6,0xFFFF` | bare `ERROR` (unknown attribute) |
-| `AT+MTATTR=0,0x0028,0x0005` | bare `ERROR` (NodeLabel is a string: non-integer types are unsupported by design, spec §3.8) |
+| `AT+MTATTR=1,6` | `+MTERR:1` (fewer than 3 parameters) |
+| `AT+MTATTR=1,6,0,1,2` | `+MTERR:1` (mode out of range: 5 params is now a valid form) |
+| `AT+MTATTR=1,6,0,1,0,9` | `+MTERR:1` (more than 5 parameters: `at_split_args` returns -1) |
+| `AT+MTATTR=x,6,0` | `+MTERR:1` (endpoint not numeric) |
+| `AT+MTATTR=1,zz,0` | `+MTERR:1` (cluster not numeric) |
+| `AT+MTATTR=1,6,0,z` | `+MTERR:1` (value not numeric) |
+| `AT+MTATTR=99,6,0` | `+MTERR:2` (unknown endpoint) |
+| `AT+MTATTR=1,0xFFFF,0` | `+MTERR:3` (unknown cluster) |
+| `AT+MTATTR=1,6,0xFFFF` | `+MTERR:4` (unknown attribute) |
+| `AT+MTATTR=0,0x0028,0x0005` | `+MTERR:5` (NodeLabel is a string: non-integer types are unsupported by design, spec §3.8) |
+| `AT+MTATTR?` | bare `ERROR` (wrong command form, not a bad parameter) |
 
-### 6.3 A note on the `+MTERR` code space
+The last four rows are the point of the C2 retrofit. `2` through `5` walk
+endpoint, cluster, attribute, type in order, so a host that gets `+MTERR:3`
+knows its endpoint was fine and its cluster was not. Before C2 all four, plus
+every parameter mistake above them, returned an identical bare `ERROR`.
 
-Today only code `8` exists, so every negative above except the unknown-command
-case asserts a **bare `ERROR`**. That is faithful to the current spec (§5), and
-the suite must assert exactly that. It is also a weakness: the ESP-NOW suite can
-tell a bad LMK (`+ENERR:6`) from a bad MAC (`ERROR`), and this one cannot tell a
-bad endpoint from a bad cluster from a wrong command form.
+Assert the **exact** code, never merely "an error". A regression that collapses
+`3` back into `2`, or into a bare `ERROR`, is precisely what this table exists
+to catch, and it is invisible to a test that only checks for failure.
 
-When specific `+MTERR` codes are allocated (spec §8 lists this as planned), these
-assertions tighten from "rejected" to "rejected for the documented reason", and
-the suite becomes as diagnostic as the ESP-NOW one. Until then, treat this as a
-known coverage limit rather than a gap in the tests.
+### 6.3 What a bare `ERROR` still means
+
+After the C2 retrofit a bare `ERROR` means exactly one thing: **the command form
+was wrong**. A SET on a query-only command, a QUERY on an exec-only one, a
+trailing character after `?`. Everything else carries a code.
+
+That division is worth asserting in both directions. The form negatives in §6.2
+must stay bare, and the parameter and lookup negatives must stay coded. A change
+that starts returning `+MTERR:1` for `AT+MTVER=1` is as much a regression as one
+that returns a bare `ERROR` for a bad endpoint, because it destroys the
+host's ability to distinguish "you asked the wrong way" from "you asked for
+something that is not there".
+
+This section previously recorded the absence of specific codes as a known
+coverage limit. C2 closed it, and the suite is now as diagnostic as the ESP-NOW
+one, which can already tell a bad LMK (`+ENERR:6`) from a bad MAC (`ERROR`).
 
 ## 7. Phase 2: Matter lifecycle (device + controller)
 
@@ -301,6 +316,22 @@ one alone can pass while the device is unusable.
 **2.4 Attribute round-trip, host to controller**
 `AT+MTATTR=1,6,0,1` returns `OK`; a `+MTATTR:1,6,0,1` URC is observed; then
 `chip-tool onoff read on-off <node> 1` reports `1`. Repeat for `0`.
+
+Then the write modes (spec §3.8). Subscribe first, with
+`chip-tool interactive start` and a subscription on OnOff, so a report is
+observable rather than inferred:
+
+- `AT+MTATTR=1,6,0,1,1` (explicit notify) behaves exactly as the default form:
+  `OK`, a `+MTATTR` URC, a report at the controller, and a read of `1`.
+- `AT+MTATTR=1,6,0,0,0` (local only) returns `OK` and a subsequent
+  `AT+MTATTR=1,6,0` reads `0`, but the controller sees **no report**. A
+  `chip-tool onoff read` afterwards does show `0`, since the value really did
+  change; it is the report that is suppressed, not the write.
+
+Mode `0` existing at all is what lets a host reflect a controller-driven change
+without echoing it back to the fabric. A regression that makes mode `0` notify
+turns that reflection into a loop, and nothing else in this suite would catch
+it, because every other observable stays correct.
 
 **2.5 Attribute round-trip, controller to host**
 `chip-tool onoff off <node> 1`, then assert a `+MTATTR:1,6,0,0` URC arrives on
@@ -434,9 +465,11 @@ T1 is worth having on its own: it is the part that runs after every edit to
   `FIRMWARE_UPDATE_SPEC.md` is untested by this suite.
 - **Thread is not built**, so the commissioning matrix is WiFi + BLE only.
 - **Non-integer attributes** are unsupported by design and are only tested for
-  correct rejection, not for behaviour.
-- **Single endpoint.** The data-model coverage is one on/off light; `AT+MTEP`
-  (runtime endpoint creation, spec §8) will need its own cases.
+  correct rejection (`+MTERR:5`), not for behaviour. `AT+MTATTRX` will need its
+  own cases when it lands.
+- **Four device types.** The table covers on/off light, dimmable light, colour
+  temperature light and temperature sensor. The other 16 in the reference API
+  are table entries and get cases as they are added.
 - **Production credentials.** Everything here assumes the esp-matter test DAC.
   A unit provisioned via `esp-matter-mfg-tool` needs its own baseline (different
   onboarding codes, different discriminator).

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -55,13 +56,33 @@ int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id);
 /* Record an endpoint in the live table as the boot rebuild creates it. */
 void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id);
 
-/* Read an integer-valued attribute into *out. Returns 0 on success, -1 on
- * failure (not found, or a non-integer type). */
+/*
+ * Why an attribute access failed. The AT layer maps these onto +MTERR codes;
+ * the mapping lives in mt_at.c so this bridge stays free of the AT error space.
+ */
+typedef enum {
+    MT_ATTR_OK = 0,
+    MT_ATTR_ERR_ENDPOINT,   /* no such endpoint                       */
+    MT_ATTR_ERR_CLUSTER,    /* no such cluster on that endpoint       */
+    MT_ATTR_ERR_ATTRIBUTE,  /* no such attribute in that cluster      */
+    MT_ATTR_ERR_TYPE,       /* not an integer-valued attribute        */
+    MT_ATTR_ERR_FAILED,     /* runtime failure                        */
+} mt_attr_result_t;
+
+/* Read an integer-valued attribute into *out. Returns an mt_attr_result_t. */
 int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out);
 
-/* Write an integer-valued attribute (interpreted per the attribute's current
- * type). Returns 0 on success, -1 on failure. */
-int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long val);
+/*
+ * Write an integer-valued attribute (interpreted per the attribute's current
+ * type). Returns an mt_attr_result_t.
+ *
+ * notify=true  uses attribute::update(): subscribers and bound devices see the
+ *              change, which is what a host-driven change should normally do.
+ * notify=false uses attribute::set_val(): the value changes locally without a
+ *              report. Used when reflecting a change that came FROM a
+ *              controller, so echoing it back does not loop.
+ */
+int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long val, bool notify);
 
 #ifdef __cplusplus
 }
