@@ -44,7 +44,8 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTFABRICS?` | query | `+MTFABRICS:<count>` → `OK` |
 | `AT+MTCOMMISSION[=<timeout_s>]` | exec/set | `OK` (window opened; `+MTCOMMISSION` URCs) |
 | `AT+MTCODES?` | query | `+MTCODES:<qr>,<manual>` → `OK` |
-| `AT+MTRESET` | exec | `OK` → factory reset + reboot |
+| `AT+MTRESET` | exec | `OK` → Matter reset (fabrics/credentials) + reboot |
+| `AT+MTFRESET` | exec | `OK` → full factory reset (adds the composition) + reboot |
 | `AT+MTATTR=<ep>,<cl>,<attr>` | set (3) | `+MTATTR:<ep>,<cl>,<attr>,<val>` → `OK` (read) |
 | `AT+MTATTR=<ep>,<cl>,<attr>,<val>` | set (4) | `OK` (write) |
 | `AT+MTEP?` | query | `+MTEP:<idx>,<ep_id>,<devtype>` per endpoint → `OK` |
@@ -87,19 +88,22 @@ controller can commission (or additionally commission) the device.
 Derived from the device's commissionable data (discriminator/passcode) and
 vendor/product IDs.
 
-### 3.7 `AT+MTRESET`
-Factory-resets the device (erases all Matter data: fabrics, credentials,
-attribute persistence) and reboots. Emits `OK`, then reboots; the host
-resynchronizes on the next `+MTREADY`.
+### 3.7 `AT+MTRESET`: Matter reset
+Erases all **Matter** data (fabrics, credentials, attribute persistence) and
+reboots. Emits `OK`, then reboots; the host resynchronizes on the next
+`+MTREADY`.
 
-**The endpoint composition survives a factory reset.** `esp_matter::factory_reset()`
-erases only esp-matter's own NVS namespace, whereas the composition lives in the
-`mt_ep` namespace of the default partition (§3.9). This is deliberate: the
-composition is a product definition supplied by the host firmware, not user
-data, so a board that is "a dimmable light plus a temperature sensor" is still
-that after a reset, and comes back immediately commissionable with the right
-data model rather than inert. To return a device to unconfigured, apply an empty
-composition: `AT+MTEPCLEAR` followed by `AT+MTEPAPPLY`.
+**The endpoint composition survives.** This is the end-user operation, "unpair
+this device from my home", and the composition is a product definition supplied
+by the host firmware rather than user data: a board that is a dimmable light
+plus a temperature sensor is still that afterwards, and comes back immediately
+commissionable with the correct data model instead of inert until the host
+re-declares it.
+
+To erase the composition as well, use `AT+MTFRESET` (§3.10). To change it
+without a full erase, stage a new one with `AT+MTEPCLEAR` / `AT+MTEP=` /
+`AT+MTEPAPPLY` (§3.9); applying an empty composition returns the device to
+unconfigured.
 
 After reset the device opens a commissioning window automatically, subject to
 the unconfigured-device policy still being settled (design spec §12.1, P2).
@@ -168,6 +172,32 @@ AT+MTEP?               -> +MTEP:0,1,0x0100
                           +MTEP:1,2,0x0302
                           OK
 ```
+
+### 3.10 `AT+MTFRESET`: full factory reset
+
+Everything `AT+MTRESET` erases, **plus the endpoint composition**, leaving a
+blank unconfigured board. Emits `OK`, then reboots; the host resynchronizes on
+the next `+MTREADY`, after which `AT+MTEP?` reports zero endpoints.
+
+This is a manufacturing and development operation, not an end-user one. The two
+resets exist separately because they have different audiences and different
+correct answers about the composition:
+
+| | `AT+MTRESET` | `AT+MTFRESET` |
+|---|---|---|
+| Fabrics, credentials, attribute persistence | erased | erased |
+| Endpoint composition (`mt_ep` namespace) | **kept** | **erased** |
+| `fctry` partition (device attestation) | untouched | untouched |
+| Typical caller | end user, unpairing | factory line, developer |
+
+**The `fctry` partition is never touched by either.** It holds the per-device
+attestation certificate and passcode provisioned at manufacture; erasing it
+would destroy the unit's identity, and no AT command should be able to do that.
+
+Note that `AT+MTFRESET` is deliberately a separate command rather than a
+parameter on `AT+MTRESET`. A form like `AT+MTRESET=1` would give meaning to an
+input that is currently required to be rejected, and that rejection is an
+intentional tripwire on the most destructive command in the set.
 
 ## 4. Unsolicited result codes (URCs)
 

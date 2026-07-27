@@ -148,7 +148,13 @@ static int cmd_mtcodes(at_type_t type, char *args)
     return AT_R_OK;
 }
 
-/* AT+MTRESET -> factory reset (erase Matter data) and reboot. */
+/*
+ * AT+MTRESET -> Matter reset: erase fabrics, credentials and attribute
+ * persistence, then reboot. The endpoint composition SURVIVES, because it is a
+ * product definition supplied by the host firmware rather than user data: a
+ * board that is a dimmable light plus a temperature sensor is still that after
+ * an end user unpairs it. Use AT+MTFRESET to erase everything.
+ */
 static int cmd_mtreset(at_type_t type, char *args)
 {
     (void)args;
@@ -157,6 +163,32 @@ static int cmd_mtreset(at_type_t type, char *args)
     }
     /* Acknowledge, drain the UART, then reset - the device reboots and the host
      * resynchronizes on the next "+MTREADY". */
+    at_uart_write_line("OK");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    mt_matter_factory_reset();
+    return AT_R_DONE;
+}
+
+/*
+ * AT+MTFRESET -> full factory reset: everything AT+MTRESET erases, plus the
+ * endpoint composition, leaving a blank unconfigured board. A manufacturing and
+ * development operation, not an end-user one.
+ *
+ * The fctry partition (per-device attestation data provisioned at manufacture)
+ * is deliberately NOT touched: erasing it would destroy the unit's identity,
+ * which no AT command should be able to do.
+ */
+static int cmd_mtfreset(at_type_t type, char *args)
+{
+    (void)args;
+    if (type != AT_EXEC) {
+        return MT_R_ERROR;
+    }
+    /* Erase the composition first: mt_matter_factory_reset() reboots, so
+     * anything sequenced after it may never run. */
+    if (mt_comp_store_erase() != 0) {
+        return MT_ERR_PERSIST;
+    }
     at_uart_write_line("OK");
     vTaskDelay(pdMS_TO_TICKS(100));
     mt_matter_factory_reset();
@@ -319,6 +351,7 @@ static const at_command_t s_cmds[] = {
     { "MTCOMMISSION", cmd_mtcommission },
     { "MTCODES",      cmd_mtcodes     },
     { "MTRESET",      cmd_mtreset     },
+    { "MTFRESET",     cmd_mtfreset    },
     { "MTATTR",       cmd_mtattr      },
     { "MTEP",         cmd_mtep        },
     { "MTEPCLEAR",    cmd_mtepclear   },

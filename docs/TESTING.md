@@ -220,11 +220,13 @@ Derived from `at_parser.c` (grammar) and `mt_at.c` (per-command validation).
 | `AT+MTCODES=1` | bare `ERROR` |
 | `AT+MTRESET?` | bare `ERROR`, **and the device does not reboot** (assert no `+MTREADY` follows) |
 | `AT+MTRESET=1` | bare `ERROR`, same no-reboot assertion |
+| `AT+MTFRESET?` | bare `ERROR`, same no-reboot assertion |
+| `AT+MTFRESET=1` | bare `ERROR`, same no-reboot assertion |
 | `AT+MTCOMMISSION?` | bare `ERROR` (query form is not accepted) |
 | `AT+MTATTR?` | bare `ERROR` |
 | `AT+MTATTR` | bare `ERROR` (exec form, no arguments) |
 
-The two `AT+MTRESET` cases are the highest-value negatives in the suite: a
+The four reset cases are the highest-value negatives in the suite: a
 dispatch regression there wipes the fabric, so they are worth their own explicit
 no-reboot assertion rather than just a result-code check.
 
@@ -358,10 +360,29 @@ that as an inconclusive run rather than a pass.
 arrives after the fail-safe expires, and that `AT+MTSTATE?` returns to `2`. Gated
 behind `--include-slow` because of the ~90 s wall clock.
 
-**2.11 Factory reset clears everything**
-`AT+MTRESET`, then `AT+MTFABRICS?` is `0`, `chip-tool` can no longer reach the old
-node ID, and the device is advertising as commissionable again. This leaves the
-rig in the factory-fresh state that 2.1 expects, so re-runs are clean.
+**2.11 The two resets differ in exactly one respect**
+Run with a composition applied and a fabric commissioned.
+
+- `AT+MTRESET`, wait for `+MTREADY`. Assert `AT+MTFABRICS?` is `0` **and**
+  `AT+MTEP?` still lists the same endpoints with the same IDs.
+- Re-commission, then `AT+MTFRESET`, wait for `+MTREADY`. Assert
+  `AT+MTFABRICS?` is `0` **and** `AT+MTEP?` now returns zero `+MTEP:` lines.
+
+The composition surviving the first and not the second is the whole distinction
+between the two commands (spec §3.10). A regression that made `AT+MTRESET` erase
+it would look harmless in every other test here, and would silently turn an
+end-user unpair into a bricked product that presents nothing until its host
+re-declares the data model.
+
+**2.12 Factory reset returns the rig to a known state**
+After the `AT+MTFRESET` in 2.11, `chip-tool` can no longer reach the old node ID
+and the device advertises as commissionable again. This leaves the rig in the
+factory-fresh state that 2.1 expects, so re-runs are clean.
+
+Note that `AT+MTRESET` alone does **not** do this, which it did before the
+composition existed. A run that resets with the wrong command starts the next
+iteration with endpoints already declared, and 2.1's assertions no longer mean
+what they say.
 
 ## 8. Interpreting failures
 
@@ -398,7 +419,7 @@ two suites is itself a finding.
 |---|---|
 | **T1** | `test/mt_regression.py` with `ATLink`, the URC queue, `check()`, the report and the JSON baseline. Phase 0 and Phase 1 only. No `chip-tool` dependency, so it runs on any bench in seconds. |
 | **T2** | Phase 2.1–2.5 (reset, commission, both attribute directions). This is where the `chip-tool` subprocess wrapper and its output parsing land. |
-| **T3** | Phase 2.6–2.11 (multi-fabric, persistence, cold-boot URC regression, expiry, final reset). |
+| **T3** | Phase 2.6–2.12 (multi-fabric, persistence, cold-boot URC regression, expiry, both resets). |
 | **T4** | Optional: fold Phase 1 into an RP2350 sketch once a host library exists, so the AT conformance half can run on the real host MCU the way the ESP-NOW suite does. |
 
 T1 is worth having on its own: it is the part that runs after every edit to
