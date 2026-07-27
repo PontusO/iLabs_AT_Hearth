@@ -379,7 +379,14 @@ Bit groups, chosen so a host can enable a whole class cheaply:
 | 10–15 | Connectivity | WiFi connectivity, internet connectivity, interface IP changed, operational network started, DNS-SD initialised, server ready |
 | 16–19 | BLE | CHIPoBLE connected, disconnected, advertising change, BLE deinitialised |
 | 20–23 | Misc | OTA state changed, bindings changed via cluster, time sync change, reserved |
-| 24–31 | Reserved | Thread and future events |
+| 24–26 | Thread | connectivity change, state change, interface state change |
+| 27–31 | Reserved | future events |
+
+Bits 24 to 26 are **allocated now although Thread is not built** (§13). The
+firmware does not emit them on a WiFi image, and a host may set them harmlessly.
+Fixing the layout while the mask is unpublished costs nothing; renumbering it
+after a host library ships is a breaking change, and Thread is a build-time
+variant that will otherwise arrive after C4 and want bits.
 
 Default mask `0x0000003F` (the commissioning group), which reproduces exactly
 what the firmware emits today.
@@ -394,6 +401,30 @@ compiles unchanged. The bit-to-value mapping stays inside the library, and
 struct cannot cross a UART, so the library passes `nullptr` for the second
 argument. Sketches that switch on the event code port verbatim; the rare one
 that dereferences the event struct does not. This goes in the library README.
+
+## 8.1 Network transport query
+
+```
+AT+MTNET?   ->  +MTNET:<transport>,<enabled>,<connected>
+```
+
+- `<transport>`: `WIFI` or `THREAD`, fixed at build time (§13).
+- `<enabled>`: `1` when the transport is compiled in and started.
+- `<connected>`: `1` when the operational network is up.
+
+This backs five reference-API getters that currently have **no** `AT+MT`
+equivalent at all: `isWiFiStationEnabled()`, `isWiFiConnected()`,
+`isThreadEnabled()`, `isThreadConnected()` and `isDeviceConnected()`. That gap
+exists independently of Thread; Thread only makes it obvious.
+
+It also tells a host which image it is talking to. Matter-over-Thread is a
+Kconfig option (`ENABLE_MATTER_OVER_THREAD`, gated on `OPENTHREAD_ENABLED`), so
+transport is a **build-time** choice and the two variants are separate images
+selected by reflash, the same model already used for the ESP-NOW and Matter
+personalities. A runtime selector would be wrong even if the SDK offered one:
+the Root Node's NetworkCommissioning cluster advertises WiFi or Thread features,
+so transport is part of the data model, and changing it on a commissioned device
+has the same consequences as changing the endpoint composition (§5).
 
 ## 9. Identify
 
@@ -537,7 +568,7 @@ and should be read as intent, not as settled behaviour.
 |---|---|
 | **C1** | Spike P1 (§12.1) first, then endpoint composition: `AT+MTEP` / `MTEPCLEAR` / `MTEPAPPLY`, NVS persistence, boot rebuild, unconfigured-state gating behind the P2 seam, and the four slice device types. |
 | **C2** | `AT+MTATTR` mode parameter and the `+MTERR` code allocation across all existing handlers. |
-| **C3** | Event mask, `+MTEVT`, removal of `+MTCOMMISSION`, `+MTIDENT`, and the resulting `AT_MT_SPEC.md` edits. |
+| **C3** | Event mask, `+MTEVT`, removal of `+MTCOMMISSION`, `+MTIDENT`, `AT+MTNET?` (§8.1), and the resulting `AT_MT_SPEC.md` edits. |
 | **C4** | `iLabs_Matter` host library: `ATLink` extraction, `ArduinoMatter`, `MatterEndPoint`, and the four endpoint classes. |
 | **C5** | `TESTING.md` update and the regression harness (T1 and T2) covering the new surface. |
 
@@ -549,7 +580,22 @@ with a terminal and `chip-tool` before any host library exists.
 - The remaining 16 device types (§6.2), plus the three needing resolution in
   §6.3. Table rows against the C1 table, not design work.
 - `AT+MTATTRX` implementation. Lands with Temperature Controlled Cabinet.
-- Thread transport. Deferred per `ARCHITECTURE.md`.
+- **Thread transport.** Deferred per `ARCHITECTURE.md`, and best done after C4
+  so there is a host library to exercise it. It is a build-time variant
+  (`ENABLE_MATTER_OVER_THREAD`), so the two images differ only in configuration,
+  and §8.1 plus the event bits at 24 to 26 are already shaped for it.
+
+  Two preconditions, in this order:
+
+  1. **Switch to a single-app partition first.** The dual-OTA table from B2
+     bring-up is still in place: `ota_0` and `ota_1` at `0x1e0000` each. Today's
+     binary leaves 15% free in that partition, and Thread's measured +164 KB
+     would cut it to about 7%. That fits, but bringing up a new transport with
+     7% headroom is needlessly unpleasant, and single-app removes the constraint
+     entirely. The switch was decided during B2 and never executed.
+  2. **A Thread Border Router on the bench.** A rig change `TESTING.md` §2 has
+     to absorb, and a hard dependency: without one, a Thread image cannot reach
+     a fabric at all.
 - `AT+MTOTA`. Covered by `FIRMWARE_UPDATE_SPEC.md`.
 - Composed endpoints and bridged devices. The reference library's
   `MatterComposedLights` example uses ordinary endpoints, so nothing here blocks

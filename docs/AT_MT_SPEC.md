@@ -52,6 +52,9 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTEP=<devtype>` | set | `OK` (append to the staged composition) |
 | `AT+MTEPCLEAR` | exec | `OK` (begin staging an empty composition) |
 | `AT+MTEPAPPLY` | exec | `OK` → persist + reboot |
+| `AT+MTEVT?` | query | `+MTEVTMASK:<hex32>` → `OK` |
+| `AT+MTEVT=<hexmask>` | set | `OK` (subscribe to platform events) |
+| `AT+MTNET?` | query | `+MTNET:<transport>,<enabled>,<connected>` → `OK` |
 
 ## 3. Command reference
 
@@ -215,15 +218,70 @@ parameter on `AT+MTRESET`. A form like `AT+MTRESET=1` would give meaning to an
 input that is currently required to be rejected, and that rejection is an
 intentional tripwire on the most destructive command in the set.
 
+### 3.11 `AT+MTEVT`: platform event subscription
+
+```
+AT+MTEVT?           ->  +MTEVTMASK:0x0000003F
+AT+MTEVT=<hexmask>  ->  OK
+```
+
+The firmware surfaces CHIP platform events as `+MTEVT:<bit>[,<detail>]`, but
+only for bits the host has subscribed to. Default mask `0x0000003F`, the
+commissioning group, which reproduces exactly what the firmware emitted before
+the mask existed.
+
+| Bits | Group | Contents |
+|---|---|---|
+| 0–5 | Commissioning | `0` window opened, `1` session started, `2` session stopped, `3` complete, `4` window closed, `5` fail-safe expired |
+| 6–9 | Fabric | `6` will be removed, `7` removed, `8` committed, `9` updated |
+| 10–15 | Connectivity | `10` WiFi, `11` internet, `12` interface IP changed, `13` operational network started, `14` DNS-SD initialised, `15` server ready |
+| 16–19 | BLE | `16` connected, `17` disconnected, `18` advertising change, `19` deinitialised |
+| 20–23 | Misc | `20` OTA state, `21` bindings changed, `22` time sync, `23` reserved |
+| 24–26 | Thread | `24` connectivity, `25` state change, `26` interface state change |
+| 27–31 | Reserved | |
+
+Bits `10`, `11` and `24` carry a `<detail>` of `1` or `0` for up and down.
+
+Thread bits are **allocated but never emitted on a WiFi image**: transport is a
+build-time choice (§3.12), and a host may subscribe to them harmlessly. Fixing
+the layout before it is published avoids renumbering later.
+
+The query answers `+MTEVTMASK`, not `+MTEVT`, deliberately. URCs may arrive
+between a command and its terminal response, so a `+MTEVT:<n>` reply would be
+indistinguishable from an event landing at that moment.
+
+### 3.12 `AT+MTNET?`: network transport
+
+```
+AT+MTNET?  ->  +MTNET:<transport>,<enabled>,<connected>
+```
+
+- `<transport>`: `WIFI` or `THREAD`.
+- `<enabled>`: `1` when the transport is compiled in and started.
+- `<connected>`: `1` when the operational network is up.
+
+Transport is fixed at build time. Matter-over-Thread is a Kconfig option
+(`ENABLE_MATTER_OVER_THREAD`, gated on `OPENTHREAD_ENABLED`), so the two
+variants are separate images selected by reflash, the same model used for the
+ESP-NOW and Matter personalities. There is deliberately no command to change it:
+the Root Node's NetworkCommissioning cluster advertises the transport's
+features, so it is part of the data model, and changing it on a commissioned
+device has the same consequences as changing the endpoint composition (§3.9).
+
 ## 4. Unsolicited result codes (URCs)
 
 | URC | Meaning |
 |---|---|
-| `+MTREADY` | AT interface up after boot or `AT+MTRESET`. |
-| `+MTCOMMISSION:STARTED` | A commissioning window opened. |
-| `+MTCOMMISSION:COMPLETE` | Commissioning finished successfully. |
-| `+MTCOMMISSION:FAILED` | Commissioning failed (fail-safe timer expired). |
-| `+MTATTR:<ep>,<cluster>,<attr>,<val>` | An attribute on the light endpoint changed (controller-driven or local). The root endpoint (0) is intentionally not reported, to keep boot-time init noise off the link. |
+| `+MTREADY` | AT interface up after boot, `AT+MTRESET`, `AT+MTFRESET` or `AT+MTEPAPPLY`. |
+| `+MTEVT:<bit>[,<detail>]` | A subscribed platform event fired (§3.11). |
+| `+MTATTR:<ep>,<cluster>,<attr>,<val>` | An attribute changed on one of the declared endpoints (controller-driven or local). The root endpoint (0) is intentionally not reported, to keep boot-time init noise off the link. |
+| `+MTIDENT:<ep>,<enabled>` | The Identify cluster started (`1`) or stopped (`0`) on an endpoint. Backs the per-endpoint identify callback; the host decides how to indicate it. |
+
+**`+MTCOMMISSION:STARTED` / `:COMPLETE` / `:FAILED` were removed** in phase C3
+and are now `+MTEVT:0`, `+MTEVT:3` and `+MTEVT:5`. All three are in the default
+event mask, so a host that sets no mask sees the same three events under the new
+name and nothing else changes. Carrying two URC families for one event would
+have been permanent; nothing depended on the old names yet.
 
 ## 5. Error codes: `+MTERR:<n>`
 

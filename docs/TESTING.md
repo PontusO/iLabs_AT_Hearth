@@ -121,7 +121,8 @@ unchanged:
 
 It also keeps a **URC queue**: any `+MT…` line that is not the current command's
 own intermediate response is pushed aside with a timestamp, so tests can await
-`+MTCOMMISSION:COMPLETE` or `+MTATTR:1,6,0,0` without racing the command stream.
+`+MTEVT:3` (commissioning complete) or `+MTATTR:1,6,0,0` without racing the
+command stream.
 This matters more here than on ESP-NOW: commissioning URCs arrive seconds after
 the command that caused them, and controller-driven `+MTATTR` URCs arrive with no
 command at all.
@@ -182,6 +183,27 @@ can therefore run on a commissioned device without disturbing it.
 | `AT+MTATTR=1,6,0` | `+MTATTR:1,6,0,<0\|1>` then `OK` |
 | `AT+MTATTR=1,0x0006,0x0000` | same value as the decimal form (hex parsing) |
 | `AT+MTATTR=0,0x0028,0x0002` | `OK` with an integer value (root-endpoint read works: VendorID) |
+| `AT+MTEVT?` | `+MTEVTMASK:0x0000003F` at boot (the commissioning group) |
+| `AT+MTNET?` | matches `+MTNET:(WIFI\|THREAD),[01],[01]` |
+
+The event mask is the one piece of state Phase 1 may change, because it is AT
+state rather than device state and it is trivially restorable. Set it, read it
+back, restore it:
+
+```
+AT+MTEVT=0xFFFFFFFF   -> OK
+AT+MTEVT?             -> +MTEVTMASK:0xFFFFFFFF
+AT+MTEVT=0x0000003F   -> OK        (restore before Phase 2)
+```
+
+**Restoring matters.** Leaving the mask wide open makes every Phase 2 URC
+assertion race against connectivity and BLE chatter that the tests do not expect,
+which presents as intermittent Phase 2 failures with no obvious cause.
+
+`AT+MTNET?` on a WiFi image should report `WIFI,1,1` once associated. A
+`<connected>` of `0` late in a run is worth noticing: it means the C6 dropped its
+AP association, and the Phase 2 mDNS-dependent tests are about to fail for
+reasons that have nothing to do with the firmware.
 
 Cross-checks worth scoring as their own tests:
 
@@ -260,6 +282,22 @@ assertion that actually proves "rejected before any side effect".
 | `AT+MTATTR=0,0x0028,0x0005` | `+MTERR:5` (NodeLabel is a string: non-integer types are unsupported by design, spec §3.8) |
 | `AT+MTATTR?` | bare `ERROR` (wrong command form, not a bad parameter) |
 
+**`AT+MTEVT` and `AT+MTNET`:**
+
+| Command | Expected |
+|---|---|
+| `AT+MTEVT` | bare `ERROR` (exec form not accepted) |
+| `AT+MTEVT=zz` | `+MTERR:1` (not a number) |
+| `AT+MTEVT=` | `+MTERR:1` (empty argument) |
+| `AT+MTNET` | bare `ERROR` (exec form on a query-only command) |
+| `AT+MTNET=1` | bare `ERROR` (set form on a query-only command) |
+
+`AT+MTNET` is query-only by design and there is deliberately no way to set the
+transport: it is a build-time choice, and the Root Node's NetworkCommissioning
+cluster advertises it, so it is part of the data model (spec §3.12). A future
+`AT+MTNET=` that appeared to work would be a serious bug, which is why the SET
+form is pinned as rejected here rather than left unspecified.
+
 The last four rows are the point of the C2 retrofit. `2` through `5` walk
 endpoint, cluster, attribute, type in order, so a host that gets `+MTERR:3`
 knows its endpoint was fine and its cluster was not. Before C2 all four, plus
@@ -295,7 +333,7 @@ before it.
 **2.1 Factory-fresh baseline**
 `AT+MTRESET` returns `OK`, the device reboots, and `+MTREADY` arrives within 15 s.
 Then `AT+MTFABRICS?` is `0` and `AT+MTSTATE?` is `1` (a fresh device opens a
-window automatically), with a `+MTCOMMISSION:STARTED` URC observed after the
+window automatically), with a `+MTEVT:0` URC (window opened) observed after the
 reboot.
 
 **2.2 Onboarding codes are usable**
@@ -306,7 +344,7 @@ from provisioned commissionable data, not from session state).
 `chip-tool pairing ble-wifi <node> <ssid> <psk> <passcode> <discriminator>`, with
 the passcode and discriminator taken from the build's credentials. Assert:
 - `chip-tool` exits 0,
-- `+MTCOMMISSION:COMPLETE` arrives on the AT link,
+- `+MTEVT:3` (commissioning complete) arrives on the AT link,
 - `AT+MTFABRICS?` becomes `1`,
 - `AT+MTSTATE?` becomes `2`.
 
@@ -348,7 +386,7 @@ intentionally suppressed (spec §4), and regressing that floods the host with
 boot-time init noise.
 
 **2.7 Additional commissioning window on an operational device**
-`AT+MTCOMMISSION=60` returns `OK`, `+MTCOMMISSION:STARTED` arrives, and
+`AT+MTCOMMISSION=60` returns `OK`, `+MTEVT:0` arrives, and
 `AT+MTSTATE?` becomes `1` while the window is open. Commission a **second
 fabric** with a second `chip-tool` storage directory, then assert
 `AT+MTFABRICS?` is `2`. Remove it with
@@ -387,7 +425,7 @@ it reads `1`, no state change occurred and the test proved nothing, so treat
 that as an inconclusive run rather than a pass.
 
 **2.10 Commissioning window expiry (slow, opt-in)**
-`AT+MTCOMMISSION=30` with no controller attaching: assert `+MTCOMMISSION:FAILED`
+`AT+MTCOMMISSION=30` with no controller attaching: assert `+MTEVT:5` (fail-safe expired)
 arrives after the fail-safe expires, and that `AT+MTSTATE?` returns to `2`. Gated
 behind `--include-slow` because of the ~90 s wall clock.
 
