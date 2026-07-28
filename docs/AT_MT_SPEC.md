@@ -27,7 +27,11 @@ flashed at a time (mode-switch by host reflash).
   `+MT…` lines out-of-band.
 - **Echo:** off at boot. `ATE1` enables character echo, `ATE0` disables it.
 - **Boot marker:** the firmware emits `+MTREADY` once when the AT interface is
-  up (after boot or after `AT+MTRESET`), so the host can resynchronize.
+  up (after boot or after `AT+MTRESET`), so the host can resynchronize. It is
+  the **first line of a new session**: no URC can precede it. URCs raised
+  before the interface is up are dropped rather than queued, because the host
+  is not listening yet and resynchronizes on the marker. A URC arriving ahead
+  of `+MTREADY` is a firmware bug, not something a host must tolerate.
 - **Number formats:** integers are decimal unless noted. Cluster and attribute
   IDs in `AT+MTATTR` accept hex (`0x0006`) or decimal (`6`).
 - **One command in flight:** wait for `OK`/`ERROR` before sending the next
@@ -90,6 +94,47 @@ controller can commission (or additionally commission) the device.
 - Progress is reported asynchronously via the commissioning event bits 0, 3 and 5 (§3.11), which are in the default event mask.
 - Note: a factory-fresh device opens a window automatically at boot; this
   command is for (re)opening one on an already-commissioned device.
+
+> #### DEFECT D1: on a commissioned device this command succeeds and does nothing
+>
+> **Status:** open, found on hardware 2026-07-28. Affects every build to date.
+>
+> The command reports success in full. It returns `OK`, raises `+MTEVT:0`,
+> and `AT+MTSTATE?` reports `1` (commissioning). CHIP really has opened a
+> window in its own bookkeeping. **Nothing is advertised.** A commissioner
+> cannot see the device, and the host has no way to tell the difference.
+>
+> Cause: `CONFIG_USE_BLE_ONLY_FOR_COMMISSIONING=y`, whose documented behaviour
+> is to deinitialise BLE on successful commissioning and to skip BLE init at
+> boot when the device is already provisioned. `BLEManagerImpl` calls
+> `esp_bt_mem_release`, handing the controller memory back to the heap, so
+> when CHIP's BLE state machine later decides to advertise there is no
+> controller to advertise with. It logs `bleAdv Timeout : Start slow
+> advertisement` and NimBLE logs nothing at all, which is the tell: NimBLE
+> announces every GAP procedure it actually performs.
+>
+> DNS-SD cannot cover for it either. On a device whose transport has no
+> network yet the mDNS publish fails too:
+> `chip[DIS]: Failed to advertise commissionable node: 3`.
+>
+> **This is exactly the case the note above says the command exists for**, so
+> the command is specified for a job the build configuration makes impossible.
+>
+> Workaround: `AT+MTFRESET`. An unprovisioned device initialises BLE at boot
+> and advertises normally. Costs the fabric and the composition.
+>
+> Candidate fix: `CONFIG_USE_BLE_ONLY_FOR_COMMISSIONING=n`, keeping the BLE
+> stack resident so a window can genuinely be reopened. The cost is RAM held
+> for the life of the device rather than reclaimed after commissioning, and
+> that has not been measured. Note the counter-argument: standard Matter
+> multi-admin adds a controller over the *operational* network rather than
+> BLE, so an ordinary device does not need BLE after commissioning. This is
+> not an ordinary device, since the host can change its transport underneath
+> it and `AT+MTCOMMISSION` exists precisely so the host can demand a window.
+>
+> Decide together with open question P2 (§12.1 of the design spec). Both ask
+> the same question: what should this device do when it believes it is
+> commissioned but cannot actually be reached?
 
 ### 3.6 `AT+MTCODES?`
 `+MTCODES:<qr_payload>,<manual_pairing_code>`
