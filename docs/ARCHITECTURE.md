@@ -36,15 +36,38 @@ the sibling of `iLabs_AT_ESP-now`, which exposes ESP-NOW over `AT+EN…`.
 
 - **WiFi, 2.4 GHz.** BLE is used for commissioning only. Chosen because it needs
   **no Thread Border Router** and reuses the WiFi stack the board already has.
-- **Thread analysis (measured):** adding Thread (`c6_wifi_thread`) costs
-  **~164 KB** of flash (net, after esp-matter's size-opt profile). Two reasons
-  it is deferred, neither of which is the flash:
+- **Thread analysis (measured):** adding Thread *alongside* WiFi
+  (`c6_wifi_thread`) costs **~164 KB** of flash. Two reasons it was deferred,
+  neither of which is the flash:
   1. Thread requires a **Border Router** on-site to be reachable/commissioned;
      WiFi does not.
-  2. On the current **4 MB** C6 with dual-OTA it is very tight (~4% free); with
-     the single-app partition (below) it fits comfortably, and an **8 MB C6**
-     module removes all pressure.
-  If Thread is ever required, it is a config addition, not a redesign.
+  2. On the current **4 MB** C6 with dual-OTA it was very tight (~4% free).
+     The single-app partition (§4) removed that pressure entirely.
+
+- **Thread-only variant, built and measured 2026-07-28.** `+164 KB` turns out
+  to be the wrong number for what this firmware actually wants, because it
+  measures WiFi **plus** Thread. Replacing WiFi with Thread is cheaper than
+  WiFi:
+
+  | image | size | free in the 3.75 MB slot |
+  |---|---|---|
+  | WiFi (`sdkconfig.defaults`) | 1,618,352 | 59% |
+  | Thread (`+ sdkconfig.defaults.thread`) | 1,517,936 | 61% |
+
+  Thread-only is **100,416 bytes smaller**, since OpenThread costs less than
+  the WiFi stack it replaces. Flash was never going to be the obstacle.
+
+- **Dual-transport is not a config flip, and this is the real finding.**
+  esp-matter's `c6_wifi_thread` reference adds a *secondary network
+  commissioning endpoint* to the data model (`THREAD_NETWORK_ENDPOINT_ID=2`,
+  `WIFI_NETWORK_ENDPOINT_ID=0`) and pins
+  `ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=3`. Both collide head-on with C1: the
+  host declares up to 16 endpoints over `AT+MTEP` and assumes it owns the
+  endpoint space above 0. An endpoint the host never declared, sitting in the
+  middle of that space, desynchronises every cached endpoint id. Supporting
+  both transports in one image is therefore a **composition redesign**, not a
+  Kconfig addition. One transport per image (`AT+MTNET?`, §3.12) stays the
+  contract.
 - **Radio ownership:** in this *separate* Matter firmware, `esp_matter::start()`
   brings up WiFi/netif itself, so `at_core`'s `link_mgr` `LINK_MODE_MATTER` path
   is a no-op here and is reserved for the future merged binary (one radio owner).
