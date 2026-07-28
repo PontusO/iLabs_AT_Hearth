@@ -66,6 +66,12 @@ the sibling of `iLabs_AT_ESP-now`, which exposes ESP-NOW over `AT+EN…`.
   0x1c000/4K; only `phy_init` shifts down by the removed `otadata`'s 8 KB, and
   that partition is unused because `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is
   not set. `flash.py` writes 0x0, 0xC000 and 0x20000 only, never 0x10000.
+- **Verified on hardware, 2026-07-28.** A device commissioned under the
+  dual-OTA table was reflashed with the single-app one and came back on the
+  same fabric, still controllable from the controller and from the local
+  button. Changing the partition layout is therefore not a recommissioning
+  event, provided `nvs` keeps its offset. Any future layout change must hold
+  that invariant or say loudly that it does not.
 
 ## 5. UART topology
 
