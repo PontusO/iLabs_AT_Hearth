@@ -583,10 +583,29 @@ void mt_at_start(void)
     at_uart_init();
     at_register_commands(s_cmds, sizeof(s_cmds) / sizeof(s_cmds[0]));
     at_parser_start(&s_engine_cfg);
-    s_at_up = true;
 
-    /* Boot marker so the host can synchronize after a reset (mirrors +ENREADY). */
+    /*
+     * Boot marker so the host can synchronize after a reset (mirrors +ENREADY).
+     *
+     * Write it BEFORE opening the URC gate, not after. These two lines were
+     * the other way round, which left a window between s_at_up going true and
+     * the marker reaching the wire. The CHIP task runs concurrently, so a URC
+     * raised in that window overtook the marker: observed on hardware as
+     * "+MTEVT:0" arriving before "+MTREADY" on the boot after AT+MTFRESET,
+     * where an unprovisioned device auto-opens a commissioning window.
+     *
+     * A URC that beats the boot marker is worse than a dropped one. The host
+     * discards everything ahead of +MTREADY by design (HearthLink::waitReady),
+     * so it was never delivered anyway; it just made the wire lie about where
+     * the boot ended. With the write first, +MTREADY is unconditionally the
+     * first line of a new session, which is the whole contract of a boot
+     * marker.
+     *
+     * at_uart_init() above has already created the TX mutex, so writing here
+     * is safe; it is only mt_at_urc() that must wait for the gate.
+     */
     at_uart_write_line("+MTREADY");
+    s_at_up = true;
 }
 
 void mt_at_urc(const char *line)
