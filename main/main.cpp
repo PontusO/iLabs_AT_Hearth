@@ -263,13 +263,50 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
 
 /* ---- C-linkage bridge for the AT+MT command handlers (see mt_matter.h) ---- */
 
+/*
+ * EVERY function below runs on the AT parser task, not on the CHIP event loop,
+ * and therefore MUST hold the CHIP stack lock while it touches CHIP.
+ *
+ * This is not defensive tidiness. Without it, AT+MTCOMMISSION=300 killed the
+ * device outright on hardware:
+ *
+ *   E chip[DL]: Chip stack locking error at 'SystemLayerImplFreeRTOS.cpp:55'.
+ *               Code is unsafe/racy
+ *   E chip[-]: chipDie chipDie chipDie
+ *
+ * OpenBasicCommissioningWindow() arms a timer, and SystemLayerImplFreeRTOS
+ * asserts that the caller holds the lock before touching the timer list. CHIP
+ * does not return an error for this; it calls chipDie() and the device aborts.
+ *
+ * The read-only accessors were just as unlocked and did not crash, which is
+ * worse rather than better: FabricCount() and IsThreadAttached() race against
+ * the CHIP task mutating the same state, so they fail rarely and silently
+ * instead of loudly and every time. Locking them costs a mutex per AT command,
+ * against a link that carries a handful of commands a second at most.
+ *
+ * Do NOT use this guard in app_event_cb(): that callback already runs ON the
+ * CHIP task, and taking the lock there would be at best redundant and at worst
+ * a deadlock. Its only job is mt_at_event(), which touches the UART, not CHIP.
+ */
+namespace {
+class ChipStackLock {
+public:
+    ChipStackLock()  { chip::DeviceLayer::PlatformMgr().LockChipStack(); }
+    ~ChipStackLock() { chip::DeviceLayer::PlatformMgr().UnlockChipStack(); }
+    ChipStackLock(const ChipStackLock &) = delete;
+    ChipStackLock &operator=(const ChipStackLock &) = delete;
+};
+}  // namespace
+
 extern "C" int mt_matter_fabric_count(void)
 {
+    ChipStackLock lock;
     return chip::Server::GetInstance().GetFabricTable().FabricCount();
 }
 
 extern "C" int mt_matter_state(void)
 {
+    ChipStackLock lock;
     if (chip::Server::GetInstance().GetCommissioningWindowManager().IsCommissioningWindowOpen()) {
         return MT_STATE_COMMISSIONING;
     }
@@ -281,6 +318,7 @@ extern "C" int mt_matter_state(void)
 
 extern "C" int mt_matter_open_commissioning(int timeout_s)
 {
+    ChipStackLock lock;
     CHIP_ERROR err = chip::Server::GetInstance().GetCommissioningWindowManager()
         .OpenBasicCommissioningWindow(chip::System::Clock::Seconds32(timeout_s),
                                       chip::CommissioningWindowAdvertisement::kAllSupported);
@@ -289,6 +327,7 @@ extern "C" int mt_matter_open_commissioning(int timeout_s)
 
 extern "C" int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual, size_t manual_len)
 {
+    ChipStackLock lock;
     chip::MutableCharSpan qrSpan(qr, qr_len);
     chip::MutableCharSpan manSpan(manual, manual_len);
     chip::RendezvousInformationFlags rendezvous(chip::RendezvousInformationFlag::kBLE);
@@ -304,6 +343,7 @@ extern "C" int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual,
 
 extern "C" void mt_matter_factory_reset(void)
 {
+    ChipStackLock lock;
     esp_matter::factory_reset();
 }
 
@@ -312,6 +352,7 @@ extern "C" int mt_matter_net_info(int *transport, int *enabled, int *connected)
     if (!transport || !enabled || !connected) {
         return -1;
     }
+    ChipStackLock lock;
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
     *transport = MT_NET_THREAD;
     *enabled   = 1;
@@ -379,6 +420,12 @@ static mt_attr_result_t attr_locate(uint16_t ep, uint32_t cluster, uint32_t attr
 
 extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out)
 {
+    /* Same reasoning as the bridge functions above, and the same lock. These
+     * two never crashed on hardware, which made them look safe and is exactly
+     * why they are worth fixing: esp_matter does no locking of its own (there
+     * is none in its attribute.cpp), so the walk of the data model and the
+     * report that update() triggers both race the CHIP task. */
+    ChipStackLock lock;
     esp_matter::attribute_t *a = nullptr;
     mt_attr_result_t r = attr_locate(ep, cluster, attr, &a);
     if (r != MT_ATTR_OK) {
@@ -394,6 +441,7 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
 
 extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long in, bool notify)
 {
+    ChipStackLock lock;
     esp_matter::attribute_t *a = nullptr;
     mt_attr_result_t r = attr_locate(ep, cluster, attr, &a);
     if (r != MT_ATTR_OK) {
