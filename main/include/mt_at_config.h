@@ -34,3 +34,30 @@
 /* Parser task tuning. */
 #define MT_PARSER_TASK_STACK 6144
 #define MT_PARSER_TASK_PRIO  10
+
+/* ------------------------------------------------------------------ */
+/*  AT link hardware flow control availability                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Whether this board actually wires the AT UART's RTS and CTS signals
+ * between the host and the C6. at_core can drive them (at_uart_set_flowctrl,
+ * AT_UART_RTS_PIN/AT_UART_CTS_PIN = GPIO19/GPIO18 on C6), and the ESP-NOW
+ * firmware exposes that through AT+ENFLOW, but no C6 board built so far
+ * routes the pair:
+ *
+ *   Challenger RP2350 WiFi6/BLE5 (V0.2) and Slice RP2350 WiFi6 both use the
+ *   ESP32-C6-MINI-1-H4 with only RXD0/TXD0, IO2/IO3/IO7/IO14/IO15 (the
+ *   esp-hosted SPI), IO9 (boot), IO8 (strapping), IO12/IO13 (USB D-/D+) and
+ *   EN. IO18 and IO19 go nowhere. The AT link is three-wire.
+ *
+ * The pair IS routed on the older ESP32-C3 Connectivity board (IO18 -> CTS,
+ * IO19 -> RTS), which is where at_core's pin assignment comes from, but
+ * Hearth is C6-only.
+ *
+ * With this at 0, AT+MTFLOW answers a query with 0 and rejects any attempt
+ * to enable a mode. Enabling CTS against an unbonded pin does not degrade
+ * gracefully: it gates the C6's transmitter on a floating input and the link
+ * stops until the next reset. Set to 1 on a board revision that routes them.
+ */
+#define MT_UART_FLOWCTRL_WIRED  0
