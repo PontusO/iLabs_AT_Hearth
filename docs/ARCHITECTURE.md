@@ -65,12 +65,50 @@ the sibling of `iLabs_AT_ESP-now`, which exposes ESP-NOW over `AT+EN…`.
   host declares up to 16 endpoints over `AT+MTEP` and assumes it owns the
   endpoint space above 0. An endpoint the host never declared, sitting in the
   middle of that space, desynchronises every cached endpoint id. Supporting
-  both transports in one image is therefore a **composition redesign**, not a
-  Kconfig addition. One transport per image (`AT+MTNET?`, §3.12) stays the
-  contract.
+  both transports in one image *concurrently* is therefore a **composition
+  redesign**, not a Kconfig addition. See §3.1: one binary carrying both, with
+  only one active at a time, avoids this specific collision.
 - **Radio ownership:** in this *separate* Matter firmware, `esp_matter::start()`
   brings up WiFi/netif itself, so `at_core`'s `link_mgr` `LINK_MODE_MATTER` path
   is a no-op here and is reserved for the future merged binary (one radio owner).
+
+### 3.1 Decision: one binary, transport selected at boot (agreed 2026-07-28, not built)
+
+The goal is a single C6 image supporting both transports with **only one active
+at a time**, the choice persisted and applied at boot. Not concurrent
+operation, so the `secondary_network_interface` endpoint does not arise and
+C1's endpoint contract is preserved.
+
+| shape | switch cost | risk | lets a *commissioned* device change network |
+|---|---|---|---|
+| Two images, host reflashes | seconds | none; reuses the existing personality-switch pattern | no |
+| **One binary, boot-time select** | a reboot | **high, see below** | no |
+| Genuine dual-interface | none | C1 composition redesign | yes |
+
+**Chosen: one binary, boot-time select**, and recorded honestly: this carried
+the highest implementation risk of the three and was chosen knowingly.
+
+The risk is that compiling both stacks in *is* the dual-interface case as far
+as CHIP is concerned. `THREAD_NETWORK_ENDPOINT_ID` and
+`WIFI_NETWORK_ENDPOINT_ID` are compile-time, both network commissioning
+drivers register, and a Matter data model is meant to be static per device.
+Presenting exactly one at runtime means suppressing the other by hand. Two
+hooks look relevant and **neither has been traced yet**:
+`CONFIG_ESP_MATTER_ENABLE_OPENTHREAD=n`, which defers Thread stack startup out
+of `esp_matter::start()` "with more flexibility" (esp_matter Kconfig line 236),
+and the per-driver `CONFIG_*_NETWORK_COMMISSIONING_DRIVER` switches, which are
+compile-time and so unlikely to suffice alone. Tracing those is the first task
+of this work, not an implementation detail of it.
+
+**What this does not buy.** A transport switch needs recommissioning whichever
+shape is used: a device booted into Thread holds no Thread dataset, so it is on
+no network, and the fabric credentials surviving in NVS cannot be reached.
+Reboot-switch and reflash-switch are both install-time operations ending in
+"commission the device". The single binary wins one artifact and convenience,
+not a capability.
+
+**Precondition:** the Thread image must be proven on hardware first, so this is
+built on something known to work rather than on two unknowns at once.
 
 ## 4. Partition layout: single-app + host OTA
 
