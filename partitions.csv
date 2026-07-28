@@ -1,10 +1,27 @@
 # Name,   Type, SubType, Offset,  Size, Flags
 # Note: Firmware partition offset needs to be 64K aligned, initial 36K (9 sectors) are reserved for bootloader and partition table
+#
+# Single-app layout. The C6 does no on-device OTA: updates arrive as a
+# host-driven serial flash of bootloader + partition table + app, written by
+# the RP2350 over UART (FIRMWARE_UPDATE_SPEC.md, ARCHITECTURE.md section 4).
+# Nothing ever has to overwrite the running image from inside it, so the second
+# app slot and otadata are dead weight, and the dual-OTA table this replaces was
+# B2 bring-up scaffolding that outlived its purpose.
+#
+# It buys the room Matter-over-Thread needs. The WiFi image is ~1.63 MB in a
+# 1.88 MB slot, 15% free; Thread adds ~164 KB, which fits with about 7% left,
+# and 7% is not room to work in on an image that grows with every SDK bump.
+# One 3.75 MB slot leaves ~1.9 MB free for the ~1.84 MB WiFi+Thread image.
+#
+# NVS is deliberately untouched by this change: nvs and nvs_keys sit below the
+# app at fixed offsets and do not move, and flash.py writes only 0x0, 0xc000
+# and 0x20000. A commissioned device therefore keeps its fabric and its mt_ep
+# endpoint composition across the repartition. phy_init shifts down by
+# otadata's 8 KB, which costs nothing: CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION is
+# not set, so that partition is unused.
 esp_secure_cert,  0x3F, ,0xd000,    0x2000, encrypted
 nvs,      data, nvs,     0x10000,   0xC000,
 nvs_keys, data, nvs_keys,,          0x1000, encrypted
-otadata,  data, ota,     ,          0x2000
 phy_init, data, phy,     ,          0x1000,
-ota_0,    app,  ota_0,   0x20000,   0x1E0000,
-ota_1,    app,  ota_1,   0x200000,  0x1E0000,
+factory,  app,  factory, 0x20000,   0x3C0000,
 fctry,    data, nvs,     0x3E0000,  0x6000

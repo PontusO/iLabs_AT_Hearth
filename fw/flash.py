@@ -135,10 +135,16 @@ REPO_ROOT = os.path.dirname(HERE)                 # fw/ -> repo root
 DEFAULT_BUILD_DIR = os.path.join(REPO_ROOT, "build")
 APP_BIN = "ilabs_at_hearth.bin"
 
+# Last-resort layout, used only when a build directory has no flasher_args.json.
+# These MUST match partitions.csv and CONFIG_PARTITION_TABLE_OFFSET, not the
+# generic IDF defaults: this project puts the table at 0xC000 (not 0x8000) and
+# the app at 0x20000 (not 0x10000, which here is `nvs` and holds the Matter
+# fabric and the mt_ep endpoint composition). The IDF defaults were sitting here
+# until 2026-07-28 and would have written the application straight over NVS.
 FLASH_IMAGES = [
     (0x0000,  "bootloader/bootloader.bin"),
-    (0x8000,  "partition_table/partition-table.bin"),
-    (0x10000, APP_BIN),
+    (0xC000,  "partition_table/partition-table.bin"),
+    (0x20000, APP_BIN),
 ]
 
 ROM_BAUD = 115200               # ESP ROM download-loader boot baud
@@ -604,9 +610,10 @@ def load_flash_plan(build_dir):
     """Resolve the ESP flash images for build_dir.
 
     Prefer the IDF-generated flasher_args.json — it carries the exact offsets
-    for whatever partition table the build uses (e.g. esp-matter's custom 4 MB
-    dual-OTA layout, app at 0x20000, plus otadata). Fall back to the fixed
-    single-app layout (FLASH_IMAGES) only when no json is present.
+    for whatever partition table the build uses (this project's custom 4 MB
+    single-app layout: bootloader at 0x0, table at 0xC000, app at 0x20000).
+    Fall back to FLASH_IMAGES only when no json is present; see the warning
+    on that constant about why its offsets are not the IDF defaults.
 
     Returns (images, settings): images is a list of (offset, abspath) sorted by
     offset; settings is the flash_settings dict (mode/freq/size) or None.
