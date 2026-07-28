@@ -290,7 +290,8 @@ the mask existed.
 | 16–19 | BLE | `16` connected, `17` disconnected, `18` advertising change, `19` deinitialised |
 | 20–23 | Misc | `20` OTA state, `21` bindings changed, `22` time sync, `23` reserved |
 | 24–26 | Thread | `24` connectivity, `25` state change, `26` interface state change |
-| 27–31 | Reserved | |
+| 27 | Device state | `27` transport mismatch (§3.12.1) |
+| 28–31 | Reserved | |
 
 Bits `10`, `11` and `24` carry a `<detail>` of `1` or `0` for up and down.
 
@@ -305,12 +306,16 @@ indistinguishable from an event landing at that moment.
 ### 3.12 `AT+MTNET?`: network transport
 
 ```
-AT+MTNET?  ->  +MTNET:<transport>,<enabled>,<connected>
+AT+MTNET?  ->  +MTNET:<transport>,<enabled>,<connected>[,<mismatch>]
 ```
 
 - `<transport>`: `WIFI` or `THREAD`.
 - `<enabled>`: `1` when the transport is compiled in and started.
 - `<connected>`: `1` when the operational network is up.
+- `<mismatch>`: `1` when a stored fabric was commissioned on a *different*
+  transport than this image provides (§3.12.1). Optional trailing field: a
+  host that parses the first three and ignores extras stays correct, which is
+  why it was added at the end rather than inserted.
 
 Transport is fixed at build time. Matter-over-Thread is a Kconfig option
 (`ENABLE_MATTER_OVER_THREAD`, gated on `OPENTHREAD_ENABLED`), so the two
@@ -319,6 +324,57 @@ ESP-NOW and Matter personalities. There is deliberately no command to change it:
 the Root Node's NetworkCommissioning cluster advertises the transport's
 features, so it is part of the data model, and changing it on a commissioned
 device has the same consequences as changing the endpoint composition (§3.9).
+
+#### 3.12.1 Transport mismatch: a fabric from the other image
+
+**Status: specified, not implemented. Blocked on defect D1 (§3.5).**
+
+Reflashing between the WiFi and Thread images leaves NVS untouched by design
+(`ARCHITECTURE.md` §4, verified on hardware), so a device commissioned under
+one image still holds that fabric under the other. Fabric credentials are
+transport-independent in Matter, so nothing about them is invalid. They are
+simply unreachable: the device has no credentials for the new transport, so it
+joins no network, and a commissioner cannot deliver any because it cannot
+reach the device.
+
+Observed on hardware 2026-07-28, and the failure is the worst available shape.
+CHIP finds the fabric, logs `Fabric already commissioned. Disabling BLE
+advertisement`, and tears BLE down. The device then reports itself commissioned
+through `AT+MTSTATE?` while being reachable by no route at all: no network, no
+BLE, no mDNS. It looks configured and is not.
+
+**Behaviour.** The firmware records the transport alongside the composition in
+the `mt_ep` NVS namespace and compares it at boot.
+
+On a mismatch it **erases nothing**:
+
+- the fabric is kept, so reflashing the original image restores a working
+  commissioned device, which matters because flipping images is routine during
+  development, and because the credentials are not actually invalid;
+- the composition is kept, since it is transport-independent and is a product
+  definition rather than user data (the same reasoning that makes it survive
+  `AT+MTRESET`, §3.8);
+- `mt_boot_window_policy()` treats the device as **not commissioned for the
+  purpose of the boot commissioning window**, so it advertises and can be
+  commissioned onto the new transport;
+- `+MTEVT:27` is raised, and `AT+MTNET?` reports `<mismatch>` as `1` so a host
+  that connected later can still discover the condition;
+- the stored transport is updated only once a fabric is successfully
+  commissioned on the new transport.
+
+The alternative of auto-erasing on mismatch was considered and rejected: it
+destroys a working fabric on any transport flip, including a brief one, and
+"looks configured but is not" is a reporting problem rather than a reason to
+delete a user's commissioning.
+
+**This resolves open question P2** (design spec §12.1), which asked whether the
+boot commissioning window can be suppressed on an unconfigured device. The
+question was the wrong way round. What matters is not whether a window can be
+suppressed but that "configured" was the wrong predicate: it must mean *has a
+fabric usable on this transport*, not merely *has a fabric*.
+
+Blocked on D1 because a device in this state has already had BLE released, so
+opening a window achieves nothing until BLE stays resident.
 
 ### 3.13 `AT+MTBAUD`: AT link rate
 
