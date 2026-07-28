@@ -23,6 +23,26 @@
 #include <app/server/CommissioningWindowManager.h>
 #include <setup_payload/OnboardingCodesUtil.h>
 
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+#include <platform/ESP32/OpenthreadLauncher.h>
+
+/*
+ * OpenThread platform defaults. These are NOT provided by ESP-IDF: every
+ * esp-matter example defines its own copy (examples/light/main/app_priv.h:84
+ * is the one this mirrors), so there is no header to include for them.
+ * Reproduced here rather than pulling an example's private header in.
+ *
+ *   RADIO_MODE_NATIVE          the C6 has its own 802.15.4 radio; it is not
+ *                              driving an external RCP over a serial link
+ *   HOST_CONNECTION_MODE_NONE  and it is not acting as an RCP for a host
+ *                              either, which is the mirror-image case
+ *   storage_partition_name     "nvs", matching partitions.csv
+ */
+#define MT_OT_RADIO_CONFIG()  { .radio_mode = RADIO_MODE_NATIVE }
+#define MT_OT_HOST_CONFIG()   { .host_connection_mode = HOST_CONNECTION_MODE_NONE }
+#define MT_OT_PORT_CONFIG()   { .storage_partition_name = "nvs", .netif_queue_size = 10, .task_queue_size = 10 }
+#endif
+
 #include "mt_at.h"
 #include "mt_comp_store.h"
 #include "mt_composition.h"
@@ -471,7 +491,31 @@ extern "C" void app_main(void)
 
     ESP_LOGI(TAG, "composition rebuilt: %u endpoint(s)", mt_matter_endpoint_count());
 
-    /* Bring up the Matter stack (BLE commissioning + WiFi transport). */
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+    /*
+     * Hand OpenThread its platform config BEFORE esp_matter::start().
+     *
+     * start() calls openthread_init_stack(), which does
+     * `assert(s_platform_config)` (OpenthreadLauncher.cpp:263) and nothing
+     * else sets it. Omit this and the Thread image boot-loops on that assert
+     * with no hint as to what is missing: everything up to and including BLE
+     * init logs normally first, so it reads like a BLE fault rather than a
+     * missing initialisation.
+     *
+     * This is why "the Thread variant builds" was not the same claim as "the
+     * Thread variant runs". The config guards in this file cover the AT
+     * surface (the AT+MTNET? transport report, event bits 24 to 26); they do
+     * not bring up the stack that surface describes.
+     */
+    esp_openthread_platform_config_t ot_config = {
+        .radio_config = MT_OT_RADIO_CONFIG(),
+        .host_config = MT_OT_HOST_CONFIG(),
+        .port_config = MT_OT_PORT_CONFIG(),
+    };
+    set_openthread_platform_config(&ot_config);
+#endif
+
+    /* Bring up the Matter stack (BLE commissioning + WiFi or Thread transport). */
     esp_err_t err = esp_matter::start(app_event_cb);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start Matter: %d", err);
