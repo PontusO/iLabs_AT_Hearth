@@ -1,0 +1,79 @@
+# iLabs AT Hearth - Matter-over-Thread variant.
+#
+# Overlay, applied AFTER sdkconfig.defaults and sdkconfig.defaults.esp32c6:
+#
+#   idf.py -B build_thread \
+#     -D SDKCONFIG=build_thread/sdkconfig \
+#     -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.thread" \
+#     build
+#
+# SDKCONFIG must be redirected into the build directory. Left at its default
+# the Thread configuration would be written to ./sdkconfig and silently take
+# over the WiFi build too.
+#
+# Modelled on esp-matter's examples/light/sdkconfig.defaults.c6_thread, NOT on
+# c6_wifi_thread, and that is a deliberate choice rather than a simplification.
+# Two reasons:
+#
+#  1. AT_MT_SPEC.md section 3.12 fixes the transport at build time and reports
+#     it through AT+MTNET?. One transport per image is the published contract.
+#  2. c6_wifi_thread adds a *secondary network commissioning endpoint* to the
+#     data model (CONFIG_THREAD_NETWORK_ENDPOINT_ID=2,
+#     CONFIG_WIFI_NETWORK_ENDPOINT_ID=0) and pins
+#     CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=3. Both collide head-on with
+#     C1: the host declares up to 16 endpoints over AT+MTEP and assumes it owns
+#     the endpoint space above 0. An endpoint the host did not declare, sitting
+#     in the middle of that space, would desynchronise every cached endpoint id.
+#     Dual-transport is therefore not a config flip for this firmware; it is a
+#     composition redesign. Out of scope here, and recorded rather than
+#     attempted.
+#
+# The board settings from the upstream reference (BSP buttons and RGB LED on
+# the C6-DevKitM-1) are deliberately absent: this firmware drives no local
+# hardware, the host does.
+
+# Radio: Thread on, WiFi station off. ENABLE_MATTER_OVER_THREAD defaults to y
+# once OPENTHREAD_ENABLED is set (chip Kconfig line 742), and is named here
+# anyway because AT_MT_SPEC.md and CLAUDE.md both refer to it by name.
+CONFIG_OPENTHREAD_ENABLED=y
+CONFIG_ENABLE_MATTER_OVER_THREAD=y
+CONFIG_ENABLE_WIFI_STATION=n
+CONFIG_ENABLE_WIFI_AP=n
+
+CONFIG_OPENTHREAD_SRP_CLIENT=y
+CONFIG_OPENTHREAD_DNS_CLIENT=y
+CONFIG_OPENTHREAD_LOG_LEVEL_DYNAMIC=n
+CONFIG_OPENTHREAD_LOG_LEVEL_NOTE=y
+
+# No OpenThread CLI. The host drives this device over AT+MT; a second command
+# interpreter on the console would only be another way to desynchronise it.
+CONFIG_OPENTHREAD_CLI=n
+
+# lwIP for OpenThread. IPv6 autoconfig is on in sdkconfig.defaults for the WiFi
+# image and must be off here: a Thread node gets its addresses from the network
+# data, not from router advertisements.
+CONFIG_LWIP_IPV6_AUTOCONFIG=n
+CONFIG_LWIP_IPV6_NUM_ADDRESSES=8
+CONFIG_LWIP_MULTICAST_PING=y
+
+# Discovery. Thread commissioning needs the full mDNS responder and extended
+# discovery, matching the upstream reference.
+CONFIG_USE_MINIMAL_MDNS=n
+CONFIG_ENABLE_EXTENDED_DISCOVERY=y
+
+CONFIG_LIBSODIUM_USE_MBEDTLS_SHA=y
+
+# BLE stays on: commissioning is over BLE on both transports, and on Thread it
+# is the only way in, since an uncommissioned node has no network credentials
+# and therefore no Thread network to be discovered on.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_EXT_ADV=n
+CONFIG_BT_NIMBLE_HCI_EVT_BUF_SIZE=70
+
+# NOT inherited from the upstream reference, which sets CONFIG_ENABLE_OTA_REQUESTOR=y:
+# this firmware has one app partition and is flashed by the host over serial
+# (see partitions.csv and FIRMWARE_UPDATE_SPEC.md). sdkconfig.defaults already
+# sets it to n; restated here so a future edit to the base file cannot quietly
+# re-enable it for the Thread image alone.
+CONFIG_ENABLE_OTA_REQUESTOR=n
