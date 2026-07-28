@@ -37,8 +37,12 @@ CONFIG_BUTTON_LONG_PRESS_TIME_MS=5000
 # disable softap by default
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
 
-# Enable OTA Requestor
-CONFIG_ENABLE_OTA_REQUESTOR=y
+# No Matter OTA Requestor. It needs two app slots to write an image into, and
+# partitions.csv now has one: updates are a host-driven serial flash from the
+# RP2350, not an on-device download (FIRMWARE_UPDATE_SPEC.md). Left on, the
+# image would carry a downloader that cannot succeed and would advertise an
+# OTA Requestor cluster to the fabric that no controller could usefully drive.
+CONFIG_ENABLE_OTA_REQUESTOR=n
 
 # Enable HKDF in mbedtls
 CONFIG_MBEDTLS_HKDF_C=y

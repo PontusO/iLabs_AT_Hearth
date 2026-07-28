@@ -55,9 +55,17 @@ the sibling of `iLabs_AT_ESP-now`, which exposes ESP-NOW over `AT+EN…`.
   `FIRMWARE_UPDATE_SPEC.md`). So the C6 uses a **single-app partition** (one
   ~3.6 MB app slot) rather than dual-OTA, and disables the Matter OTA Requestor.
   This gives ~1.9 MB free for the ~1.84 MB WiFi+Thread image.
-- **Current state:** the firmware still carries the esp-matter light's dual-OTA
-  table (copied in during B2); switching to single-app + `ENABLE_OTA_REQUESTOR=n`
-  is a pending cleanup that matches this decision.
+- **Done, 2026-07-28.** `partitions.csv` is single-app (`factory`, 0x20000,
+  3840 KB) and `CONFIG_ENABLE_OTA_REQUESTOR=n`. Measured: the app went from
+  0x196410 to 0x18b1b0, so dropping the OTA Requestor also *shrank* it by about
+  45 KB, and free space went from 15% of a 1.88 MB slot to 59% of a 3.75 MB one,
+  i.e. 301 KB to 2.31 MB. Thread's ~164 KB now lands with ~2.1 MB to spare
+  rather than the ~4 to 7% the dual-OTA table left.
+- **NVS is deliberately unmoved by the switch,** which is what lets an already
+  commissioned device survive it. `nvs` stays at 0x10000/48K and `nvs_keys` at
+  0x1c000/4K; only `phy_init` shifts down by the removed `otadata`'s 8 KB, and
+  that partition is unused because `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is
+  not set. `flash.py` writes 0x0, 0xC000 and 0x20000 only, never 0x10000.
 
 ## 5. UART topology
 
@@ -88,7 +96,7 @@ the sibling of `iLabs_AT_ESP-now`, which exposes ESP-NOW over `AT+EN…`.
 
 ```
 CMakeLists.txt                 esp-matter integration + at_core sibling dir
-partitions.csv                 (dual-OTA today; -> single-app, see §4)
+partitions.csv                 single-app, one 3840 KB slot (see §4)
 sdkconfig.defaults[.esp32c6]   Matter config + console/AT UART split
 main/
   main.cpp                     esp_matter runtime + mt_matter_* bridge
