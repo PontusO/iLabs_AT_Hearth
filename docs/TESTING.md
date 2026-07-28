@@ -185,6 +185,9 @@ can therefore run on a commissioned device without disturbing it.
 | `AT+MTATTR=0,0x0028,0x0002` | `OK` with an integer value (root-endpoint read works: VendorID) |
 | `AT+MTEVT?` | `+MTEVTMASK:0x0000003F` at boot (the commissioning group) |
 | `AT+MTNET?` | matches `+MTNET:(WIFI\|THREAD),[01],[01]` |
+| `AT+MTBAUD?` | `+MTBAUD:115200` at boot |
+| `AT+MTFLOW?` | `+MTFLOW:0` (no board routes RTS/CTS) |
+| `AT+MTFLOW=0` | `OK` (the only mode this hardware accepts) |
 
 The event mask is the one piece of state Phase 1 may change, because it is AT
 state rather than device state and it is trivially restorable. Set it, read it
@@ -297,6 +300,33 @@ transport: it is a build-time choice, and the Root Node's NetworkCommissioning
 cluster advertises it, so it is part of the data model (spec §3.12). A future
 `AT+MTNET=` that appeared to work would be a serious bug, which is why the SET
 form is pinned as rejected here rather than left unspecified.
+
+**`AT+MTBAUD` and `AT+MTFLOW`:**
+
+| Command | Expected |
+|---|---|
+| `AT+MTBAUD` | bare `ERROR` (exec form not accepted) |
+| `AT+MTBAUD=12345` | `+MTERR:1` (not a standard rate) |
+| `AT+MTBAUD=zz` | `+MTERR:1` (not a number) |
+| `AT+MTBAUD=1843200` | `+MTERR:1` (above the 921600 cap) |
+| `AT+MTFLOW` | bare `ERROR` (exec form not accepted) |
+| `AT+MTFLOW=4` | `+MTERR:1` (above the highest mode) |
+| `AT+MTFLOW=1` | `+MTERR:1` (RTS/CTS not wired on this board) |
+| `AT+MTFLOW=3` | `+MTERR:1` (same) |
+
+The three rejected `AT+MTFLOW` modes are the assertion that matters here.
+`at_core` can drive RTS/CTS and the ESP-NOW image accepts all four modes
+through `AT+ENFLOW`, but no C6 board routes the pair (spec §3.14). A build
+that started accepting mode `1` or `3` would gate the C6's transmitter on an
+unbonded pin: the symptom is not an error but a link that stops mid-answer
+and needs a reset, which is exactly the kind of failure a regression suite
+should catch before a bench session does.
+
+Do not add a positive `AT+MTBAUD=<rate>` case to this phase. A rate switch
+leaves the harness and the device disagreeing until the harness reopens its
+port, so it belongs in a dedicated test that owns the reconnect, not in a
+table of one-line assertions. `AT+MTBAUD?` reading back `115200` (§6.1)
+covers the query side.
 
 The last four rows are the point of the C2 retrofit. `2` through `5` walk
 endpoint, cluster, attribute, type in order, so a host that gets `+MTERR:3`

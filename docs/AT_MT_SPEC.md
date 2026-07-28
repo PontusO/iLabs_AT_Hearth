@@ -8,9 +8,12 @@ flashed at a time (mode-switch by host reflash).
 
 ## 1. Transport & line conventions
 
-- **Link:** UART, `115200 8N1`, no flow control by default. The AT link is on
-  the C6's UART1 (host-bridge pins GPIO16/17); the console/logs live on a
-  separate UART (GPIO2). See `ARCHITECTURE.md`.
+- **Link:** UART, `115200 8N1`, no flow control. The AT link is on the C6's
+  UART1 (host-bridge pins GPIO16/17); the console/logs live on a separate
+  UART (GPIO2). See `ARCHITECTURE.md`. The rate is changeable at runtime with
+  `AT+MTBAUD` (§3.13) and is not persisted, so every reset returns the link to
+  115200. Hardware flow control has a command (`AT+MTFLOW`, §3.14) but no
+  wiring on any board built so far.
 - **Command framing:** a command line is terminated by CR (`\r`) or LF (`\n`).
 - **Response framing:** every response and URC line is terminated by CRLF.
 - **Command forms:**
@@ -55,6 +58,10 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTEVT?` | query | `+MTEVTMASK:<hex32>` → `OK` |
 | `AT+MTEVT=<hexmask>` | set | `OK` (subscribe to platform events) |
 | `AT+MTNET?` | query | `+MTNET:<transport>,<enabled>,<connected>` → `OK` |
+| `AT+MTBAUD?` | query | `+MTBAUD:<baud>` → `OK` |
+| `AT+MTBAUD=<baud>` | set | `OK` at the old rate, then the link switches |
+| `AT+MTFLOW?` | query | `+MTFLOW:<mode>` → `OK` |
+| `AT+MTFLOW=<mode>` | set | `OK` at the old setting, then the link switches |
 
 ## 3. Command reference
 
@@ -268,6 +275,63 @@ the Root Node's NetworkCommissioning cluster advertises the transport's
 features, so it is part of the data model, and changing it on a commissioned
 device has the same consequences as changing the endpoint composition (§3.9).
 
+### 3.13 `AT+MTBAUD`: AT link rate
+
+```
+AT+MTBAUD?         ->  +MTBAUD:<baud>
+AT+MTBAUD=<baud>   ->  OK, then the link switches
+```
+
+Accepted rates, the same table the ESP-NOW image's `AT+ENBAUD` uses:
+
+```
+1200 2400 4800 9600 19200 38400 57600 115200 230400 460800 921600
+```
+
+Anything else is `+MTERR:1`.
+
+The `OK` goes out at the **old** rate: the switch drains TX first, so the
+acknowledgement is complete before the divisor changes. The host reconfigures
+its own side after seeing it. A URC that happens to land in that gap also goes
+out at the old rate, for the same reason.
+
+**The rate is not persisted.** It lives in RAM, so a reset (`AT+MTRESET`,
+`AT+MTEPAPPLY`, the reset line, power) returns the link to 115200. That is
+what gives a host that loses sync a guaranteed way back: pulse reset and
+resynchronize on `+MTREADY`. Persisting the rate would make one bad switch
+unrecoverable without a serial-download reflash.
+
+### 3.14 `AT+MTFLOW`: hardware flow control
+
+```
+AT+MTFLOW?         ->  +MTFLOW:<mode>
+AT+MTFLOW=<mode>   ->  OK, then the link switches
+```
+
+| Mode | Meaning |
+|---|---|
+| `0` | none, three-wire TX/RX/GND |
+| `1` | RTS only: the C6 signals the host to pause |
+| `2` | CTS only: the host signals the C6 to pause |
+| `3` | full RTS/CTS |
+
+`OK` goes out at the old setting, for the same reason as `AT+MTBAUD`, and
+mattering more here: enabling CTS can gate this device's own transmitter.
+
+**No board built so far wires RTS/CTS to the C6, so only mode `0` is
+accepted; `1` to `3` answer `+MTERR:1`.** The shared `at_core` can drive them
+(`AT_UART_RTS_PIN` = GPIO19, `AT_UART_CTS_PIN` = GPIO18 on C6) and the ESP-NOW
+firmware exposes the full range through `AT+ENFLOW`, but on the Challenger
+RP2350 WiFi6/BLE5 and the Slice RP2350 WiFi6 the ESP32-C6-MINI-1-H4 uses only
+`RXD0`/`TXD0`, the esp-hosted SPI, boot, strapping, USB and `EN`. GPIO18 and
+GPIO19 are not connected. The pair *is* routed on the older ESP32-C3
+Connectivity board, which is where `at_core`'s pin assignment comes from.
+
+Accepting a mode the board cannot honour would not degrade gracefully: it
+would gate the transmitter on an unbonded input and the link would stop
+mid-answer, needing a reset. `MT_UART_FLOWCTRL_WIRED` in `mt_at_config.h` is
+the one macro a board revision that routes the pair has to flip.
+
 ## 4. Unsolicited result codes (URCs)
 
 | URC | Meaning |
@@ -345,7 +409,13 @@ allocated here and kept semantically stable for a future merged binary.
 ## 9. Relationship to `AT+EN`
 
 `AT+MT` and `AT+EN` share the `at_core` engine, transport, framing and error
-conventions, and disjoint command namespaces. Only one personality is flashed
+conventions, and disjoint command namespaces. The two transport commands are
+deliberately parallel: `AT+MTBAUD` and `AT+MTFLOW` (§3.13, §3.14) drive the
+same `at_uart_set_baud()` / `at_uart_set_flowctrl()` as `AT+ENBAUD` and
+`AT+ENFLOW`, with the same rate table and mode numbering, so a host that can
+retune one link can retune the other. They diverge in two places only: a bad
+value is `+MTERR:1` here and a bare `ERROR` there, following each namespace's
+own grammar, and `AT+MTFLOW` refuses the modes this hardware cannot honour. Only one personality is flashed
 at a time; the host reflashes the C6 to switch. This keeps a future single
 binary (registering both command tables) a mechanical merge. See the
 [ESP-NOW + Matter integration plan](hearth-integration-plan.md).

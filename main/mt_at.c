@@ -440,6 +440,99 @@ static int cmd_mtepapply(at_type_t type, char *args)
     return AT_R_DONE;
 }
 
+/* ---- AT link transport (baud, flow control) ---------------------------- */
+
+/*
+ * Standard rates only, capped at 921600. Same table as the ESP-NOW image's
+ * AT+ENBAUD: the two firmwares share at_core's UART, so a host that knows
+ * how to retune one link knows how to retune the other.
+ *
+ * Not persisted, deliberately. The rate lives in RAM, so every reset returns
+ * the link to AT_UART_BAUD (115200) and a host that loses sync has a
+ * guaranteed way back: pulse reset. Persisting it would make a bad switch
+ * unrecoverable without a serial-download reflash.
+ */
+static const int s_baud_rates[] = {
+    1200, 2400, 4800, 9600, 19200, 38400, 57600,
+    115200, 230400, 460800, 921600,
+};
+
+/* AT+MTBAUD? -> +MTBAUD:<baud>;  AT+MTBAUD=<baud> -> OK, then switch. */
+static int cmd_mtbaud(at_type_t type, char *args)
+{
+    if (type == AT_QUERY) {
+        at_uart_write_line("+MTBAUD:%d", at_uart_get_baud());
+        return AT_R_OK;
+    }
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+
+    unsigned long baud;
+    if (!parse_u(args, &baud)) {
+        return MT_ERR_BAD_PARAM;
+    }
+    bool valid = false;
+    for (size_t i = 0; i < sizeof(s_baud_rates) / sizeof(s_baud_rates[0]); i++) {
+        if ((unsigned long)s_baud_rates[i] == baud) {
+            valid = true;
+            break;
+        }
+    }
+    if (!valid) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    /* Acknowledge at the current rate first: at_uart_set_baud() drains TX
+     * before it switches, so this OK still leaves at the rate the host is
+     * still listening at. The host reconfigures its own side after seeing
+     * it. Any URC raised in the gap goes out at the old rate too, for the
+     * same reason. */
+    at_resp_ok();
+    at_uart_set_baud((int)baud);
+    return AT_R_DONE;
+}
+
+/*
+ * AT+MTFLOW? -> +MTFLOW:<mode>;  AT+MTFLOW=<mode> -> OK, then switch.
+ * Modes are at_core's: 0 none, 1 RTS, 2 CTS, 3 CTS+RTS.
+ *
+ * On a board that does not route the pair (MT_UART_FLOWCTRL_WIRED == 0,
+ * which is every C6 board built so far) anything but 0 is rejected with
+ * +MTERR:1 rather than accepted and quietly ineffective. Accepting it would
+ * be worse than useless: enabling CTS gates this chip's transmitter on an
+ * unbonded pin, and the link would simply stop mid-answer. See
+ * mt_at_config.h for the netlist this claim rests on.
+ */
+static int cmd_mtflow(at_type_t type, char *args)
+{
+    if (type == AT_QUERY) {
+        at_uart_write_line("+MTFLOW:%d", at_uart_get_flowctrl());
+        return AT_R_OK;
+    }
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+
+    unsigned long mode;
+    if (!parse_u(args, &mode) || mode > AT_UART_FLOWCTRL_CTS_RTS) {
+        return MT_ERR_BAD_PARAM;
+    }
+#if !MT_UART_FLOWCTRL_WIRED
+    if (mode != AT_UART_FLOWCTRL_NONE) {
+        return MT_ERR_BAD_PARAM;
+    }
+#endif
+
+    /* Same ordering reason as the baud switch: acknowledge at the current
+     * flow-control state, then change it, because at_uart_set_flowctrl()
+     * drains TX first and enabling CTS would otherwise be able to gate this
+     * very response. */
+    at_resp_ok();
+    at_uart_set_flowctrl((int)mode);
+    return AT_R_DONE;
+}
+
 /* ---- dispatch table & registration ------------------------------------ */
 
 static const at_command_t s_cmds[] = {
@@ -459,6 +552,8 @@ static const at_command_t s_cmds[] = {
     { "MTEPAPPLY",    cmd_mtepapply   },
     { "MTEVT",        cmd_mtevt       },
     { "MTNET",        cmd_mtnet       },
+    { "MTBAUD",       cmd_mtbaud      },
+    { "MTFLOW",       cmd_mtflow      },
 };
 
 /* Engine config for the Matter personality: "+MTERR" code space, the
