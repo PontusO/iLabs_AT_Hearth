@@ -358,10 +358,24 @@ advertisement`, and tears BLE down. The device then reports itself commissioned
 through `AT+MTSTATE?` while being reachable by no route at all: no network, no
 BLE, no mDNS. It looks configured and is not.
 
-**Behaviour.** The firmware records the transport alongside the composition in
-the `mt_ep` NVS namespace and compares it at boot.
+**Detection.** The firmware asks CHIP whether this transport is provisioned
+(`IsWiFiStationProvisioned()` / `IsThreadProvisioned()`) and treats a device
+holding a fabric on an unprovisioned transport as unreachable.
 
-On a mismatch it **erases nothing**:
+An earlier design recorded which transport a fabric was commissioned on and
+compared it at boot. That was replaced after hardware showed it answers the
+wrong question. It asks "where did this fabric come from" when what matters is
+"can this device reach a network". A device commissioned over Thread and then
+reflashed to the WiFi image joined WiFi perfectly well, on credentials left by
+an earlier WiFi commissioning, and served its Thread-era fabric over mDNS. A
+marker would have called that a mismatch and opened a pointless window on a
+working device. Fabric credentials are transport-independent; **provisioning is
+the thing that is not**.
+
+The check also needs no storage of its own, so it cannot drift, and it is
+correct on a device upgraded to this firmware without any migration step.
+
+On a mismatch the firmware **erases nothing**:
 
 - the fabric is kept, so reflashing the original image restores a working
   commissioned device, which matters because flipping images is routine during
@@ -374,8 +388,8 @@ On a mismatch it **erases nothing**:
   commissioned onto the new transport;
 - `+MTEVT:27` is raised, and `AT+MTNET?` reports `<mismatch>` as `1` so a host
   that connected later can still discover the condition;
-- the stored transport is updated only once a fabric is successfully
-  commissioned on the new transport.
+- the condition clears on `kCommissioningComplete`, since commissioning on
+  this transport is precisely what provisions it.
 
 The alternative of auto-erasing on mismatch was considered and rejected: it
 destroys a working fabric on any transport flip, including a brief one, and

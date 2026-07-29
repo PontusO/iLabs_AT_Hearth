@@ -147,22 +147,9 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         break;
     case DeviceEventType::kCommissioningComplete:
         ESP_LOGI(TAG, "Commissioning complete");
-        /*
-         * Stamp the transport the device is now commissioned on (spec 3.12.1).
-         * Written here rather than at boot, and only on success: the marker's
-         * whole job is to say which transport the *stored fabric* belongs to,
-         * so writing it before there is a fabric would make a device that
-         * merely booted look commissioned here, and the next reflash back
-         * would then fail to notice a genuine mismatch.
-         *
-         * This also clears the latch, so AT+MTNET? stops reporting a mismatch
-         * the moment the situation is resolved.
-         */
-#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
-        mt_comp_store_save_transport(MT_NET_THREAD);
-#else
-        mt_comp_store_save_transport(MT_NET_WIFI);
-#endif
+        /* Whatever was unreachable is now reachable: commissioning on this
+         * transport is exactly what provisions it (spec 3.12.1). Clearing the
+         * latch stops AT+MTNET? reporting a mismatch that no longer exists. */
         s_transport_mismatch = false;
         mt_at_event(MT_EVT_COMMISSION_COMPLETE, nullptr);
         break;
@@ -528,6 +515,35 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
  * decisions elsewhere: this function is the single place that changes when
  * P2 lands.
  */
+/*
+ * Can this device actually be reached on the transport this image provides?
+ *
+ * Asked of CHIP rather than of a stored marker, and that distinction was
+ * settled on hardware. An earlier version recorded which transport a fabric
+ * was commissioned on and compared it at boot, which sounds equivalent and is
+ * not: it answers "where did this fabric come from" when the question is "can
+ * this device reach a network". A device commissioned over Thread, reflashed
+ * to the WiFi image, joined WiFi perfectly well on credentials left by an
+ * earlier WiFi commissioning and served its Thread-era fabric over mDNS. The
+ * marker would have called that a mismatch and opened a pointless
+ * commissioning window on a device that was working.
+ *
+ * IsWiFiStationProvisioned() / IsThreadProvisioned() answer the real question,
+ * need no NVS of their own, and cannot drift out of date.
+ *
+ * Call only after esp_matter::start(): both read state the stack populates,
+ * and both want the CHIP lock.
+ */
+static bool mt_transport_is_provisioned()
+{
+    ChipStackLock lock;
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+    return chip::DeviceLayer::ConnectivityMgr().IsThreadProvisioned();
+#else
+    return chip::DeviceLayer::ConnectivityMgr().IsWiFiStationProvisioned();
+#endif
+}
+
 static void mt_boot_window_policy(bool configured)
 {
     /*
@@ -549,9 +565,20 @@ static void mt_boot_window_policy(bool configured)
      * claim about itself, so the claim is what gets corrected: open a window
      * and let it be commissioned onto the transport it actually has.
      */
+    /*
+     * A fabric with no way to be reached on it. Note this asks for the FABRIC
+     * count, not the `configured` argument, which reports whether the host has
+     * declared an endpoint composition. Those are independent: a device can
+     * hold a composition and no fabric (declared but never commissioned) or a
+     * fabric and no composition (commissioned, then AT+MTEPCLEAR). Only a
+     * fabric can be stranded by a transport it cannot reach.
+     */
+    s_transport_mismatch = (mt_matter_fabric_count() > 0) && !mt_transport_is_provisioned();
+
     if (s_transport_mismatch) {
-        ESP_LOGW(TAG, "boot window policy: fabric belongs to the other transport, "
-                      "opening a commissioning window (spec 3.12.1)");
+        ESP_LOGW(TAG, "boot window policy: holds a fabric but this transport is not "
+                      "provisioned, so it is unreachable; opening a commissioning "
+                      "window (spec 3.12.1)");
         /* The +MTEVT:27 for this is raised in app_main AFTER mt_at_start(), not
          * here. This runs before the AT interface exists, so mt_at_urc() would
          * drop it on the s_at_up guard, and even if it did not, a URC ahead of
@@ -604,39 +631,6 @@ extern "C" void app_main(void)
         comp.count = 0;
     }
 
-    /*
-     * Does the stored fabric belong to this image's transport? (spec 3.12.1)
-     *
-     * Read here, before esp_matter::start(), because the answer decides what
-     * mt_boot_window_policy() does immediately after start returns. Only a
-     * device that actually holds a fabric can be mismatched: with no fabric
-     * there is nothing to be unreachable, and CHIP opens its own window
-     * anyway. A missing marker (never commissioned, or an image predating the
-     * marker) reads as "unknown" and must NOT count as a mismatch, or every
-     * device upgraded to this firmware would open a window on its first boot.
-     */
-    {
-        int stored = 0;
-        /* The compile-time constant directly, NOT mt_matter_net_info(): that
-         * now takes the CHIP stack lock, and esp_matter::start() has not run
-         * yet, so the platform manager's mutex does not exist. Same class of
-         * trap as raising a URC before mt_at_start(). */
-#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
-        const int here = MT_NET_THREAD;
-#else
-        const int here = MT_NET_WIFI;
-#endif
-        int trc = mt_comp_store_load_transport(&stored);
-        if (trc == 0 && stored != here) {
-            s_transport_mismatch = true;
-            ESP_LOGW(TAG, "stored fabric was commissioned on transport %d, this image "
-                          "provides %d: credentials are valid but unreachable",
-                     stored, here);
-        } else if (trc == 1) {
-            ESP_LOGI(TAG, "no stored transport marker (never commissioned, or an "
-                          "image older than the marker)");
-        }
-    }
 
     for (uint16_t i = 0; i < comp.count; i++) {
         uint16_t ep_id = 0;
