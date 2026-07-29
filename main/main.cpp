@@ -51,6 +51,10 @@
 
 static const char *TAG = "mt_main";
 
+/* Free heap once the stack is up and BLE is still resident. Paired with the
+ * figure logged when BLE is torn down; see kBLEDeinitialized in app_event_cb. */
+static uint32_t s_heap_at_startup = 0;
+
 using namespace esp_matter;
 using namespace esp_matter::endpoint;
 
@@ -183,7 +187,17 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         mt_at_event(MT_EVT_BLE_ADVERTISING_CHANGE, nullptr);
         break;
     case DeviceEventType::kBLEDeinitialized:
-        ESP_LOGI(TAG, "BLE deinitialized and memory reclaimed");
+        /* Free heap here, against the figure logged at the end of app_main, is
+         * the cost of CONFIG_USE_BLE_ONLY_FOR_COMMISSIONING=y: what the BLE
+         * stack hands back once it is torn down, and therefore what defect D1's
+         * candidate fix (keeping BLE resident so AT+MTCOMMISSION can actually
+         * reopen a window) would give up permanently. Kept as a standing
+         * diagnostic rather than removed after the measurement: the number
+         * moves with every SDK bump, and it is the number that decision rests
+         * on. */
+        ESP_LOGI(TAG, "BLE deinitialized, free heap %u (was %u at startup, reclaimed %d)",
+                 (unsigned)esp_get_free_heap_size(), (unsigned)s_heap_at_startup,
+                 (int)esp_get_free_heap_size() - (int)s_heap_at_startup);
         mt_at_event(MT_EVT_BLE_DEINITIALIZED, nullptr);
         break;
 
@@ -577,4 +591,7 @@ extern "C" void app_main(void)
      * Matter; the host drives Matter over AT from B4.2 onward. */
     mt_at_start();
     ESP_LOGI(TAG, "iLabs AT Hearth: AT+MT interface up");
+
+    s_heap_at_startup = esp_get_free_heap_size();
+    ESP_LOGI(TAG, "free heap at startup: %u (BLE resident)", (unsigned)s_heap_at_startup);
 }
