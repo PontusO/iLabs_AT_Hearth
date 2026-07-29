@@ -57,6 +57,20 @@ the sibling of `iLabs_AT_ESP-now`, which exposes ESP-NOW over `AT+EN…`.
   Thread-only is **100,416 bytes smaller**, since OpenThread costs less than
   the WiFi stack it replaces. Flash was never going to be the obstacle.
 
+- **Hardware-verified 2026-07-29.** Commissioned over BLE onto a Thread network
+  and driven from a controller end to end. The device's CASE session addressed
+  chip-tool at the border router's on-mesh (OMR) address, confirming the Matter
+  traffic ran over 802.15.4 rather than any fallback. Rig: `otbr-agent` built
+  from `ot-br-posix` on the dev workstation, radio a Nabu Casa ZBT-2 reflashed
+  from its stock Zigbee EZSP firmware to `ot-rcp`.
+  Two notes for whoever repeats this. `script/setup` is **not** required and
+  should be avoided on a workstation: running `otbr-agent` directly yields a
+  `wpan0` that a local commissioner can use, and the setup script chains
+  firewall, NAT64, `dhcpcd` and `systemd-networkd` installers. The only
+  persistent changes needed were `/var/lib/thread` and the D-Bus policy file
+  `src/agent/otbr-agent.conf`, without which the agent aborts at
+  `dbus_agent.cpp:67` and `ot-ctl` reports only a reset socket.
+
 - **Dual-transport is not a config flip, and this is the real finding.**
   esp-matter's `c6_wifi_thread` reference adds a *secondary network
   commissioning endpoint* to the data model (`THREAD_NETWORK_ENDPOINT_ID=2`,
