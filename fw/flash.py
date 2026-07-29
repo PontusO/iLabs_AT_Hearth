@@ -47,7 +47,9 @@ Usage:
     python3 flash.py --board 1       # non-interactive board select (index or dir)
     python3 flash.py --board Challenger_RP2350_WIFI6-BLE5 --port /dev/ttyACM0
     python3 flash.py --skip-bridge   # bridge already running: flash the ESP only
-    python3 flash.py --bridge espnow # bridge that also forwards the C6 console
+    python3 flash.py --bridge espnow # flash, then leave the console-forwarding
+                                     # bridge installed (one BOOTSEL press: the
+                                     # swap uses a 1200-baud touch reset)
     python3 flash.py --bridge espnow --bridge-only   # swap bridge, leave C6 alone
     python3 flash.py --dry-run       # show what would happen, no copy/flash
 
@@ -151,17 +153,20 @@ BOARDS = [
 BRIDGES = {
     "serial": {
         "uf2": "RP2350USB2Serial.ino.uf2",
-        "desc": "AT link only, and the only bridge that can flash the C6",
+        "desc": "AT link only",
         "can_flash": True,
     },
     "espnow": {
         "uf2": "RP2040USB2SerialEspNow.ino.uf2",
-        "desc": "AT link + C6 console forwarded to GP12/13 at 921600 "
-                "(monitor only, cannot flash: use with --bridge-only)",
+        "desc": "AT link + C6 console forwarded to GP12/13 at 921600",
         "can_flash": False,
     },
 }
 DEFAULT_BRIDGE = "serial"
+# The bridge stage 2 always flashes through, regardless of --bridge: it is the
+# only one that translates DTR/RTS onto the C6's EN/IO9, which is what the
+# forked esptool's RP2040Reset needs to reach the ROM download loader.
+FLASHING_BRIDGE = "serial"
 
 # The ESP flash images come from the IDF build output (not a prebuilt bundle):
 # after `idf.py build` they land under <repo>/build/. Paths below are relative
@@ -766,8 +771,8 @@ def stage1_copy_bridge(board, dry_run=False, bridge=DEFAULT_BRIDGE):
     ports_before = list_serial_ports()
 
     if dry_run:
-        cprint(f"[dry-run] would wait for mount '{board['mount_label']}' and copy",
-               style="yellow")
+        cprint(f"[dry-run] would wait for mount '{board['mount_label']}' and copy "
+               f"the '{bridge}' bridge", style="yellow")
         cprint(f"[dry-run]   {uf2}", style="dim")
         return ports_before, None
 
@@ -790,6 +795,63 @@ def stage1_copy_bridge(board, dry_run=False, bridge=DEFAULT_BRIDGE):
         cprint(f"  (device rebooted during copy: {e})", style="dim")
 
     return ports_before, mount
+
+
+def touch_reset_to_bootsel(port):
+    """Reboot the RP2350 into BOOTSEL by opening `port` at 1200 baud.
+
+    arduino-pico implements the standard touch reset: a 1200-baud open with DTR
+    deasserted reboots into the mass-storage bootloader. That means swapping the
+    bridge does not need the physical button, so ending up with a different
+    bridge than the one used to flash is a single automatic step rather than a
+    second manual round trip.
+    """
+    try:
+        import serial
+    except ImportError:
+        die("pyserial is required for the 1200-baud touch reset")
+
+    cprint(f"Rebooting the bridge into BOOTSEL (1200-baud touch on {port})...",
+           style="cyan")
+    try:
+        s = serial.Serial(port=None, baudrate=1200)
+        s.port = port
+        s.dtr = False
+        s.open()
+        time.sleep(0.15)
+        s.close()
+    except OSError as e:
+        # The port frequently vanishes the instant the reboot takes effect,
+        # which is success, not failure.
+        cprint(f"  (port closed as the board rebooted: {e})", style="dim")
+    time.sleep(1.0)
+
+
+def swap_bridge(board, bridge, port):
+    """Install a different bridge sketch after flashing, without the button."""
+    uf2 = os.path.join(HERE, BRIDGES[bridge]["uf2"])
+    if not os.path.isfile(uf2):
+        die(f"missing bridge UF2: {uf2}")
+
+    touch_reset_to_bootsel(port)
+
+    mount = wait_for_mount(board["mount_label"], timeout=30.0)
+    if not mount:
+        die(f"timed out waiting for '{board['mount_label']}' after the touch "
+            f"reset. Put the board in BOOTSEL and copy {os.path.basename(uf2)} "
+            f"by hand, or re-run with --bridge {DEFAULT_BRIDGE}.")
+
+    time.sleep(0.5)
+    cprint(f"Installing '{bridge}' bridge ({BRIDGES[bridge]['desc']})...",
+           style="cyan")
+    try:
+        shutil.copy(uf2, mount)
+        try:
+            os.sync()
+        except (AttributeError, OSError):
+            pass
+    except OSError as e:
+        cprint(f"  (device rebooted during copy: {e})", style="dim")
 
 
 # --------------------------------------------------------------------------- #
@@ -892,7 +954,9 @@ def main():
                     help="seconds to wait after the bridge port appears before "
                     "flashing (default %.1f)" % PORT_SETTLE_S)
     ap.add_argument("--bridge", choices=sorted(BRIDGES), default=DEFAULT_BRIDGE,
-                    help="which RP2350 bridge sketch to install: "
+                    help="which RP2350 bridge to be left with when done "
+                         "(flashing always goes through the '"
+                         + FLASHING_BRIDGE + "' one, then swaps automatically): "
                          + "; ".join(f"{k} = {v['desc']}" for k, v in sorted(BRIDGES.items()))
                          + f" (default: {DEFAULT_BRIDGE})")
     ap.add_argument("--bridge-only", action="store_true",
@@ -920,17 +984,6 @@ def main():
         print_boards()
         return 0
 
-    # A monitor bridge cannot drive the C6 into its ROM download loader, so
-    # flashing through one hangs waiting for a sync that never comes. Caught
-    # here rather than left to a timeout, because the symptom (flash.py sits
-    # doing nothing) points nowhere near the cause.
-    if not args.bridge_only and not BRIDGES[args.bridge].get("can_flash", True):
-        die(f"--bridge {args.bridge} cannot flash the C6: it never releases the "
-            f"mode/reset pins, so esptool cannot reach the download loader.\n"
-            f"  Flash first, then swap:\n"
-            f"    python3 flash.py --build-dir <dir>\n"
-            f"    python3 flash.py --bridge {args.bridge} --bridge-only")
-
     # ESP32-C6 is the only board, so default to it without prompting.
     board = resolve_board(args.board) or BOARDS[0]
     cprint(f"\nSelected: {board['label']}", style="bold")
@@ -940,7 +993,9 @@ def main():
             cprint("[dry-run] would skip the bridge UF2 copy (--skip-bridge)",
                    style="yellow")
         else:
-            stage1_copy_bridge(board, dry_run=True, bridge=args.bridge)
+            stage1_copy_bridge(
+                board, dry_run=True,
+                bridge=args.bridge if args.bridge_only else FLASHING_BRIDGE)
         port = args.port or "<auto-detected ttyACM*/cu.usbmodem*>"
         cprint(f"[dry-run] would flash on {port}:", style="yellow")
         if args.bridge_only:
@@ -960,6 +1015,12 @@ def main():
                f"(verified round-trip), else fall back to {ROM_BAUD}", style="dim")
         cprint(f"[dry-run]   settle: wait for port, then {PORT_SETTLE_S:.1f}s "
                f"before flashing", style="dim")
+        if args.bridge != FLASHING_BRIDGE:
+            cprint(f"[dry-run] would then touch-reset at 1200 baud and install "
+                   f"the '{args.bridge}' bridge (no button needed)",
+                   style="yellow")
+            cprint(f"[dry-run]   {os.path.join(HERE, BRIDGES[args.bridge]['uf2'])}",
+                   style="dim")
         return 0
 
     if args.skip_bridge:
@@ -978,7 +1039,14 @@ def main():
         cprint(f"Using serial port {port}", style="dim")
     else:
         # Stage 1: bridge UF2 -> RP mass storage.
-        ports_before, _ = stage1_copy_bridge(board, bridge=args.bridge)
+        # Always flash through the bridge that can drive the C6 into its ROM
+        # download loader. A monitor bridge never releases the mode/reset pins,
+        # so esptool could not sync through one. If a different bridge was
+        # asked for, it is installed afterwards by swap_bridge().
+        # --bridge-only installs exactly what was asked for and stops; the
+        # normal path flashes through FLASHING_BRIDGE and swaps afterwards.
+        ports_before, _ = stage1_copy_bridge(
+            board, bridge=args.bridge if args.bridge_only else FLASHING_BRIDGE)
 
         # --bridge-only: the bridge is the deliverable, so stop before touching
         # the C6. Lets a bridge be swapped (e.g. to get the console) without
@@ -1022,6 +1090,13 @@ def main():
         try:
             do_flash(esptool, board, port, args.build_dir, keep_baud=args.keep_baud)
             cprint("\nMatter AT firmware flashed OK.", style="green")
+            # --bridge names the bridge you want to be left with, not the one
+            # used to flash. Swapping needs no button: the 1200-baud touch
+            # reset puts the RP2350 back into BOOTSEL on its own.
+            if args.bridge != FLASHING_BRIDGE:
+                swap_bridge(board, args.bridge, port)
+                cprint(f"Bridge '{args.bridge}' installed: "
+                       f"{BRIDGES[args.bridge]['desc']}.", style="green")
             return 0
         except KeyboardInterrupt:
             cprint("\nAborted.", style="yellow")
