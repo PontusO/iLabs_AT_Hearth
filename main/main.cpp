@@ -64,11 +64,26 @@ static uint32_t s_heap_at_startup = 0;
  */
 static bool s_transport_mismatch = false;
 
-/* Set when a kCommissioningWindowOpened event actually reached the host, so
- * app_main's boot replay can tell "the host missed this" from "the host
- * already has it". Without it the replay fires unconditionally and a host
- * whose window happened to open after mt_at_start() sees +MTEVT:0 twice. */
-static bool s_window_evt_delivered = false;
+/*
+ * Set by whichever path emits +MTEVT:0 for the current window, and cleared
+ * when that window closes. Exactly one report per window, whichever of the two
+ * paths gets there first.
+ *
+ * Two paths exist because CHIP may open the boot window either side of
+ * mt_at_start(): before it, the native event is dropped by the s_at_up guard
+ * and app_main's replay is the only delivery; after it, the native event is
+ * delivered and the replay must stay quiet. An earlier attempt had the native
+ * handler set this and the replay test it, which cannot work: on hardware the
+ * window opened ~10 ms AFTER the replay ran, so the flag was always false when
+ * the replay looked. Ownership has to sit with the emitter, not with one
+ * particular emitter.
+ *
+ * volatile because app_main and the CHIP task touch it concurrently. A residual
+ * race remains, between the replay reading the flag and mt_matter_state()
+ * acquiring the CHIP lock; it is microseconds against the ~10 ms that made this
+ * reproducible, and its worst outcome is the duplicate it replaces.
+ */
+static volatile bool s_window_evt_sent = false;
 
 /* Window opened on a transport mismatch. The same 300 s AT+MTCOMMISSION
  * defaults to: long enough to commission unhurriedly, short enough that a
@@ -139,14 +154,16 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     /* Commissioning. */
     case DeviceEventType::kCommissioningWindowOpened:
         ESP_LOGI(TAG, "Commissioning window opened");
-        /* Remember whether this actually reached the host. If it did, the boot
-         * replay in app_main must not repeat it; if it was dropped because the
-         * AT interface was not up yet, the replay is the only delivery. */
-        if (mt_at_event(MT_EVT_COMMISSION_WINDOW_OPEN, nullptr)) {
-            s_window_evt_delivered = true;
+        /* Skip if the boot replay already reported this window. */
+        if (!s_window_evt_sent && mt_at_event(MT_EVT_COMMISSION_WINDOW_OPEN, nullptr)) {
+            s_window_evt_sent = true;
         }
         break;
     case DeviceEventType::kCommissioningWindowClosed:
+        /* Arm the next window to be reported: without this the flag latches and
+         * a window reopened later (AT+MTCOMMISSION, or a transport mismatch)
+         * would be silent. */
+        s_window_evt_sent = false;
         mt_at_event(MT_EVT_COMMISSION_WINDOW_CLOSED, nullptr);
         break;
     case DeviceEventType::kCommissioningSessionStarted:
@@ -726,8 +743,14 @@ extern "C" void app_main(void)
      * s_window_evt_delivered is what makes it exactly one rather than one or
      * two: the replay only fires for an event the host did not already get.
      */
-    if (!s_window_evt_delivered && mt_matter_state() == MT_STATE_COMMISSIONING) {
-        mt_at_event(MT_EVT_COMMISSION_WINDOW_OPEN, nullptr);
+    if (!s_window_evt_sent && mt_matter_state() == MT_STATE_COMMISSIONING
+        && !s_window_evt_sent) {
+        /* Re-tested after mt_matter_state(), which takes and releases the CHIP
+         * lock: any event dispatch in flight when the first test ran has
+         * completed by then, so the second test sees its flag. */
+        if (mt_at_event(MT_EVT_COMMISSION_WINDOW_OPEN, nullptr)) {
+            s_window_evt_sent = true;
+        }
     }
 
     /* Same reasoning, and the same placement requirement: raised from
