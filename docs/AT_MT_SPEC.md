@@ -95,14 +95,17 @@ controller can commission (or additionally commission) the device.
 - Note: a factory-fresh device opens a window automatically at boot; this
   command is for (re)opening one on an already-commissioned device.
 
-> #### DEFECT D1: on a commissioned device this command succeeds and does nothing
+> #### DEFECT D1: on a commissioned device this command succeeded and did nothing
 >
-> **Status:** open, found on hardware 2026-07-28. Affects every build to date.
+> **Status: FIXED 2026-07-29.** Found on hardware 2026-07-28; affected every
+> build up to and including tag `0.1.0`. Kept on record rather than deleted,
+> because the failure mode (a command reporting success in every observable
+> way while doing nothing) is worth recognising if it recurs.
 >
-> The command reports success in full. It returns `OK`, raises `+MTEVT:0`,
-> and `AT+MTSTATE?` reports `1` (commissioning). CHIP really has opened a
-> window in its own bookkeeping. **Nothing is advertised.** A commissioner
-> cannot see the device, and the host has no way to tell the difference.
+> The command reported success in full. It returned `OK`, raised `+MTEVT:0`,
+> and `AT+MTSTATE?` reported `1` (commissioning). CHIP really had opened a
+> window in its own bookkeeping. **Nothing was advertised.** A commissioner
+> could not see the device, and the host had no way to tell the difference.
 >
 > Cause: `CONFIG_USE_BLE_ONLY_FOR_COMMISSIONING=y`, whose documented behaviour
 > is to deinitialise BLE on successful commissioning and to skip BLE init at
@@ -120,13 +123,23 @@ controller can commission (or additionally commission) the device.
 > **This is exactly the case the note above says the command exists for**, so
 > the command is specified for a job the build configuration makes impossible.
 >
-> Workaround: `AT+MTFRESET`. An unprovisioned device initialises BLE at boot
-> and advertises normally. Costs the fabric and the composition.
+> Fix: `CONFIG_USE_BLE_ONLY_FOR_COMMISSIONING=n` in `sdkconfig.defaults`,
+> keeping the BLE stack resident so a window can genuinely be reopened.
 >
-> Candidate fix: `CONFIG_USE_BLE_ONLY_FOR_COMMISSIONING=n`, keeping the BLE
-> stack resident so a window can genuinely be reopened. The cost is RAM held
-> for the life of the device rather than reclaimed after commissioning, and
-> that has not been measured. Note the counter-argument: standard Matter
+> The cost was measured on hardware rather than estimated: **35,800 bytes**,
+> leaving 173 KB of free heap with BLE resident against 209 KB without. Cheap,
+> and not a speculative configuration: the device already ran in exactly this
+> state for the first seconds of every boot and throughout every commissioning.
+> The firmware now logs both figures on every boot (`kBLEDeinitialized` in
+> `main.cpp`) so the trade can be re-checked after an SDK bump instead of taken
+> on trust. The image also shrank by 1,504 bytes, since the teardown path
+> compiles out.
+>
+> Consequence: the BLE radio stays initialised for the life of the device. It
+> does not advertise unless a window is open, but it is powered.
+>
+> `AT+MTFRESET` was the workaround before the fix, at the cost of the fabric
+> and the composition. Note the counter-argument: standard Matter
 > multi-admin adds a controller over the *operational* network rather than
 > BLE, so an ordinary device does not need BLE after commissioning. This is
 > not an ordinary device, since the host can change its transport underneath
@@ -327,7 +340,9 @@ device has the same consequences as changing the endpoint composition (§3.9).
 
 #### 3.12.1 Transport mismatch: a fabric from the other image
 
-**Status: specified, not implemented. Blocked on defect D1 (§3.5).**
+**Status: specified, not implemented.** No longer blocked: defect D1 (§3.5) was
+fixed on 2026-07-29, so BLE now stays resident and a window opened on a device
+in this state genuinely advertises.
 
 Reflashing between the WiFi and Thread images leaves NVS untouched by design
 (`ARCHITECTURE.md` §4, verified on hardware), so a device commissioned under
