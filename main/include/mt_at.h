@@ -81,8 +81,20 @@ enum {
     MT_EVT_TRANSPORT_MISMATCH         = 27,
 };
 
-/* Commissioning group only: what the firmware emitted before the mask existed. */
-#define MT_EVT_MASK_DEFAULT  0x0000003FU
+/*
+ * Commissioning group (bits 0-5), what the firmware emitted before the mask
+ * existed, PLUS bit 27.
+ *
+ * Bit 27 is in the default out of necessity rather than preference. The mask
+ * lives in RAM and resets to this value on every boot, so an event that only
+ * ever fires during boot can never be subscribed to in time: there is no
+ * moment at which a host could have set a mask that would catch it. Bit 27 is
+ * the only such event in the protocol, so excluding it would not make it
+ * optional, it would make it unreachable. Verified the hard way on 2026-07-29,
+ * when AT+MTEVT=0xFFFFFFFF followed by a reset produced no +MTEVT:27, because
+ * the reset discarded the mask that had just been set.
+ */
+#define MT_EVT_MASK_DEFAULT  0x0800003FU
 
 /*
  * Emit "+MTEVT:<bit>" (or "+MTEVT:<bit>,<detail>" when detail is non-NULL),
