@@ -183,7 +183,7 @@ can therefore run on a commissioned device without disturbing it.
 | `AT+MTATTR=1,6,0` | `+MTATTR:1,6,0,<0\|1>` then `OK` |
 | `AT+MTATTR=1,0x0006,0x0000` | same value as the decimal form (hex parsing) |
 | `AT+MTATTR=0,0x0028,0x0002` | `OK` with an integer value (root-endpoint read works: VendorID) |
-| `AT+MTEVT?` | `+MTEVTMASK:0x0000003F` at boot (the commissioning group) |
+| `AT+MTEVT?` | `+MTEVTMASK:0x0800003F` at boot (commissioning group plus bit 27) |
 | `AT+MTNET?` | matches `+MTNET:(WIFI\|THREAD),[01],[01]` |
 | `AT+MTBAUD?` | `+MTBAUD:115200` at boot |
 | `AT+MTFLOW?` | `+MTFLOW:0` (no board routes RTS/CTS) |
@@ -196,7 +196,7 @@ back, restore it:
 ```
 AT+MTEVT=0xFFFFFFFF   -> OK
 AT+MTEVT?             -> +MTEVTMASK:0xFFFFFFFF
-AT+MTEVT=0x0000003F   -> OK        (restore before Phase 2)
+AT+MTEVT=0x0800003F   -> OK        (restore before Phase 2)
 ```
 
 **Restoring matters.** Leaving the mask wide open makes every Phase 2 URC

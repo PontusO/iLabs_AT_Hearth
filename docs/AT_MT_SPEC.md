@@ -286,14 +286,22 @@ intentional tripwire on the most destructive command in the set.
 ### 3.11 `AT+MTEVT`: platform event subscription
 
 ```
-AT+MTEVT?           ->  +MTEVTMASK:0x0000003F
+AT+MTEVT?           ->  +MTEVTMASK:0x0800003F
 AT+MTEVT=<hexmask>  ->  OK
 ```
 
 The firmware surfaces CHIP platform events as `+MTEVT:<bit>[,<detail>]`, but
-only for bits the host has subscribed to. Default mask `0x0000003F`, the
-commissioning group, which reproduces exactly what the firmware emitted before
-the mask existed.
+only for bits the host has subscribed to. Default mask `0x0800003F`: the
+commissioning group (bits 0-5), which reproduces exactly what the firmware
+emitted before the mask existed, plus bit 27.
+
+**The mask is not persistent.** It lives in RAM and resets to the default on
+every boot, which has a consequence worth stating outright: an event that only
+ever fires *during* boot can never be subscribed to in time, because there is
+no moment at which a host could set a mask that would catch it. Such an event
+is either in the default mask or it is unreachable. Bit 27 (§3.12.1) is the
+only one in this protocol, which is why it is in the default despite not being
+part of the commissioning group. Any future boot-only event must join it.
 
 | Bits | Group | Contents |
 |---|---|---|
