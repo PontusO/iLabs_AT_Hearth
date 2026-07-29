@@ -47,6 +47,8 @@ Usage:
     python3 flash.py --board 1       # non-interactive board select (index or dir)
     python3 flash.py --board Challenger_RP2350_WIFI6-BLE5 --port /dev/ttyACM0
     python3 flash.py --skip-bridge   # bridge already running: flash the ESP only
+    python3 flash.py --bridge espnow # bridge that also forwards the C6 console
+    python3 flash.py --bridge espnow --bridge-only   # swap bridge, leave C6 alone
     python3 flash.py --dry-run       # show what would happen, no copy/flash
 
 Set ILABS_ESPTOOL_PATH to point at the forked esptool checkout if it is not on
@@ -121,12 +123,42 @@ BOARDS = [
         "label": "Challenger RP2350 WiFi6/BLE5  (ESP32-C6)",
         "chip": "esp32c6",
         "mount_label": "RP2350",
-        "uf2": "RP2350USB2Serial.ino.uf2",       # sits next to this script, in fw/
         "flash_mode": "dio",
         "flash_freq": "80m",
         "flash_size": "keep",                    # flash the image exactly as built
     },
 ]
+
+# --------------------------------------------------------------------------- #
+# Bridge sketches for the RP2350.
+#
+# Both turn the RP2350 into a USB-to-serial bridge for the C6's AT link, which
+# is what stage 2 flashes through and what the host talks AT+MT over afterwards.
+# They differ in what happens to the C6's *console* (its GPIO2, wired to RP2350
+# GP8 on the net the schematic calls ESP32_MISO):
+#
+#   serial  the shipped bridge. AT link only. The console goes nowhere, so a
+#           panic backtrace or a boot log is invisible.
+#   espnow  additionally reads the console with a PIO software UART and
+#           forwards it to Serial1 (GP12/13), the board's external UART pins.
+#           Attach a probe there and the C6's log is readable while the AT link
+#           keeps working on USB. Worth the extra step whenever something is
+#           being debugged rather than merely flashed.
+#
+# The console side runs at 921600. It used to switch rates mid-stream, which no
+# single reader can follow; if a capture is unreadable, check that first.
+# --------------------------------------------------------------------------- #
+BRIDGES = {
+    "serial": {
+        "uf2": "RP2350USB2Serial.ino.uf2",
+        "desc": "AT link only",
+    },
+    "espnow": {
+        "uf2": "RP2040USB2SerialEspNow.ino.uf2",
+        "desc": "AT link + C6 console forwarded to GP12/13 at 921600",
+    },
+}
+DEFAULT_BRIDGE = "serial"
 
 # The ESP flash images come from the IDF build output (not a prebuilt bundle):
 # after `idf.py build` they land under <repo>/build/. Paths below are relative
@@ -134,6 +166,9 @@ BOARDS = [
 REPO_ROOT = os.path.dirname(HERE)                 # fw/ -> repo root
 DEFAULT_BUILD_DIR = os.path.join(REPO_ROOT, "build")
 APP_BIN = "ilabs_at_hearth.bin"
+# Where partitions.csv puts the app. Used to reject a build directory left over
+# from the dual-OTA layout, where the app lived at 0x10000 (now `nvs`).
+APP_OFFSET = 0x20000
 
 # Last-resort layout, used only when a build directory has no flasher_args.json.
 # These MUST match partitions.csv and CONFIG_PARTITION_TABLE_OFFSET, not the
@@ -637,9 +672,39 @@ def load_flash_plan(build_dir):
     return [(addr, os.path.join(build_dir, rel)) for addr, rel in FLASH_IMAGES], None
 
 
+def check_plan_is_this_project(images, build_dir):
+    """Refuse a build directory that is not this firmware, current layout.
+
+    The default build dir is <repo>/build, which on a developer machine is
+    typically a stale leftover: this project has used build_b4 as the live one
+    since B2, and `build` may still hold an image from before the rename to
+    Hearth AND from before the single-app partition switch. Flashing that would
+    put the app at 0x10000, which is now `nvs`, writing the application over
+    the Matter fabric and the endpoint composition.
+
+    Two cheap checks catch it: the app must be named APP_BIN, and it must land
+    at the offset partitions.csv gives it. Both were wrong for the stale
+    directory, so either alone would have been enough.
+    """
+    app = [(a, p) for a, p in images if os.path.basename(p) == APP_BIN]
+    if not app:
+        names = ", ".join(sorted({os.path.basename(p) for _, p in images})) or "nothing"
+        die(f"{build_dir} does not look like a build of this firmware: expected "
+            f"{APP_BIN}, found {names}.\n"
+            f"  The live build directory is usually build_b4; pass --build-dir.")
+    addr = app[0][0]
+    if addr != APP_OFFSET:
+        die(f"{build_dir} was built for a different partition layout: the app "
+            f"is at 0x{addr:x}, this project puts it at 0x{APP_OFFSET:x}.\n"
+            f"  0x10000 is `nvs` here, so flashing that would overwrite the "
+            f"Matter fabric and the endpoint composition. Rebuild, or pass "
+            f"--build-dir at the current build.")
+
+
 def do_flash(esptool, board, port, build_dir, keep_baud=False):
     from esptool.logger import log
     images, settings = load_flash_plan(build_dir)
+    check_plan_is_this_project(images, build_dir)
     settings = settings or {}
     addr_data = []
     plan = []
@@ -690,8 +755,8 @@ def do_flash(esptool, board, port, build_dir, keep_baud=False):
         _close_port(esp)
 
 
-def stage1_copy_bridge(board, dry_run=False):
-    uf2 = os.path.join(HERE, board["uf2"])
+def stage1_copy_bridge(board, dry_run=False, bridge=DEFAULT_BRIDGE):
+    uf2 = os.path.join(HERE, BRIDGES[bridge]["uf2"])
     if not os.path.isfile(uf2):
         die(f"missing bridge UF2: {uf2}")
 
@@ -823,6 +888,13 @@ def main():
     ap.add_argument("--settle", type=float, default=PORT_SETTLE_S,
                     help="seconds to wait after the bridge port appears before "
                     "flashing (default %.1f)" % PORT_SETTLE_S)
+    ap.add_argument("--bridge", choices=sorted(BRIDGES), default=DEFAULT_BRIDGE,
+                    help="which RP2350 bridge sketch to install: "
+                         + "; ".join(f"{k} = {v['desc']}" for k, v in sorted(BRIDGES.items()))
+                         + f" (default: {DEFAULT_BRIDGE})")
+    ap.add_argument("--bridge-only", action="store_true",
+                    help="install the bridge sketch and stop, leaving the C6 "
+                         "untouched (use to swap bridges without reflashing)")
     ap.add_argument("--skip-bridge", action="store_true",
                     help="skip stage 1 (the bridge UF2 copy / BOOTSEL step) and "
                     "flash the ESP over an already-running bridge")
@@ -854,9 +926,13 @@ def main():
             cprint("[dry-run] would skip the bridge UF2 copy (--skip-bridge)",
                    style="yellow")
         else:
-            stage1_copy_bridge(board, dry_run=True)
+            stage1_copy_bridge(board, dry_run=True, bridge=args.bridge)
         port = args.port or "<auto-detected ttyACM*/cu.usbmodem*>"
         cprint(f"[dry-run] would flash on {port}:", style="yellow")
+        if args.bridge_only:
+            cprint("[dry-run] would stop after the bridge (--bridge-only); "
+                   "the C6 would not be touched", style="yellow")
+            return 0
         dr_images, dr_settings = load_flash_plan(args.build_dir)
         dr_settings = dr_settings or {}
         for addr, path in dr_images:
@@ -888,7 +964,15 @@ def main():
         cprint(f"Using serial port {port}", style="dim")
     else:
         # Stage 1: bridge UF2 -> RP mass storage.
-        ports_before, _ = stage1_copy_bridge(board)
+        ports_before, _ = stage1_copy_bridge(board, bridge=args.bridge)
+
+        # --bridge-only: the bridge is the deliverable, so stop before touching
+        # the C6. Lets a bridge be swapped (e.g. to get the console) without
+        # reflashing a co-processor that is already running what it should.
+        if args.bridge_only:
+            cprint(f"\nBridge '{args.bridge}' installed; C6 left untouched "
+                   f"(--bridge-only).", style="green")
+            return 0
 
         # Stage 2a: find the serial bridge port.
         if args.port:
