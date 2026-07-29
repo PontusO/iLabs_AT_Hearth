@@ -348,9 +348,24 @@ device has the same consequences as changing the endpoint composition (§3.9).
 
 #### 3.12.1 Transport mismatch: a fabric from the other image
 
-**Status: implemented 2026-07-29, not yet hardware-verified.** Depended on
-defect D1 (§3.5), fixed the same day, without which a window opened in this
-state would advertise to nobody.
+**Status: implemented and hardware-verified 2026-07-29.** Depended on defect
+D1 (§3.5), fixed the same day, without which a window opened in this state
+would advertise to nobody.
+
+Verified against a device commissioned over Thread, with its WiFi credentials
+erased and verified absent, then reflashed to the WiFi image. It reported
+`+MTREADY`, `+MTEVT:0`, `+MTEVT:27`, and:
+
+```
+AT+MTNET?      ->  +MTNET:WIFI,1,0,1     mismatch flagged, not connected
+AT+MTFABRICS?  ->  +MTFABRICS:1          fabric preserved, nothing erased
+AT+MTEP?       ->  +MTEP:0,1,0x0100      composition preserved
+AT+MTSTATE?    ->  +MTSTATE:1,1          window OPEN while holding a fabric
+```
+
+The last line is the load-bearing one: CHIP had already logged `Fabric already
+commissioned. Disabling BLE advertisement`, so a commissioning window open on a
+device with one fabric is the policy overriding it.
 
 Reflashing between the WiFi and Thread images leaves NVS untouched by design
 (`ARCHITECTURE.md` §4, verified on hardware), so a device commissioned under
