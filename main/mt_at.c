@@ -347,9 +347,16 @@ static int cmd_mtnet(at_type_t type, char *args)
     if (mt_matter_net_info(&transport, &enabled, &connected) != 0) {
         return MT_R_ERROR;
     }
-    at_uart_write_line("+MTNET:%s,%d,%d",
+    /*
+     * The <mismatch> field is appended, never inserted, so a host that parses
+     * the first three fields and ignores extras stays correct (spec 3.12).
+     * Emitted unconditionally rather than only when set: a field that appears
+     * and disappears is harder to parse than one that is always there, and a
+     * host cannot tell "no mismatch" from "old firmware" if it is omitted.
+     */
+    at_uart_write_line("+MTNET:%s,%d,%d,%d",
                        transport == MT_NET_THREAD ? "THREAD" : "WIFI",
-                       enabled, connected);
+                       enabled, connected, mt_matter_transport_mismatch());
     return AT_R_OK;
 }
 

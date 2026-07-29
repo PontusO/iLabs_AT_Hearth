@@ -55,6 +55,18 @@ typedef enum {
  */
 int mt_matter_net_info(int *transport, int *enabled, int *connected);
 
+/*
+ * True when the stored fabric was commissioned on a different transport than
+ * this image provides, i.e. the device holds credentials it has no way to use
+ * (spec 3.12.1). Backs the optional trailing <mismatch> field on AT+MTNET?.
+ *
+ * Latched at boot rather than recomputed: the comparison is against a marker
+ * that is rewritten the moment the device is commissioned on this transport,
+ * so a live read would flip to 0 mid-commissioning and the host would lose the
+ * explanation for why the window it is looking at exists.
+ */
+int mt_matter_transport_mismatch(void);
+
 /* ---- live composition (built at boot from the stored composition) ------ */
 
 /* Number of endpoints this device currently presents, excluding the Root

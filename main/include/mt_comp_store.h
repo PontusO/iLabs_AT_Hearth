@@ -37,6 +37,29 @@ int mt_comp_store_save(const mt_composition_t *comp);
  */
 int mt_comp_store_erase(void);
 
+/*
+ * The transport (MT_NET_WIFI / MT_NET_THREAD) the stored fabric was
+ * commissioned on, kept in this namespace rather than the platform one so it
+ * survives AT+MTRESET alongside the composition and is erased with it by
+ * AT+MTFRESET.
+ *
+ * Reflashing between the WiFi and Thread images leaves NVS untouched by
+ * design, so a device can hold a fabric that is perfectly valid and completely
+ * unreachable: Matter fabric credentials are transport-independent, but the
+ * device has no credentials for the new transport and a commissioner cannot
+ * deliver any without first reaching it. Comparing this marker against the
+ * compiled-in transport at boot is what lets the firmware notice (spec
+ * section 3.12.1).
+ *
+ * Load returns 0 and writes *out on success, 1 when nothing is stored (which
+ * is the normal state of a device that has never been commissioned, and of
+ * every device built before this marker existed), -1 on an NVS failure.
+ */
+int mt_comp_store_load_transport(int *out);
+
+/* Persist the transport. Returns 0 on success, -1 on an NVS failure. */
+int mt_comp_store_save_transport(int transport);
+
 #ifdef __cplusplus
 }
 #endif

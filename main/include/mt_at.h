@@ -72,6 +72,13 @@ enum {
     MT_EVT_THREAD_CONNECTIVITY        = 24,
     MT_EVT_THREAD_STATE_CHANGE        = 25,
     MT_EVT_THREAD_IF_STATE_CHANGE     = 26,
+
+    /* Device state (bit 27). Raised once at boot when the stored fabric was
+     * commissioned on a different transport than this image provides, so the
+     * device holds credentials it cannot use (spec 3.12.1). Bit 27 rather than
+     * the nominally reserved 23, which the host library already maps to
+     * MATTER_ESP32_SPECIFIC_EVENT. */
+    MT_EVT_TRANSPORT_MISMATCH         = 27,
 };
 
 /* Commissioning group only: what the firmware emitted before the mask existed. */
