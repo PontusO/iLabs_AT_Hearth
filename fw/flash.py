@@ -763,12 +763,44 @@ def do_flash(esptool, board, port, build_dir, keep_baud=False):
         _close_port(esp)
 
 
-def stage1_copy_bridge(board, dry_run=False, bridge=DEFAULT_BRIDGE):
+def try_auto_bootsel(board, port_hint=None):
+    """Put the board into BOOTSEL without the button, when we safely can.
+
+    A running bridge sketch reboots into mass storage on a 1200-baud open, so
+    the whole flash cycle can be automated. The risk is touching the wrong
+    device: looks_like_bridge() matches any ttyACM, which on a working bench is
+    also the debug probe and whatever radio dongle is plugged in. So this acts
+    only when the target is unambiguous, and otherwise falls back to asking for
+    the button, which is what always used to happen.
+    """
+    if find_mount(board["mount_label"]):
+        cprint("Board is already in BOOTSEL.", style="dim")
+        return
+
+    port = port_hint
+    if not port:
+        candidates = sorted(d for d in list_serial_ports() if looks_like_bridge(d))
+        if len(candidates) == 1:
+            port = candidates[0]
+        else:
+            cprint(f"  ({len(candidates)} bridge-like ports; not guessing which "
+                   f"to reset. Pass --port to automate this, or press BOOTSEL.)",
+                   style="dim")
+            return
+
+    touch_reset_to_bootsel(port)
+
+
+def stage1_copy_bridge(board, dry_run=False, bridge=DEFAULT_BRIDGE,
+                       port_hint=None, auto_bootsel=True):
     uf2 = os.path.join(HERE, BRIDGES[bridge]["uf2"])
     if not os.path.isfile(uf2):
         die(f"missing bridge UF2: {uf2}")
 
     ports_before = list_serial_ports()
+
+    if not dry_run and auto_bootsel:
+        try_auto_bootsel(board, port_hint)
 
     if dry_run:
         cprint(f"[dry-run] would wait for mount '{board['mount_label']}' and copy "
@@ -959,6 +991,9 @@ def main():
                          + FLASHING_BRIDGE + "' one, then swaps automatically): "
                          + "; ".join(f"{k} = {v['desc']}" for k, v in sorted(BRIDGES.items()))
                          + f" (default: {DEFAULT_BRIDGE})")
+    ap.add_argument("--no-auto-bootsel", action="store_true",
+                    help="do not try the 1200-baud touch reset; wait for the "
+                         "BOOTSEL button instead")
     ap.add_argument("--bridge-only", action="store_true",
                     help="install the bridge sketch and stop, leaving the C6 "
                          "untouched (use to swap bridges without reflashing)")
@@ -1046,7 +1081,8 @@ def main():
         # --bridge-only installs exactly what was asked for and stops; the
         # normal path flashes through FLASHING_BRIDGE and swaps afterwards.
         ports_before, _ = stage1_copy_bridge(
-            board, bridge=args.bridge if args.bridge_only else FLASHING_BRIDGE)
+            board, bridge=args.bridge if args.bridge_only else FLASHING_BRIDGE,
+            port_hint=args.port, auto_bootsel=not args.no_auto_bootsel)
 
         # --bridge-only: the bridge is the deliverable, so stop before touching
         # the C6. Lets a bridge be swapped (e.g. to get the console) without
