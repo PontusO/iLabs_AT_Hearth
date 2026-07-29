@@ -694,11 +694,29 @@ extern "C" void app_main(void)
     s_heap_at_startup = esp_get_free_heap_size();
     ESP_LOGI(TAG, "free heap at startup: %u (BLE resident)", (unsigned)s_heap_at_startup);
 
-    /* Now that the AT interface is up and +MTREADY has gone out, the host can
-     * be told its fabric is unreachable (spec 3.12.1). Deliberately after
-     * mt_at_start(): raised from mt_boot_window_policy() it would be dropped by
-     * the s_at_up guard, and would breach the rule that +MTREADY is the first
-     * line of a session. */
+    /*
+     * Boot-state events, replayed now that the AT interface exists.
+     *
+     * Everything raised before mt_at_start() is dropped by design (the host is
+     * not listening and resynchronizes on +MTREADY), but "a commissioning
+     * window is open" is the one piece of boot state a host genuinely acts on,
+     * and whether CHIP opens it during esp_matter::start() or shortly after is
+     * not something this firmware controls. It moved once already: keeping BLE
+     * resident for defect D1 made CHIP advertise during Server::Init, which is
+     * early enough to be dropped, where before it landed just late enough to
+     * be delivered.
+     *
+     * Replaying it here makes the sequence deterministic instead of a race:
+     * +MTREADY, then +MTEVT:0 if a window is open, on every boot that has one.
+     * Worth pinning precisely because C5 will assert on it.
+     */
+    if (mt_matter_state() == MT_STATE_COMMISSIONING) {
+        mt_at_event(MT_EVT_COMMISSION_WINDOW_OPEN, nullptr);
+    }
+
+    /* Same reasoning, and the same placement requirement: raised from
+     * mt_boot_window_policy() this would be dropped by the s_at_up guard and
+     * would breach the rule that +MTREADY is the first line of a session. */
     if (s_transport_mismatch) {
         mt_at_event(MT_EVT_TRANSPORT_MISMATCH, nullptr);
     }

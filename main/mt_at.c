@@ -16,6 +16,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "freertos/FreeRTOS.h"
@@ -31,6 +32,11 @@
 #include "mt_composition.h"
 #include "mt_devtypes.h"
 #include "mt_matter.h"
+
+/* Longest +MTEVT line: "+MTEVT:31," plus a detail. Details are "0"/"1" today
+ * (bits 10, 11 and 24); 48 leaves room without putting a 512-byte
+ * MT_AT_LINE_MAX buffer on the CHIP task's stack. Truncation is safe. */
+#define MT_EVT_LINE_MAX 48
 
 /* +MTERR:<n> code space (mirrors the ESP-NOW layout: 1..99 carry a code,
  * >= MT_ERR_GENERIC is a plain "ERROR"). Real codes are assigned in B4. */
@@ -327,11 +333,31 @@ void mt_at_event(int bit, const char *detail)
     if ((s_evt_mask & (1UL << bit)) == 0) {
         return;
     }
+
+    /*
+     * Formatted, then handed to mt_at_urc() rather than written here.
+     *
+     * This used to call at_uart_write_line() directly, which made it a second
+     * URC path with no s_at_up gate, and it panicked the device:
+     *
+     *   assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))
+     *
+     * exactly the failure mt_at_urc()'s guard exists to prevent. It stayed
+     * hidden because the commissioning window used to open *after*
+     * mt_at_start(). Keeping BLE resident (defect D1) let CHIP advertise
+     * during Server::Init instead, so kCommissioningWindowOpened started
+     * arriving while at_uart's TX mutex was still NULL.
+     *
+     * One gate, one writer. A URC path that formats its own line and writes it
+     * itself will eventually be added before the UART exists again.
+     */
+    char line[MT_EVT_LINE_MAX];
     if (detail) {
-        at_uart_write_line("+MTEVT:%d,%s", bit, detail);
+        snprintf(line, sizeof(line), "+MTEVT:%d,%s", bit, detail);
     } else {
-        at_uart_write_line("+MTEVT:%d", bit);
+        snprintf(line, sizeof(line), "+MTEVT:%d", bit);
     }
+    mt_at_urc(line);
 }
 
 /* ---- network transport query (C3) ------------------------------------- */
