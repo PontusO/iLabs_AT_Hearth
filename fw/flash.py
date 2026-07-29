@@ -151,11 +151,14 @@ BOARDS = [
 BRIDGES = {
     "serial": {
         "uf2": "RP2350USB2Serial.ino.uf2",
-        "desc": "AT link only",
+        "desc": "AT link only, and the only bridge that can flash the C6",
+        "can_flash": True,
     },
     "espnow": {
         "uf2": "RP2040USB2SerialEspNow.ino.uf2",
-        "desc": "AT link + C6 console forwarded to GP12/13 at 921600",
+        "desc": "AT link + C6 console forwarded to GP12/13 at 921600 "
+                "(monitor only, cannot flash: use with --bridge-only)",
+        "can_flash": False,
     },
 }
 DEFAULT_BRIDGE = "serial"
@@ -916,6 +919,17 @@ def main():
     if args.list:
         print_boards()
         return 0
+
+    # A monitor bridge cannot drive the C6 into its ROM download loader, so
+    # flashing through one hangs waiting for a sync that never comes. Caught
+    # here rather than left to a timeout, because the symptom (flash.py sits
+    # doing nothing) points nowhere near the cause.
+    if not args.bridge_only and not BRIDGES[args.bridge].get("can_flash", True):
+        die(f"--bridge {args.bridge} cannot flash the C6: it never releases the "
+            f"mode/reset pins, so esptool cannot reach the download loader.\n"
+            f"  Flash first, then swap:\n"
+            f"    python3 flash.py --build-dir <dir>\n"
+            f"    python3 flash.py --bridge {args.bridge} --bridge-only")
 
     # ESP32-C6 is the only board, so default to it without prompting.
     board = resolve_board(args.board) or BOARDS[0]
