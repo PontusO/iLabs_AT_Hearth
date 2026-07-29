@@ -37,6 +37,25 @@ CONFIG_BUTTON_LONG_PRESS_TIME_MS=5000
 # disable softap by default
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
 
+# app_main calls into CHIP, so it needs a CHIP-sized stack. IDF's 3584-byte
+# default is not one, and the shortfall is not subtle: opening a commissioning
+# window from mt_boot_window_policy() (spec 3.12.1) drags in mDNS advertising
+# and overflowed it outright.
+#
+#   Guru Meditation Error: Core 0 panic'ed (Stack protection fault).
+#   Detected in task "main"
+#   Stack pointer: 0x40837fc0   Stack bounds: 0x40837fc4 - 0x40838fc0
+#
+# The same call via AT+MTCOMMISSION had always worked, because that path runs
+# on the AT parser task (MT_PARSER_TASK_STACK, 6144). Identical function, two
+# stacks, only one of them adequate.
+#
+# 8192 to match CONFIG_CHIP_TASK_STACK_SIZE rather than merely clearing the
+# observed overflow: app_main also rebuilds the endpoint composition and runs
+# esp_matter::start(), so it deserves the same headroom as the task whose work
+# it is doing. Costs ~4.6 KB of RAM once.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # Keep the BLE stack resident after commissioning. CHIP defaults this to y,
 # which deinitialises BLE on successful commissioning and skips BLE init at
 # boot on an already-provisioned device, calling esp_bt_mem_release() to hand
