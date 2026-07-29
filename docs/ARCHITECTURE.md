@@ -187,6 +187,57 @@ fw/  flash.py, RP2350USB2Serial.ino.uf2   host-bridge flasher (PC-side)
 docs/  AT_MT_SPEC.md, FIRMWARE_UPDATE_SPEC.md, ARCHITECTURE.md (this file)
 ```
 
+## 8.1 Portability: what a different co-processor would cost
+
+Recorded 2026-07-29, not a plan. Prompted by asking whether `AT+MT` could serve
+an nRF54L or an EFR32 instead of the C6. The answer turned out to be measurable
+rather than speculative, and the measurement is the kind of thing that is
+obvious today and invisible in six months.
+
+**`AT+MT` is a host contract, not a description of what the C6 happens to do.**
+`AT_MT_SPEC.md` contains five references to ESP anything, all incidental: the
+title, the model string, a comparison to the arduino-esp32 API, and the
+flow-control section, which is board wiring. The command grammar, the `+MTERR`
+code space, the URC set and the event bit map are Matter and CHIP concepts that
+every vendor's SDK shares, because they are all connectedhomeip underneath.
+
+**Measured split of this firmware:**
+
+| | lines | real dependency |
+|---|---|---|
+| `mt_at.c` | 635 | `vTaskDelay`, `esp_restart`. Two calls. |
+| `mt_composition.c` | 80 | none; already host-tested |
+| `mt_comp_store.c` | 118 | NVS only |
+| `include/mt_matter.h` | 116 | none; pure C declarations |
+| `main.cpp` + `mt_devtypes.cpp` | 804 | the Matter SDK itself |
+
+Every `esp_matter` and `CHIP` string in `mt_at.c` and `mt_matter.h` is in a
+comment. So the per-vendor surface is **804 lines of C++ behind a 116-line C
+header**: about a dozen `mt_matter_*` bridge functions, a device type table,
+storage, and UART plumbing. Above that line the entire AT surface moves
+unchanged, and `iLabs_Hearth` on the host never learns that anything changed,
+because it speaks a UART protocol and has no opinion about the silicon.
+
+**The seam was not designed for this.** `mt_matter.h` exists because no
+esp_matter header may enter a C translation unit (a build-hygiene rule, see
+CLAUDE.md), and enforcing that produced exactly the boundary a port needs.
+
+**The hard part, and it is not the line count.** `AT+MTEP` lets the *host*
+declare an endpoint composition at runtime, which works because `esp_matter`
+provides a dynamic data model. Both Nordic's nRF Connect SDK and Silicon Labs'
+Matter SDK default to **ZAP-generated static endpoints**. connectedhomeip does
+support dynamic endpoints underneath (`emberAfSetDynamicEndpoint`, the route
+bridge devices take, and both vendors ship bridge samples), so it is possible,
+but it means building the vendor equivalent of `esp_matter`'s data model layer
+rather than getting it from the SDK. That single problem dominates the port on
+both. The weaker alternative is a query-only `AT+MTEP?` with fixed compositions
+per image, which is much less work and a materially worse product.
+
+**One thing gets easier on nRF54L.** It is 802.15.4 and BLE only, no WiFi, so
+the transport is Thread by construction: no build-time variant, `AT+MTNET?`
+always answers `THREAD`, and the whole transport-mismatch problem (§3.12.1 of
+the spec, and open question P2) cannot arise.
+
 ## 9. Decision log (summary)
 
 | Decision | Choice | Why |
@@ -197,3 +248,4 @@ docs/  AT_MT_SPEC.md, FIRMWARE_UPDATE_SPEC.md, ARCHITECTURE.md (this file)
 | OTA | Host serial flash (single-app) | Robust, flash-efficient, host-owned. |
 | Matter OTA Requestor | Disabled | Redundant with host OTA; frees flash. |
 | Radio owner (Matter) | esp_matter (link_mgr reserved) | Separate image; link_mgr for the merge. |
+| Co-processor vendor | ESP32-C6 for now, not locked in | `AT+MT` is vendor-neutral; port surface is 804 lines behind a C header (§8.1). |
