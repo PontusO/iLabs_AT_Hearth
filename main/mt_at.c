@@ -325,13 +325,13 @@ static int cmd_mtevt(at_type_t type, char *args)
     return AT_R_OK;
 }
 
-void mt_at_event(int bit, const char *detail)
+bool mt_at_event(int bit, const char *detail)
 {
     if (bit < 0 || bit > 31) {
-        return;
+        return false;
     }
     if ((s_evt_mask & (1UL << bit)) == 0) {
-        return;
+        return false;
     }
 
     /*
@@ -357,7 +357,7 @@ void mt_at_event(int bit, const char *detail)
     } else {
         snprintf(line, sizeof(line), "+MTEVT:%d", bit);
     }
-    mt_at_urc(line);
+    return mt_at_urc(line);
 }
 
 /* ---- network transport query (C3) ------------------------------------- */
@@ -641,7 +641,7 @@ void mt_at_start(void)
     s_at_up = true;
 }
 
-void mt_at_urc(const char *line)
+bool mt_at_urc(const char *line)
 {
     /*
      * URCs can fire from esp_matter callbacks during esp_matter::start(),
@@ -655,7 +655,8 @@ void mt_at_urc(const char *line)
      * not listening yet, and it resynchronizes on the +MTREADY that follows.
      */
     if (!s_at_up) {
-        return;
+        return false;
     }
     at_uart_write_line("%s", line);
+    return true;
 }

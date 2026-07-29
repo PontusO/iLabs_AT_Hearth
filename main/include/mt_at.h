@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -24,8 +26,13 @@ void mt_at_start(void);
 /*
  * Emit a single URC line (e.g. "+MTIDENT:1,1") over the AT link.
  * Safe to call from the Matter task; used by the C++ event callbacks.
+ *
+ * Returns true if the line reached the wire, false if it was dropped because
+ * the AT interface is not up yet. Callers may ignore it; the one that must not
+ * is app_main's boot replay, which has to know whether an event it is about to
+ * repeat has already been delivered.
  */
-void mt_at_urc(const char *line);
+bool mt_at_urc(const char *line);
 
 /* ---- event surface (C3) ----------------------------------------------- *
  * Platform events reach the host as "+MTEVT:<bit>[,<detail>]", filtered by a
@@ -99,8 +106,12 @@ enum {
 /*
  * Emit "+MTEVT:<bit>" (or "+MTEVT:<bit>,<detail>" when detail is non-NULL),
  * if the host has subscribed to that bit. Safe to call from the Matter task.
+ *
+ * Returns true only if the line actually reached the host: false when the bit
+ * is not in the subscription mask, and false when the AT interface is not up
+ * yet. Both are ordinary outcomes rather than errors.
  */
-void mt_at_event(int bit, const char *detail);
+bool mt_at_event(int bit, const char *detail);
 
 #ifdef __cplusplus
 }
