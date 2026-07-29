@@ -64,6 +64,12 @@ static uint32_t s_heap_at_startup = 0;
  */
 static bool s_transport_mismatch = false;
 
+/* Set when a kCommissioningWindowOpened event actually reached the host, so
+ * app_main's boot replay can tell "the host missed this" from "the host
+ * already has it". Without it the replay fires unconditionally and a host
+ * whose window happened to open after mt_at_start() sees +MTEVT:0 twice. */
+static bool s_window_evt_delivered = false;
+
 /* Window opened on a transport mismatch. The same 300 s AT+MTCOMMISSION
  * defaults to: long enough to commission unhurriedly, short enough that a
  * device nobody is attending stops advertising. */
@@ -133,7 +139,12 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     /* Commissioning. */
     case DeviceEventType::kCommissioningWindowOpened:
         ESP_LOGI(TAG, "Commissioning window opened");
-        mt_at_event(MT_EVT_COMMISSION_WINDOW_OPEN, nullptr);
+        /* Remember whether this actually reached the host. If it did, the boot
+         * replay in app_main must not repeat it; if it was dropped because the
+         * AT interface was not up yet, the replay is the only delivery. */
+        if (mt_at_event(MT_EVT_COMMISSION_WINDOW_OPEN, nullptr)) {
+            s_window_evt_delivered = true;
+        }
         break;
     case DeviceEventType::kCommissioningWindowClosed:
         mt_at_event(MT_EVT_COMMISSION_WINDOW_CLOSED, nullptr);
@@ -707,10 +718,15 @@ extern "C" void app_main(void)
      * be delivered.
      *
      * Replaying it here makes the sequence deterministic instead of a race:
-     * +MTREADY, then +MTEVT:0 if a window is open, on every boot that has one.
-     * Worth pinning precisely because C5 will assert on it.
+     * +MTREADY, then exactly one +MTEVT:0 on every boot that has a window open,
+     * whichever side of mt_at_start() CHIP happened to open it. Worth pinning
+     * precisely because C5 will assert on it, and an assertion against a race
+     * is worse than no assertion.
+     *
+     * s_window_evt_delivered is what makes it exactly one rather than one or
+     * two: the replay only fires for an event the host did not already get.
      */
-    if (mt_matter_state() == MT_STATE_COMMISSIONING) {
+    if (!s_window_evt_delivered && mt_matter_state() == MT_STATE_COMMISSIONING) {
         mt_at_event(MT_EVT_COMMISSION_WINDOW_OPEN, nullptr);
     }
 
