@@ -55,6 +55,20 @@ static const char *TAG = "mt_main";
  * figure logged when BLE is torn down; see kBLEDeinitialized in app_event_cb. */
 static uint32_t s_heap_at_startup = 0;
 
+/*
+ * Latched at boot: the stored fabric belongs to the other transport (spec
+ * 3.12.1). Latched rather than recomputed because the marker it derives from
+ * is rewritten as soon as the device is commissioned here, and a live read
+ * would flip to false mid-commissioning, taking away the host's explanation
+ * for the window it is currently looking at.
+ */
+static bool s_transport_mismatch = false;
+
+/* Window opened on a transport mismatch. The same 300 s AT+MTCOMMISSION
+ * defaults to: long enough to commission unhurriedly, short enough that a
+ * device nobody is attending stops advertising. */
+#define MT_MISMATCH_WINDOW_S 300
+
 using namespace esp_matter;
 using namespace esp_matter::endpoint;
 
@@ -133,6 +147,23 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         break;
     case DeviceEventType::kCommissioningComplete:
         ESP_LOGI(TAG, "Commissioning complete");
+        /*
+         * Stamp the transport the device is now commissioned on (spec 3.12.1).
+         * Written here rather than at boot, and only on success: the marker's
+         * whole job is to say which transport the *stored fabric* belongs to,
+         * so writing it before there is a fabric would make a device that
+         * merely booted look commissioned here, and the next reflash back
+         * would then fail to notice a genuine mismatch.
+         *
+         * This also clears the latch, so AT+MTNET? stops reporting a mismatch
+         * the moment the situation is resolved.
+         */
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+        mt_comp_store_save_transport(MT_NET_THREAD);
+#else
+        mt_comp_store_save_transport(MT_NET_WIFI);
+#endif
+        s_transport_mismatch = false;
         mt_at_event(MT_EVT_COMMISSION_COMPLETE, nullptr);
         break;
     case DeviceEventType::kFailSafeTimerExpired:
@@ -361,6 +392,13 @@ extern "C" void mt_matter_factory_reset(void)
     esp_matter::factory_reset();
 }
 
+extern "C" int mt_matter_transport_mismatch(void)
+{
+    /* No ChipStackLock: this reads a plain bool latched by app_main and
+     * cleared on kCommissioningComplete, and touches nothing in CHIP. */
+    return s_transport_mismatch ? 1 : 0;
+}
+
 extern "C" int mt_matter_net_info(int *transport, int *enabled, int *connected)
 {
     if (!transport || !enabled || !connected) {
@@ -492,11 +530,44 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
  */
 static void mt_boot_window_policy(bool configured)
 {
+    /*
+     * P2, resolved. The question used to be "can the boot window be suppressed
+     * on an unconfigured device?" and it was the wrong way round: the bug was
+     * that "configured" was the wrong predicate. It has to mean *has a fabric
+     * usable on this transport*, not merely *has a fabric*.
+     *
+     * A device reflashed between the WiFi and Thread images keeps its fabric,
+     * because NVS survives a reflash by design. CHIP then finds it, logs
+     * "Fabric already commissioned. Disabling BLE advertisement", and the
+     * device sits there reporting itself commissioned while reachable by no
+     * route at all: no network, because it has no credentials for this
+     * transport, and no BLE, because CHIP just switched it off.
+     *
+     * Nothing is erased to fix that. The fabric is still valid and becomes
+     * useful again the moment the original image is reflashed, which is a
+     * routine thing to do while developing. What is wrong is the device's
+     * claim about itself, so the claim is what gets corrected: open a window
+     * and let it be commissioned onto the transport it actually has.
+     */
+    if (s_transport_mismatch) {
+        ESP_LOGW(TAG, "boot window policy: fabric belongs to the other transport, "
+                      "opening a commissioning window (spec 3.12.1)");
+        /* The +MTEVT:27 for this is raised in app_main AFTER mt_at_start(), not
+         * here. This runs before the AT interface exists, so mt_at_urc() would
+         * drop it on the s_at_up guard, and even if it did not, a URC ahead of
+         * +MTREADY is a protocol violation (spec section 1). */
+        if (mt_matter_open_commissioning(MT_MISMATCH_WINDOW_S) != 0) {
+            ESP_LOGE(TAG, "failed to open the commissioning window; the device holds a "
+                          "fabric it cannot reach and cannot be recommissioned without "
+                          "AT+MTCOMMISSION or AT+MTFRESET");
+        }
+        return;
+    }
+
     if (configured) {
         ESP_LOGI(TAG, "boot window policy: configured device, default CHIP behaviour");
     } else {
-        ESP_LOGW(TAG, "boot window policy: UNCONFIGURED, spec section 5.5 wants no "
-                      "commissioning window here (open question P2)");
+        ESP_LOGI(TAG, "boot window policy: unconfigured, CHIP opens its own window");
     }
 }
 
@@ -531,6 +602,40 @@ extern "C" void app_main(void)
     } else if (rc == 1) {
         ESP_LOGI(TAG, "no stored composition, starting unconfigured");
         comp.count = 0;
+    }
+
+    /*
+     * Does the stored fabric belong to this image's transport? (spec 3.12.1)
+     *
+     * Read here, before esp_matter::start(), because the answer decides what
+     * mt_boot_window_policy() does immediately after start returns. Only a
+     * device that actually holds a fabric can be mismatched: with no fabric
+     * there is nothing to be unreachable, and CHIP opens its own window
+     * anyway. A missing marker (never commissioned, or an image predating the
+     * marker) reads as "unknown" and must NOT count as a mismatch, or every
+     * device upgraded to this firmware would open a window on its first boot.
+     */
+    {
+        int stored = 0;
+        /* The compile-time constant directly, NOT mt_matter_net_info(): that
+         * now takes the CHIP stack lock, and esp_matter::start() has not run
+         * yet, so the platform manager's mutex does not exist. Same class of
+         * trap as raising a URC before mt_at_start(). */
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+        const int here = MT_NET_THREAD;
+#else
+        const int here = MT_NET_WIFI;
+#endif
+        int trc = mt_comp_store_load_transport(&stored);
+        if (trc == 0 && stored != here) {
+            s_transport_mismatch = true;
+            ESP_LOGW(TAG, "stored fabric was commissioned on transport %d, this image "
+                          "provides %d: credentials are valid but unreachable",
+                     stored, here);
+        } else if (trc == 1) {
+            ESP_LOGI(TAG, "no stored transport marker (never commissioned, or an "
+                          "image older than the marker)");
+        }
     }
 
     for (uint16_t i = 0; i < comp.count; i++) {
@@ -594,4 +699,13 @@ extern "C" void app_main(void)
 
     s_heap_at_startup = esp_get_free_heap_size();
     ESP_LOGI(TAG, "free heap at startup: %u (BLE resident)", (unsigned)s_heap_at_startup);
+
+    /* Now that the AT interface is up and +MTREADY has gone out, the host can
+     * be told its fabric is unreachable (spec 3.12.1). Deliberately after
+     * mt_at_start(): raised from mt_boot_window_policy() it would be dropped by
+     * the s_at_up guard, and would breach the rule that +MTREADY is the first
+     * line of a session. */
+    if (s_transport_mismatch) {
+        mt_at_event(MT_EVT_TRANSPORT_MISMATCH, nullptr);
+    }
 }
