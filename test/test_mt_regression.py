@@ -5,10 +5,13 @@ Exercises ATLink against a scripted fake transport, so the result
 mapping and URC handling are pinned without a board on the desk.
 """
 
+import contextlib
+import io
 import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -234,6 +237,91 @@ class TestPhase0(unittest.TestCase):
     def test_dead_link_aborts(self):
         problem = phase0(scripted_link({}), {})
         self.assertIn("AT", problem)
+
+
+from mt_regression import add_test, TESTS, main
+
+
+class TestAddTestDuplicateGuard(unittest.TestCase):
+    """A duplicate (phase, name) would silently collapse a baseline
+    results key (write_baseline keys by name), so it must raise instead
+    of registering quietly."""
+
+    def test_duplicate_name_raises(self):
+        saved = list(TESTS)
+        try:
+            add_test(99, "__dup_test__", lambda link: True)
+            with self.assertRaises(ValueError):
+                add_test(99, "__dup_test__", lambda link: True)
+        finally:
+            TESTS[:] = saved
+
+
+class FlakySerial:
+    """serial.Serial double for main(): answers Phase 0's three commands
+    from a canned script, then raises OSError on the first read once the
+    link has gone quiet, simulating a lost link mid-run (design spec
+    item 6.6/§6, TESTING.md §6). The raise is armed only after AT+CGMR's
+    reply is written, so Phase 0's own polling never trips it."""
+
+    HEALTHY = {
+        b"AT\r\n": b"OK\r\n",
+        b"AT+CGMM\r\n": b"ESP32-C6 Hearth\r\nOK\r\n",
+        b"AT+CGMR\r\n": b"0.1.0\r\nOK\r\n",
+    }
+
+    def __init__(self, port, baudrate, timeout=0.05):
+        self.rx = b""
+        self.armed = False
+
+    def write(self, data):
+        if data == b"AT+CGMR\r\n":
+            self.armed = True
+        self.rx += self.HEALTHY.get(data, b"")
+        return len(data)
+
+    def read(self, n=1):
+        if self.rx:
+            chunk, self.rx = self.rx[:n], self.rx[n:]
+            return chunk
+        if self.armed:
+            raise OSError("simulated link loss")
+        return b""
+
+    def close(self):
+        pass
+
+
+class TestMainSurvivesLostLink(unittest.TestCase):
+    """Design spec §6: a serial disconnect mid-run must still print the
+    summary. main() only imports pyserial function-locally, so a fake
+    'serial' module in sys.modules is enough to drive main() end to end
+    without a real port or pyserial installed."""
+
+    def test_lost_link_still_prints_summary(self):
+        fake_serial = types.ModuleType("serial")
+
+        class FakeSerialException(Exception):
+            pass
+
+        fake_serial.SerialException = FakeSerialException
+        fake_serial.Serial = FlakySerial
+        had_serial = "serial" in sys.modules
+        saved_serial = sys.modules.get("serial")
+        sys.modules["serial"] = fake_serial
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = main(["--port", "/dev/fake", "--phase", "1"])
+        finally:
+            if had_serial:
+                sys.modules["serial"] = saved_serial
+            else:
+                del sys.modules["serial"]
+        text = out.getvalue()
+        self.assertIn("(link lost:", text)
+        self.assertIn("===== RESULT:", text)
+        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":
