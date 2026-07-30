@@ -404,5 +404,71 @@ class TestMainSurvivesLostLink(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+from mt_regression import (ChipTool, parse_setup_payload,
+                           parse_onoff_reports, parse_onoff_read)
+
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fixtures")
+
+
+def fixture(name):
+    with open(os.path.join(FIXTURES, name), "r", errors="replace") as f:
+        return f.read()
+
+
+class FakeChipRunner:
+    """Scripted stand-in for ChipTool's subprocess runner."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = []
+
+    def __call__(self, argv, timeout):
+        self.calls.append((argv, timeout))
+        return self.script.pop(0)
+
+
+class TestChipTool(unittest.TestCase):
+    def test_run_appends_storage_and_returns_script(self):
+        runner = FakeChipRunner([(0, "hello")])
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool("/bin/chip-tool", d, runner=runner)
+            rc, out = chip.run(["onoff", "read", "on-off", "0x4845", "1"])
+        self.assertEqual((rc, out), (0, "hello"))
+        argv, timeout = runner.calls[0]
+        self.assertEqual(argv[0], "/bin/chip-tool")
+        self.assertEqual(argv[-2:], ["--storage-directory", d])
+        self.assertEqual(timeout, 60)
+
+    def test_wipe_storage_removes_files_keeps_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "chip_tool_config.ini"), "w").close()
+            chip = ChipTool("/bin/chip-tool", d)
+            chip.wipe_storage()
+            self.assertTrue(os.path.isdir(d))
+            self.assertEqual(os.listdir(d), [])
+
+
+class TestChipToolParsers(unittest.TestCase):
+    def test_parse_setup_payload_fixture(self):
+        got = parse_setup_payload(fixture("chiptool_parse_setup_payload.txt"))
+        self.assertEqual(got, (20202021, 3840))
+
+    def test_parse_setup_payload_garbage_is_none(self):
+        self.assertIsNone(parse_setup_payload("no such content"))
+
+    def test_parse_onoff_read_true_false(self):
+        self.assertEqual(
+            parse_onoff_read(fixture("chiptool_onoff_read_true.txt")), 1)
+        self.assertEqual(
+            parse_onoff_read(fixture("chiptool_onoff_read_false.txt")), 0)
+        self.assertIsNone(parse_onoff_read(""))
+
+    def test_parse_onoff_reports_counts_in_order(self):
+        text = (fixture("chiptool_onoff_read_true.txt")
+                + fixture("chiptool_onoff_read_false.txt"))
+        self.assertEqual(parse_onoff_reports(text), [1, 0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
