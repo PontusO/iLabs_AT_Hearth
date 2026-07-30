@@ -121,21 +121,29 @@ class ATLink:
         self.noise.append(line)
         return None
 
-    def await_urc(self, pattern, timeout=5.0):
-        """Return the first URC matching the regex, consuming it. Checks
-        the queue before the wire, so a URC that raced an earlier command
-        still satisfies the wait. None on timeout."""
+    def await_urc_ts(self, pattern, timeout=5.0):
+        """await_urc, but returning (timestamp, line). Timestamps are the
+        queue-insert (read) times and reads preserve wire order, so
+        comparing two results compares arrival order: 2.3 uses this to
+        prove +MTEVT:4 followed +MTEVT:3 rather than merely existing."""
         rx = re.compile(pattern)
-        for i, (_, u) in enumerate(self.urcs):
+        for i, (ts, u) in enumerate(self.urcs):
             if rx.search(u):
-                return self.urcs.pop(i)[1]
+                self.urcs.pop(i)
+                return ts, u
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             got = self._pump_one(deadline)
             if got is not None and rx.search(got):
-                self.urcs.pop()
-                return got
+                return self.urcs.pop()
         return None
+
+    def await_urc(self, pattern, timeout=5.0):
+        """Return the first URC matching the regex, consuming it. Checks
+        the queue before the wire, so a URC that raced an earlier command
+        still satisfies the wait. None on timeout."""
+        got = self.await_urc_ts(pattern, timeout)
+        return got[1] if got is not None else None
 
     def assert_no_urc(self, pattern, window):
         """True when nothing matching arrives within the window. This is
@@ -482,6 +490,16 @@ def repo_head(path):
         return out.stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def cmd_retry(link, cmd, timeout=None):
+    """One retry on no-response, for the documented settling quirk: the
+    first command after a reboot can time out once (graph N22). Retrying
+    on -2 only keeps real ERROR results exact."""
+    res, lines = link.command(cmd, timeout=timeout)
+    if res == -2:
+        res, lines = link.command(cmd, timeout=timeout)
+    return res, lines
 
 
 def phase0(link, header):
