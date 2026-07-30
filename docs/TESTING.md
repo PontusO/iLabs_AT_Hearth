@@ -381,6 +381,12 @@ the passcode and discriminator taken from the build's credentials. Assert:
 The AT-side and controller-side views agreeing is the point of the test: either
 one alone can pass while the device is unusable.
 
+Since 2026-07-30 (commit eb15d0f, decision DE24) events `0` and `4` are a
+pair: exactly one `+MTEVT:4` is raised per reported `+MTEVT:0`, after
+`+MTEVT:3` on a successful commissioning. The harness asserts the order and
+the absence of a duplicate; both leaks it guards against existed before the
+fix (spec `AT_MT_SPEC.md` section 3.11).
+
 **2.4 Attribute round-trip, host to controller**
 `AT+MTATTR=1,6,0,1` returns `OK`; a `+MTATTR:1,6,0,1` URC is observed; then
 `chip-tool onoff read on-off <node> 1` reports `1`. Repeat for `0`.
@@ -416,7 +422,7 @@ intentionally suppressed (spec §4), and regressing that floods the host with
 boot-time init noise.
 
 **2.7 Additional commissioning window on an operational device**
-`AT+MTCOMMISSION=60` returns `OK`, `+MTEVT:0` arrives, and
+`AT+MTCOMMISSION=180` returns `OK`, `+MTEVT:0` arrives, and
 `AT+MTSTATE?` becomes `1` while the window is open. Commission a **second
 fabric** with a second `chip-tool` storage directory, then assert
 `AT+MTFABRICS?` is `2`. Remove it with
@@ -455,9 +461,12 @@ it reads `1`, no state change occurred and the test proved nothing, so treat
 that as an inconclusive run rather than a pass.
 
 **2.10 Commissioning window expiry (slow, opt-in)**
-`AT+MTCOMMISSION=30` with no controller attaching: assert `+MTEVT:5` (fail-safe expired)
-arrives after the fail-safe expires, and that `AT+MTSTATE?` returns to `2`. Gated
-behind `--include-slow` because of the ~90 s wall clock.
+`AT+MTCOMMISSION=180` with no controller attaching: assert the window's end is
+reported and that `AT+MTSTATE?` returns to `2`. Gated behind `--include-slow`
+because of the ~200 s wall clock. (The 180 s floor is CHIP's Matter minimum;
+values below it are rejected with `+MTERR:1` since commit eb15d0f. Which URC
+ends a never-attached window, `+MTEVT:5` or only `+MTEVT:4`, is pinned when T3
+implements this test.)
 
 **2.11 The two resets differ in exactly one respect**
 Run with a composition applied and a fabric commissioned.
