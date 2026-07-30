@@ -240,6 +240,86 @@ class TestPhase0(unittest.TestCase):
 
 
 from mt_regression import add_test, TESTS, main
+from mt_regression import (Suite, StepAbort, Phase2Context, run_phase2,
+                           PHASE2_STEPS, write_baseline)
+
+
+class TestSuiteSkip(unittest.TestCase):
+    def test_skip_is_counted_and_printed(self):
+        s = Suite()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            s.check("a", True)
+            s.skip("b", "earlier step failed")
+            s.summary()
+        text = out.getvalue()
+        self.assertIn("[SKIP] b: earlier step failed", text)
+        self.assertIn("1 passed, 0 failed, 1 skipped", text)
+        self.assertEqual(s.skipped, [("b", "earlier step failed")])
+
+    def test_summary_without_skips_is_unchanged(self):
+        s = Suite()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            s.check("a", True)
+            s.summary()
+        self.assertIn("===== RESULT: 1 passed, 0 failed =====",
+                      out.getvalue())
+
+    def test_baseline_records_skips(self):
+        s = Suite()
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.check("ran", True)
+            s.skip("not run", "aborted")
+        with tempfile.NamedTemporaryFile("r", suffix=".json") as f:
+            with contextlib.redirect_stdout(io.StringIO()):
+                write_baseline(f.name, {"port": "x"}, s)
+            data = json.load(open(f.name))
+        self.assertEqual(data["results"]["ran"], "PASS")
+        self.assertEqual(data["results"]["not run"], "SKIP")
+
+
+class TestRunPhase2(unittest.TestCase):
+    def _ctx(self):
+        s = Suite()
+        return Phase2Context(link=None, chip=None, suite=s, opts=None), s
+
+    def test_abort_skips_the_rest(self):
+        calls = []
+
+        def ok_step(ctx):
+            calls.append("ok")
+
+        def bad_step(ctx):
+            raise StepAbort("device did not come back")
+
+        def never_step(ctx):
+            calls.append("never")
+
+        saved = list(PHASE2_STEPS)
+        PHASE2_STEPS[:] = [("one", ok_step), ("two", bad_step),
+                           ("three", never_step)]
+        try:
+            ctx, s = self._ctx()
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase2(ctx)
+        finally:
+            PHASE2_STEPS[:] = saved
+        self.assertEqual(calls, ["ok"])
+        self.assertEqual(s.skipped,
+                         [("three", "device did not come back")])
+
+    def test_no_abort_runs_all(self):
+        calls = []
+        saved = list(PHASE2_STEPS)
+        PHASE2_STEPS[:] = [("one", lambda ctx: calls.append(1)),
+                          ("two", lambda ctx: calls.append(2))]
+        try:
+            ctx, _ = self._ctx()
+            run_phase2(ctx)
+        finally:
+            PHASE2_STEPS[:] = saved
+        self.assertEqual(calls, [1, 2])
 
 
 class TestAddTestDuplicateGuard(unittest.TestCase):
