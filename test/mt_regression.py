@@ -265,6 +265,42 @@ def step_2_2_codes_stable(ctx):
             tag="P2")
 
 
+def step_2_3_commission(ctx):
+    """TESTING.md 2.3 plus the DE24 window-event contract: the AT-side
+    and controller-side views must agree, and exactly one +MTEVT:4 must
+    follow +MTEVT:3 (order proven by timestamps, because a queue scan
+    alone would let the old pre-eb15d0f leak pass)."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    rc, out = chip.run(["payload", "parse-setup-payload", ctx.qr],
+                       timeout=15)
+    parsed = parse_setup_payload(out) if rc == 0 else None
+    if not s.check("2.3 QR payload parses", parsed is not None, tag="P2"):
+        raise StepAbort("onboarding QR not machine-usable")
+    passcode, discriminator = parsed
+    rc, out = chip.run(["pairing", "ble-wifi", "0x%X" % ctx.node_id,
+                        ctx.opts.ssid, ctx.opts.psk,
+                        str(passcode), str(discriminator)], timeout=120)
+    paired = s.check("2.3 chip-tool pairing exits 0", rc == 0, tag="P2")
+    s.check("2.3 +MTEVT:1 session started",
+            link.await_urc(r"\+MTEVT:1$", timeout=90.0) is not None,
+            tag="P2")
+    got3 = link.await_urc_ts(r"\+MTEVT:3$", timeout=90.0)
+    s.check("2.3 +MTEVT:3 commissioning complete", got3 is not None,
+            tag="P2")
+    got4 = link.await_urc_ts(r"\+MTEVT:4$", timeout=15.0)
+    s.check("2.3 exactly one +MTEVT:4, after complete",
+            got3 is not None and got4 is not None and got4[0] > got3[0]
+            and link.assert_no_urc(r"\+MTEVT:4$", 10.0), tag="P2")
+    if not (paired and got3 is not None):
+        raise StepAbort("commissioning failed")
+    res, lines = link.command("AT+MTFABRICS?")
+    s.check("2.3 fabrics 1", res == 0 and lines == ["+MTFABRICS:1"],
+            tag="P2")
+    res, lines = link.command("AT+MTSTATE?")
+    s.check("2.3 state 2 (operational)",
+            res == 0 and lines == ["+MTSTATE:2,1"], tag="P2")
+
+
 def step_cleanup_factory_fresh(ctx):
     """T2 addition (design spec section 4): leave the bench in the
     documented factory-fresh state and scored, because a cleanup that
@@ -808,6 +844,7 @@ register_phase1_negative()
 PHASE2_STEPS[:] = [
     ("2.1 factory-fresh baseline", step_2_1_factory_fresh),
     ("2.2 onboarding codes stable", step_2_2_codes_stable),
+    ("2.3 commission ble-wifi", step_2_3_commission),
     ("cleanup factory-fresh", step_cleanup_factory_fresh),
 ]
 

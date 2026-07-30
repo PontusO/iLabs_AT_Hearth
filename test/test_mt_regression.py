@@ -624,7 +624,8 @@ class FakeLink:
     (dict cmd -> (res, lines), or a list of those for sequential calls)
     and a scripted URC stream whose timestamps encode wire order. stale_urcs
     are seeded at construction and drain() clears them, letting fresh URCs
-    (from urcs) arrive after AT+MTRESET."""
+    (from urcs) arrive after AT+MTRESET. When no stale_urcs, fresh URCs are
+    seeded immediately so steps that don't call AT+MTRESET can still await them."""
 
     def __init__(self, commands=None, urcs=None, stale_urcs=None):
         self.commands = dict(commands or {})
@@ -634,6 +635,14 @@ class FakeLink:
         self.urc_queue = [(float(i), u) for i, u in enumerate(self.stale_urcs)]
         # If stale URCs exist, drain() must be called before fresh URCs are added
         self.needs_drain = bool(self.stale_urcs)
+        # Track whether fresh URCs have been added to avoid duplicates
+        self.fresh_urcs_added = False
+        # If no stale URCs, add fresh URCs immediately (for tests without AT+MTRESET)
+        if not self.stale_urcs and self.urcs:
+            start_ts = max((ts for ts, _ in self.urc_queue), default=-1.0) + 1.0
+            self.urc_queue.extend([(start_ts + float(i), u)
+                                   for i, u in enumerate(self.urcs)])
+            self.fresh_urcs_added = True
         self.sent = []
 
     def command(self, cmd, expect=None, timeout=None):
@@ -641,13 +650,14 @@ class FakeLink:
         v = self.commands.get(cmd, (0, []))
         if isinstance(v, list):
             v = v.pop(0) if v else (-2, [])
-        # Append fresh URCs after AT+MTRESET (only if stale URCs were drained)
-        if cmd == "AT+MTRESET" and not self.needs_drain:
+        # Append fresh URCs after AT+MTRESET (only if stale URCs were drained and fresh not already added)
+        if cmd == "AT+MTRESET" and not self.needs_drain and not self.fresh_urcs_added:
             # Add fresh URCs with timestamps starting after current max
             start_ts = (max((ts for ts, _ in self.urc_queue), default=-1.0)
                        + 1.0)
             self.urc_queue.extend([(start_ts + float(i), u)
                                    for i, u in enumerate(self.urcs)])
+            self.fresh_urcs_added = True
         return v
 
     def await_urc_ts(self, pattern, timeout=5.0):
@@ -668,6 +678,7 @@ class FakeLink:
         dropped = [u for _, u in self.urc_queue]
         self.urc_queue.clear()
         self.needs_drain = False  # Drain satisfies the requirement
+        self.fresh_urcs_added = False  # Reset so AT+MTRESET can add them again
         return dropped
 
 
@@ -755,6 +766,74 @@ class TestCleanupStep(unittest.TestCase):
                 step_cleanup_factory_fresh(ctx)
             self.assertEqual(ctx.suite.failed, 0)
             self.assertEqual(os.listdir(d), [])
+
+
+from mt_regression import step_2_3_commission
+
+
+class TestStep23(unittest.TestCase):
+    AT_OK = {
+        "AT+MTFABRICS?": (0, ["+MTFABRICS:1"]),
+        "AT+MTSTATE?": (0, ["+MTSTATE:2,1"]),
+    }
+
+    def _ctx(self, runner, urcs):
+        link = FakeLink(self.AT_OK, urcs=urcs)
+        d = tempfile.mkdtemp()  # outlives the step; ChipTool.run mkdirs it
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_ctx(link, chip=chip)
+        ctx.qr, ctx.manual = "MT:Y.K9042C00KA0648G00", "34970112332"
+        return ctx, runner
+
+    def test_happy_path(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(runner,
+                                ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        pairing_argv = runner.calls[1][0]
+        self.assertEqual(pairing_argv[1:4],
+                         ["pairing", "ble-wifi", "0x4845"])
+        self.assertIn("20202021", pairing_argv)
+        self.assertIn("3840", pairing_argv)
+
+    def test_double_close_fails_the_de24_check(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "success"),
+        ])
+        ctx, _ = self._ctx(runner,
+                           ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4", "+MTEVT:4"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_close_before_complete_fails_order(self):
+        """The pre-fix D16 wire order (a 4 leaking at session
+        establishment) must fail, not pass by queue-scan accident."""
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "success"),
+        ])
+        ctx, _ = self._ctx(runner, ["+MTEVT:1", "+MTEVT:4", "+MTEVT:3"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_pairing_failure_aborts(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (1, "CHIP:TOO: Run command failure"),
+        ])
+        ctx, _ = self._ctx(runner, [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_3_commission(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
 
 
 if __name__ == "__main__":
