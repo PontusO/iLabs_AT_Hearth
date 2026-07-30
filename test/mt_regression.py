@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""iLabs AT Hearth regression harness, stage T1: Phase 0 and Phase 1.
+"""iLabs AT Hearth regression harness, stages T1+T2: Phases 0, 1 and 2.
 
-Test inventory: docs/TESTING.md sections 5 and 6.
-Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-design.md.
+Test inventory: docs/TESTING.md sections 5, 6 and 7 (2.1-2.5).
+Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-design.md
+and .../2026-07-30-c5-regression-harness-t2-design.md.
 
-Run: python3 test/mt_regression.py --port /dev/ttyACM0
+Phase 1 run: python3 test/mt_regression.py --port /dev/ttyACM0
+Phase 2 run: MT_SSID=... MT_PSK=... python3 test/mt_regression.py \
+    --port /dev/ttyACM0 --phase 2
+
+Standing rule (T1 design section 8, N23): never have an AT+MTATTR command
+in flight while a controller-driven +MTATTR URC is expected; ATLink would
+absorb the URC into the command's response lines. Phase 2 steps sequence
+around this by construction.
 """
 
 import argparse
@@ -502,6 +510,34 @@ def cmd_retry(link, cmd, timeout=None):
     return res, lines
 
 
+GATE_REFERENCE_QR = "MT:Y.K9042C00KA0648G00"
+
+
+def phase2_gate(chip, args):
+    """Phase-2-only preflight, before anything destructive: chip-tool
+    exists, runs as this user (the 2026-07-29 root-owned counters file
+    made every non-root run fail), and credentials are present. Returns
+    an abort message or None."""
+    if not getattr(args, "ssid", None) or not getattr(args, "psk", None):
+        return ("phase 2 needs WiFi credentials: export MT_SSID and "
+                "MT_PSK (or pass --ssid/--psk)")
+    if not (os.path.isfile(chip.binary)
+            and os.access(chip.binary, os.X_OK)):
+        return ("chip-tool not executable: %s (set MT_CHIPTOOL or "
+                "--chip-tool)" % chip.binary)
+    try:
+        rc, out = chip.run(
+            ["payload", "parse-setup-payload", GATE_REFERENCE_QR],
+            timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "chip-tool failed to run: %s" % exc
+    if rc != 0 or parse_setup_payload(out) is None:
+        return ("chip-tool cannot parse the reference setup payload; "
+                "check it runs as this user (root-owned /tmp/chip_*.ini "
+                "is the known cause)")
+    return None
+
+
 def phase0(link, header):
     """Link preflight per TESTING.md 5. A hard gate, not a scored test:
     if this fails, the rest of the report is noise. Returns an abort
@@ -712,15 +748,33 @@ register_phase1_negative()
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", default=os.environ.get("MT_PORT", "/dev/ttyACM0"))
-    ap.add_argument("--phase", type=int, choices=[0, 1], default=None,
-                    help="run only this phase (0 runs just the preflight gate)")
+    ap.add_argument("--phase", type=int, choices=[0, 1, 2], default=None,
+                    help="run only this phase (0 runs just the preflight "
+                         "gate; 2 is stateful and never runs by default)")
     ap.add_argument("-k", dest="keyword", default=None,
                     help="run only tests whose name contains this substring")
     ap.add_argument("--baseline", default=None,
                     help="write a JSON baseline of this run")
     ap.add_argument("--include-slow", action="store_true",
                     help="reserved for Phase 2; no effect in T1")
+    ap.add_argument("--chip-tool",
+                    default=os.environ.get("MT_CHIPTOOL", DEFAULT_CHIPTOOL))
+    ap.add_argument("--storage",
+                    default=os.environ.get("MT_CHIPTOOL_STORAGE",
+                                           "/tmp/mt-regression"))
+    ap.add_argument("--ssid", default=os.environ.get("MT_SSID"))
+    ap.add_argument("--psk", default=os.environ.get("MT_PSK"))
+    ap.add_argument("--node-id", type=lambda x: int(x, 0), default=0x4845,
+                    help="node id chip-tool assigns at pairing")
     args = ap.parse_args(argv)
+
+    chip = None
+    if args.phase == 2:
+        chip = ChipTool(args.chip_tool, args.storage)
+        problem = phase2_gate(chip, args)
+        if problem:
+            print("ABORT: " + problem)
+            return 2
 
     import serial
     try:
@@ -739,12 +793,19 @@ def main(argv=None):
         "ssid": os.environ.get("MT_SSID"),
     }
     suite = Suite()
+    truncated = False
     try:
         problem = phase0(link, header)
         if problem:
             print("ABORT: " + problem)
             return 2
-        if args.phase != 0:
+        if args.phase == 2:
+            header["node_id"] = "0x%X" % args.node_id
+            chip.wipe_storage()
+            ctx = Phase2Context(link, chip, suite, args)
+            run_phase2(ctx)
+            capture_header(link, header)
+        elif args.phase != 0:
             for phase, name, tag, fn, slow in TESTS:
                 if args.phase is not None and phase != args.phase:
                     continue
@@ -762,14 +823,18 @@ def main(argv=None):
             capture_header(link, header)
     except KeyboardInterrupt:
         print("\n(interrupted)")
-    except Exception as exc:
+        truncated = True
+    except (serial.SerialException, OSError) as exc:
+        # Narrow deliberately (T2 design section 5): a harness bug must
+        # raise a traceback, not masquerade as a lost link.
         print("(link lost: %s)" % exc)
+        truncated = True
     finally:
         port.close()
     suite.summary()
     if args.baseline:
         write_baseline(args.baseline, header, suite)
-    return 1 if suite.failed else 0
+    return 1 if (suite.failed or suite.skipped or truncated) else 0
 
 
 if __name__ == "__main__":

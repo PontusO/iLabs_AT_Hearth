@@ -401,7 +401,9 @@ class TestMainSurvivesLostLink(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("(link lost:", text)
         self.assertIn("===== RESULT:", text)
-        self.assertEqual(rc, 0)
+        # T2 contract change (design spec section 3): a truncated run must
+        # not exit 0, even when nothing that ran failed.
+        self.assertEqual(rc, 1)
 
 
 from mt_regression import (ChipTool, parse_setup_payload,
@@ -566,6 +568,50 @@ class TestCmdRetry(unittest.TestCase):
             link = Counting(res)
             cmd_retry(link, "AT")
             self.assertEqual(link.calls, 1)
+
+
+from mt_regression import phase2_gate, GATE_REFERENCE_QR
+
+
+class TestPhase2Gate(unittest.TestCase):
+    def _args(self, **kw):
+        base = {"ssid": "net", "psk": "secret"}
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def test_missing_creds_abort(self):
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool("/bin/true", d)
+            problem = phase2_gate(chip, self._args(ssid=None))
+        self.assertIn("MT_SSID", problem)
+
+    def test_missing_binary_abort(self):
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool(os.path.join(d, "nope"), d)
+            problem = phase2_gate(chip, self._args())
+        self.assertIn("chip-tool", problem)
+
+    def test_unparseable_reference_payload_abort(self):
+        runner = FakeChipRunner([(0, "garbage")])
+        with tempfile.TemporaryDirectory() as d:
+            binary = os.path.join(d, "chip-tool")
+            open(binary, "w").close()
+            os.chmod(binary, 0o755)
+            chip = ChipTool(binary, d, runner=runner)
+            problem = phase2_gate(chip, self._args())
+        self.assertIn("parse", problem)
+
+    def test_healthy_gate_passes(self):
+        runner = FakeChipRunner(
+            [(0, fixture("chiptool_parse_setup_payload.txt"))])
+        with tempfile.TemporaryDirectory() as d:
+            binary = os.path.join(d, "chip-tool")
+            open(binary, "w").close()
+            os.chmod(binary, 0o755)
+            chip = ChipTool(binary, d, runner=runner)
+            self.assertIsNone(phase2_gate(chip, self._args()))
+        self.assertEqual(runner.calls[0][0][1:3],
+                         ["payload", "parse-setup-payload"])
 
 
 if __name__ == "__main__":
