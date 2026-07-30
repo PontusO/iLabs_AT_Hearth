@@ -7,6 +7,7 @@ Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-des
 Run: python3 test/mt_regression.py --port /dev/ttyACM0
 """
 
+import re
 import time
 
 
@@ -94,3 +95,47 @@ class ATLink:
                 self.urcs.append((time.monotonic(), line))
                 continue
             lines.append(line)
+
+    def _pump_one(self, deadline):
+        """Read one line outside any command; route it. Returns the line
+        if it was a URC, else None."""
+        line = self._read_line(deadline)
+        if line is None:
+            return None
+        if line.startswith("+"):
+            self.urcs.append((time.monotonic(), line))
+            return line
+        self.noise.append(line)
+        return None
+
+    def await_urc(self, pattern, timeout=5.0):
+        """Return the first URC matching the regex, consuming it. Checks
+        the queue before the wire, so a URC that raced an earlier command
+        still satisfies the wait. None on timeout."""
+        rx = re.compile(pattern)
+        for i, (_, u) in enumerate(self.urcs):
+            if rx.search(u):
+                return self.urcs.pop(i)[1]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            got = self._pump_one(deadline)
+            if got is not None and rx.search(got):
+                self.urcs.pop()
+                return got
+        return None
+
+    def assert_no_urc(self, pattern, window):
+        """True when nothing matching arrives within the window. This is
+        the no-reboot proof for the reset-form negatives."""
+        return self.await_urc(pattern, timeout=window) is None
+
+    def drain(self, quiet=0.2):
+        """Read until the link is quiet, then discard and return every
+        queued URC, so one test's stray URC cannot satisfy the next
+        test's expectation."""
+        deadline = time.monotonic() + quiet
+        while time.monotonic() < deadline:
+            self._pump_one(deadline)
+        dropped = [u for _, u in self.urcs]
+        self.urcs.clear()
+        return dropped

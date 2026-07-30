@@ -90,5 +90,43 @@ class TestResultMapping(unittest.TestCase):
         self.assertEqual(lines, ["+MTVER:0.1.0"])
 
 
+class TestUrcQueue(unittest.TestCase):
+    def test_await_urc_from_queue(self):
+        link, _ = link_with_reply(b"")
+        link.urcs.append((0.0, "+MTEVT:3"))
+        self.assertEqual(link.await_urc(r"\+MTEVT:3", timeout=0.05), "+MTEVT:3")
+        self.assertEqual(link.urcs, [])
+
+    def test_await_urc_from_wire(self):
+        link, ft = link_with_reply(b"")
+        ft.rx = b"+MTATTR:1,6,0,1\r\n"
+        self.assertEqual(link.await_urc(r"\+MTATTR:1,6,0,\d", timeout=0.2),
+                         "+MTATTR:1,6,0,1")
+
+    def test_await_urc_timeout_returns_none(self):
+        link, _ = link_with_reply(b"")
+        self.assertIsNone(link.await_urc(r"\+MTREADY", timeout=0.05))
+
+    def test_await_urc_queues_non_matching(self):
+        link, ft = link_with_reply(b"")
+        ft.rx = b"+MTEVT:10,1\r\n+MTREADY\r\n"
+        self.assertEqual(link.await_urc(r"\+MTREADY", timeout=0.2), "+MTREADY")
+        self.assertEqual([u for _, u in link.urcs], ["+MTEVT:10,1"])
+
+    def test_assert_no_urc(self):
+        link, ft = link_with_reply(b"")
+        self.assertTrue(link.assert_no_urc(r"\+MTREADY", 0.05))
+        ft.rx = b"+MTREADY\r\n"
+        self.assertFalse(link.assert_no_urc(r"\+MTREADY", 0.2))
+
+    def test_drain_empties_queue_and_wire(self):
+        link, ft = link_with_reply(b"")
+        link.urcs.append((0.0, "+MTEVT:0"))
+        ft.rx = b"+MTEVT:18,1\r\n"
+        dropped = link.drain(quiet=0.05)
+        self.assertEqual(dropped, ["+MTEVT:0", "+MTEVT:18,1"])
+        self.assertEqual(link.urcs, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
