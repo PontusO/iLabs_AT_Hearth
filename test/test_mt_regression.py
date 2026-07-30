@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -612,6 +613,119 @@ class TestPhase2Gate(unittest.TestCase):
             self.assertIsNone(phase2_gate(chip, self._args()))
         self.assertEqual(runner.calls[0][0][1:3],
                          ["payload", "parse-setup-payload"])
+
+
+from mt_regression import (step_2_1_factory_fresh, step_2_2_codes_stable,
+                           step_cleanup_factory_fresh)
+
+
+class FakeLink:
+    """ATLink double for Phase 2 step tests: scripted command replies
+    (dict cmd -> (res, lines), or a list of those for sequential calls)
+    and a scripted URC stream whose timestamps encode wire order."""
+
+    def __init__(self, commands=None, urcs=None):
+        self.commands = dict(commands or {})
+        self.urcs = list(urcs or [])
+        self.urc_queue = []
+        self.sent = []
+
+    def command(self, cmd, expect=None, timeout=None):
+        self.sent.append(cmd)
+        v = self.commands.get(cmd, (0, []))
+        if isinstance(v, list):
+            v = v.pop(0) if v else (-2, [])
+        # Repopulate URCs after AT+MTRESET to simulate device reboot
+        if cmd == "AT+MTRESET":
+            self.urc_queue = [(float(i), u) for i, u in enumerate(self.urcs)]
+        return v
+
+    def await_urc_ts(self, pattern, timeout=5.0):
+        rx = re.compile(pattern)
+        for i, (ts, u) in enumerate(self.urc_queue):
+            if rx.search(u):
+                return self.urc_queue.pop(i)
+        return None
+
+    def await_urc(self, pattern, timeout=5.0):
+        got = self.await_urc_ts(pattern, timeout)
+        return got[1] if got is not None else None
+
+    def assert_no_urc(self, pattern, window):
+        return self.await_urc(pattern, window) is None
+
+    def drain(self, quiet=0.2):
+        dropped = [u for _, u in self.urc_queue]
+        self.urc_queue.clear()
+        return dropped
+
+
+CODES = ("+MTCODES:MT:Y.K9042C00KA0648G00,34970112332", )
+
+
+def fresh_ctx(link, chip=None, storage=None):
+    opts = types.SimpleNamespace(node_id=0x4845, ssid="net", psk="secret",
+                                 storage=storage)
+    return Phase2Context(link=link, chip=chip, suite=Suite(), opts=opts)
+
+
+class TestStep21(unittest.TestCase):
+    HAPPY = {
+        "AT+MTCODES?": (0, list(CODES)),
+        "AT+MTRESET": (0, []),
+        "AT+MTFABRICS?": (0, ["+MTFABRICS:0"]),
+        "AT+MTSTATE?": (0, ["+MTSTATE:1,0"]),
+    }
+
+    def test_happy_path_scores_all(self):
+        link = FakeLink(self.HAPPY, urcs=["+MTREADY", "+MTEVT:0"])
+        ctx = fresh_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_1_factory_fresh(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual(ctx.qr, "MT:Y.K9042C00KA0648G00")
+        self.assertEqual(ctx.manual, "34970112332")
+
+    def test_no_ready_aborts(self):
+        link = FakeLink(self.HAPPY, urcs=[])
+        ctx = fresh_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_1_factory_fresh(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep22(unittest.TestCase):
+    def test_codes_must_match_capture(self):
+        link = FakeLink({"AT+MTCODES?": (0, list(CODES))})
+        ctx = fresh_ctx(link)
+        ctx.qr, ctx.manual = "MT:Y.K9042C00KA0648G00", "34970112332"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_2_codes_stable(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_changed_codes_fail(self):
+        link = FakeLink({"AT+MTCODES?": (0, ["+MTCODES:MT:XX,00000000000"])})
+        ctx = fresh_ctx(link)
+        ctx.qr, ctx.manual = "MT:Y.K9042C00KA0648G00", "34970112332"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_2_codes_stable(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestCleanupStep(unittest.TestCase):
+    def test_cleanup_resets_and_wipes(self):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "chip_tool_config.ini"), "w").close()
+            chip = ChipTool("/bin/chip-tool", d)
+            link = FakeLink({"AT+MTRESET": (0, []),
+                             "AT+MTFABRICS?": (0, ["+MTFABRICS:0"])},
+                            urcs=["+MTREADY"])
+            ctx = fresh_ctx(link, chip=chip)
+            with contextlib.redirect_stdout(io.StringIO()):
+                step_cleanup_factory_fresh(ctx)
+            self.assertEqual(ctx.suite.failed, 0)
+            self.assertEqual(os.listdir(d), [])
 
 
 if __name__ == "__main__":

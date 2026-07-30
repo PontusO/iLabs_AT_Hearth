@@ -224,6 +224,66 @@ class Phase2Context:
         self.node_id = getattr(opts, "node_id", 0x4845)
 
 
+def step_2_1_factory_fresh(ctx):
+    """TESTING.md 2.1. Captures the codes first because 2.2 compares
+    against the pre-reset value, then drains so a stale boot URC cannot
+    satisfy the post-reset awaits."""
+    link, s = ctx.link, ctx.suite
+    res, lines = link.command("AT+MTCODES?")
+    if res == 0 and lines:
+        m = re.fullmatch(r"\+MTCODES:(.+),(\d{11})", lines[0])
+        if m:
+            ctx.qr, ctx.manual = m.group(1), m.group(2)
+    if not s.check("2.1 codes captured before reset", ctx.qr is not None,
+                   tag="P2"):
+        raise StepAbort("cannot capture onboarding codes")
+    link.drain(0.3)
+    res, _ = cmd_retry(link, "AT+MTRESET", timeout=5.0)
+    ok = s.check("2.1 MTRESET -> OK", res == 0, tag="P2")
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    s.check("2.1 +MTREADY within 15 s", ready is not None, tag="P2")
+    if not ok or ready is None:
+        raise StepAbort("device did not come back from AT+MTRESET")
+    s.check("2.1 +MTEVT:0 after reboot",
+            link.await_urc(r"\+MTEVT:0$", timeout=15.0) is not None,
+            tag="P2")
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    s.check("2.1 fabrics 0", res == 0 and lines == ["+MTFABRICS:0"],
+            tag="P2")
+    res, lines = cmd_retry(link, "AT+MTSTATE?")
+    s.check("2.1 state 1 (window open)",
+            res == 0 and lines == ["+MTSTATE:1,0"], tag="P2")
+
+
+def step_2_2_codes_stable(ctx):
+    """TESTING.md 2.2: the codes derive from provisioned commissionable
+    data, so a factory reset must not change them."""
+    link, s = ctx.link, ctx.suite
+    res, lines = cmd_retry(link, "AT+MTCODES?")
+    want = ["+MTCODES:%s,%s" % (ctx.qr, ctx.manual)]
+    s.check("2.2 codes unchanged by reset", res == 0 and lines == want,
+            tag="P2")
+
+
+def step_cleanup_factory_fresh(ctx):
+    """T2 addition (design spec section 4): leave the bench in the
+    documented factory-fresh state and scored, because a cleanup that
+    fails leaves a bench that lies to the next run."""
+    link, s = ctx.link, ctx.suite
+    link.drain(0.3)
+    res, _ = cmd_retry(link, "AT+MTRESET", timeout=5.0)
+    s.check("cleanup MTRESET -> OK", res == 0, tag="P2")
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    s.check("cleanup +MTREADY within 15 s", ready is not None, tag="P2")
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    s.check("cleanup fabrics 0", res == 0 and lines == ["+MTFABRICS:0"],
+            tag="P2")
+    if ctx.chip is not None:
+        ctx.chip.wipe_storage()
+        s.check("cleanup storage wiped",
+                not os.listdir(ctx.chip.storage_dir), tag="P2")
+
+
 PHASE2_STEPS = []  # populated bottom-of-module once the steps exist
 
 
@@ -743,6 +803,13 @@ def register_phase1_negative():
 
 
 register_phase1_negative()
+
+
+PHASE2_STEPS[:] = [
+    ("2.1 factory-fresh baseline", step_2_1_factory_fresh),
+    ("2.2 onboarding codes stable", step_2_2_codes_stable),
+    ("cleanup factory-fresh", step_cleanup_factory_fresh),
+]
 
 
 def main(argv=None):
