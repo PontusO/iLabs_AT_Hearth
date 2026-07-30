@@ -628,10 +628,12 @@ class FakeLink:
     URCs immediately (for tests that skip AT+MTRESET); otherwise URCs arrive
     only after drain() or AT+MTRESET (preserves test fidelity)."""
 
-    def __init__(self, commands=None, urcs=None, stale_urcs=None, no_reset=False):
+    def __init__(self, commands=None, urcs=None, stale_urcs=None, no_reset=False,
+                 urcs_after_drain=None):
         self.commands = dict(commands or {})
         self.urcs = list(urcs or [])
         self.stale_urcs = list(stale_urcs or [])
+        self.urcs_after_drain = list(urcs_after_drain or [])
         self.no_reset = no_reset
         # Seed queue with stale URCs at low timestamps (0, 1, ...)
         self.urc_queue = [(float(i), u) for i, u in enumerate(self.stale_urcs)]
@@ -639,6 +641,8 @@ class FakeLink:
         self.needs_drain = bool(self.stale_urcs)
         # Track whether fresh URCs have been added to avoid duplicates
         self.fresh_urcs_added = False
+        # Track whether urcs_after_drain have been released
+        self.urcs_after_drain_released = False
         # Only seed fresh URCs immediately when no_reset=True (explicit opt-in)
         if no_reset and not self.stale_urcs and self.urcs:
             start_ts = max((ts for ts, _ in self.urc_queue), default=-1.0) + 1.0
@@ -677,17 +681,17 @@ class FakeLink:
         return self.await_urc(pattern, window) is None
 
     def drain(self, quiet=0.2):
-        # In no_reset mode, preserve fresh URCs; only clear when we had stale URCs to drain
-        if self.needs_drain or not self.no_reset:
-            dropped = [u for _, u in self.urc_queue]
-            self.urc_queue.clear()
-        else:
-            dropped = []
+        # Always clear the queue: honest drain() semantics
+        dropped = [u for _, u in self.urc_queue]
+        self.urc_queue.clear()
         self.needs_drain = False  # Drain satisfies the requirement
-        # Only reset fresh_urcs_added if we're not in no_reset mode; in no_reset mode,
-        # the URCs should survive drain() and be re-used by await_urc() calls
-        if not self.no_reset:
-            self.fresh_urcs_added = False  # Reset so AT+MTRESET can add them again
+        self.fresh_urcs_added = False  # Reset so AT+MTRESET can add them again
+        # Release urcs_after_drain on the first drain() call
+        if self.urcs_after_drain and not self.urcs_after_drain_released:
+            start_ts = max((ts for ts, _ in self.urc_queue), default=-1.0) + 1.0
+            self.urc_queue.extend([(start_ts + float(i), u)
+                                   for i, u in enumerate(self.urcs_after_drain)])
+            self.urcs_after_drain_released = True
         return dropped
 
 
@@ -934,7 +938,7 @@ class TestStep25(unittest.TestCase):
         link = FakeLink({
             "AT+MTATTR=1,6,0,1": (0, []),
             "AT+MTATTR=1,6,0": [(0, [r]) for r in reads],
-        }, urcs=urcs, no_reset=True)
+        }, urcs_after_drain=urcs)
         d = tempfile.mkdtemp()
         chip = ChipTool("/bin/chip-tool", d, runner=runner)
         return fresh_ctx(link, chip=chip)
