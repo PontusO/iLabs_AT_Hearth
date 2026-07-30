@@ -126,12 +126,17 @@ static int cmd_mtfabrics(at_type_t type, char *args)
  * AT+MTCOMMISSION[=<timeout_s>] -> open a basic commissioning window.
  * Default 300 s. Progress is reported by the commissioning event bits (0, 3, 5),
  * which are in the default event mask, from the platform event callback.
+ *
+ * The floor is 180 s because CHIP enforces the Matter 3-minute minimum
+ * announcement duration (CommissioningWindowManager::MinCommissioningTimeout).
+ * This check used to allow 30, so 30..179 passed here and then failed inside
+ * CHIP with a bare ERROR and a spurious +MTEVT:4 from the cleanup path.
  */
 static int cmd_mtcommission(at_type_t type, char *args)
 {
     unsigned timeout = 300;
     if (type == AT_SET) {
-        if (!at_parse_uint(args, &timeout) || timeout < 30 || timeout > 900) {
+        if (!at_parse_uint(args, &timeout) || timeout < 180 || timeout > 900) {
             return MT_ERR_BAD_PARAM;
         }
     } else if (type != AT_EXEC) {

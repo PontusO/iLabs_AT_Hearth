@@ -260,7 +260,7 @@ opens, so they are state-safe):
 
 | Command | Expected |
 |---|---|
-| `AT+MTCOMMISSION=29` | `+MTERR:1` (below the 30 s minimum) |
+| `AT+MTCOMMISSION=179` | `+MTERR:1` (below the 180 s minimum) |
 | `AT+MTCOMMISSION=901` | `+MTERR:1` (above the 900 s maximum) |
 | `AT+MTCOMMISSION=abc` | `+MTERR:1` (not an integer) |
 | `AT+MTCOMMISSION=` | `+MTERR:1` (empty argument) |

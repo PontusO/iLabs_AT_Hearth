@@ -2,13 +2,13 @@
   "header": {
     "at_core_repo_head": "11c9935ea392b62c0a9c84c5197483aa1fee41ef",
     "cgmr": "0.1.0",
-    "fw_repo_head": "1c428718e33008e832832d4083978d9c366ab61c",
+    "fw_repo_head": "bb5101f61210461eb202a68fa089fe4d095b3785",
     "manual_code": "34970112332",
     "net": "+MTNET:WIFI,1,0,0",
-    "port": "/dev/ttyACM0",
+    "port": "/dev/ttyACM2",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-07-30T11:49:29+00:00",
+    "timestamp": "2026-07-30T13:14:20+00:00",
     "transport": "WIFI"
   },
   "results": {
@@ -44,7 +44,7 @@
     "MTCODES? format": "PASS",
     "MTCODES? stable across reads": "PASS",
     "MTCOMMISSION= -> +MTERR:1": "PASS",
-    "MTCOMMISSION=29 -> +MTERR:1": "PASS",
+    "MTCOMMISSION=179 -> +MTERR:1": "PASS",
     "MTCOMMISSION=300x -> +MTERR:1": "PASS",
     "MTCOMMISSION=901 -> +MTERR:1": "PASS",
     "MTCOMMISSION=abc -> +MTERR:1": "PASS",

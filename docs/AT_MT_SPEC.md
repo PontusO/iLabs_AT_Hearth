@@ -89,7 +89,12 @@ firmware revision (= `AT+MTVER?`'s first field).
 ### 3.5 `AT+MTCOMMISSION[=<timeout_s>]`
 Opens a **basic commissioning window** (BLE + DNS-SD advertising) so a
 controller can commission (or additionally commission) the device.
-- `<timeout_s>`: optional window lifetime, 30–900 s (default 300).
+- `<timeout_s>`: optional window lifetime, 180–900 s (default 300). The floor
+  is Matter's 3-minute minimum announcement duration, which CHIP enforces
+  (`CommissioningWindowManager::MinCommissioningTimeout`); values below it are
+  rejected with `+MTERR:1`. Until 2026-07-30 this spec said 30, which the AT
+  layer accepted and CHIP then refused at runtime, so 30–179 returned a bare
+  `ERROR` plus a spurious `+MTEVT:4`.
 - Returns `OK` once the window request is accepted.
 - Progress is reported asynchronously via the commissioning event bits 0, 3 and 5 (§3.11), which are in the default event mask.
 - Note: a factory-fresh device opens a window automatically at boot; this
@@ -315,6 +320,16 @@ part of the commissioning group. Any future boot-only event must join it.
 | 28–31 | Reserved | |
 
 Bits `10`, `11` and `24` carry a `<detail>` of `1` or `0` for up and down.
+
+Events `0` and `4` are a **pair**: exactly one `+MTEVT:4` is raised per
+`+MTEVT:0` the host actually received, at the moment the window truly ends
+(commissioning complete, window timeout, or the 20-failed-attempts limit).
+CHIP's underlying "window closed" callback really means "stopped advertising
+for PASE", and it also fires when a commissioner establishes a session (the
+window is paused, not gone) and when a failed open cleans up a window that
+never existed. Both are deliberately suppressed. Before 2026-07-30 both
+leaked through: a successful commissioning showed two `+MTEVT:4`, and a
+failed `AT+MTCOMMISSION` showed one with no matching `+MTEVT:0`.
 
 Thread bits are **allocated but never emitted on a WiFi image**: transport is a
 build-time choice (§3.12), and a host may subscribe to them harmlessly. Fixing
