@@ -128,5 +128,39 @@ class TestUrcQueue(unittest.TestCase):
         self.assertEqual(link.urcs, [])
 
 
+class TestEchoAndRaw(unittest.TestCase):
+    def test_echo_line_skipped_and_counted(self):
+        link, _ = link_with_reply(b"AT+MTVER?\r\n+MTVER:0.1.0\r\nOK\r\n")
+        link.echo = True
+        res, lines = link.command("AT+MTVER?")
+        self.assertEqual(res, 0)
+        self.assertEqual(lines, ["+MTVER:0.1.0"])
+        self.assertEqual(link.echo_seen, 1)
+
+    def test_echo_off_leaves_counter(self):
+        link, _ = link_with_reply(b"+MTVER:0.1.0\r\nOK\r\n")
+        res, _ = link.command("AT+MTVER?")
+        self.assertEqual(res, 0)
+        self.assertEqual(link.echo_seen, 0)
+
+    def test_raw_bare_cr_times_out(self):
+        link, ft = link_with_reply(b"")
+        res, _ = link.raw(b"\r", timeout=0.05)
+        self.assertEqual(res, -2)
+        self.assertEqual(ft.tx, b"\r")
+
+    def test_raw_with_terminator_variants(self):
+        for term in (b"\r", b"\n", b"\r\n"):
+            link, ft = link_with_reply(b"OK\r\n")
+            res, _ = link.raw(b"AT" + term)
+            self.assertEqual(res, 0, term)
+            self.assertEqual(ft.tx, b"AT" + term)
+
+    def test_raw_overlong_line_bare_error(self):
+        link, _ = link_with_reply(b"ERROR\r\n")
+        res, _ = link.raw(b"AT+MT" + b"X" * 600 + b"\r\n", timeout=0.2)
+        self.assertEqual(res, -1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

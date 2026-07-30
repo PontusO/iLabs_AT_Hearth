@@ -68,6 +68,13 @@ class ATLink:
         deadline = time.monotonic() + (timeout or self.default_timeout)
         return self._collect(cmd, expect, deadline)
 
+    def raw(self, data, timeout=0.5, echo_of=None, expect=None):
+        """Send bytes exactly as given (terminator included by the caller)
+        and collect a response. This is how the bare-CR, overlong-line and
+        terminator-variant grammar cases reach the parser unmangled."""
+        self.t.write(data)
+        return self._collect(echo_of, expect, time.monotonic() + timeout)
+
     def _collect(self, echo_of, expect, deadline):
         lines = []
         err = None
