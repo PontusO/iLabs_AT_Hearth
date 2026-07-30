@@ -160,11 +160,27 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         }
         break;
     case DeviceEventType::kCommissioningWindowClosed:
-        /* Arm the next window to be reported: without this the flag latches and
-         * a window reopened later (AT+MTCOMMISSION, or a transport mismatch)
-         * would be silent. */
-        s_window_evt_sent = false;
-        mt_at_event(MT_EVT_COMMISSION_WINDOW_CLOSED, nullptr);
+        /* CHIP raises this whenever it stops advertising for PASE, which is
+         * three different moments: a commissioner established a session (the
+         * window still open, only paused to new commissioners), the window
+         * genuinely ended (completion, timeout, or the 20-attempt limit), and
+         * a failed open cleaning up a window that never existed. The host
+         * contract is one +MTEVT:4 per reported +MTEVT:0, at the moment the
+         * window is really gone, so gate on both. The window manager is asked
+         * directly rather than via mt_matter_state(): this callback runs on
+         * the CHIP task and must not take the stack lock. */
+        {
+            const bool still_open = chip::Server::GetInstance()
+                .GetCommissioningWindowManager().IsCommissioningWindowOpen();
+            ESP_LOGI(TAG, "Commissioning window closed event (reported=%d, still_open=%d)",
+                     (int)s_window_evt_sent, (int)still_open);
+            if (s_window_evt_sent && !still_open) {
+                /* Cleared even if the URC is masked out: the window is gone,
+                 * and the next one must be reported as a fresh +MTEVT:0. */
+                s_window_evt_sent = false;
+                mt_at_event(MT_EVT_COMMISSION_WINDOW_CLOSED, nullptr);
+            }
+        }
         break;
     case DeviceEventType::kCommissioningSessionStarted:
         ESP_LOGI(TAG, "Commissioning session started");

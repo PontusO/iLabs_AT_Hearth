@@ -464,7 +464,7 @@ def register_phase1_negative():
     n("MTATTR (exec) -> ERROR", expect_err("AT+MTATTR", -1))
 
     # MTCOMMISSION range and parse guards, all state-safe
-    n("MTCOMMISSION=29 -> +MTERR:1", commission_rejected_stateless("29"))
+    n("MTCOMMISSION=179 -> +MTERR:1", commission_rejected_stateless("179"))
     n("MTCOMMISSION=901 -> +MTERR:1", commission_rejected_stateless("901"))
     n("MTCOMMISSION=abc -> +MTERR:1", commission_rejected_stateless("abc"))
     n("MTCOMMISSION= -> +MTERR:1", commission_rejected_stateless(""))
