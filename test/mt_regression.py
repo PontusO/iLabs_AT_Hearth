@@ -364,6 +364,7 @@ def register_phase1_positive():
                                    line_re=r"\+MTSTATE:[012],\d+"))
     p("MTFABRICS? format", expect_ok("AT+MTFABRICS?",
                                      line_re=r"\+MTFABRICS:\d+"))
+    p("MTSTATE agrees with MTFABRICS", t_state_fabrics_consistent)
     p("MTCODES? format", expect_ok(
         "AT+MTCODES?", line_re=r"\+MTCODES:MT:[0-9A-Z.\-]+,\d{11}"))
     p("MTCODES? stable across reads", t_codes_stable)
