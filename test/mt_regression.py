@@ -199,7 +199,28 @@ def repo_head(path):
 
 
 def phase0(link, header):
-    """Filled in by a later task. Returns an abort message or None."""
+    """Link preflight per TESTING.md 5. A hard gate, not a scored test:
+    if this fails, the rest of the report is noise. Returns an abort
+    message, or None when the link is usable."""
+    link.drain(0.3)
+    if link.command("AT", timeout=1.0)[0] != 0:
+        return ("AT does not answer OK within 1 s: dead parser task, wrong "
+                "port, or the console stream instead of the AT stream")
+    res, lines = link.command("AT+CGMM")
+    model = lines[0] if lines else ""
+    if res != 0 or not model:
+        return "AT+CGMM gave no model string"
+    if "ESP-NOW" in model:
+        return ("wrong personality: this board runs the ESP-NOW firmware; "
+                "reflash Hearth with python3 fw/flash.py --build-dir "
+                "build_b4 --port <port> --bridge espnow")
+    if model != "ESP32-C6 Hearth":
+        return "unexpected model: %r" % model
+    res, lines = link.command("AT+CGMR")
+    if res != 0 or not lines:
+        return "AT+CGMR failed"
+    header["cgmr"] = lines[0]
+    print("  [GATE] preflight ok: %s, firmware %s" % (model, lines[0]))
     return None
 
 

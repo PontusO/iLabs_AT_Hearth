@@ -164,7 +164,7 @@ class TestEchoAndRaw(unittest.TestCase):
         self.assertEqual(res, -1)
 
 
-from mt_regression import Suite, capture_header, write_baseline
+from mt_regression import Suite, capture_header, write_baseline, phase0
 
 
 class TestSuite(unittest.TestCase):
@@ -203,6 +203,37 @@ class TestBaseline(unittest.TestCase):
         self.assertEqual(data["header"]["port"], "/dev/null")
         self.assertEqual(data["results"]["MTVER? emits +MTVER:"], "PASS")
         self.assertEqual(data["results"]["MTCOMMISSION=901 -> +MTERR:1"], "FAIL")
+
+
+def scripted_link(replies):
+    link, _ = link_with_reply(b"")
+    link.default_timeout = 0.2
+    link.t.on_write = lambda d: replies.get(d, b"ERROR\r\n")
+    return link
+
+
+class TestPhase0(unittest.TestCase):
+    HEALTHY = {
+        b"AT\r\n": b"OK\r\n",
+        b"AT+CGMM\r\n": b"ESP32-C6 Hearth\r\nOK\r\n",
+        b"AT+CGMR\r\n": b"0.1.0\r\nOK\r\n",
+    }
+
+    def test_healthy_device_passes(self):
+        header = {}
+        self.assertIsNone(phase0(scripted_link(self.HEALTHY), header))
+        self.assertEqual(header["cgmr"], "0.1.0")
+
+    def test_wrong_personality_named(self):
+        replies = dict(self.HEALTHY)
+        replies[b"AT+CGMM\r\n"] = b"ESP32-C6 ESP-NOW\r\nOK\r\n"
+        problem = phase0(scripted_link(replies), {})
+        self.assertIn("personality", problem)
+        self.assertIn("flash.py", problem)
+
+    def test_dead_link_aborts(self):
+        problem = phase0(scripted_link({}), {})
+        self.assertIn("AT", problem)
 
 
 if __name__ == "__main__":
