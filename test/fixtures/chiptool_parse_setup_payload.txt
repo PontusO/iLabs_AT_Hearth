@@ -1,0 +1,9 @@
+[0;34m[1785427165.042] [948756:948756] [DL] ChipLinuxStorage::Init: Using KVS config file: /tmp/chip_tool_kvs[0m
+[0;34m[1785427165.042] [948756:948756] [SPL] Parsing base38Representation: MT:Y.K9042C00KA0648G00[0m
+[0;32m[1785427165.042] [948756:948756] [SPL] Version:             0[0m
+[0;32m[1785427165.042] [948756:948756] [SPL] VendorID:            65521[0m
+[0;32m[1785427165.042] [948756:948756] [SPL] ProductID:           32768[0m
+[0;32m[1785427165.042] [948756:948756] [SPL] Custom flow:         0    (STANDARD)[0m
+[0;32m[1785427165.042] [948756:948756] [SPL] Discovery Bitmask:   0x02 (BLE)[0m
+[0;32m[1785427165.042] [948756:948756] [SPL] Long discriminator:  3840   (0xf00)[0m
+[0;32m[1785427165.042] [948756:948756] [SPL] Passcode:            20202021[0m
