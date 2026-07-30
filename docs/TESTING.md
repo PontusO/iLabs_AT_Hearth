@@ -488,6 +488,7 @@ what they say.
 | Symptom | Likely cause |
 |---|---|
 | Phase 0 aborts on `AT+CGMM` | Wrong personality flashed (ESP-NOW firmware on the board), or the RP2350 bridge is not running. |
+| Phase 0 aborts on the very first `AT` right after a reflash or bridge reboot | Settling: the first command after a reboot can time out once. Re-run before investigating; the parser task needs a moment after the bridge re-enumerates. |
 | All of Phase 1 fails, Phase 0 passed | An `at_core` grammar/dispatch regression. Run the ESP-NOW RegressionSuite: if its Phase 1 also fails, the bug is in `at_core`, not in `mt_at.c`. |
 | One named Phase 1 test fails | Its name points at the command. Compare against the JSON baseline. |
 | 2.3 fails with `chip-tool` timing out on BLE | BlueZ busy or the adapter is claimed by another process. Restart `bluetooth.service` and re-run. |
@@ -531,7 +532,9 @@ T1 is worth having on its own: it is the part that runs after every edit to
   phase here.
 - **`AT+MTOTA` is unimplemented** (spec §8), so the firmware-update path in
   `FIRMWARE_UPDATE_SPEC.md` is untested by this suite.
-- **Thread is not built**, so the commissioning matrix is WiFi + BLE only.
+- **Thread is built** (hardware-verified 2026-07-29) and Phase 1 runs on both
+  images with committed baselines. Phase 2's commissioning matrix is still
+  WiFi + BLE only; `chip-tool pairing ble-thread` cases are unwritten.
 - **Non-integer attributes** are unsupported by design and are only tested for
   correct rejection (`+MTERR:5`), not for behaviour. `AT+MTATTRX` will need its
   own cases when it lands.

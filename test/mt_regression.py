@@ -180,6 +180,8 @@ TESTS = []
 
 
 def add_test(phase, name, fn, tag="AT+", slow=False):
+    if any(p == phase and n == name for p, n, _, _, _ in TESTS):
+        raise ValueError("duplicate test name in phase %r: %r" % (phase, name))
     TESTS.append((phase, name, tag, fn, slow))
 
 
@@ -210,16 +212,21 @@ def expect_err(cmd, want, expect=None):
 
 def t_echo_on_off(link):
     """ATE1 then ATE0, echo observed on and off. link.echo is managed
-    here, not inside ATLink, so the harness never guesses device state."""
+    here, not inside ATLink, so the harness never guesses device state.
+    Every failure path after ATE1 succeeds sends a best-effort ATE0 first,
+    so one failed check does not leave the device echoing for the rest of
+    the run."""
     if link.command("ATE1")[0] != 0:
         return False
     link.echo = True
     before = link.echo_seen
     if link.command("AT")[0] != 0 or link.echo_seen <= before:
         link.echo = False
+        link.command("ATE0")
         return False
     if link.command("ATE0")[0] != 0:
         link.echo = False
+        link.command("ATE0")
         return False
     link.echo = False
     before = link.echo_seen
@@ -551,6 +558,8 @@ def main(argv=None):
             capture_header(link, header)
     except KeyboardInterrupt:
         print("\n(interrupted)")
+    except Exception as exc:
+        print("(link lost: %s)" % exc)
     finally:
         port.close()
     suite.summary()

@@ -153,3 +153,8 @@ comparison in T1.
   (TESTING.md T4).
 - TESTING.md §11 notes "Thread is not built"; that is stale since 2026-07-29
   but correcting TESTING.md is a docs task, not part of this harness change.
+- T2 must resolve an ATLink classification ambiguity Phase 1 never hits:
+  during a write like `AT+MTATTR=1,6,0,1` (expect prefix `+MTATTR:`), an
+  unsolicited controller-driven `+MTATTR:...` URC arriving before the
+  terminal `OK` is absorbed into the command's response lines instead of
+  the URC queue. Phase 2.4/2.5 will hit this on the first write test.
