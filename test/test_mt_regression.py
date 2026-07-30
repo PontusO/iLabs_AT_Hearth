@@ -16,7 +16,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mt_regression import ATLink
+from mt_regression import ATLink, cmd_retry
 
 
 class FakeTransport:
@@ -515,6 +515,57 @@ class TestSubscriber(unittest.TestCase):
                         "time.sleep(30)"]
             self.assertTrue(sub.start(settle=5.0))
             sub.stop()
+
+
+class TestAwaitUrcTs(unittest.TestCase):
+    def test_order_is_preserved_via_timestamps(self):
+        link, _ = link_with_reply(b"")
+        link.urcs = [(10.0, "+MTEVT:4"), (20.0, "+MTEVT:3")]
+        got3 = link.await_urc_ts(r"\+MTEVT:3$", timeout=0.1)
+        got4 = link.await_urc_ts(r"\+MTEVT:4$", timeout=0.1)
+        self.assertEqual(got3, (20.0, "+MTEVT:3"))
+        self.assertEqual(got4, (10.0, "+MTEVT:4"))
+        # the out-of-order arrival is visible to the caller:
+        self.assertLess(got4[0], got3[0])
+
+    def test_await_urc_still_returns_line_only(self):
+        link, _ = link_with_reply(b"")
+        link.urcs = [(1.0, "+MTEVT:0")]
+        self.assertEqual(link.await_urc(r"\+MTEVT:0$", timeout=0.1),
+                         "+MTEVT:0")
+
+
+class TestCmdRetry(unittest.TestCase):
+    def test_retries_once_on_timeout(self):
+        class OneShotDeaf:
+            """First command gets nothing, second gets OK: the documented
+            post-reboot settling quirk (graph N22)."""
+
+            def __init__(self):
+                self.calls = 0
+
+            def command(self, cmd, expect=None, timeout=None):
+                self.calls += 1
+                return (0, ["+MTFABRICS:0"]) if self.calls > 1 else (-2, [])
+
+        link = OneShotDeaf()
+        self.assertEqual(cmd_retry(link, "AT+MTFABRICS?"),
+                         (0, ["+MTFABRICS:0"]))
+        self.assertEqual(link.calls, 2)
+
+    def test_no_retry_on_success_or_error(self):
+        class Counting:
+            def __init__(self, res):
+                self.res, self.calls = res, 0
+
+            def command(self, cmd, expect=None, timeout=None):
+                self.calls += 1
+                return self.res, []
+
+        for res in (0, 1, -1):
+            link = Counting(res)
+            cmd_retry(link, "AT")
+            self.assertEqual(link.calls, 1)
 
 
 if __name__ == "__main__":
