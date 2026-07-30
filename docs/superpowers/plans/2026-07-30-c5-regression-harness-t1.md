@@ -993,6 +993,7 @@ def register_phase1_positive():
                                    line_re=r"\+MTSTATE:[012],\d+"))
     p("MTFABRICS? format", expect_ok("AT+MTFABRICS?",
                                      line_re=r"\+MTFABRICS:\d+"))
+    p("MTSTATE agrees with MTFABRICS", t_state_fabrics_consistent)
     p("MTCODES? format", expect_ok(
         "AT+MTCODES?", line_re=r"\+MTCODES:MT:[0-9A-Z.\-]+,\d{11}"))
     p("MTCODES? stable across reads", t_codes_stable)
@@ -1030,7 +1031,7 @@ Run: `python3 test/test_mt_regression.py`
 Expected: all 25 tests still PASS (this task adds device-facing tests, which only hardware can run; the self-test guards the helpers indirectly through Tasks 1 to 6).
 
 Also run: `python3 -c "import sys; sys.path.insert(0, 'test'); import mt_regression as m; print(len(m.TESTS))"`
-Expected: `20` (the positive registrations).
+Expected: `21` (the positive registrations).
 
 - [ ] **Step 3: Commit**
 
@@ -1173,7 +1174,7 @@ Run: `python3 test/test_mt_regression.py`
 Expected: all 25 tests PASS.
 
 Run: `python3 -c "import sys; sys.path.insert(0, 'test'); import mt_regression as m; print(len(m.TESTS))"`
-Expected: `66` (20 positive + 46 negative).
+Expected: `67` (21 positive + 46 negative).
 
 - [ ] **Step 3: Commit**
 
@@ -1207,7 +1208,7 @@ Expected: `free` (if a process holds it, stop that process first; do not proceed
 - [ ] **Step 2: First harness run, scored**
 
 Run: `python3 test/mt_regression.py --port /dev/ttyACM0`
-Expected: `[GATE] preflight ok: ESP32-C6 Hearth, firmware 0.1.0`, then 66 checks, `===== RESULT: 66 passed, 0 failed =====`, exit code 0 (`echo $?`).
+Expected: `[GATE] preflight ok: ESP32-C6 Hearth, firmware 0.1.0`, then 67 checks, `===== RESULT: 67 passed, 0 failed =====`, exit code 0 (`echo $?`).
 
 If any check fails: STOP and diagnose against TESTING.md §8 before touching the harness. A failure here is either a real firmware regression or a harness bug; systematic-debugging applies, and the GPIO2 console (via the espnow bridge) carries the firmware's side of the story.
 
@@ -1270,7 +1271,7 @@ Expected: `AT+MTRESET -> 0` then `ready: +MTREADY`.
 - [ ] **Step 3: Two harness runs, scored, then the baseline**
 
 Run twice: `python3 test/mt_regression.py --port /dev/ttyACM0`
-Expected both times: `===== RESULT: 66 passed, 0 failed =====`, exit 0. The device is now uncommissioned with a window auto-opened, so expect state 1 with fabric count 0 inside the consistency check, and `+MTNET:WIFI,...,0` as the last field (no mismatch after the reset).
+Expected both times: `===== RESULT: 67 passed, 0 failed =====`, exit 0. The device is now uncommissioned with a window auto-opened, so expect state 1 with fabric count 0 inside the consistency check, and `+MTNET:WIFI,...,0` as the last field (no mismatch after the reset).
 
 Then: `python3 test/mt_regression.py --port /dev/ttyACM0 --baseline test/baselines/wifi.json`
 
