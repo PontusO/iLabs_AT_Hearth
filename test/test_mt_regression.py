@@ -470,5 +470,52 @@ class TestChipToolParsers(unittest.TestCase):
         self.assertEqual(parse_onoff_reports(text), [1, 0])
 
 
+from mt_regression import Subscriber
+
+
+class TestSubscriber(unittest.TestCase):
+    def _chip(self, d):
+        return ChipTool("/bin/chip-tool", d)
+
+    def test_argv_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = Subscriber(self._chip(d), 0x4845)
+        self.assertEqual(sub.argv[:8],
+                         ["/bin/chip-tool", "onoff", "subscribe", "on-off",
+                          "0", "5", "0x4845", "1"])
+        self.assertIn("--storage-directory", sub.argv)
+
+    def test_reports_and_windows_from_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = Subscriber(self._chip(d), 0x4845)
+            with open(sub.out_path, "w") as f:
+                f.write("CHIP:TOO:   OnOff: TRUE\n")
+            self.assertEqual(sub.reports(), [1])
+            base = len(sub.reports())
+            self.assertFalse(sub.wait_new_report(base, 0.3))
+            self.assertTrue(sub.no_new_report(base, 0.3))
+            with open(sub.out_path, "a") as f:
+                f.write("CHIP:TOO:   OnOff: FALSE\n")
+            self.assertTrue(sub.wait_new_report(base, 0.5))
+
+    def test_start_detects_early_death(self):
+        """A subscriber whose process dies before the priming report is a
+        failed start, not a silent no-report generator."""
+        with tempfile.TemporaryDirectory() as d:
+            sub = Subscriber(self._chip(d), 0x4845)
+            sub.argv = [sys.executable, "-c", "raise SystemExit(1)"]
+            self.assertFalse(sub.start(settle=1.0))
+            sub.stop()
+
+    def test_start_sees_priming_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = Subscriber(self._chip(d), 0x4845)
+            sub.argv = [sys.executable, "-u", "-c",
+                        "import time; print('CHIP:TOO:   OnOff: TRUE');"
+                        "time.sleep(30)"]
+            self.assertTrue(sub.start(settle=5.0))
+            sub.stop()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

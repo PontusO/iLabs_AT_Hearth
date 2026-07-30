@@ -289,6 +289,77 @@ def parse_onoff_read(text):
     return vals[-1] if vals else None
 
 
+class Subscriber:
+    """Background `chip-tool onoff subscribe` (design spec section 2).
+
+    At most one instance alive, and no ChipTool.run() while it lives:
+    chip-tool's ini storage is not safe for two processes. Its stdout
+    goes to a file; parsing reads the file, so report observation works
+    the same whether the process is live (hardware) or the file is
+    written by a test."""
+
+    def __init__(self, chip, node_id, endpoint=1, min_s=0, max_s=5,
+                 popen=None):
+        self.chip = chip
+        self.argv = [chip.binary, "onoff", "subscribe", "on-off",
+                     str(min_s), str(max_s), "0x%X" % node_id,
+                     str(endpoint), "--timeout", "120",
+                     "--storage-directory", chip.storage_dir]
+        self.out_path = os.path.join(chip.storage_dir, "subscribe.log")
+        self._popen = popen or subprocess.Popen
+        self._proc = None
+        self._out = None
+
+    def start(self, settle=10.0):
+        """True once the priming report arrives, which is the proof the
+        subscription is live. False if the process dies first or the
+        settle window passes silently."""
+        os.makedirs(self.chip.storage_dir, exist_ok=True)
+        self._out = open(self.out_path, "wb")
+        self._proc = self._popen(self.argv, stdout=self._out,
+                                 stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + settle
+        while time.monotonic() < deadline:
+            if self.reports():
+                return True
+            if self._proc.poll() is not None:
+                return False
+            time.sleep(0.2)
+        return False
+
+    def reports(self):
+        try:
+            with open(self.out_path, "r", errors="replace") as f:
+                return parse_onoff_reports(f.read())
+        except OSError:
+            return []
+
+    def wait_new_report(self, count_before, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if len(self.reports()) > count_before:
+                return True
+            time.sleep(0.2)
+        return False
+
+    def no_new_report(self, count_before, window):
+        """The full window must pass with nothing new: this is 2.4's
+        mode-0 proof, so it deliberately waits the whole window."""
+        return not self.wait_new_report(count_before, window)
+
+    def stop(self):
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait(5)
+        if self._out is not None:
+            self._out.close()
+            self._out = None
+
+
 TESTS = []
 
 
