@@ -7,8 +7,14 @@ Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-des
 Run: python3 test/mt_regression.py --port /dev/ttyACM0
 """
 
+import argparse
+import json
+import os
 import re
+import subprocess
+import sys
 import time
+from datetime import datetime, timezone
 
 
 class ATLink:
@@ -146,3 +152,125 @@ class ATLink:
         dropped = [u for _, u in self.urcs]
         self.urcs.clear()
         return dropped
+
+
+class Suite:
+    """Scores and prints checks in the ESP-NOW RegressionSuite's format,
+    so the two rigs' reports read the same."""
+
+    def __init__(self):
+        self.results = []
+
+    def check(self, name, ok, tag="AT+"):
+        ok = bool(ok)
+        self.results.append((name, ok, tag))
+        print("  [%s] [%s] %s" % ("PASS" if ok else "FAIL", tag, name))
+        return ok
+
+    @property
+    def failed(self):
+        return sum(1 for _, ok, _ in self.results if not ok)
+
+    def summary(self):
+        passed = sum(1 for _, ok, _ in self.results if ok)
+        print("===== RESULT: %d passed, %d failed =====" % (passed, self.failed))
+
+
+TESTS = []
+
+
+def add_test(phase, name, fn, tag="AT+", slow=False):
+    TESTS.append((phase, name, tag, fn, slow))
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def repo_head(path):
+    """HEAD of a git repo, or None when unresolvable. Both this repo and
+    the at_core repo go into the baseline header: at_core is compiled in
+    cross-repo, so bisecting a regression needs both hashes."""
+    try:
+        out = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or None
+    except OSError:
+        return None
+
+
+def phase0(link, header):
+    """Filled in by a later task. Returns an abort message or None."""
+    return None
+
+
+def capture_header(link, header):
+    """Filled in by a later task."""
+
+
+def write_baseline(path, header, suite):
+    """Filled in by a later task."""
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--port", default=os.environ.get("MT_PORT", "/dev/ttyACM0"))
+    ap.add_argument("--phase", type=int, choices=[0, 1], default=None,
+                    help="run only this phase (0 runs just the preflight gate)")
+    ap.add_argument("-k", dest="keyword", default=None,
+                    help="run only tests whose name contains this substring")
+    ap.add_argument("--baseline", default=None,
+                    help="write a JSON baseline of this run")
+    ap.add_argument("--include-slow", action="store_true",
+                    help="reserved for Phase 2; no effect in T1")
+    args = ap.parse_args(argv)
+
+    import serial
+    try:
+        port = serial.Serial(args.port, 115200, timeout=0.05)
+    except serial.SerialException as exc:
+        print("ABORT: cannot open %s: %s" % (args.port, exc))
+        return 2
+
+    link = ATLink(port)
+    header = {
+        "port": args.port,
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "fw_repo_head": repo_head(REPO_ROOT),
+        "at_core_repo_head": repo_head(
+            os.path.join(os.path.dirname(REPO_ROOT), "iLabs_AT_ESP-now")),
+        "ssid": os.environ.get("MT_SSID"),
+    }
+    suite = Suite()
+    try:
+        problem = phase0(link, header)
+        if problem:
+            print("ABORT: " + problem)
+            return 2
+        if args.phase != 0:
+            for phase, name, tag, fn, slow in TESTS:
+                if args.phase is not None and phase != args.phase:
+                    continue
+                if args.keyword and args.keyword not in name:
+                    continue
+                if slow and not args.include_slow:
+                    continue
+                link.drain()
+                try:
+                    ok = fn(link)
+                except Exception as exc:
+                    print("  (exception in %s: %s)" % (name, exc))
+                    ok = False
+                suite.check(name, ok, tag)
+            capture_header(link, header)
+    except KeyboardInterrupt:
+        print("\n(interrupted)")
+    finally:
+        port.close()
+    suite.summary()
+    if args.baseline:
+        write_baseline(args.baseline, header, suite)
+    return 1 if suite.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

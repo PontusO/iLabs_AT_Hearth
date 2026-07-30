@@ -162,5 +162,19 @@ class TestEchoAndRaw(unittest.TestCase):
         self.assertEqual(res, -1)
 
 
+from mt_regression import Suite
+
+
+class TestSuite(unittest.TestCase):
+    def test_check_scores_and_prints(self):
+        s = Suite()
+        self.assertTrue(s.check("MTVER? emits +MTVER:", True))
+        self.assertFalse(s.check("MTCOMMISSION=901 -> +MTERR:1", False, tag="AT-"))
+        self.assertEqual(s.failed, 1)
+        self.assertEqual(s.results[0], ("MTVER? emits +MTVER:", True, "AT+"))
+        self.assertEqual(s.results[1],
+                         ("MTCOMMISSION=901 -> +MTERR:1", False, "AT-"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
