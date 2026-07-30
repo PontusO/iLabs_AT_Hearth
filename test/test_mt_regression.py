@@ -624,10 +624,11 @@ class FakeLink:
     (dict cmd -> (res, lines), or a list of those for sequential calls)
     and a scripted URC stream whose timestamps encode wire order. stale_urcs
     are seeded at construction and drain() clears them, letting fresh URCs
-    (from urcs) arrive after AT+MTRESET. When no stale_urcs, fresh URCs are
-    seeded immediately so steps that don't call AT+MTRESET can still await them."""
+    (from urcs) arrive after AT+MTRESET. Pass no_reset=True to seed fresh
+    URCs immediately (for tests that skip AT+MTRESET); otherwise URCs arrive
+    only after drain() or AT+MTRESET (preserves test fidelity)."""
 
-    def __init__(self, commands=None, urcs=None, stale_urcs=None):
+    def __init__(self, commands=None, urcs=None, stale_urcs=None, no_reset=False):
         self.commands = dict(commands or {})
         self.urcs = list(urcs or [])
         self.stale_urcs = list(stale_urcs or [])
@@ -637,8 +638,8 @@ class FakeLink:
         self.needs_drain = bool(self.stale_urcs)
         # Track whether fresh URCs have been added to avoid duplicates
         self.fresh_urcs_added = False
-        # If no stale URCs, add fresh URCs immediately (for tests without AT+MTRESET)
-        if not self.stale_urcs and self.urcs:
+        # Only seed fresh URCs immediately when no_reset=True (explicit opt-in)
+        if no_reset and not self.stale_urcs and self.urcs:
             start_ts = max((ts for ts, _ in self.urc_queue), default=-1.0) + 1.0
             self.urc_queue.extend([(start_ts + float(i), u)
                                    for i, u in enumerate(self.urcs)])
@@ -778,7 +779,7 @@ class TestStep23(unittest.TestCase):
     }
 
     def _ctx(self, runner, urcs):
-        link = FakeLink(self.AT_OK, urcs=urcs)
+        link = FakeLink(self.AT_OK, urcs=urcs, no_reset=True)
         d = tempfile.mkdtemp()  # outlives the step; ChipTool.run mkdirs it
         chip = ChipTool("/bin/chip-tool", d, runner=runner)
         ctx = fresh_ctx(link, chip=chip)
