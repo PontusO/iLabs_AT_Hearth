@@ -204,11 +204,34 @@ def phase0(link, header):
 
 
 def capture_header(link, header):
-    """Filled in by a later task."""
+    """Record transport and onboarding codes into the report header.
+    Unscored: the scored format checks live in Phase 1. The baseline, not
+    the harness, carries the expected code values, so provisioned
+    production units do not fail spuriously (TESTING.md 6.1)."""
+    res, lines = link.command("AT+MTNET?")
+    if res == 0 and lines:
+        header["net"] = lines[0]
+        m = re.match(r"\+MTNET:(WIFI|THREAD),", lines[0])
+        if m:
+            header["transport"] = m.group(1)
+    res, lines = link.command("AT+MTCODES?")
+    if res == 0 and lines:
+        m = re.fullmatch(r"\+MTCODES:(.+),(\d{11})", lines[0])
+        if m:
+            header["qr_payload"] = m.group(1)
+            header["manual_code"] = m.group(2)
 
 
 def write_baseline(path, header, suite):
-    """Filled in by a later task."""
+    data = {
+        "header": header,
+        "results": {name: ("PASS" if ok else "FAIL")
+                    for name, ok, _ in suite.results},
+    }
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    print("baseline written: %s" % path)
 
 
 def main(argv=None):
