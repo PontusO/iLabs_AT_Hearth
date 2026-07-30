@@ -160,6 +160,7 @@ class Suite:
 
     def __init__(self):
         self.results = []
+        self.skipped = []
 
     def check(self, name, ok, tag="AT+"):
         ok = bool(ok)
@@ -167,13 +168,62 @@ class Suite:
         print("  [%s] [%s] %s" % ("PASS" if ok else "FAIL", tag, name))
         return ok
 
+    def skip(self, name, reason):
+        """A step not run because an earlier step broke its preconditions.
+        Counted separately from failures, and never silently: a truncated
+        run must not read as a clean one (design spec section 3)."""
+        self.skipped.append((name, reason))
+        print("  [SKIP] %s: %s" % (name, reason))
+
     @property
     def failed(self):
         return sum(1 for _, ok, _ in self.results if not ok)
 
     def summary(self):
         passed = sum(1 for _, ok, _ in self.results if ok)
-        print("===== RESULT: %d passed, %d failed =====" % (passed, self.failed))
+        if self.skipped:
+            print("===== RESULT: %d passed, %d failed, %d skipped =====" %
+                  (passed, self.failed, len(self.skipped)))
+        else:
+            print("===== RESULT: %d passed, %d failed =====" %
+                  (passed, self.failed))
+
+
+class StepAbort(Exception):
+    """Raised inside a Phase 2 step when its failure invalidates every
+    later step's preconditions (reset failed, commissioning failed). The
+    step has already scored its own FAIL; this just stops the chain."""
+
+
+class Phase2Context:
+    """Shared state the ordered Phase 2 steps hand each other."""
+
+    def __init__(self, link, chip, suite, opts):
+        self.link = link
+        self.chip = chip
+        self.suite = suite
+        self.opts = opts
+        self.qr = None
+        self.manual = None
+        self.node_id = getattr(opts, "node_id", 0x4845)
+
+
+PHASE2_STEPS = []  # populated bottom-of-module once the steps exist
+
+
+def run_phase2(ctx):
+    """Ordered execution with abort/skip semantics: Phase 1 checks are
+    independent, Phase 2 steps chain, so a broken precondition skips the
+    remainder instead of producing 20 misleading FAILs."""
+    abort_reason = None
+    for name, fn in PHASE2_STEPS:
+        if abort_reason is not None:
+            ctx.suite.skip(name, abort_reason)
+            continue
+        try:
+            fn(ctx)
+        except StepAbort as exc:
+            abort_reason = str(exc)
 
 
 TESTS = []
@@ -348,8 +398,10 @@ def capture_header(link, header):
 def write_baseline(path, header, suite):
     data = {
         "header": header,
-        "results": {name: ("PASS" if ok else "FAIL")
-                    for name, ok, _ in suite.results},
+        "results": dict(
+            [(name, "PASS" if ok else "FAIL")
+             for name, ok, _ in suite.results]
+            + [(name, "SKIP") for name, _ in suite.skipped]),
     }
     with open(path, "w") as f:
         json.dump(data, f, indent=2, sort_keys=True)
