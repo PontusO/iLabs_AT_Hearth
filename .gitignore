@@ -11,3 +11,6 @@ __pycache__/
 # host unit-test binaries (test/host/Makefile)
 test/host/test_*
 !test/host/test_*.c
+
+# task-graph MCP server state
+task-graph.json
