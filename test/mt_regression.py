@@ -183,6 +183,101 @@ def add_test(phase, name, fn, tag="AT+", slow=False):
     TESTS.append((phase, name, tag, fn, slow))
 
 
+def expect_ok(cmd, line_re=None, expect=None):
+    """Command terminates OK; when line_re is given, the first response
+    line must fullmatch it."""
+    def fn(link):
+        res, lines = link.command(cmd, expect=expect)
+        if res != 0:
+            return False
+        if line_re is None:
+            return True
+        return bool(lines) and re.fullmatch(line_re, lines[0]) is not None
+    return fn
+
+
+def expect_err(cmd, want, expect=None):
+    """Command fails in exactly the expected way: want > 0 is a +MTERR
+    code, -1 a bare ERROR, -2 no response. Exactness is the point
+    (TESTING.md 6.3): 'an error happened' would let code collapses
+    through."""
+    def fn(link):
+        res, _ = link.command(cmd, expect=expect,
+                              timeout=1.0 if want == -2 else None)
+        return res == want
+    return fn
+
+
+def t_echo_on_off(link):
+    """ATE1 then ATE0, echo observed on and off. link.echo is managed
+    here, not inside ATLink, so the harness never guesses device state."""
+    if link.command("ATE1")[0] != 0:
+        return False
+    link.echo = True
+    before = link.echo_seen
+    if link.command("AT")[0] != 0 or link.echo_seen <= before:
+        link.echo = False
+        return False
+    if link.command("ATE0")[0] != 0:
+        link.echo = False
+        return False
+    link.echo = False
+    before = link.echo_seen
+    res, lines = link.command("AT")
+    return res == 0 and link.echo_seen == before and not lines
+
+
+def t_cgmr_matches_mtver(link):
+    r1, a = link.command("AT+CGMR")
+    r2, b = link.command("AT+MTVER?")
+    return r1 == 0 and r2 == 0 and bool(a) and bool(b) \
+        and b[0] == "+MTVER:" + a[0]
+
+
+def t_attr_hex_equals_decimal(link):
+    r1, dec = link.command("AT+MTATTR=1,6,0")
+    r2, hexa = link.command("AT+MTATTR=1,0x0006,0x0000")
+    return r1 == 0 and r2 == 0 and dec == hexa
+
+
+def t_state_fabrics_consistent(link):
+    """State 2 implies fabrics > 0, state 0 implies fabrics == 0, and the
+    count in +MTSTATE agrees with +MTFABRICS. State 1 may hold either:
+    an open window outranks the fabric count in mt_matter_state()."""
+    r1, s = link.command("AT+MTSTATE?")
+    r2, f = link.command("AT+MTFABRICS?")
+    if r1 != 0 or r2 != 0 or not s or not f:
+        return False
+    ms = re.fullmatch(r"\+MTSTATE:([012]),(\d+)", s[0])
+    mf = re.fullmatch(r"\+MTFABRICS:(\d+)", f[0])
+    if not ms or not mf or ms.group(2) != mf.group(1):
+        return False
+    state, count = int(ms.group(1)), int(mf.group(1))
+    if state == 2 and count == 0:
+        return False
+    if state == 0 and count != 0:
+        return False
+    return True
+
+
+def t_codes_stable(link):
+    r1, a = link.command("AT+MTCODES?")
+    r2, b = link.command("AT+MTCODES?")
+    return r1 == 0 and r2 == 0 and bool(a) and a == b
+
+
+def t_evt_mask_set_read_restore(link):
+    """The one piece of state Phase 1 may touch, restored immediately:
+    a wide-open mask makes later URC assertions race BLE and
+    connectivity chatter (TESTING.md 6.1)."""
+    ok = link.command("AT+MTEVT=0xFFFFFFFF")[0] == 0
+    res, lines = link.command("AT+MTEVT?", expect="+MTEVTMASK:")
+    ok = ok and res == 0 and lines == ["+MTEVTMASK:0xFFFFFFFF"]
+    ok = link.command("AT+MTEVT=0x0800003F")[0] == 0 and ok
+    res, lines = link.command("AT+MTEVT?", expect="+MTEVTMASK:")
+    return ok and res == 0 and lines == ["+MTEVTMASK:0x0800003F"]
+
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -253,6 +348,45 @@ def write_baseline(path, header, suite):
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
     print("baseline written: %s" % path)
+
+
+def register_phase1_positive():
+    p = lambda name, fn: add_test(1, name, fn, tag="AT+")
+    p("AT -> OK", expect_ok("AT"))
+    p("ATE1/ATE0 echo on and off", t_echo_on_off)
+    p("CGMI -> iLabs Electronics",
+      expect_ok("AT+CGMI", line_re=r"iLabs Electronics"))
+    p("CGMM -> ESP32-C6 Hearth",
+      expect_ok("AT+CGMM", line_re=r"ESP32-C6 Hearth"))
+    p("CGMR equals MTVER? field", t_cgmr_matches_mtver)
+    p("MTVER? emits +MTVER:", expect_ok("AT+MTVER?", line_re=r"\+MTVER:.+"))
+    p("MTSTATE? format", expect_ok("AT+MTSTATE?",
+                                   line_re=r"\+MTSTATE:[012],\d+"))
+    p("MTFABRICS? format", expect_ok("AT+MTFABRICS?",
+                                     line_re=r"\+MTFABRICS:\d+"))
+    p("MTCODES? format", expect_ok(
+        "AT+MTCODES?", line_re=r"\+MTCODES:MT:[0-9A-Z.\-]+,\d{11}"))
+    p("MTCODES? stable across reads", t_codes_stable)
+    p("lower-case dispatch", expect_ok("at+mtver?", line_re=r"\+MTVER:.+",
+                                       expect="+MTVER:"))
+    p("MTATTR read 1,6,0", expect_ok("AT+MTATTR=1,6,0",
+                                     line_re=r"\+MTATTR:1,6,0,[01]"))
+    p("MTATTR hex equals decimal", t_attr_hex_equals_decimal)
+    p("MTATTR root VendorID read", expect_ok(
+        "AT+MTATTR=0,0x0028,0x0002", line_re=r"\+MTATTR:0,40,2,\d+"))
+    p("MTEVT? boot default mask", expect_ok(
+        "AT+MTEVT?", line_re=r"\+MTEVTMASK:0x0800003F",
+        expect="+MTEVTMASK:"))
+    p("MTEVT mask set/readback/restore", t_evt_mask_set_read_restore)
+    p("MTNET? format", expect_ok(
+        "AT+MTNET?", line_re=r"\+MTNET:(WIFI|THREAD),[01],[01],[01]"))
+    p("MTBAUD? -> 115200", expect_ok("AT+MTBAUD?",
+                                     line_re=r"\+MTBAUD:115200"))
+    p("MTFLOW? -> 0", expect_ok("AT+MTFLOW?", line_re=r"\+MTFLOW:0"))
+    p("MTFLOW=0 accepted", expect_ok("AT+MTFLOW=0"))
+
+
+register_phase1_positive()
 
 
 def main(argv=None):
