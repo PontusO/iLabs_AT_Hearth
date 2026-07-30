@@ -622,12 +622,18 @@ from mt_regression import (step_2_1_factory_fresh, step_2_2_codes_stable,
 class FakeLink:
     """ATLink double for Phase 2 step tests: scripted command replies
     (dict cmd -> (res, lines), or a list of those for sequential calls)
-    and a scripted URC stream whose timestamps encode wire order."""
+    and a scripted URC stream whose timestamps encode wire order. stale_urcs
+    are seeded at construction and drain() clears them, letting fresh URCs
+    (from urcs) arrive after AT+MTRESET."""
 
-    def __init__(self, commands=None, urcs=None):
+    def __init__(self, commands=None, urcs=None, stale_urcs=None):
         self.commands = dict(commands or {})
         self.urcs = list(urcs or [])
-        self.urc_queue = []
+        self.stale_urcs = list(stale_urcs or [])
+        # Seed queue with stale URCs at low timestamps (0, 1, ...)
+        self.urc_queue = [(float(i), u) for i, u in enumerate(self.stale_urcs)]
+        # If stale URCs exist, drain() must be called before fresh URCs are added
+        self.needs_drain = bool(self.stale_urcs)
         self.sent = []
 
     def command(self, cmd, expect=None, timeout=None):
@@ -635,9 +641,13 @@ class FakeLink:
         v = self.commands.get(cmd, (0, []))
         if isinstance(v, list):
             v = v.pop(0) if v else (-2, [])
-        # Repopulate URCs after AT+MTRESET to simulate device reboot
-        if cmd == "AT+MTRESET":
-            self.urc_queue = [(float(i), u) for i, u in enumerate(self.urcs)]
+        # Append fresh URCs after AT+MTRESET (only if stale URCs were drained)
+        if cmd == "AT+MTRESET" and not self.needs_drain:
+            # Add fresh URCs with timestamps starting after current max
+            start_ts = (max((ts for ts, _ in self.urc_queue), default=-1.0)
+                       + 1.0)
+            self.urc_queue.extend([(start_ts + float(i), u)
+                                   for i, u in enumerate(self.urcs)])
         return v
 
     def await_urc_ts(self, pattern, timeout=5.0):
@@ -657,6 +667,7 @@ class FakeLink:
     def drain(self, quiet=0.2):
         dropped = [u for _, u in self.urc_queue]
         self.urc_queue.clear()
+        self.needs_drain = False  # Drain satisfies the requirement
         return dropped
 
 
@@ -693,6 +704,24 @@ class TestStep21(unittest.TestCase):
             with self.assertRaises(StepAbort):
                 step_2_1_factory_fresh(ctx)
         self.assertGreater(ctx.suite.failed, 0)
+
+    def test_drain_clears_stale_urcs(self):
+        """Verify drain() correctly clears stale URCs that arrived before
+        the reset, preventing them from satisfying post-reset awaits. This
+        test seeds stale URCs (wrong event codes) and fresh URCs; drain()
+        must remove stale ones so only fresh ones are found. Without drain(),
+        the step fails to find the expected +MTREADY."""
+        stale_urcs = ["+MTEVT:99", "+MTEVT:88"]  # wrong codes, from pre-reset
+        fresh_urcs = ["+MTREADY", "+MTEVT:0"]  # correct codes, post-reset
+        link = FakeLink(self.HAPPY, urcs=fresh_urcs, stale_urcs=stale_urcs)
+        ctx = fresh_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_1_factory_fresh(ctx)
+        # All checks pass: drain() cleared stale URCs, and the step found
+        # the fresh +MTREADY and +MTEVT:0 that arrived after AT+MTRESET
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual(ctx.qr, "MT:Y.K9042C00KA0648G00")
+        self.assertEqual(ctx.manual, "34970112332")
 
 
 class TestStep22(unittest.TestCase):
