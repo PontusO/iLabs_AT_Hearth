@@ -194,7 +194,7 @@ def repo_head(path):
         out = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
                              capture_output=True, text=True, timeout=5)
         return out.stdout.strip() or None
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return None
 
 
