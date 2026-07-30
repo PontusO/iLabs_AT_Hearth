@@ -222,6 +222,7 @@ class Phase2Context:
         self.qr = None
         self.manual = None
         self.node_id = getattr(opts, "node_id", 0x4845)
+        self.subscriber_factory = None  # test seam; None means real Subscriber
 
 
 def step_2_1_factory_fresh(ctx):
@@ -299,6 +300,73 @@ def step_2_3_commission(ctx):
     res, lines = link.command("AT+MTSTATE?")
     s.check("2.3 state 2 (operational)",
             res == 0 and lines == ["+MTSTATE:2,1"], tag="P2")
+
+
+def step_2_4_host_to_controller(ctx):
+    """TESTING.md 2.4. Sequencing per the concurrency rule: subscriber
+    up, AT-side writes observed, subscriber down, only then controller
+    reads. Mode 0 keeping the report suppressed is the one property
+    nothing else in the suite can catch."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    for want in (1, 0):
+        res, _ = link.command("AT+MTATTR=1,6,0,%d" % want)
+        okw = s.check("2.4 AT write %d -> OK" % want, res == 0, tag="P2")
+        rc, out = chip.run(["onoff", "read", "on-off",
+                            "0x%X" % ctx.node_id, "1"], timeout=30)
+        s.check("2.4 controller reads %d" % want,
+                rc == 0 and parse_onoff_read(out) == want, tag="P2")
+        if not okw:
+            raise StepAbort("AT-side attribute write failed")
+    factory = ctx.subscriber_factory or (
+        lambda: Subscriber(chip, ctx.node_id))
+    sub = factory()
+    if not s.check("2.4 subscriber starts", sub.start(), tag="P2"):
+        sub.stop()
+        raise StepAbort("subscription did not come up")
+    try:
+        base = len(sub.reports())
+        res, _ = link.command("AT+MTATTR=1,6,0,1,1")
+        s.check("2.4 mode 1 write -> OK", res == 0, tag="P2")
+        s.check("2.4 mode 1 produces a report",
+                sub.wait_new_report(base, 5.0), tag="P2")
+        base = len(sub.reports())
+        res, _ = link.command("AT+MTATTR=1,6,0,0,0")
+        s.check("2.4 mode 0 write -> OK", res == 0, tag="P2")
+        res, lines = link.command("AT+MTATTR=1,6,0")
+        s.check("2.4 local read shows 0",
+                res == 0 and lines == ["+MTATTR:1,6,0,0"], tag="P2")
+        s.check("2.4 mode 0 produces no report",
+                sub.no_new_report(base, 5.0), tag="P2")
+    finally:
+        sub.stop()
+    rc, out = chip.run(["onoff", "read", "on-off", "0x%X" % ctx.node_id,
+                        "1"], timeout=30)
+    s.check("2.4 controller read shows 0 after mode-0 write",
+            rc == 0 and parse_onoff_read(out) == 0, tag="P2")
+
+
+def step_2_5_controller_to_host(ctx):
+    """TESTING.md 2.5, the end-to-end proof in the controller-to-host
+    direction. The value is set to 1 first so `off` is a real
+    transition: a no-change write may fire no callback, and an assertion
+    on it would prove nothing."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    res, _ = link.command("AT+MTATTR=1,6,0,1")
+    s.check("2.5 precondition write 1 -> OK", res == 0, tag="P2")
+    link.drain(0.5)
+    for verb, want in (("off", 0), ("on", 1), ("toggle", 0)):
+        rc, _ = chip.run(["onoff", verb, "0x%X" % ctx.node_id, "1"],
+                         timeout=30)
+        okc = s.check("2.5 chip-tool %s exits 0" % verb, rc == 0, tag="P2")
+        got = link.await_urc(r"\+MTATTR:1,6,0,%d$" % want, timeout=2.0)
+        s.check("2.5 unprompted +MTATTR after %s" % verb, got is not None,
+                tag="P2")
+        res, lines = link.command("AT+MTATTR=1,6,0")
+        s.check("2.5 AT read agrees (%d)" % want,
+                res == 0 and lines == ["+MTATTR:1,6,0,%d" % want],
+                tag="P2")
+        if not okc:
+            raise StepAbort("controller-side write failed")
 
 
 def step_cleanup_factory_fresh(ctx):
@@ -845,6 +913,8 @@ PHASE2_STEPS[:] = [
     ("2.1 factory-fresh baseline", step_2_1_factory_fresh),
     ("2.2 onboarding codes stable", step_2_2_codes_stable),
     ("2.3 commission ble-wifi", step_2_3_commission),
+    ("2.4 host to controller", step_2_4_host_to_controller),
+    ("2.5 controller to host", step_2_5_controller_to_host),
     ("cleanup factory-fresh", step_cleanup_factory_fresh),
 ]
 

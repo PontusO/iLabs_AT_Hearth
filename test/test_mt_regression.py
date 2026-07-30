@@ -632,6 +632,7 @@ class FakeLink:
         self.commands = dict(commands or {})
         self.urcs = list(urcs or [])
         self.stale_urcs = list(stale_urcs or [])
+        self.no_reset = no_reset
         # Seed queue with stale URCs at low timestamps (0, 1, ...)
         self.urc_queue = [(float(i), u) for i, u in enumerate(self.stale_urcs)]
         # If stale URCs exist, drain() must be called before fresh URCs are added
@@ -676,10 +677,17 @@ class FakeLink:
         return self.await_urc(pattern, window) is None
 
     def drain(self, quiet=0.2):
-        dropped = [u for _, u in self.urc_queue]
-        self.urc_queue.clear()
+        # In no_reset mode, preserve fresh URCs; only clear when we had stale URCs to drain
+        if self.needs_drain or not self.no_reset:
+            dropped = [u for _, u in self.urc_queue]
+            self.urc_queue.clear()
+        else:
+            dropped = []
         self.needs_drain = False  # Drain satisfies the requirement
-        self.fresh_urcs_added = False  # Reset so AT+MTRESET can add them again
+        # Only reset fresh_urcs_added if we're not in no_reset mode; in no_reset mode,
+        # the URCs should survive drain() and be re-used by await_urc() calls
+        if not self.no_reset:
+            self.fresh_urcs_added = False  # Reset so AT+MTRESET can add them again
         return dropped
 
 
@@ -769,7 +777,8 @@ class TestCleanupStep(unittest.TestCase):
             self.assertEqual(os.listdir(d), [])
 
 
-from mt_regression import step_2_3_commission
+from mt_regression import (step_2_3_commission, step_2_4_host_to_controller,
+                           step_2_5_controller_to_host)
 
 
 class TestStep23(unittest.TestCase):
@@ -834,6 +843,120 @@ class TestStep23(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(StepAbort):
                 step_2_3_commission(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class FakeSubscriber:
+    """Scripted Subscriber: report counts stepped by the test."""
+
+    def __init__(self, counts, start_ok=True):
+        self.counts = list(counts)   # successive reports() lengths
+        self.start_ok = start_ok
+        self.stopped = False
+
+    def start(self, settle=10.0):
+        return self.start_ok
+
+    def reports(self):
+        n = self.counts[0] if len(self.counts) == 1 else self.counts.pop(0)
+        return [1] * n
+
+    def wait_new_report(self, count_before, timeout):
+        return len(self.reports()) > count_before
+
+    def no_new_report(self, count_before, window):
+        return not (len(self.reports()) > count_before)
+
+    def stop(self):
+        self.stopped = True
+
+
+class TestStep24(unittest.TestCase):
+    def _ctx(self, runner, sub):
+        link = FakeLink({
+            "AT+MTATTR=1,6,0,1": (0, []),
+            "AT+MTATTR=1,6,0,0": (0, []),
+            "AT+MTATTR=1,6,0,1,1": (0, []),
+            "AT+MTATTR=1,6,0,0,0": (0, []),
+            "AT+MTATTR=1,6,0": (0, ["+MTATTR:1,6,0,0"]),
+        })
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_ctx(link, chip=chip)
+        ctx.subscriber_factory = lambda: sub
+        return ctx
+
+    def test_happy_path(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_onoff_read_true.txt")),
+            (0, fixture("chiptool_onoff_read_false.txt")),
+            (0, fixture("chiptool_onoff_read_false.txt")),
+        ])
+        # reports() call sequence in the step: base before mode-1 (1),
+        # wait after mode-1 (2, the new report), base before mode-0 (2),
+        # settle window (2, nothing new; last value sticks)
+        sub = FakeSubscriber(counts=[1, 2, 2])
+        ctx = self._ctx(runner, sub)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_4_host_to_controller(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertTrue(sub.stopped)
+
+    def test_mode0_report_leak_fails(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_onoff_read_true.txt")),
+            (0, fixture("chiptool_onoff_read_false.txt")),
+            (0, fixture("chiptool_onoff_read_false.txt")),
+        ])
+        # a report appears after the mode-0 write: the regression 2.4
+        # exists for (base 1, mode-1 report 2, base 2, then 3 in the window)
+        sub = FakeSubscriber(counts=[1, 2, 2, 3])
+        ctx = self._ctx(runner, sub)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_4_host_to_controller(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+        self.assertTrue(sub.stopped)
+
+    def test_subscriber_start_failure_aborts_and_stops(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_onoff_read_true.txt")),
+            (0, fixture("chiptool_onoff_read_false.txt")),
+        ])
+        sub = FakeSubscriber(counts=[0], start_ok=False)
+        ctx = self._ctx(runner, sub)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_4_host_to_controller(ctx)
+
+
+class TestStep25(unittest.TestCase):
+    def _ctx(self, runner, urcs, reads):
+        link = FakeLink({
+            "AT+MTATTR=1,6,0,1": (0, []),
+            "AT+MTATTR=1,6,0": [(0, [r]) for r in reads],
+        }, urcs=urcs, no_reset=True)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_ctx(link, chip=chip)
+
+    def test_happy_path(self):
+        runner = FakeChipRunner([(0, ""), (0, ""), (0, "")])
+        ctx = self._ctx(runner,
+                        ["+MTATTR:1,6,0,0", "+MTATTR:1,6,0,1",
+                         "+MTATTR:1,6,0,0"],
+                        ["+MTATTR:1,6,0,0", "+MTATTR:1,6,0,1",
+                         "+MTATTR:1,6,0,0"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_5_controller_to_host(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_missing_urc_fails(self):
+        runner = FakeChipRunner([(0, ""), (0, ""), (0, "")])
+        ctx = self._ctx(runner, [],
+                        ["+MTATTR:1,6,0,0", "+MTATTR:1,6,0,1",
+                         "+MTATTR:1,6,0,0"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_5_controller_to_host(ctx)
         self.assertGreater(ctx.suite.failed, 0)
 
 
