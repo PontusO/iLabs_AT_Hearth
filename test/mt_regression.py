@@ -390,6 +390,114 @@ def register_phase1_positive():
 register_phase1_positive()
 
 
+def reject_without_reboot(cmd):
+    """The four reset-form negatives: a dispatch regression here wipes
+    the fabric, so each carries its own no-reboot proof (no +MTREADY
+    within 3 s), not just a result code (TESTING.md 6.2)."""
+    def fn(link):
+        res, _ = link.command(cmd)
+        return res == -1 and link.assert_no_urc(r"\+MTREADY", 3.0)
+    return fn
+
+
+def commission_rejected_stateless(argtext):
+    """Rejected before any side effect: AT+MTSTATE? before and after
+    must agree, which is the assertion that proves it."""
+    def fn(link):
+        r0, before = link.command("AT+MTSTATE?")
+        res, _ = link.command("AT+MTCOMMISSION=" + argtext)
+        r1, after = link.command("AT+MTSTATE?")
+        return r0 == 0 and r1 == 0 and res == 1 and before == after
+    return fn
+
+
+def t_bare_cr_no_response(link):
+    """Deliberate parser behaviour, easy to break: an empty line gets no
+    response at all, not ERROR."""
+    res, _ = link.raw(b"\r", timeout=0.5)
+    return res == -2
+
+
+def t_overlong_line(link):
+    res, _ = link.raw(b"AT+MT" + b"X" * 600 + b"\r\n", timeout=1.0)
+    return res == -1
+
+
+def t_terminator_variants(link):
+    for term in (b"\r", b"\n", b"\r\n"):
+        res, _ = link.raw(b"AT" + term, timeout=1.0)
+        if res != 0:
+            return False
+    return True
+
+
+def register_phase1_negative():
+    n = lambda name, fn: add_test(1, name, fn, tag="AT-")
+
+    # grammar and dispatch (shared at_core)
+    n("MTBOGUS -> +MTERR:8", expect_err("AT+MTBOGUS", 8))
+    n("non-AT line -> ERROR", expect_err("HELLO", -1))
+    n("trailing char after ? -> ERROR", expect_err("AT+MTVER?X", -1))
+    n("overlong line -> ERROR", t_overlong_line)
+    n("bare CR -> no response", t_bare_cr_no_response)
+    n("CR, LF and CRLF all terminate", t_terminator_variants)
+
+    # wrong command form: bare ERROR, never a code (TESTING.md 6.3)
+    n("MTVER=1 -> ERROR", expect_err("AT+MTVER=1", -1))
+    n("CGMI? -> ERROR", expect_err("AT+CGMI?", -1))
+    n("MTSTATE (exec) -> ERROR", expect_err("AT+MTSTATE", -1))
+    n("MTFABRICS=1 -> ERROR", expect_err("AT+MTFABRICS=1", -1))
+    n("MTCODES=1 -> ERROR", expect_err("AT+MTCODES=1", -1))
+    n("MTRESET? -> ERROR, no reboot", reject_without_reboot("AT+MTRESET?"))
+    n("MTRESET=1 -> ERROR, no reboot", reject_without_reboot("AT+MTRESET=1"))
+    n("MTFRESET? -> ERROR, no reboot", reject_without_reboot("AT+MTFRESET?"))
+    n("MTFRESET=1 -> ERROR, no reboot", reject_without_reboot("AT+MTFRESET=1"))
+    n("MTCOMMISSION? -> ERROR", expect_err("AT+MTCOMMISSION?", -1))
+    n("MTATTR? -> ERROR", expect_err("AT+MTATTR?", -1))
+    n("MTATTR (exec) -> ERROR", expect_err("AT+MTATTR", -1))
+
+    # MTCOMMISSION range and parse guards, all state-safe
+    n("MTCOMMISSION=29 -> +MTERR:1", commission_rejected_stateless("29"))
+    n("MTCOMMISSION=901 -> +MTERR:1", commission_rejected_stateless("901"))
+    n("MTCOMMISSION=abc -> +MTERR:1", commission_rejected_stateless("abc"))
+    n("MTCOMMISSION= -> +MTERR:1", commission_rejected_stateless(""))
+    n("MTCOMMISSION=300x -> +MTERR:1", commission_rejected_stateless("300x"))
+
+    # MTATTR argument validation: exact codes, walking ep/cluster/attr/type
+    n("MTATTR=1,6 -> +MTERR:1", expect_err("AT+MTATTR=1,6", 1))
+    n("MTATTR=1,6,0,1,2 -> +MTERR:1", expect_err("AT+MTATTR=1,6,0,1,2", 1))
+    n("MTATTR six params -> +MTERR:1", expect_err("AT+MTATTR=1,6,0,1,0,9", 1))
+    n("MTATTR=x,6,0 -> +MTERR:1", expect_err("AT+MTATTR=x,6,0", 1))
+    n("MTATTR=1,zz,0 -> +MTERR:1", expect_err("AT+MTATTR=1,zz,0", 1))
+    n("MTATTR=1,6,0,z -> +MTERR:1", expect_err("AT+MTATTR=1,6,0,z", 1))
+    n("MTATTR=99,6,0 -> +MTERR:2", expect_err("AT+MTATTR=99,6,0", 2))
+    n("MTATTR=1,0xFFFF,0 -> +MTERR:3", expect_err("AT+MTATTR=1,0xFFFF,0", 3))
+    n("MTATTR=1,6,0xFFFF -> +MTERR:4", expect_err("AT+MTATTR=1,6,0xFFFF", 4))
+    n("MTATTR NodeLabel -> +MTERR:5",
+      expect_err("AT+MTATTR=0,0x0028,0x0005", 5))
+
+    # MTEVT and MTNET
+    n("MTEVT (exec) -> ERROR", expect_err("AT+MTEVT", -1))
+    n("MTEVT=zz -> +MTERR:1", expect_err("AT+MTEVT=zz", 1))
+    n("MTEVT= -> +MTERR:1", expect_err("AT+MTEVT=", 1))
+    n("MTNET (exec) -> ERROR", expect_err("AT+MTNET", -1))
+    n("MTNET=1 -> ERROR", expect_err("AT+MTNET=1", -1))
+
+    # MTBAUD and MTFLOW: rejections only, a rate switch owns a reconnect
+    # and does not belong in a one-line assertion (TESTING.md 6.2)
+    n("MTBAUD (exec) -> ERROR", expect_err("AT+MTBAUD", -1))
+    n("MTBAUD=12345 -> +MTERR:1", expect_err("AT+MTBAUD=12345", 1))
+    n("MTBAUD=zz -> +MTERR:1", expect_err("AT+MTBAUD=zz", 1))
+    n("MTBAUD=1843200 -> +MTERR:1", expect_err("AT+MTBAUD=1843200", 1))
+    n("MTFLOW (exec) -> ERROR", expect_err("AT+MTFLOW", -1))
+    n("MTFLOW=4 -> +MTERR:1", expect_err("AT+MTFLOW=4", 1))
+    n("MTFLOW=1 -> +MTERR:1 (RTS/CTS unwired)", expect_err("AT+MTFLOW=1", 1))
+    n("MTFLOW=3 -> +MTERR:1 (RTS/CTS unwired)", expect_err("AT+MTFLOW=3", 1))
+
+
+register_phase1_negative()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", default=os.environ.get("MT_PORT", "/dev/ttyACM0"))
