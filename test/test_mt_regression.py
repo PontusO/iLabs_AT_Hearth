@@ -5,8 +5,10 @@ Exercises ATLink against a scripted fake transport, so the result
 mapping and URC handling are pinned without a board on the desk.
 """
 
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -162,7 +164,7 @@ class TestEchoAndRaw(unittest.TestCase):
         self.assertEqual(res, -1)
 
 
-from mt_regression import Suite
+from mt_regression import Suite, capture_header, write_baseline
 
 
 class TestSuite(unittest.TestCase):
@@ -174,6 +176,33 @@ class TestSuite(unittest.TestCase):
         self.assertEqual(s.results[0], ("MTVER? emits +MTVER:", True, "AT+"))
         self.assertEqual(s.results[1],
                          ("MTCOMMISSION=901 -> +MTERR:1", False, "AT-"))
+
+
+class TestBaseline(unittest.TestCase):
+    def test_capture_header(self):
+        link, _ = link_with_reply(b"")
+        replies = {
+            b"AT+MTNET?\r\n": b"+MTNET:THREAD,1,1,0\r\nOK\r\n",
+            b"AT+MTCODES?\r\n": b"+MTCODES:MT:Y.K90AFN004-JZ59D00,34970112332\r\nOK\r\n",
+        }
+        link.t.on_write = lambda d: replies.get(d, b"ERROR\r\n")
+        header = {}
+        capture_header(link, header)
+        self.assertEqual(header["transport"], "THREAD")
+        self.assertEqual(header["net"], "+MTNET:THREAD,1,1,0")
+        self.assertEqual(header["qr_payload"], "MT:Y.K90AFN004-JZ59D00")
+        self.assertEqual(header["manual_code"], "34970112332")
+
+    def test_write_baseline(self):
+        s = Suite()
+        s.check("MTVER? emits +MTVER:", True)
+        s.check("MTCOMMISSION=901 -> +MTERR:1", False, tag="AT-")
+        with tempfile.NamedTemporaryFile("r", suffix=".json") as f:
+            write_baseline(f.name, {"port": "/dev/null"}, s)
+            data = json.load(open(f.name))
+        self.assertEqual(data["header"]["port"], "/dev/null")
+        self.assertEqual(data["results"]["MTVER? emits +MTVER:"], "PASS")
+        self.assertEqual(data["results"]["MTCOMMISSION=901 -> +MTERR:1"], "FAIL")
 
 
 if __name__ == "__main__":
