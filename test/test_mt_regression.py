@@ -1359,6 +1359,84 @@ class TestStep28(unittest.TestCase):
                       failed_names)
 
 
+from mt_regression import step_2_9_cold_boot
+
+
+class TestStep29(unittest.TestCase):
+    """T3 2.9, the B4.3 boot-loop regression (design spec section 12.1):
+    only a cold boot with a pending StartUpOnOff change reaches the URC
+    path that fires during esp_matter::start(), before the AT UART
+    exists; 2.8's warm reset preserves state and cannot exercise it.
+    ctx.relink here wraps ctx.power_cycler (not swd_reset, unlike 2.8),
+    so the fake relink calls the injected action and propagates its
+    (ok, detail) the way make_relink's real relink does, instead of
+    assuming success outright: that is what lets the cycle-not-observed
+    case reach StepAbort through the same code path as a real refused
+    power cycle."""
+
+    @staticmethod
+    def _commands(post_boot_attr=0):
+        # A fresh dict and fresh inner lists per call: FakeLink.command()
+        # pops list-valued entries in place, so a dict literal reused
+        # across test methods (a class attribute, shared for the whole
+        # process) would let one test exhaust another's scripted replies
+        # (the TestStep27 hazard TestStep28 already avoids).
+        return {
+            "AT+MTATTR=1,6,0,1": (0, []),
+            "AT+MTATTR=1,6,0": [(0, ["+MTATTR:1,6,0,1"]),
+                                (0, ["+MTATTR:1,6,0,%d" % post_boot_attr])],
+            "AT+MTFABRICS?": (0, ["+MTFABRICS:1"]),
+        }
+
+    @staticmethod
+    def _relink(link):
+        def relink(action):
+            ok, detail = action()
+            if ok:
+                link.push_urcs(["+MTREADY"])
+            return ok, detail
+        return relink
+
+    def test_happy_path(self):
+        link = FakeLink(self._commands(post_boot_attr=0))
+        ctx = fresh_ctx(link)
+        ctx.relink = self._relink(link)
+        cycler_calls = []
+
+        def power_cycler():
+            cycler_calls.append(True)
+            return True, ""
+
+        ctx.power_cycler = power_cycler
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_9_cold_boot(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertTrue(cycler_calls)
+
+    def test_inconclusive_path_fails_and_prints(self):
+        link = FakeLink(self._commands(post_boot_attr=1))
+        ctx = fresh_ctx(link)
+        ctx.relink = self._relink(link)
+        ctx.power_cycler = lambda: (True, "")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            step_2_9_cold_boot(ctx)
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.9 StartUpOnOff toggled at init", failed_names)
+        self.assertIn("inconclusive", buf.getvalue())
+
+    def test_cycle_not_observed_aborts(self):
+        link = FakeLink(self._commands())
+        ctx = fresh_ctx(link)
+        ctx.relink = self._relink(link)
+        ctx.power_cycler = lambda: (
+            False, "power cycle not observed (device never vanished)")
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_9_cold_boot(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
 class TestGateSkips(unittest.TestCase):
     def _ctx_with_steps(self, steps, **optkw):
         # fresh_ctx() exists; read it first and reuse its FakeLink/opts
