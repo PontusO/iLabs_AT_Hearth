@@ -811,7 +811,49 @@ class TestSwdReset(unittest.TestCase):
         self.assertIn("no probe", detail)
 
 
-from mt_regression import make_relink
+from mt_regression import make_relink, flush_print
+
+
+class TestFlushPrint(unittest.TestCase):
+    def test_default_prompt_printer_flushes(self):
+        """The operator prompt must reach a tee'd log immediately:
+        python stdout is block-buffered when piped, and an unflushed
+        prompt cost a whole hardware run (the operator was never told
+        to unplug)."""
+        class Recorder:
+            def __init__(self):
+                self.writes = []
+                self.flushes = 0
+
+            def write(self, s):
+                self.writes.append(s)
+
+            def flush(self):
+                self.flushes += 1
+
+        rec = Recorder()
+        with contextlib.redirect_stdout(rec):
+            flush_print("unplug now")
+        self.assertIn("unplug now", "".join(rec.writes))
+        self.assertGreater(rec.flushes, 0)
+
+    def test_operator_power_cycle_default_printer_is_flush_print(self):
+        defaults = operator_power_cycle.__defaults__
+        self.assertIs(defaults[0], flush_print)
+
+
+class TestCaptureHeaderClosedPort(unittest.TestCase):
+    def test_capture_header_tolerates_dead_link(self):
+        """After an abort whose relink left the port closed, main still
+        calls capture_header; it must degrade to an incomplete header,
+        not a misleading '(link lost)' tail."""
+        class DeadLink:
+            def command(self, *a, **k):
+                raise OSError("port closed")
+
+        header = {"port": "/dev/fake"}
+        capture_header(DeadLink(), header)
+        self.assertEqual(header, {"port": "/dev/fake"})
 
 
 class TestMakeRelink(unittest.TestCase):

@@ -1144,7 +1144,15 @@ def make_relink(link, port_path, settle=1.0, pump=2.5, deadline_s=30.0,
     return relink
 
 
-def operator_power_cycle(port_path, printer=print,
+def flush_print(*args):
+    """print with an unconditional flush: operator prompts must reach a
+    tee'd log the moment they happen. Python block-buffers stdout when
+    piped, and an unflushed prompt cost a whole hardware run (the
+    operator was never told to unplug)."""
+    print(*args, flush=True)
+
+
+def operator_power_cycle(port_path, printer=flush_print,
                          path_exists=os.path.exists, sleep=time.sleep,
                          unplug_timeout=60.0, clock=time.monotonic):
     """2.9's power cycle, observed rather than trusted: the device path
@@ -1222,7 +1230,18 @@ def capture_header(link, header):
     """Record transport and onboarding codes into the report header.
     Unscored: the scored format checks live in Phase 1. The baseline, not
     the harness, carries the expected code values, so provisioned
-    production units do not fail spuriously (TESTING.md 6.1)."""
+    production units do not fail spuriously (TESTING.md 6.1). Tolerates
+    a dead or deliberately closed link (an abort whose relink failed
+    leaves the port closed): the header just stays incomplete, instead
+    of a misleading link-lost tail after the summary was already
+    decided."""
+    try:
+        return _capture_header_live(link, header)
+    except OSError:
+        return None
+
+
+def _capture_header_live(link, header):
     res, lines = link.command("AT+MTNET?")
     if res == 0 and lines:
         header["net"] = lines[0]
