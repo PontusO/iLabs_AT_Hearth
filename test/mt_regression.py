@@ -1159,10 +1159,15 @@ def flush_print(*args):
 
 def operator_power_cycle(port_path, printer=flush_print,
                          path_exists=os.path.exists, sleep=time.sleep,
-                         unplug_timeout=60.0, clock=time.monotonic):
+                         unplug_timeout=180.0, clock=time.monotonic):
     """2.9's power cycle, observed rather than trusted: the device path
     must actually disappear before the step counts the cycle as having
-    happened. A prompt alone would pass with no power cycle at all."""
+    happened. A prompt alone would pass with no power cycle at all.
+
+    The window is generous because the prompt may reach the operator
+    through a relay (a log watcher plus a phone notification), which
+    ate most of the original 60 s on a real run; waiting costs nothing
+    when the operator is quick, since the loop exits on the unplug."""
     printer("")
     printer("  *** OPERATOR: unplug the Challenger's USB cable now. ***")
     deadline = clock() + unplug_timeout

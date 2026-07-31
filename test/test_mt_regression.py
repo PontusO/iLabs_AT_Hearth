@@ -841,6 +841,11 @@ class TestFlushPrint(unittest.TestCase):
         defaults = operator_power_cycle.__defaults__
         self.assertIs(defaults[0], flush_print)
 
+    def test_operator_power_cycle_default_window_covers_relay(self):
+        """60 s was eaten by the prompt relay chain on a real run; the
+        window must budget for a notification round-trip plus a human."""
+        self.assertGreaterEqual(operator_power_cycle.__defaults__[3], 180.0)
+
 
 class TestCaptureHeaderClosedPort(unittest.TestCase):
     def test_capture_header_tolerates_dead_link(self):
