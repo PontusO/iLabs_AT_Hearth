@@ -48,9 +48,13 @@ chip-tool is a subprocess, parsed from stdout.
 
 **`Subscriber`** owns the background report watcher.
 
-- Starts `chip-tool onoff subscribe on-off <min> <max> <node> <ep>` with
-  stdout captured to a file; `reports()` parses the value reports seen so far;
-  `stop()` terminates and reaps it.
+- Runs `chip-tool interactive start` with
+  `onoff subscribe on-off <min> <max> <node> <ep>` written to its stdin and
+  stdout captured to a file; `reports()` parses the value reports seen so
+  far; `stop()` sends `quit()` and escalates to terminate/kill. This is the
+  section 8.1 fallback, forced during Task 11 hardware verification: the
+  real binary's one-shot subscribe exits about 3 seconds after the priming
+  report, so it can never observe a change-triggered report.
 - **Concurrency rule, enforced by sequencing:** chip-tool's ini-file storage is
   not safe for concurrent processes. No one-shot `ChipTool.run()` happens while
   the Subscriber is alive. 2.4 therefore orders: subscribe, AT-side writes,

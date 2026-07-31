@@ -495,12 +495,42 @@ class TestSubscriber(unittest.TestCase):
         return ChipTool("/bin/chip-tool", d)
 
     def test_argv_shape(self):
+        # Interactive mode is not a choice: the real binary's one-shot
+        # subscribe exits about 3 s after the priming report (Task 11),
+        # so only an interactive session can observe change reports.
         with tempfile.TemporaryDirectory() as d:
             sub = Subscriber(self._chip(d), 0x4845)
-        self.assertEqual(sub.argv[:8],
-                         ["/bin/chip-tool", "onoff", "subscribe", "on-off",
-                          "0", "5", "0x4845", "1"])
-        self.assertIn("--storage-directory", sub.argv)
+        self.assertEqual(sub.argv,
+                         ["/bin/chip-tool", "interactive", "start",
+                          "--storage-directory", d])
+        self.assertEqual(sub.subscribe_cmd,
+                         "onoff subscribe on-off 0 5 0x4845 1")
+
+    def test_start_sends_subscribe_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = Subscriber(self._chip(d), 0x4845)
+            sub.argv = [sys.executable, "-u", "-c",
+                        "import sys; line = sys.stdin.readline();"
+                        "print('GOT ' + line.strip());"
+                        "print('CHIP:TOO:   OnOff: TRUE');"
+                        "import time; time.sleep(30)"]
+            self.assertTrue(sub.start(settle=5.0))
+            with open(sub.out_path, errors="replace") as f:
+                self.assertIn("GOT " + sub.subscribe_cmd, f.read())
+            sub.stop()
+
+    def test_stop_quits_gracefully(self):
+        """quit() on stdin must end the session without SIGTERM, so the
+        interactive process can flush and release its ini storage."""
+        with tempfile.TemporaryDirectory() as d:
+            sub = Subscriber(self._chip(d), 0x4845)
+            sub.argv = [sys.executable, "-u", "-c",
+                        "import sys; print('CHIP:TOO:   OnOff: TRUE');"
+                        "[sys.exit(0) for l in sys.stdin"
+                        " if l.startswith('quit')]"]
+            self.assertTrue(sub.start(settle=5.0))
+            sub.stop()
+            self.assertEqual(sub._proc.returncode, 0)
 
     def test_reports_and_windows_from_file(self):
         with tempfile.TemporaryDirectory() as d:
