@@ -1472,8 +1472,11 @@ class TestStep28(unittest.TestCase):
         # process) would let one test exhaust another's scripted replies.
         return {
             "AT+MTATTR=1,6,0,1": (0, []),
+            # Pre-reboot read echoes the write; the post-reboot read is
+            # 0: the firmware does not persist OnOff (bug B63), and the
+            # step pins that measured behavior.
             "AT+MTATTR=1,6,0": [(0, ["+MTATTR:1,6,0,1"]),
-                                (0, ["+MTATTR:1,6,0,1"])],
+                                (0, ["+MTATTR:1,6,0,0"])],
             "AT+MTFABRICS?": (0, ["+MTFABRICS:1"]),
             "AT+MTSTATE?": (0, ["+MTSTATE:2,1"]),
         }
