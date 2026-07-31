@@ -476,6 +476,43 @@ def step_2_8_warm_reboot(ctx):
             link.assert_no_urc(r"\+MTEVT:0$", 5.0), tag="P2")
 
 
+def step_2_9_cold_boot(ctx):
+    """TESTING.md 2.9, the B4.3 boot-loop regression: a commissioned
+    device whose OnOff state changes at init fires a URC during
+    esp_matter::start(), before the AT UART exists. Only a cold boot
+    with a pending state change reaches the path; a warm reset (2.8)
+    preserves state and proves nothing here. A post-boot read of 1
+    means no state change happened, and TESTING.md forbids calling
+    that a pass: it scores FAIL with an inconclusive note."""
+    link, s = ctx.link, ctx.suite
+    res, _ = link.command("AT+MTATTR=1,6,0,1")
+    okw = res == 0
+    res, lines = link.command("AT+MTATTR=1,6,0")
+    if not s.check("2.9 precondition: light on before power-off",
+                   okw and res == 0 and lines == ["+MTATTR:1,6,0,1"],
+                   tag="P2"):
+        raise StepAbort("could not establish the pre-power-off state")
+    link.drain(0.3)
+    cycler = ctx.power_cycler or (
+        lambda: operator_power_cycle(ctx.opts.port))
+    ok, detail = ctx.relink(cycler)
+    if not s.check("2.9 observed power cycle, port back", ok, tag="P2"):
+        raise StepAbort("power cycle not completed: %s" % detail)
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    s.check("2.9 +MTREADY within 15 s", ready is not None, tag="P2")
+    if ready is None:
+        raise StepAbort("device not ready after cold boot")
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    s.check("2.9 fabric survived cold boot",
+            res == 0 and lines == ["+MTFABRICS:1"], tag="P2")
+    res, lines = cmd_retry(link, "AT+MTATTR=1,6,0")
+    toggled = res == 0 and lines == ["+MTATTR:1,6,0,0"]
+    s.check("2.9 StartUpOnOff toggled at init", toggled, tag="P2")
+    if res == 0 and lines == ["+MTATTR:1,6,0,1"]:
+        print("    (inconclusive: no state change at init, the guarded "
+              "path was never reached)")
+
+
 def step_cleanup_factory_fresh(ctx):
     """T2 addition (design spec section 4): leave the bench in the
     documented factory-fresh state and scored, because a cleanup that
@@ -1201,6 +1238,8 @@ PHASE2_STEPS[:] = [
      "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.8 warm reboot", "fn": step_2_8_warm_reboot,
      "requires": ["2.3 commission ble-wifi"]},
+    {"name": "2.9 cold boot", "fn": step_2_9_cold_boot,
+     "gate": "include_manual", "requires": ["2.3 commission ble-wifi"]},
     {"name": "cleanup factory-fresh", "fn": step_cleanup_factory_fresh},
 ]
 
