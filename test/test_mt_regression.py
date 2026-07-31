@@ -840,8 +840,7 @@ class TestOperatorPowerCycle(unittest.TestCase):
         self.assertIn("not observed", detail)
 
 
-from mt_regression import (step_2_1_factory_fresh, step_2_2_codes_stable,
-                           step_cleanup_factory_fresh)
+from mt_regression import step_2_1_factory_fresh, step_2_2_codes_stable
 
 
 class FakeLink:
@@ -1040,35 +1039,33 @@ class TestStep22(unittest.TestCase):
         self.assertGreater(ctx.suite.failed, 0)
 
 
-class TestCleanupStep(unittest.TestCase):
-    def test_cleanup_resets_and_wipes(self):
-        with tempfile.TemporaryDirectory() as d:
-            open(os.path.join(d, "chip_tool_config.ini"), "w").close()
-            chip = ChipTool("/bin/chip-tool", d)
-            link = FakeLink({"AT+MTRESET": (0, []),
-                             "AT+MTFABRICS?": (0, ["+MTFABRICS:0"])},
-                            urcs=["+MTREADY"])
-            ctx = fresh_ctx(link, chip=chip)
-            with contextlib.redirect_stdout(io.StringIO()):
-                step_cleanup_factory_fresh(ctx)
-            self.assertEqual(ctx.suite.failed, 0)
-            self.assertEqual(os.listdir(d), [])
-
-
 from mt_regression import (step_2_3_commission, step_2_4_host_to_controller,
                            step_2_5_controller_to_host)
 
 
 class TestStep23(unittest.TestCase):
+    """T3 retrofit (N41 item 2): the commissioning URCs release via a
+    FakeChipRunner on_call hook firing on the actual `pairing` invocation
+    (TestStep27's pattern), not pre-seeded at construction, so a test that
+    deletes the pairing call cannot pass the URC assertions by accident."""
+
     AT_OK = {
         "AT+MTFABRICS?": (0, ["+MTFABRICS:1"]),
         "AT+MTSTATE?": (0, ["+MTSTATE:2,1"]),
     }
 
+    @staticmethod
+    def _release_on_pairing(link, urcs):
+        def on_call(argv):
+            if "pairing" in argv:
+                link.push_urcs(urcs)
+        return on_call
+
     def _ctx(self, runner, urcs):
-        link = FakeLink(self.AT_OK, urcs=urcs, no_reset=True)
+        link = FakeLink(dict(self.AT_OK))
         d = tempfile.mkdtemp()  # outlives the step; ChipTool.run mkdirs it
         chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        runner.on_call = self._release_on_pairing(link, urcs)
         ctx = fresh_ctx(link, chip=chip)
         ctx.qr, ctx.manual = "MT:Y.K9042C00KA0648G00", "34970112332"
         return ctx, runner
@@ -1249,15 +1246,21 @@ class TestStep27(unittest.TestCase):
     checks anyway. See task-5-report.md for the deletion probe that
     proves this."""
 
-    AT_OK = {
-        "AT+MTCOMMISSION=180": (0, []),
-        "AT+MTSTATE?": [(0, ["+MTSTATE:1,1"]), (0, ["+MTSTATE:2,2"])],
-        "AT+MTFABRICS?": [(0, ["+MTFABRICS:2"]), (0, ["+MTFABRICS:1"])],
-    }
+    @staticmethod
+    def _commands():
+        # A fresh dict and fresh inner lists per call: FakeLink.command()
+        # pops list-valued entries in place, so a dict literal reused
+        # across test methods (a class attribute, shared for the whole
+        # process) would let one test exhaust another's scripted replies.
+        return {
+            "AT+MTCOMMISSION=180": (0, []),
+            "AT+MTSTATE?": [(0, ["+MTSTATE:1,1"]), (0, ["+MTSTATE:2,2"])],
+            "AT+MTFABRICS?": [(0, ["+MTFABRICS:2"]), (0, ["+MTFABRICS:1"])],
+        }
 
     def _ctx(self, runner):
         link = FakeLink(
-            dict(self.AT_OK), no_reset=True,
+            self._commands(), no_reset=True,
             urcs_on_command={"AT+MTCOMMISSION=180": ["+MTEVT:0"]})
         d = tempfile.mkdtemp()  # outlives the step; ChipTool.run mkdirs it
         ctx = fresh_ctx(link)
@@ -1620,6 +1623,109 @@ class TestStep211(unittest.TestCase):
             with self.assertRaises(StepAbort):
                 step_2_11_two_resets(ctx)
         self.assertGreater(ctx.suite.failed, 0)
+
+
+from mt_regression import step_2_12_rig_restore
+
+
+class TestStep212(unittest.TestCase):
+    """T3 2.12: absorbs the retired cleanup step's duties (TESTING.md
+    2.12, spec 3.9 staging grammar). The MTEP staging round-trip is
+    byte-identical on the bench (T3 Task 1 finding (d): capture, clear,
+    stage, apply, readback all matched), so the strict `lines ==
+    ctx.composition` equality in the step is correct as written, not a
+    stand-in for a looser comparison."""
+
+    COMPOSITION = ["+MTEP:0,1,0x0100"]
+
+    @staticmethod
+    def _commands(ep_readback=None, state="+MTSTATE:1,0",
+                 fabrics="+MTFABRICS:0"):
+        # Fresh dict per call (the TestStep27 exhaustion hazard the newer
+        # TestStep classes already avoid).
+        if ep_readback is None:
+            ep_readback = list(TestStep212.COMPOSITION)
+        return {
+            "AT+MTSTATE?": (0, [state]),
+            "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []),
+            "AT+MTEPAPPLY": (0, []),
+            "AT+MTEP?": (0, ep_readback),
+            "AT+MTFABRICS?": (0, [fabrics]),
+        }
+
+    def _ctx(self, runner, commands=None):
+        # +MTEVT:0 models the URC MTFRESET's reboot released in 2.11's
+        # flow (Task 9's urcs_on_command pattern); +MTREADY releases on
+        # AT+MTEPAPPLY the same way.
+        link = FakeLink(commands or self._commands(), no_reset=True,
+                        urcs=["+MTEVT:0"],
+                        urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
+        open(os.path.join(d1, "f"), "w").close()
+        open(os.path.join(d2, "f"), "w").close()
+        chip = ChipTool("/bin/chip-tool", d1, runner=runner)
+        chip2 = ChipTool("/bin/chip-tool", d2, runner=runner)
+        ctx = fresh_ctx(link, chip=chip)
+        ctx.chip2 = chip2
+        ctx.composition = list(self.COMPOSITION)
+        return ctx, d1, d2
+
+    def test_happy_path(self):
+        # The old node's storage was wiped mid-2.11, then re-commissioned,
+        # then AT+MTFRESET killed the device side: the read must fail.
+        runner = FakeChipRunner([(1, "CHIP:TOO: Run command failure")])
+        ctx, d1, d2 = self._ctx(runner)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_12_rig_restore(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual(os.listdir(d1), [])
+        self.assertEqual(os.listdir(d2), [])
+
+    def test_reachable_old_node_fails(self):
+        runner = FakeChipRunner([(0, "CHIP:TOO:   OnOff: TRUE")])
+        ctx, _, _ = self._ctx(runner)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_12_rig_restore(ctx)
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.12 old node unreachable", failed_names)
+
+    def test_readback_mismatch_fails(self):
+        runner = FakeChipRunner([(1, "CHIP:TOO: Run command failure")])
+        commands = self._commands(ep_readback=["+MTEP:0,1,0x0104"])
+        ctx, _, _ = self._ctx(runner, commands=commands)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_12_rig_restore(ctx)
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("cleanup composition restored", failed_names)
+
+
+from mt_regression import step_2_6_root_urc_sweep
+
+
+class TestStep26(unittest.TestCase):
+    """T3 2.6, scored last: no `+MTATTR:0,...` URC anywhere in the whole
+    run's history (TESTING.md 2.6)."""
+
+    def test_clean_history_passes(self):
+        link = FakeLink()
+        link.urc_history = [(0.0, "+MTEVT:0"), (1.0, "+MTATTR:1,6,0,1"),
+                            (2.0, "+MTREADY")]
+        ctx = fresh_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_6_root_urc_sweep(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_root_endpoint_attr_urc_fails(self):
+        link = FakeLink()
+        link.urc_history = [(0.0, "+MTEVT:0"), (1.0, "+MTATTR:0,40,2,1"),
+                            (2.0, "+MTREADY")]
+        ctx = fresh_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_6_root_urc_sweep(ctx)
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.6 no root-endpoint +MTATTR URC in the whole run",
+                      failed_names)
 
 
 class TestGateSkips(unittest.TestCase):

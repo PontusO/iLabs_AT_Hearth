@@ -358,7 +358,11 @@ one, which can already tell a bad LMK (`+ENERR:6`) from a bad MAC (`ERROR`).
 
 Stateful and destructive: it factory-resets, commissions, and re-commissions. It
 runs in a fixed order, and each step's preconditions are established by the step
-before it.
+before it. Two steps are opt-in and skip by default: `--include-slow` admits 2.10
+(the ~200 s window-expiry wait) and `--include-manual` admits 2.9 (needs an
+operator at the bench); a step sat out this way counts as gated in the run
+summary, separately from a failure or an abort-skip, because it is operator
+intent and not a truncated run.
 
 **2.1 Factory-fresh baseline**
 `AT+MTRESET` returns `OK`, the device reboots, and `+MTREADY` arrives within 15 s.
@@ -492,6 +496,10 @@ Note that `AT+MTRESET` alone does **not** do this, which it did before the
 composition existed. A run that resets with the wrong command starts the next
 iteration with endpoints already declared, and 2.1's assertions no longer mean
 what they say.
+
+The T3 harness restores the captured composition after this test (staging
+grammar, spec 3.9), so a full run still ends in the
+factory-fresh-with-composition state 2.1 expects.
 
 ## 8. Interpreting failures
 

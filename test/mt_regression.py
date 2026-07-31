@@ -599,23 +599,70 @@ def step_2_11_two_resets(ctx):
             res == 0 and lines == [], tag="P2")
 
 
-def step_cleanup_factory_fresh(ctx):
-    """T2 addition (design spec section 4): leave the bench in the
-    documented factory-fresh state and scored, because a cleanup that
-    fails leaves a bench that lies to the next run."""
-    link, s = ctx.link, ctx.suite
+def step_2_12_rig_restore(ctx):
+    """TESTING.md 2.12 plus the T3 cleanup: after the 2.11 MTFRESET the
+    old node must be gone and the device commissionable again, and the
+    run must hand the next one the documented bench convention:
+    factory-fresh WITH the composition declared. The replay uses the
+    spec 3.9 staging grammar; MTEPAPPLY persists and reboots on its
+    own."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    rc, _ = chip.run(["onoff", "read", "on-off", "0x%X" % ctx.node_id,
+                      "1"], timeout=30)
+    s.check("2.12 old node unreachable", rc != 0, tag="P2")
+    s.check("2.12 +MTEVT:0 after factory reset",
+            link.await_urc(r"\+MTEVT:0$", 15.0) is not None, tag="P2")
+    res, lines = link.command("AT+MTSTATE?")
+    s.check("2.12 state 1 (commissionable again)",
+            res == 0 and lines == ["+MTSTATE:1,0"], tag="P2")
+    devtypes = []
+    for ln in ctx.composition or []:
+        m = re.fullmatch(r"\+MTEP:\d+,\d+,(\S+)", ln)
+        if m:
+            devtypes.append(m.group(1))
+    if not s.check("cleanup captured composition parses",
+                   bool(devtypes), tag="P2"):
+        raise StepAbort("no captured composition to restore")
+    ok = link.command("AT+MTEPCLEAR")[0] == 0
+    for dt in devtypes:
+        ok = link.command("AT+MTEP=%s" % dt)[0] == 0 and ok
+    s.check("cleanup composition staged", ok, tag="P2")
     link.drain(0.3)
-    res, _ = cmd_retry(link, "AT+MTRESET", timeout=5.0)
-    s.check("cleanup MTRESET -> OK", res == 0, tag="P2")
+    res, _ = link.command("AT+MTEPAPPLY", timeout=5.0)
+    s.check("cleanup MTEPAPPLY -> OK", res == 0, tag="P2")
     ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
-    s.check("cleanup +MTREADY within 15 s", ready is not None, tag="P2")
+    if not s.check("cleanup +MTREADY after apply", ready is not None,
+                   tag="P2"):
+        raise StepAbort("device did not come back from AT+MTEPAPPLY")
+    res, lines = cmd_retry(link, "AT+MTEP?")
+    s.check("cleanup composition restored",
+            res == 0 and lines == ctx.composition, tag="P2")
     res, lines = cmd_retry(link, "AT+MTFABRICS?")
-    s.check("cleanup fabrics 0", res == 0 and lines == ["+MTFABRICS:0"],
+    s.check("cleanup fabrics 0",
+            res == 0 and lines == ["+MTFABRICS:0"], tag="P2")
+    res, lines = link.command("AT+MTSTATE?")
+    s.check("cleanup state 1 (window open)",
+            res == 0 and lines == ["+MTSTATE:1,0"], tag="P2")
+    for c in (ctx.chip, ctx.chip2):
+        if c is not None:
+            c.wipe_storage()
+    s.check("cleanup storages wiped",
+            all(not os.listdir(c.storage_dir)
+                for c in (ctx.chip, ctx.chip2) if c is not None),
             tag="P2")
-    if ctx.chip is not None:
-        ctx.chip.wipe_storage()
-        s.check("cleanup storage wiped",
-                not os.listdir(ctx.chip.storage_dir), tag="P2")
+
+
+def step_2_6_root_urc_sweep(ctx):
+    """TESTING.md 2.6, scored last: across every URC of the whole run,
+    endpoint 0 stays silent. Every reboot in the chain (four resets
+    plus the commissioning cycles) widens the net; regressing the
+    suppression floods the host with boot-time init noise."""
+    bad = [u for _, u in ctx.link.urc_history
+           if u.startswith("+MTATTR:0,")]
+    ctx.suite.check("2.6 no root-endpoint +MTATTR URC in the whole run",
+                    not bad, tag="P2")
+    if bad:
+        print("    offending (first 5): %s" % bad[:5])
 
 
 PHASE2_STEPS = []  # populated bottom-of-module once the steps exist
@@ -1327,8 +1374,10 @@ PHASE2_STEPS[:] = [
     {"name": "2.1 factory-fresh baseline", "fn": step_2_1_factory_fresh},
     {"name": "2.2 onboarding codes stable", "fn": step_2_2_codes_stable},
     {"name": "2.3 commission ble-wifi", "fn": step_2_3_commission},
-    {"name": "2.4 host to controller", "fn": step_2_4_host_to_controller},
-    {"name": "2.5 controller to host", "fn": step_2_5_controller_to_host},
+    {"name": "2.4 host to controller", "fn": step_2_4_host_to_controller,
+     "requires": ["2.3 commission ble-wifi"]},
+    {"name": "2.5 controller to host", "fn": step_2_5_controller_to_host,
+     "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.7 second fabric", "fn": step_2_7_second_fabric,
      "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.8 warm reboot", "fn": step_2_8_warm_reboot,
@@ -1339,7 +1388,9 @@ PHASE2_STEPS[:] = [
      "gate": "include_slow", "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.11 two resets", "fn": step_2_11_two_resets,
      "requires": ["2.3 commission ble-wifi"]},
-    {"name": "cleanup factory-fresh", "fn": step_cleanup_factory_fresh},
+    {"name": "2.12 rig restore", "fn": step_2_12_rig_restore,
+     "requires": ["2.11 two resets"]},
+    {"name": "2.6 root-endpoint URC sweep", "fn": step_2_6_root_urc_sweep},
 ]
 
 
