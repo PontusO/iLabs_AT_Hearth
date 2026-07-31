@@ -282,8 +282,12 @@ class TestSuiteSkip(unittest.TestCase):
 
 class TestRunPhase2(unittest.TestCase):
     def _ctx(self):
+        # T3's run_phase2 calls recover_after_abort() on StepAbort, which
+        # issues AT+MTRESET: link=None would crash there, so this needs a
+        # real (fake) link even though these tests predate gates/requires.
         s = Suite()
-        return Phase2Context(link=None, chip=None, suite=s, opts=None), s
+        return Phase2Context(link=FakeLink(), chip=None, suite=s,
+                             opts=None), s
 
     def test_abort_skips_the_rest(self):
         calls = []
@@ -298,8 +302,9 @@ class TestRunPhase2(unittest.TestCase):
             calls.append("never")
 
         saved = list(PHASE2_STEPS)
-        PHASE2_STEPS[:] = [("one", ok_step), ("two", bad_step),
-                           ("three", never_step)]
+        PHASE2_STEPS[:] = [{"name": "one", "fn": ok_step},
+                           {"name": "two", "fn": bad_step},
+                           {"name": "three", "fn": never_step}]
         try:
             ctx, s = self._ctx()
             with contextlib.redirect_stdout(io.StringIO()):
@@ -313,8 +318,8 @@ class TestRunPhase2(unittest.TestCase):
     def test_no_abort_runs_all(self):
         calls = []
         saved = list(PHASE2_STEPS)
-        PHASE2_STEPS[:] = [("one", lambda ctx: calls.append(1)),
-                          ("two", lambda ctx: calls.append(2))]
+        PHASE2_STEPS[:] = [{"name": "one", "fn": lambda ctx: calls.append(1)},
+                          {"name": "two", "fn": lambda ctx: calls.append(2)}]
         try:
             ctx, _ = self._ctx()
             run_phase2(ctx)
@@ -798,10 +803,26 @@ class FakeLink:
 CODES = ("+MTCODES:MT:Y.K9042C00KA0648G00,34970112332", )
 
 
-def fresh_ctx(link, chip=None, storage=None):
+def fresh_ctx(link=None, chip=None, storage=None):
+    if link is None:
+        link = FakeLink()
     opts = types.SimpleNamespace(node_id=0x4845, ssid="net", psk="secret",
-                                 storage=storage)
+                                 storage=storage, include_slow=False,
+                                 include_manual=False, keyword=None)
     return Phase2Context(link=link, chip=chip, suite=Suite(), opts=opts)
+
+
+@contextlib.contextmanager
+def patched_steps(steps):
+    """Swap PHASE2_STEPS for the duration of the block, restoring after:
+    the T3 gate/-k/requires tests exercise run_phase2() against a small
+    scripted table instead of the real six-step Phase 2 chain."""
+    saved = list(PHASE2_STEPS)
+    PHASE2_STEPS[:] = steps
+    try:
+        yield
+    finally:
+        PHASE2_STEPS[:] = saved
 
 
 class TestStep21(unittest.TestCase):
@@ -1062,6 +1083,79 @@ class TestStep25(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             step_2_5_controller_to_host(ctx)
         self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestGateSkips(unittest.TestCase):
+    def _ctx_with_steps(self, steps, **optkw):
+        # fresh_ctx() exists; read it first and reuse its FakeLink/opts
+        # construction, then override PHASE2_STEPS around run_phase2.
+        ...
+
+    def test_gated_step_skips_without_failing_exit(self):
+        s = Suite()
+        s.check("a", True)
+        s.gate_skip("2.10 window expiry", "include_slow")
+        self.assertEqual(s.failed, 0)
+        self.assertEqual(s.skipped, [])
+        self.assertEqual(len(s.gated), 1)
+
+    def test_summary_shows_gated_count(self):
+        s = Suite()
+        s.check("a", True)
+        s.gate_skip("2.9 cold boot", "include_manual")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            s.summary()
+        self.assertIn("1 gated", buf.getvalue())
+
+    def test_run_phase2_gates_and_requires(self):
+        calls = []
+        steps = [
+            {"name": "one", "fn": lambda ctx: calls.append("one")},
+            {"name": "slow", "fn": lambda ctx: calls.append("slow"),
+             "gate": "include_slow"},
+            {"name": "needs-one", "fn": lambda ctx: calls.append("dep"),
+             "requires": ["one"]},
+            {"name": "needs-slow", "fn": lambda ctx: calls.append("dep2"),
+             "requires": ["slow"]},
+        ]
+        ctx = fresh_ctx()          # opts has include_slow=False
+        with patched_steps(steps): # helper below
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase2(ctx)
+        self.assertEqual(calls, ["one", "dep"])
+        self.assertEqual([n for n, _ in ctx.suite.gated],
+                         ["slow"])
+        self.assertEqual([n for n, _ in ctx.suite.skipped],
+                         ["needs-slow"])
+
+    def test_keyword_deselects_by_substring(self):
+        calls = []
+        steps = [
+            {"name": "2.4 host to controller",
+             "fn": lambda ctx: calls.append("a")},
+            {"name": "2.5 controller to host",
+             "fn": lambda ctx: calls.append("b")},
+        ]
+        ctx = fresh_ctx()
+        ctx.opts.keyword = "2.5"
+        with patched_steps(steps):
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase2(ctx)
+        self.assertEqual(calls, ["b"])
+
+    def test_abort_triggers_recovery(self):
+        def boom(ctx):
+            ctx.suite.check("boom", False, tag="P2")
+            raise StepAbort("dead")
+        steps = [{"name": "boom", "fn": boom},
+                 {"name": "after", "fn": lambda ctx: None}]
+        ctx = fresh_ctx()   # its FakeLink accepts AT+MTRESET
+        with patched_steps(steps):
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase2(ctx)
+        self.assertIn("AT+MTRESET", ctx.link.sent)  # recovery reset issued
+        self.assertEqual([n for n, _ in ctx.suite.skipped], ["after"])
 
 
 if __name__ == "__main__":
