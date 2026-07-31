@@ -1523,11 +1523,11 @@ class TestStep28(unittest.TestCase):
         # process) would let one test exhaust another's scripted replies.
         return {
             "AT+MTATTR=1,6,0,1": (0, []),
-            # Pre-reboot read echoes the write; the post-reboot read is
-            # 0: the firmware does not persist OnOff (bug B63), and the
-            # step pins that measured behavior.
+            # Pre-reboot read echoes the write; the post-reboot read
+            # is 1 again: OnOff survives since the B63 fix (8100af4),
+            # and this step is its warm-reboot regression guard.
             "AT+MTATTR=1,6,0": [(0, ["+MTATTR:1,6,0,1"]),
-                                (0, ["+MTATTR:1,6,0,0"])],
+                                (0, ["+MTATTR:1,6,0,1"])],
             "AT+MTFABRICS?": (0, ["+MTFABRICS:1"]),
             "AT+MTSTATE?": (0, ["+MTSTATE:2,1"]),
         }
@@ -1634,7 +1634,7 @@ class TestStep29(unittest.TestCase):
         return relink
 
     def test_happy_path(self):
-        link = FakeLink(self._commands(post_boot_attr=0))
+        link = FakeLink(self._commands(post_boot_attr=1))
         ctx = fresh_ctx(link)
         ctx.relink = self._relink(link)
         cycler_calls = []
@@ -1649,17 +1649,17 @@ class TestStep29(unittest.TestCase):
         self.assertEqual(ctx.suite.failed, 0)
         self.assertTrue(cycler_calls)
 
-    def test_inconclusive_path_fails_and_prints(self):
-        link = FakeLink(self._commands(post_boot_attr=1))
+    def test_value_lost_fails_the_guard(self):
+        """A post-boot read of 0 is a B63 regression and must fail."""
+        link = FakeLink(self._commands(post_boot_attr=0))
         ctx = fresh_ctx(link)
         ctx.relink = self._relink(link)
         ctx.power_cycler = lambda: (True, "")
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
+        with contextlib.redirect_stdout(io.StringIO()):
             step_2_9_cold_boot(ctx)
         failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
-        self.assertIn("2.9 StartUpOnOff toggled at init", failed_names)
-        self.assertIn("inconclusive", buf.getvalue())
+        self.assertIn("2.9 value survived cold boot (B63 guard)",
+                      failed_names)
 
     def test_cycle_not_observed_aborts(self):
         link = FakeLink(self._commands())
