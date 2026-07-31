@@ -237,6 +237,9 @@ class Phase2Context:
         self.opts = opts
         self.qr = None
         self.manual = None
+        self.passcode = None
+        self.discriminator = None
+        self.chip2 = None         # second controller identity (T3 2.7)
         self.node_id = getattr(opts, "node_id", 0x4845)
         self.subscriber_factory = None  # test seam; None means real Subscriber
         self.relink = None        # installed by main(); steps 2.8/2.9 need it
@@ -297,6 +300,7 @@ def step_2_3_commission(ctx):
     if not s.check("2.3 QR payload parses", parsed is not None, tag="P2"):
         raise StepAbort("onboarding QR not machine-usable")
     passcode, discriminator = parsed
+    ctx.passcode, ctx.discriminator = passcode, discriminator
     rc, out = chip.run(["pairing", "ble-wifi", "0x%X" % ctx.node_id,
                         ctx.opts.ssid, ctx.opts.psk,
                         str(passcode), str(discriminator)], timeout=120)
@@ -386,6 +390,56 @@ def step_2_5_controller_to_host(ctx):
                 tag="P2")
         if not okc:
             raise StepAbort("controller-side write failed")
+
+
+def step_2_7_second_fabric(ctx):
+    """TESTING.md 2.7: fabric accounting through an additional window.
+    The second controller pairs over the network (the device is already
+    on WiFi; verb pinned by T3 Task 1 finding (b): `onnetwork-long`), and
+    the DE24 pair (one +MTEVT:4 per +MTEVT:0, after complete) must hold
+    for host-opened windows exactly as it does for the boot window."""
+    link, s, chip2 = ctx.link, ctx.suite, ctx.chip2
+    res, _ = link.command("AT+MTCOMMISSION=180")
+    okw = s.check("2.7 MTCOMMISSION=180 -> OK", res == 0, tag="P2")
+    s.check("2.7 +MTEVT:0 window opened",
+            link.await_urc(r"\+MTEVT:0$", 5.0) is not None, tag="P2")
+    res, lines = link.command("AT+MTSTATE?")
+    s.check("2.7 state 1 while window open",
+            res == 0 and lines == ["+MTSTATE:1,1"], tag="P2")
+    if not okw:
+        raise StepAbort("could not open an additional window")
+    node2 = ctx.node_id + 1
+    rc, out = chip2.run(["pairing", "onnetwork-long", "0x%X" % node2,
+                         str(ctx.passcode), str(ctx.discriminator)],
+                        timeout=120)
+    paired = s.check("2.7 second controller pairs", rc == 0, tag="P2")
+    s.check("2.7 +MTEVT:1 session started",
+            link.await_urc(r"\+MTEVT:1$", 90.0) is not None, tag="P2")
+    got3 = link.await_urc_ts(r"\+MTEVT:3$", 90.0)
+    s.check("2.7 +MTEVT:3 complete", got3 is not None, tag="P2")
+    got4 = link.await_urc_ts(r"\+MTEVT:4$", 15.0)
+    s.check("2.7 exactly one +MTEVT:4, after complete",
+            got3 is not None and got4 is not None and got4[0] > got3[0]
+            and link.assert_no_urc(r"\+MTEVT:4$", 10.0), tag="P2")
+    if not (paired and got3 is not None):
+        raise StepAbort("second commissioning failed")
+    res, lines = link.command("AT+MTFABRICS?")
+    s.check("2.7 fabrics 2", res == 0 and lines == ["+MTFABRICS:2"],
+            tag="P2")
+    res, lines = link.command("AT+MTSTATE?")
+    s.check("2.7 state 2 after window",
+            res == 0 and lines == ["+MTSTATE:2,2"], tag="P2")
+    rc, out = chip2.run(["operationalcredentials", "read", "fabrics",
+                         "0x%X" % node2, "0"], timeout=30)
+    idx = parse_fabric_index(out, node2) if rc == 0 else None
+    if s.check("2.7 fabric index found", idx is not None, tag="P2"):
+        rc, _ = chip2.run(["operationalcredentials", "remove-fabric",
+                           str(idx), "0x%X" % node2, "0"], timeout=30)
+        s.check("2.7 remove-fabric exits 0", rc == 0, tag="P2")
+    res, lines = link.command("AT+MTFABRICS?")
+    s.check("2.7 fabrics back to 1",
+            res == 0 and lines == ["+MTFABRICS:1"], tag="P2")
+    link.drain(0.5)
 
 
 def step_cleanup_factory_fresh(ctx):
@@ -519,6 +573,29 @@ def parse_setup_payload(text):
         disc = re.search(r"Discriminator(?: value)?:\s*(\d+)", text)
     if pc and disc:
         return int(pc.group(1)), int(disc.group(1))
+    return None
+
+
+def parse_fabric_index(text, node_id):
+    """FabricIndex of the fabrics-list entry whose node id matches, from
+    `operationalcredentials read fabrics` output. Shape validated against
+    the Task 1 fixture (test/fixtures/chiptool_read_fabrics.txt): each
+    entry prints `NodeID:` *before* `FabricIndex:`, the opposite order the
+    T3 plan guessed, so this tracks the most recently seen node id and
+    resolves it when the following FabricIndex line arrives. The fixture's
+    NodeID prints as plain decimal with no `0x` prefix; other chip-tool
+    revisions are documented to print it as hex, so a `0x` prefix (when
+    present) selects base 16. None when the node is not present."""
+    last_node = None
+    for m in re.finditer(
+            r"Node\s*ID:\s*(0x)?([0-9A-Fa-f]+)|FabricIndex:\s*(\d+)",
+            text, re.IGNORECASE):
+        if m.group(3) is not None:
+            if last_node == node_id:
+                return int(m.group(3))
+            last_node = None
+        else:
+            last_node = int(m.group(2), 16 if m.group(1) else 10)
     return None
 
 
@@ -1080,6 +1157,8 @@ PHASE2_STEPS[:] = [
     {"name": "2.3 commission ble-wifi", "fn": step_2_3_commission},
     {"name": "2.4 host to controller", "fn": step_2_4_host_to_controller},
     {"name": "2.5 controller to host", "fn": step_2_5_controller_to_host},
+    {"name": "2.7 second fabric", "fn": step_2_7_second_fabric,
+     "requires": ["2.3 commission ble-wifi"]},
     {"name": "cleanup factory-fresh", "fn": step_cleanup_factory_fresh},
 ]
 
@@ -1151,6 +1230,8 @@ def main(argv=None):
             chip.wipe_storage()
             ctx = Phase2Context(link, chip, suite, args)
             ctx.relink = make_relink(link, args.port)
+            ctx.chip2 = ChipTool(args.chip_tool, args.storage + "-f2")
+            ctx.chip2.wipe_storage()
             run_phase2(ctx)
             capture_header(link, header)
         elif args.phase != 0:

@@ -426,14 +426,23 @@ def fixture(name):
 
 
 class FakeChipRunner:
-    """Scripted stand-in for ChipTool's subprocess runner."""
+    """Scripted stand-in for ChipTool's subprocess runner. on_call, when
+    given, is invoked with each argv before the scripted result is
+    returned: T3 step 2.7 uses this to release the commissioning URCs at
+    the moment the `pairing` invocation actually happens, rather than
+    pre-seeding them at construction (N41 item 2), so a test that deletes
+    the pairing call can actually fail the URC assertions instead of
+    trivially passing them."""
 
-    def __init__(self, script):
+    def __init__(self, script, on_call=None):
         self.script = list(script)
         self.calls = []
+        self.on_call = on_call
 
     def __call__(self, argv, timeout):
         self.calls.append((argv, timeout))
+        if self.on_call is not None:
+            self.on_call(argv)
         return self.script.pop(0)
 
 
@@ -502,6 +511,21 @@ class TestChipToolParsers(unittest.TestCase):
         text = (fixture("chiptool_onoff_read_true.txt")
                 + fixture("chiptool_onoff_read_false.txt"))
         self.assertEqual(parse_onoff_reports(text), [1, 0])
+
+
+from mt_regression import parse_fabric_index
+
+
+class TestParseFabricIndex(unittest.TestCase):
+    def test_finds_index_for_node(self):
+        text = fixture("chiptool_read_fabrics.txt")
+        idx = parse_fabric_index(text, 0x4846)
+        # literal value the fixture contains (Task 1 finding (b): index 2)
+        self.assertEqual(idx, 2)
+
+    def test_absent_node_is_none(self):
+        text = fixture("chiptool_read_fabrics.txt")
+        self.assertIsNone(parse_fabric_index(text, 0xDEAD))
 
 
 from mt_regression import Subscriber
@@ -797,14 +821,25 @@ class FakeLink:
     are seeded at construction and drain() clears them, letting fresh URCs
     (from urcs) arrive after AT+MTRESET. Pass no_reset=True to seed fresh
     URCs immediately (for tests that skip AT+MTRESET); otherwise URCs arrive
-    only after drain() or AT+MTRESET (preserves test fidelity)."""
+    only after drain() or AT+MTRESET (preserves test fidelity).
+
+    urcs_on_command (dict cmd -> [urc, ...]) releases URCs the first time
+    that exact command string is sent through command(), independent of
+    the AT+MTRESET mechanics above: T3 step 2.7 uses this to tie
+    +MTEVT:0 to AT+MTCOMMISSION=180, the way the real device's window-open
+    URC actually arrives. push_urcs() is the same release mechanism for a
+    trigger that isn't an AT command at all (step 2.7's pairing/1/3/4 URCs,
+    released from a FakeChipRunner on_call hook when the chip-tool
+    `pairing` invocation happens)."""
 
     def __init__(self, commands=None, urcs=None, stale_urcs=None, no_reset=False,
-                 urcs_after_drain=None):
+                 urcs_after_drain=None, urcs_on_command=None):
         self.commands = dict(commands or {})
         self.urcs = list(urcs or [])
         self.stale_urcs = list(stale_urcs or [])
         self.urcs_after_drain = list(urcs_after_drain or [])
+        self.urcs_on_command = dict(urcs_on_command or {})
+        self._released_on_command = set()
         self.no_reset = no_reset
         # Seed queue with stale URCs at low timestamps (0, 1, ...)
         self.urc_queue = [(float(i), u) for i, u in enumerate(self.stale_urcs)]
@@ -840,7 +875,22 @@ class FakeLink:
             self.urc_queue.extend(fresh_entries)
             self.urc_history.extend(fresh_entries)
             self.fresh_urcs_added = True
+        if (cmd in self.urcs_on_command
+                and cmd not in self._released_on_command):
+            self._released_on_command.add(cmd)
+            self.push_urcs(self.urcs_on_command[cmd])
         return v
+
+    def push_urcs(self, urcs):
+        """Directly enqueue URCs after whatever is already queued, with
+        timestamps that preserve arrival order. Honest release mechanism
+        for triggers that never go through command() at all (e.g. a
+        chip-tool invocation observed via FakeChipRunner.on_call)."""
+        start_ts = (max((ts for ts, _ in self.urc_queue), default=-1.0)
+                   + 1.0)
+        entries = [(start_ts + float(i), u) for i, u in enumerate(urcs)]
+        self.urc_queue.extend(entries)
+        self.urc_history.extend(entries)
 
     def await_urc_ts(self, pattern, timeout=5.0):
         rx = re.compile(pattern)
@@ -1156,6 +1206,86 @@ class TestStep25(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             step_2_5_controller_to_host(ctx)
         self.assertGreater(ctx.suite.failed, 0)
+
+
+from mt_regression import step_2_7_second_fabric
+
+
+class TestStep27(unittest.TestCase):
+    """T3 2.7. Deliberate upgrade over TestStep23's pattern (N41 item 2):
+    the pairing/1/3/4 URCs are released by a FakeChipRunner on_call hook
+    firing on the actual `pairing` invocation, not pre-seeded at
+    construction, so a step that skips the call cannot pass the URC
+    checks anyway. See task-5-report.md for the deletion probe that
+    proves this."""
+
+    AT_OK = {
+        "AT+MTCOMMISSION=180": (0, []),
+        "AT+MTSTATE?": [(0, ["+MTSTATE:1,1"]), (0, ["+MTSTATE:2,2"])],
+        "AT+MTFABRICS?": [(0, ["+MTFABRICS:2"]), (0, ["+MTFABRICS:1"])],
+    }
+
+    def _ctx(self, runner):
+        link = FakeLink(
+            dict(self.AT_OK), no_reset=True,
+            urcs_on_command={"AT+MTCOMMISSION=180": ["+MTEVT:0"]})
+        d = tempfile.mkdtemp()  # outlives the step; ChipTool.run mkdirs it
+        ctx = fresh_ctx(link)
+        ctx.chip2 = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx.passcode, ctx.discriminator = 20202021, 3840
+        return ctx, link
+
+    @staticmethod
+    def _release_on_pairing(link):
+        def on_call(argv):
+            if "pairing" in argv:
+                link.push_urcs(["+MTEVT:1", "+MTEVT:3", "+MTEVT:4"])
+        return on_call
+
+    def test_happy_path_counts(self):
+        runner = FakeChipRunner([
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+            (0, fixture("chiptool_read_fabrics.txt")),
+            (0, "CHIP:TOO: NOCResponse"),
+        ])
+        ctx, link = self._ctx(runner)
+        runner.on_call = self._release_on_pairing(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_7_second_fabric(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        pairing_argv = runner.calls[0][0]
+        self.assertEqual(pairing_argv[1:3], ["pairing", "onnetwork-long"])
+        self.assertIn("0x4846", pairing_argv)
+        self.assertIn("20202021", pairing_argv)
+        self.assertIn("3840", pairing_argv)
+        remove_argv = runner.calls[2][0]
+        self.assertEqual(remove_argv[1:3],
+                         ["operationalcredentials", "remove-fabric"])
+        self.assertIn("2", remove_argv)
+
+    def test_pairing_failure_aborts(self):
+        # No on_call release wired: a failed pairing produces no
+        # commissioning URCs on real hardware either.
+        runner = FakeChipRunner([(1, "CHIP:TOO: Run command failure")])
+        ctx, _ = self._ctx(runner)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_7_second_fabric(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_missing_index_scores_fail_but_continues(self):
+        runner = FakeChipRunner([
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+            (0, "no matching fabric entries in this capture"),
+        ])
+        ctx, link = self._ctx(runner)
+        runner.on_call = self._release_on_pairing(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_7_second_fabric(ctx)   # must not raise
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.7 fabric index found", failed_names)
+        # no index means remove-fabric must never be attempted
+        self.assertEqual(len(runner.calls), 2)
 
 
 class TestGateSkips(unittest.TestCase):
