@@ -34,7 +34,10 @@ chip-tool is a subprocess, parsed from stdout.
 **`ChipTool`** wraps one-shot invocations.
 
 - `run(args, timeout=60)` returns `(exit_code, stdout_text)`. Every call
-  passes `--storage-directory <dir>`.
+  passes `--storage-directory <dir>`, except the `payload` subcommand
+  family: those are pure parsers taking exactly one positional argument
+  and no options, and the flag makes the real binary fail with "Wrong
+  arguments number" (found during Task 11 hardware verification).
 - Binary resolution: `--chip-tool` argument, else `MT_CHIPTOOL`, else the
   esp-matter build product
   `~/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool`.
