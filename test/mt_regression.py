@@ -442,6 +442,40 @@ def step_2_7_second_fabric(ctx):
     link.drain(0.5)
 
 
+def step_2_8_warm_reboot(ctx):
+    """TESTING.md 2.8. The reset is RP2350-driven over SWD: openocd
+    resets the bridge, whose setup() pulses the C6 reset, so the C6
+    reboots with NVS intact. Extension over TESTING.md: a commissioned
+    device must not open a boot window, so a +MTEVT:0 here is a fail."""
+    link, s = ctx.link, ctx.suite
+    res, _ = link.command("AT+MTATTR=1,6,0,1")
+    s.check("2.8 precondition write 1 -> OK", res == 0, tag="P2")
+    res, lines = link.command("AT+MTATTR=1,6,0")
+    if not s.check("2.8 precondition reads 1",
+                   res == 0 and lines == ["+MTATTR:1,6,0,1"], tag="P2"):
+        raise StepAbort("could not establish the pre-reboot state")
+    link.drain(0.3)
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    if not s.check("2.8 SWD reset, port back", ok, tag="P2"):
+        raise StepAbort("bridge did not come back after SWD reset: %s"
+                        % detail)
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    s.check("2.8 +MTREADY within 15 s", ready is not None, tag="P2")
+    if ready is None:
+        raise StepAbort("device not ready after warm reboot")
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    s.check("2.8 fabric survived",
+            res == 0 and lines == ["+MTFABRICS:1"], tag="P2")
+    res, lines = cmd_retry(link, "AT+MTATTR=1,6,0")
+    s.check("2.8 attribute value survived",
+            res == 0 and lines == ["+MTATTR:1,6,0,1"], tag="P2")
+    res, lines = link.command("AT+MTSTATE?")
+    s.check("2.8 state 2 (operational)",
+            res == 0 and lines == ["+MTSTATE:2,1"], tag="P2")
+    s.check("2.8 no boot window on commissioned device",
+            link.assert_no_urc(r"\+MTEVT:0$", 5.0), tag="P2")
+
+
 def step_cleanup_factory_fresh(ctx):
     """T2 addition (design spec section 4): leave the bench in the
     documented factory-fresh state and scored, because a cleanup that
@@ -466,13 +500,19 @@ PHASE2_STEPS = []  # populated bottom-of-module once the steps exist
 
 def recover_after_abort(ctx, reason):
     """Best-effort bench recovery after a chain abort: do not strand a
-    commissioned device or dirty storage for the next run. Unscored;
-    link death never reaches here (it raises SerialException past
-    run_phase2, and a dead link would fail these commands harmlessly)."""
+    commissioned device or dirty storage for the next run. Unscored.
+    The link may be dead or deliberately closed (a failed relink leaves
+    the port closed by contract), so link errors are swallowed here and
+    the storage wipes always run; OSError covers SerialException and
+    PortNotOpenError, both subclasses."""
     print("  (recovery after abort: %s)" % reason)
-    res, _ = cmd_retry(ctx.link, "AT+MTRESET", timeout=5.0)
-    if res == 0:
-        ctx.link.await_urc(r"\+MTREADY$", timeout=15.0)
+    try:
+        res, _ = cmd_retry(ctx.link, "AT+MTRESET", timeout=5.0)
+        if res == 0:
+            ctx.link.await_urc(r"\+MTREADY$", timeout=15.0)
+    except OSError as exc:
+        print("  (recovery: link unavailable, device reset skipped: %s)"
+              % exc)
     for c in (ctx.chip, getattr(ctx, "chip2", None)):
         if c is not None:
             c.wipe_storage()
@@ -1158,6 +1198,8 @@ PHASE2_STEPS[:] = [
     {"name": "2.4 host to controller", "fn": step_2_4_host_to_controller},
     {"name": "2.5 controller to host", "fn": step_2_5_controller_to_host},
     {"name": "2.7 second fabric", "fn": step_2_7_second_fabric,
+     "requires": ["2.3 commission ble-wifi"]},
+    {"name": "2.8 warm reboot", "fn": step_2_8_warm_reboot,
      "requires": ["2.3 commission ble-wifi"]},
     {"name": "cleanup factory-fresh", "fn": step_cleanup_factory_fresh},
 ]

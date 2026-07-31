@@ -1288,6 +1288,77 @@ class TestStep27(unittest.TestCase):
         self.assertEqual(len(runner.calls), 2)
 
 
+from mt_regression import step_2_8_warm_reboot
+
+
+class TestStep28(unittest.TestCase):
+    """T3 2.8: warm reboot over the SWD path (Task 1 finding (a), pinned
+    on the bench: the by-id device path disappears and reappears across
+    the reset, and +MTREADY was observed 1.84 s after reopen, n=1). The
+    fake relink models exactly that: it stands in for ctx.relink, is
+    called with the swd_reset action, and pushes +MTREADY into the link
+    via FakeLink.push_urcs the way a real reboot's URC would arrive after
+    the port comes back."""
+
+    @staticmethod
+    def _commands():
+        # A fresh dict and fresh inner lists per call: FakeLink.command()
+        # pops list-valued entries in place, so a dict literal reused
+        # across test methods (a class attribute, shared for the whole
+        # process) would let one test exhaust another's scripted replies.
+        return {
+            "AT+MTATTR=1,6,0,1": (0, []),
+            "AT+MTATTR=1,6,0": [(0, ["+MTATTR:1,6,0,1"]),
+                                (0, ["+MTATTR:1,6,0,1"])],
+            "AT+MTFABRICS?": (0, ["+MTFABRICS:1"]),
+            "AT+MTSTATE?": (0, ["+MTSTATE:2,1"]),
+        }
+
+    def test_happy_path(self):
+        link = FakeLink(self._commands())
+        relink_called = []
+
+        def relink(action):
+            relink_called.append(True)
+            link.push_urcs(["+MTREADY"])
+            return True, ""
+
+        ctx = fresh_ctx(link)
+        ctx.relink = relink
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_8_warm_reboot(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertTrue(relink_called)
+
+    def test_relink_failure_aborts(self):
+        link = FakeLink(self._commands())
+
+        def relink(action):
+            return False, "port did not come back"
+
+        ctx = fresh_ctx(link)
+        ctx.relink = relink
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_8_warm_reboot(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_boot_window_urc_fails_the_guard(self):
+        link = FakeLink(self._commands())
+
+        def relink(action):
+            link.push_urcs(["+MTREADY", "+MTEVT:0"])
+            return True, ""
+
+        ctx = fresh_ctx(link)
+        ctx.relink = relink
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_8_warm_reboot(ctx)
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.8 no boot window on commissioned device",
+                      failed_names)
+
+
 class TestGateSkips(unittest.TestCase):
     def _ctx_with_steps(self, steps, **optkw):
         # fresh_ctx() exists; read it first and reuse its FakeLink/opts
@@ -1359,6 +1430,34 @@ class TestGateSkips(unittest.TestCase):
                 run_phase2(ctx)
         self.assertIn("AT+MTRESET", ctx.link.sent)  # recovery reset issued
         self.assertEqual([n for n, _ in ctx.suite.skipped], ["after"])
+
+    def test_recovery_survives_dead_link_and_still_wipes_storage(self):
+        """Task 4 carried finding: make_relink's contract leaves the port
+        CLOSED when its action fails, and step_2_8_warm_reboot raises
+        StepAbort on that path. recover_after_abort's own AT+MTRESET then
+        hits a closed transport (PortNotOpenError, a SerialException,
+        which subclasses OSError), which must not propagate past
+        run_phase2 nor skip the storage wipes that follow it."""
+
+        class DeadLink:
+            def command(self, *a, **kw):
+                raise OSError("port closed")
+
+        def boom(ctx):
+            ctx.suite.check("boom", False, tag="P2")
+            raise StepAbort("dead")
+
+        steps = [{"name": "boom", "fn": boom}]
+        d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
+        open(os.path.join(d1, "f"), "w").close()
+        open(os.path.join(d2, "f"), "w").close()
+        ctx = fresh_ctx(link=DeadLink(), chip=ChipTool("/bin/chip-tool", d1))
+        ctx.chip2 = ChipTool("/bin/chip-tool", d2)
+        with patched_steps(steps):
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase2(ctx)  # must not raise
+        self.assertEqual(os.listdir(d1), [])
+        self.assertEqual(os.listdir(d2), [])
 
 
 if __name__ == "__main__":
