@@ -184,6 +184,7 @@ class Suite:
     def __init__(self):
         self.results = []
         self.skipped = []
+        self.gated = []
 
     def check(self, name, ok, tag="AT+"):
         ok = bool(ok)
@@ -198,18 +199,25 @@ class Suite:
         self.skipped.append((name, reason))
         print("  [SKIP] %s: %s" % (name, reason))
 
+    def gate_skip(self, name, flag):
+        """A step deliberately gated out (--include-slow, --include-manual,
+        -k). Unlike skip(), never fails the run: gating is operator
+        intent, not truncation."""
+        self.gated.append((name, flag))
+        print("  [SKIP] %s (gated: --%s)" % (name, flag.replace("_", "-")))
+
     @property
     def failed(self):
         return sum(1 for _, ok, _ in self.results if not ok)
 
     def summary(self):
         passed = sum(1 for _, ok, _ in self.results if ok)
+        parts = ["%d passed" % passed, "%d failed" % self.failed]
         if self.skipped:
-            print("===== RESULT: %d passed, %d failed, %d skipped =====" %
-                  (passed, self.failed, len(self.skipped)))
-        else:
-            print("===== RESULT: %d passed, %d failed =====" %
-                  (passed, self.failed))
+            parts.append("%d skipped" % len(self.skipped))
+        if self.gated:
+            parts.append("%d gated" % len(self.gated))
+        print("===== RESULT: %s =====" % ", ".join(parts))
 
 
 class StepAbort(Exception):
@@ -398,19 +406,51 @@ def step_cleanup_factory_fresh(ctx):
 PHASE2_STEPS = []  # populated bottom-of-module once the steps exist
 
 
+def recover_after_abort(ctx, reason):
+    """Best-effort bench recovery after a chain abort: do not strand a
+    commissioned device or dirty storage for the next run. Unscored;
+    link death never reaches here (it raises SerialException past
+    run_phase2, and a dead link would fail these commands harmlessly)."""
+    print("  (recovery after abort: %s)" % reason)
+    res, _ = cmd_retry(ctx.link, "AT+MTRESET", timeout=5.0)
+    if res == 0:
+        ctx.link.await_urc(r"\+MTREADY$", timeout=15.0)
+    for c in (ctx.chip, getattr(ctx, "chip2", None)):
+        if c is not None:
+            c.wipe_storage()
+
+
 def run_phase2(ctx):
-    """Ordered execution with abort/skip semantics: Phase 1 checks are
-    independent, Phase 2 steps chain, so a broken precondition skips the
-    remainder instead of producing 20 misleading FAILs."""
+    """Ordered execution with abort/skip semantics (T2) plus gates and
+    -k deselection (T3): a gated-out step is operator intent and exits
+    zero; a step whose prerequisite did not run is an abort-skip, so a
+    truncated chain still fails loudly."""
     abort_reason = None
-    for name, fn in PHASE2_STEPS:
+    ran = set()
+    kw = getattr(ctx.opts, "keyword", None)
+    for step in PHASE2_STEPS:
+        name, fn = step["name"], step["fn"]
         if abort_reason is not None:
             ctx.suite.skip(name, abort_reason)
             continue
+        gate = step.get("gate")
+        if gate and not getattr(ctx.opts, gate, False):
+            ctx.suite.gate_skip(name, gate)
+            continue
+        if kw and kw not in name:
+            ctx.suite.gate_skip(name, "k=%s" % kw)
+            continue
+        missing = [r for r in step.get("requires", ()) if r not in ran]
+        if missing:
+            ctx.suite.skip(name, "requires step that did not run: %s"
+                           % missing[0])
+            continue
         try:
             fn(ctx)
+            ran.add(name)
         except StepAbort as exc:
             abort_reason = str(exc)
+            recover_after_abort(ctx, abort_reason)
 
 
 DEFAULT_CHIPTOOL = os.path.expanduser(
@@ -961,12 +1001,12 @@ register_phase1_negative()
 
 
 PHASE2_STEPS[:] = [
-    ("2.1 factory-fresh baseline", step_2_1_factory_fresh),
-    ("2.2 onboarding codes stable", step_2_2_codes_stable),
-    ("2.3 commission ble-wifi", step_2_3_commission),
-    ("2.4 host to controller", step_2_4_host_to_controller),
-    ("2.5 controller to host", step_2_5_controller_to_host),
-    ("cleanup factory-fresh", step_cleanup_factory_fresh),
+    {"name": "2.1 factory-fresh baseline", "fn": step_2_1_factory_fresh},
+    {"name": "2.2 onboarding codes stable", "fn": step_2_2_codes_stable},
+    {"name": "2.3 commission ble-wifi", "fn": step_2_3_commission},
+    {"name": "2.4 host to controller", "fn": step_2_4_host_to_controller},
+    {"name": "2.5 controller to host", "fn": step_2_5_controller_to_host},
+    {"name": "cleanup factory-fresh", "fn": step_cleanup_factory_fresh},
 ]
 
 
@@ -981,7 +1021,10 @@ def main(argv=None):
     ap.add_argument("--baseline", default=None,
                     help="write a JSON baseline of this run")
     ap.add_argument("--include-slow", action="store_true",
-                    help="reserved for slow checks (T3); currently no effect")
+                    help="include the ~200 s window-expiry test (2.10)")
+    ap.add_argument("--include-manual", action="store_true",
+                    help="include tests needing an operator at the bench "
+                         "(2.9 cold boot)")
     ap.add_argument("--chip-tool",
                     default=os.environ.get("MT_CHIPTOOL", DEFAULT_CHIPTOOL))
     ap.add_argument("--storage",
@@ -992,6 +1035,11 @@ def main(argv=None):
     ap.add_argument("--node-id", type=lambda x: int(x, 0), default=0x4845,
                     help="node id chip-tool assigns at pairing")
     args = ap.parse_args(argv)
+    if args.baseline and args.phase == 2 and not (
+            args.include_slow and args.include_manual):
+        ap.error("--baseline with --phase 2 requires --include-slow and "
+                 "--include-manual: a committed baseline must not contain "
+                 "gated-out entries")
 
     chip = None
     if args.phase == 2:
