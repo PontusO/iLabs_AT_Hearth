@@ -30,21 +30,36 @@ typedef struct {
     const char       *name;
 } mt_devtype_entry_t;
 
+/*
+ * StartUpOnOff must be null ("previous value"), not esp-matter's config
+ * default of 0 ("always Off", esp_matter_feature.h:217). With 0, CHIP's
+ * OnOffServer forces the light Off at every boot and PERSISTS the 0, so
+ * the stored OnOff never survives a reboot (bug B63). The persistence
+ * machinery itself was proven healthy: this default was overwriting it.
+ */
+static void mt_startup_on_off_null(on_off_with_lighting_config *c)
+{
+    c->on_off_lighting.start_up_on_off = nullable<uint8_t>();
+}
+
 static endpoint_t *mk_on_off_light(node_t *n)
 {
     on_off_light::config_t c;
+    mt_startup_on_off_null(&c);
     return on_off_light::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
 
 static endpoint_t *mk_dimmable_light(node_t *n)
 {
     dimmable_light::config_t c;
+    mt_startup_on_off_null(&c);
     return dimmable_light::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
 
 static endpoint_t *mk_color_temperature_light(node_t *n)
 {
     color_temperature_light::config_t c;
+    mt_startup_on_off_null(&c);
     return color_temperature_light::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
 
