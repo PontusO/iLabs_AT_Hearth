@@ -423,8 +423,22 @@ class ChipTool:
 
     @staticmethod
     def _default_runner(argv, timeout):
-        proc = subprocess.run(argv, capture_output=True, text=True,
-                              timeout=timeout)
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # A hung chip-tool must become a scored failure with skip
+            # semantics, not a raw traceback: TimeoutExpired is a
+            # SubprocessError, which neither run_phase2 (StepAbort only)
+            # nor main (serial/OSError only) catches. subprocess.run has
+            # already killed the child. Partial output arrives as bytes
+            # despite text=True (CPython quirk).
+            def _txt(s):
+                if isinstance(s, bytes):
+                    return s.decode(errors="replace")
+                return s or ""
+            return 124, (_txt(exc.stdout) + _txt(exc.stderr)
+                         + "\n(chip-tool timed out after %s s)" % timeout)
         return proc.returncode, proc.stdout + proc.stderr
 
     def run(self, args, timeout=60):
@@ -960,7 +974,7 @@ def main(argv=None):
     ap.add_argument("--baseline", default=None,
                     help="write a JSON baseline of this run")
     ap.add_argument("--include-slow", action="store_true",
-                    help="reserved for Phase 2; no effect in T1")
+                    help="reserved for slow checks (T3); currently no effect")
     ap.add_argument("--chip-tool",
                     default=os.environ.get("MT_CHIPTOOL", DEFAULT_CHIPTOOL))
     ap.add_argument("--storage",
@@ -994,7 +1008,7 @@ def main(argv=None):
         "fw_repo_head": repo_head(REPO_ROOT),
         "at_core_repo_head": repo_head(
             os.path.join(os.path.dirname(REPO_ROOT), "iLabs_AT_ESP-now")),
-        "ssid": os.environ.get("MT_SSID"),
+        "ssid": args.ssid,
     }
     suite = Suite()
     truncated = False

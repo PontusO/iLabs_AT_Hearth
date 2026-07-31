@@ -1,4 +1,4 @@
-# SYNTHESIZED in T2 Task 3; replaced by a real capture in Task 11.
+# SYNTHESIZED in T2 Task 3. Task 11 verified the parsers against real chip-tool output on the bench; no replacement was needed, so the line shapes here are synthetic, not a capture.
 [1753900000.123456][11111:22222] CHIP:DMG: ReportDataMessage =
 [1753900000.123456][11111:22222] CHIP:DMG: {
 [1753900000.123999][11111:22222] CHIP:TOO: Endpoint: 1 Cluster: 0x0000_0006 Attribute 0x0000_0000 DataVersion: 1234

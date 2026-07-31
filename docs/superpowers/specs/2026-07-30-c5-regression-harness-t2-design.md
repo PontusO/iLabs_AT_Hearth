@@ -24,7 +24,8 @@ run-end cleanup. 2.6 to 2.12 remain T3.
   for report observation. A persistent `interactive start` REPL was rejected as
   a fragile parsing dependency; reads-only (no subscription) was rejected
   because only report observation catches a mode-0-notifies regression
-  (TESTING.md 2.4).
+  (TESTING.md 2.4). Hardware overturned the first rejection for the
+  subscription only: see section 2 and the section 8.1 fallback.
 
 ## 2. Components
 
