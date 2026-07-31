@@ -241,7 +241,7 @@ class TestPhase0(unittest.TestCase):
         self.assertIn("AT", problem)
 
 
-from mt_regression import add_test, TESTS, main
+from mt_regression import add_test, TESTS, main, exit_code
 from mt_regression import (Suite, StepAbort, Phase2Context, run_phase2,
                            PHASE2_STEPS, write_baseline)
 
@@ -441,6 +441,52 @@ class TestMainSurvivesLostLink(unittest.TestCase):
         # T2 contract change (design spec section 3): a truncated run must
         # not exit 0, even when nothing that ran failed.
         self.assertEqual(rc, 1)
+
+
+class TestMainBaselineRefusalGate(unittest.TestCase):
+    """Design spec's self-test inventory (T3 final review finding 1a):
+    --baseline with --phase 2 must refuse before any serial or
+    chip-tool activity runs, when --include-slow and --include-manual
+    are not both given, so a partial baseline is never written to disk
+    let alone reaching hardware. ap.error() exits 2 via argparse at
+    argument-parsing time, well before main() imports pyserial or
+    touches ChipTool, so no fake transport is needed here."""
+
+    def test_baseline_without_gates_refuses_before_any_io(self):
+        with tempfile.TemporaryDirectory() as d:
+            baseline_path = os.path.join(d, "baseline.json")
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    main(["--phase", "2", "--baseline", baseline_path])
+            self.assertEqual(cm.exception.code, 2)
+            self.assertFalse(os.path.exists(baseline_path))
+
+
+class TestExitCode(unittest.TestCase):
+    """T3 final review finding 1b: the design spec's self-test inventory
+    expects main()'s exit expression pinned against a suite of only
+    gated entries. exit_code() is the production function main()
+    returns through (mt_regression.py), so calling it directly here
+    means a regression that folds suite.gated into the expression fails
+    this test, rather than only a hand-derived copy of the formula."""
+
+    def test_gated_only_suite_exits_zero(self):
+        s = Suite()
+        s.check("a", True)
+        s.gate_skip("2.10 window expiry", "include_slow")
+        s.gate_skip("2.9 cold boot", "include_manual")
+        self.assertEqual(exit_code(s, truncated=False), 0)
+
+    def test_failed_check_exits_nonzero(self):
+        s = Suite()
+        s.check("a", False)
+        self.assertEqual(exit_code(s, truncated=False), 1)
+
+    def test_truncation_alone_exits_nonzero(self):
+        s = Suite()
+        s.check("a", True)
+        self.assertEqual(exit_code(s, truncated=True), 1)
 
 
 from mt_regression import (ChipTool, parse_setup_payload,
@@ -1489,18 +1535,33 @@ class TestStep28(unittest.TestCase):
     def test_happy_path(self):
         link = FakeLink(self._commands())
         relink_called = []
+        swd_calls = []
+
+        def fake_swd_runner(argv, **kw):
+            swd_calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
         def relink(action):
-            relink_called.append(True)
-            link.push_urcs(["+MTREADY"])
-            return True, ""
+            # T3 final review finding 4: must invoke the injected action
+            # (like TestStep29's fake relink does), or step_2_8's real
+            # swd_reset() call is never reached and this test cannot
+            # notice it going missing.
+            ok, detail = action()
+            relink_called.append((ok, detail))
+            if ok:
+                link.push_urcs(["+MTREADY"])
+            return ok, detail
 
         ctx = fresh_ctx(link)
         ctx.relink = relink
+        ctx.swd_runner = fake_swd_runner
         with contextlib.redirect_stdout(io.StringIO()):
             step_2_8_warm_reboot(ctx)
         self.assertEqual(ctx.suite.failed, 0)
         self.assertTrue(relink_called)
+        self.assertTrue(relink_called[0][0])
+        self.assertTrue(swd_calls,
+                        "step must reach swd_reset via ctx.swd_runner")
 
     def test_relink_failure_aborts(self):
         link = FakeLink(self._commands())
@@ -1536,15 +1597,18 @@ from mt_regression import step_2_9_cold_boot
 
 class TestStep29(unittest.TestCase):
     """T3 2.9, the B4.3 boot-loop regression (design spec section 12.1):
-    only a cold boot with a pending StartUpOnOff change reaches the URC
-    path that fires during esp_matter::start(), before the AT UART
-    exists; 2.8's warm reset preserves state and cannot exercise it.
-    ctx.relink here wraps ctx.power_cycler (not swd_reset, unlike 2.8),
-    so the fake relink calls the injected action and propagates its
-    (ok, detail) the way make_relink's real relink does, instead of
-    assuming success outright: that is what lets the cycle-not-observed
-    case reach StepAbort through the same code path as a real refused
-    power cycle."""
+    only a cold boot reaches the URC path that fires during
+    esp_matter::start(), before the AT UART exists. While B63 stands
+    nothing persists across any reboot, warm (2.8) or cold, so the
+    StartUpOnOff-at-init path this step targets cannot currently arm;
+    its present regression value is the commissioned device coming
+    cleanly through a cold boot to +MTREADY (see B63, TESTING.md's 2.9
+    caveat). ctx.relink here wraps ctx.power_cycler (not swd_reset,
+    unlike 2.8), so the fake relink calls the injected action and
+    propagates its (ok, detail) the way make_relink's real relink does,
+    instead of assuming success outright: that is what lets the
+    cycle-not-observed case reach StepAbort through the same code path
+    as a real refused power cycle."""
 
     @staticmethod
     def _commands(post_boot_attr=0):
@@ -1868,11 +1932,6 @@ class TestStep26(unittest.TestCase):
 
 
 class TestGateSkips(unittest.TestCase):
-    def _ctx_with_steps(self, steps, **optkw):
-        # fresh_ctx() exists; read it first and reuse its FakeLink/opts
-        # construction, then override PHASE2_STEPS around run_phase2.
-        ...
-
     def test_gated_step_skips_without_failing_exit(self):
         s = Suite()
         s.check("a", True)
@@ -1889,6 +1948,22 @@ class TestGateSkips(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             s.summary()
         self.assertIn("1 gated", buf.getvalue())
+
+    def test_gate_skip_label_spells_the_real_flag(self):
+        # T3 final review finding 5: run_phase2 passes "k=<kw>" for a
+        # -k deselection, which is not a --flag; gate_skip must not run
+        # it through the --flag.replace("_", "-") path meant for
+        # --include-slow/--include-manual, or the printed label claims
+        # a "--k=..." flag that does not exist.
+        s = Suite()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            s.gate_skip("2.10 window expiry", "include_slow")
+            s.gate_skip("2.5 controller to host", "k=2.4")
+        out = buf.getvalue()
+        self.assertIn("(gated: --include-slow)", out)
+        self.assertIn("(gated: -k 2.4)", out)
+        self.assertNotIn("--k=", out)
 
     def test_run_phase2_gates_and_requires(self):
         calls = []

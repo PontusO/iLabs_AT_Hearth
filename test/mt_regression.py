@@ -203,9 +203,16 @@ class Suite:
     def gate_skip(self, name, flag):
         """A step deliberately gated out (--include-slow, --include-manual,
         -k). Unlike skip(), never fails the run: gating is operator
-        intent, not truncation."""
+        intent, not truncation. run_phase2 passes "k=<kw>" for the -k
+        case (there is no --k flag to spell), so that one is rendered as
+        the real "-k <kw>" invocation instead of falling through the
+        --flag.replace() path meant for the include-* flags."""
         self.gated.append((name, flag))
-        print("  [SKIP] %s (gated: --%s)" % (name, flag.replace("_", "-")))
+        if flag.startswith("k="):
+            label = "-k %s" % flag[2:]
+        else:
+            label = "--%s" % flag.replace("_", "-")
+        print("  [SKIP] %s (gated: %s)" % (name, label))
 
     @property
     def failed(self):
@@ -486,10 +493,15 @@ def step_2_9_cold_boot(ctx):
     """TESTING.md 2.9, the B4.3 boot-loop regression: a commissioned
     device whose OnOff state changes at init fires a URC during
     esp_matter::start(), before the AT UART exists. Only a cold boot
-    with a pending state change reaches the path; a warm reset (2.8)
-    preserves state and proves nothing here. A post-boot read of 1
-    means no state change happened, and TESTING.md forbids calling
-    that a pass: it scores FAIL with an inconclusive note."""
+    reaches that path at all, but while B63 stands nothing persists
+    across any reboot, warm (2.8) or cold, so the StartUpOnOff-at-init
+    path this step targets cannot currently arm. This step's present
+    regression value is narrower than its name: the commissioned device
+    coming cleanly through a cold boot to +MTREADY (see B63 and
+    TESTING.md's 2.9 caveat; the read regains its original sharpness
+    once persistence lands). A post-boot read of 1 means no state
+    change happened, and TESTING.md forbids calling that a pass: it
+    scores FAIL with an inconclusive note."""
     link, s = ctx.link, ctx.suite
     res, _ = link.command("AT+MTATTR=1,6,0,1")
     okw = res == 0
@@ -1452,6 +1464,16 @@ PHASE2_STEPS[:] = [
 ]
 
 
+def exit_code(suite, truncated):
+    """main()'s pass/fail verdict: nonzero on any scored failure, any
+    abort-skip, or a truncated run. Gated entries (--include-slow,
+    --include-manual, -k: operator intent, not truncation) must never
+    tip this on their own (T3 final review finding 1b). Kept as its own
+    function, not inlined in main(), so a self-test can call the real
+    return path instead of re-deriving the same boolean expression."""
+    return 1 if (suite.failed or suite.skipped or truncated) else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", default=os.environ.get("MT_PORT", "/dev/ttyACM0"))
@@ -1555,7 +1577,7 @@ def main(argv=None):
     suite.summary()
     if args.baseline:
         write_baseline(args.baseline, header, suite)
-    return 1 if (suite.failed or suite.skipped or truncated) else 0
+    return exit_code(suite, truncated)
 
 
 if __name__ == "__main__":
