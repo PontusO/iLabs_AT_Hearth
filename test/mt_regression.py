@@ -33,13 +33,15 @@ class ATLink:
     result is 0 for OK, n > 0 for +MTERR:n then ERROR, -1 for a bare ERROR,
     and -2 when no terminal response arrived before the deadline. lines are
     the command's own intermediate response lines. Stray +... lines are
-    queued on self.urcs with a monotonic timestamp, never dropped.
+    queued on self.urcs with a monotonic timestamp, never dropped, and
+    mirrored into urc_history, which drain() never clears (2.6 sweeps it).
     """
 
     def __init__(self, transport, default_timeout=2.0):
         self.t = transport
         self.default_timeout = default_timeout
         self.urcs = []
+        self.urc_history = []
         self.echo = False
         self.echo_seen = 0
         self.noise = []
@@ -67,6 +69,11 @@ class ATLink:
                     return None
                 else:
                     time.sleep(0.005)
+
+    def _queue_urc(self, line):
+        entry = (time.monotonic(), line)
+        self.urcs.append(entry)
+        self.urc_history.append(entry)
 
     @staticmethod
     def _derive_expect(cmd):
@@ -113,7 +120,7 @@ class ATLink:
                 lines.append(line)
                 continue
             if line.startswith("+"):
-                self.urcs.append((time.monotonic(), line))
+                self._queue_urc(line)
                 continue
             lines.append(line)
 
@@ -124,7 +131,7 @@ class ATLink:
         if line is None:
             return None
         if line.startswith("+"):
-            self.urcs.append((time.monotonic(), line))
+            self._queue_urc(line)
             return line
         self.noise.append(line)
         return None

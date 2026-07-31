@@ -575,6 +575,44 @@ class TestSubscriber(unittest.TestCase):
             sub.stop()
 
 
+class TestUrcHistory(unittest.TestCase):
+    def test_history_survives_drain(self):
+        link, _ = link_with_reply(b"+MTEVT:0\r\n+MTATTR:0,40,2,1\r\nOK\r\n")
+        link.command("AT")
+        link.drain(0.05)
+        self.assertEqual(link.urcs, [])
+        self.assertEqual([u for _, u in link.urc_history],
+                         ["+MTEVT:0", "+MTATTR:0,40,2,1"])
+
+    def test_history_accumulates_across_commands(self):
+        link, t = link_with_reply(b"+MTEVT:1\r\nOK\r\n")
+        link.command("AT")
+        t.rx += b"+MTEVT:3\r\nOK\r\n"
+        link.command("AT")
+        self.assertEqual([u for _, u in link.urc_history],
+                         ["+MTEVT:1", "+MTEVT:3"])
+
+    def test_fake_link_mirrors_history(self):
+        link = FakeLink(commands={"AT+MTRESET": (0, [])},
+                        stale_urcs=["+MTREADY"])
+        link.drain()
+        link.command("AT+MTRESET")
+        self.assertIn("+MTREADY", [u for _, u in link.urc_history])
+        self.assertEqual(link.urcs, [])
+
+    def test_drain_clears_stale_ready_that_would_satisfy_await(self):
+        """A gutted drain() must fail this: the stale +MTREADY would
+        satisfy the await that follows it."""
+        link = FakeLink(commands={"AT+MTRESET": (0, [])},
+                        stale_urcs=["+MTREADY"])
+        link.drain()
+        self.assertIsNone(link.await_urc(r"\+MTREADY$", timeout=0.05))
+
+    def test_parse_setup_payload_short_discriminator_fallback(self):
+        text = "Passcode: 20202021\nDiscriminator value: 3840\n"
+        self.assertEqual(parse_setup_payload(text), (20202021, 3840))
+
+
 class TestAwaitUrcTs(unittest.TestCase):
     def test_order_is_preserved_via_timestamps(self):
         link, _ = link_with_reply(b"")
@@ -692,6 +730,7 @@ class FakeLink:
         self.no_reset = no_reset
         # Seed queue with stale URCs at low timestamps (0, 1, ...)
         self.urc_queue = [(float(i), u) for i, u in enumerate(self.stale_urcs)]
+        self.urc_history = [(float(i), u) for i, u in enumerate(self.stale_urcs)]
         # If stale URCs exist, drain() must be called before fresh URCs are added
         self.needs_drain = bool(self.stale_urcs)
         # Track whether fresh URCs have been added to avoid duplicates
@@ -701,8 +740,10 @@ class FakeLink:
         # Only seed fresh URCs immediately when no_reset=True (explicit opt-in)
         if no_reset and not self.stale_urcs and self.urcs:
             start_ts = max((ts for ts, _ in self.urc_queue), default=-1.0) + 1.0
-            self.urc_queue.extend([(start_ts + float(i), u)
-                                   for i, u in enumerate(self.urcs)])
+            fresh_entries = [(start_ts + float(i), u)
+                             for i, u in enumerate(self.urcs)]
+            self.urc_queue.extend(fresh_entries)
+            self.urc_history.extend(fresh_entries)
             self.fresh_urcs_added = True
         self.sent = []
 
@@ -716,8 +757,10 @@ class FakeLink:
             # Add fresh URCs with timestamps starting after current max
             start_ts = (max((ts for ts, _ in self.urc_queue), default=-1.0)
                        + 1.0)
-            self.urc_queue.extend([(start_ts + float(i), u)
-                                   for i, u in enumerate(self.urcs)])
+            fresh_entries = [(start_ts + float(i), u)
+                             for i, u in enumerate(self.urcs)]
+            self.urc_queue.extend(fresh_entries)
+            self.urc_history.extend(fresh_entries)
             self.fresh_urcs_added = True
         return v
 
@@ -744,8 +787,10 @@ class FakeLink:
         # Release urcs_after_drain on the first drain() call
         if self.urcs_after_drain and not self.urcs_after_drain_released:
             start_ts = max((ts for ts, _ in self.urc_queue), default=-1.0) + 1.0
-            self.urc_queue.extend([(start_ts + float(i), u)
-                                   for i, u in enumerate(self.urcs_after_drain)])
+            after_drain_entries = [(start_ts + float(i), u)
+                                   for i, u in enumerate(self.urcs_after_drain)]
+            self.urc_queue.extend(after_drain_entries)
+            self.urc_history.extend(after_drain_entries)
             self.urcs_after_drain_released = True
         return dropped
 
