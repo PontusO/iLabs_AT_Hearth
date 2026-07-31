@@ -328,6 +328,36 @@ class TestRunPhase2(unittest.TestCase):
             PHASE2_STEPS[:] = saved
         self.assertEqual(calls, [1, 2])
 
+    def test_captures_composition_before_the_loop(self):
+        """T3 Task 9: run_phase2 must read AT+MTEP? once, before any step
+        runs, so cleanup (Task 10) can compare against it later even if
+        every step is gated out or the chain aborts on step one."""
+        link = FakeLink({"AT+MTEP?": (0, ["+MTEP:0,1,0x0100"])})
+        s = Suite()
+        ctx = Phase2Context(link=link, chip=None, suite=s, opts=None)
+        saved = list(PHASE2_STEPS)
+        PHASE2_STEPS[:] = []
+        try:
+            run_phase2(ctx)
+        finally:
+            PHASE2_STEPS[:] = saved
+        self.assertEqual(ctx.composition, ["+MTEP:0,1,0x0100"])
+
+    def test_unscripted_mtep_query_leaves_composition_empty(self):
+        """FakeLink's default reply for a command absent from its dict is
+        (0, []) (Task 6 finding): every pre-Task-9 test's FakeLink lacks
+        AT+MTEP? entirely, so this is what they all now get, harmlessly."""
+        link = FakeLink()
+        s = Suite()
+        ctx = Phase2Context(link=link, chip=None, suite=s, opts=None)
+        saved = list(PHASE2_STEPS)
+        PHASE2_STEPS[:] = []
+        try:
+            run_phase2(ctx)
+        finally:
+            PHASE2_STEPS[:] = saved
+        self.assertEqual(ctx.composition, [])
+
 
 class TestAddTestDuplicateGuard(unittest.TestCase):
     """A duplicate (phase, name) would silently collapse a baseline
@@ -1502,6 +1532,94 @@ class TestStep210(unittest.TestCase):
         failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
         self.assertIn("2.10 state back to 2 (operational)", failed_names)
         self.assertNotIn("2.10 window end reported (+MTEVT:4)", failed_names)
+
+
+from mt_regression import step_2_11_two_resets
+
+
+class TestStep211(unittest.TestCase):
+    """T3 2.11: the two resets differ in exactly one respect (spec
+    3.10, TESTING.md 2.11). AT+MTEP? is queried three times with
+    different scripted replies (before the resets, after MTRESET,
+    after MTFRESET), so it is list-valued like TestStep28/29's
+    AT+MTATTR=1,6,0; +MTREADY is released per-command via
+    urcs_on_command the way TestStep27 releases +MTEVT:0 on
+    AT+MTCOMMISSION=180, and +MTEVT:3 is released by a FakeChipRunner
+    on_call hook firing on the real `pairing` invocation (TestStep27's
+    pattern), not pre-seeded, so a step that skipped the call could not
+    pass the check by accident."""
+
+    @staticmethod
+    def _commands(before=("+MTEP:0,1,0x0100",), after_reset=None,
+                  after_freset=()):
+        # Fresh dict and fresh inner lists per call: FakeLink.command()
+        # pops list-valued entries in place (the TestStep27 hazard
+        # TestStep28/29/210 already avoid).
+        if after_reset is None:
+            after_reset = list(before)
+        return {
+            "AT+MTEP?": [(0, list(before)), (0, list(after_reset)),
+                        (0, list(after_freset))],
+            "AT+MTFABRICS?": [(0, ["+MTFABRICS:0"]), (0, ["+MTFABRICS:1"]),
+                              (0, ["+MTFABRICS:0"])],
+            "AT+MTRESET": (0, []),
+            "AT+MTFRESET": (0, []),
+        }
+
+    def _ctx(self, runner, commands=None):
+        link = FakeLink(
+            commands or self._commands(),
+            urcs_on_command={"AT+MTRESET": ["+MTREADY"],
+                             "AT+MTFRESET": ["+MTREADY"]})
+        d = tempfile.mkdtemp()  # outlives the step; ChipTool.run mkdirs it
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_ctx(link, chip=chip)
+        ctx.passcode, ctx.discriminator = 20202021, 3840
+        return ctx, link
+
+    @staticmethod
+    def _release_on_pairing(link):
+        def on_call(argv):
+            if "pairing" in argv:
+                link.push_urcs(["+MTEVT:1", "+MTEVT:3"])
+        return on_call
+
+    def test_happy_path(self):
+        runner = FakeChipRunner([
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, link = self._ctx(runner)
+        runner.on_call = self._release_on_pairing(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_11_two_resets(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        pairing_argv = runner.calls[0][0]
+        self.assertEqual(pairing_argv[1:3], ["pairing", "ble-wifi"])
+
+    def test_composition_changed_by_reset_fails_survives_check(self):
+        # A regression that made AT+MTRESET erase the composition, the
+        # exact failure TESTING.md 2.11 exists to catch.
+        commands = self._commands(after_reset=["+MTEP:0,1,0x0104"])
+        runner = FakeChipRunner([
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, link = self._ctx(runner, commands=commands)
+        runner.on_call = self._release_on_pairing(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_11_two_resets(ctx)
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.11 composition survives MTRESET", failed_names)
+
+    def test_recommission_failure_aborts(self):
+        # No on_call release wired: a failed pairing produces no
+        # commissioning URCs on real hardware either (TestStep27's
+        # test_pairing_failure_aborts reasoning).
+        runner = FakeChipRunner([(1, "CHIP:TOO: Run command failure")])
+        ctx, _ = self._ctx(runner)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_11_two_resets(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
 
 
 class TestGateSkips(unittest.TestCase):

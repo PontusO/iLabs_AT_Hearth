@@ -245,6 +245,7 @@ class Phase2Context:
         self.relink = None        # installed by main(); steps 2.8/2.9 need it
         self.swd_runner = None    # test seam for swd_reset
         self.power_cycler = None  # test seam for operator_power_cycle
+        self.composition = None   # +MTEP: lines captured by run_phase2
 
 
 def step_2_1_factory_fresh(ctx):
@@ -547,6 +548,57 @@ def step_2_10_window_expiry(ctx):
             res == 0 and lines == ["+MTSTATE:2,1"], tag="P2")
 
 
+def step_2_11_two_resets(ctx):
+    """TESTING.md 2.11: MTRESET erases the fabric and keeps the
+    composition; MTFRESET erases both. The composition surviving the
+    first is the whole distinction (spec 3.10): losing it turns an
+    end-user unpair into a device that presents nothing."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    res, before = link.command("AT+MTEP?")
+    if not s.check("2.11 composition present before resets",
+                   res == 0 and bool(before), tag="P2"):
+        raise StepAbort("no composition to compare across resets")
+    link.drain(0.3)
+    res, _ = cmd_retry(link, "AT+MTRESET", timeout=5.0)
+    s.check("2.11 MTRESET -> OK", res == 0, tag="P2")
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    if not s.check("2.11 +MTREADY after MTRESET", ready is not None,
+                   tag="P2"):
+        raise StepAbort("device did not come back from AT+MTRESET")
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    s.check("2.11 fabrics 0 after MTRESET",
+            res == 0 and lines == ["+MTFABRICS:0"], tag="P2")
+    res, lines = cmd_retry(link, "AT+MTEP?")
+    s.check("2.11 composition survives MTRESET",
+            res == 0 and lines == before, tag="P2")
+    chip.wipe_storage()  # the old fabric died with the reset
+    rc, _ = chip.run(["pairing", "ble-wifi", "0x%X" % ctx.node_id,
+                      ctx.opts.ssid, ctx.opts.psk,
+                      str(ctx.passcode), str(ctx.discriminator)],
+                     timeout=120)
+    paired = s.check("2.11 re-commission exits 0", rc == 0, tag="P2")
+    got3 = link.await_urc_ts(r"\+MTEVT:3$", 90.0)
+    s.check("2.11 +MTEVT:3 on re-commission", got3 is not None, tag="P2")
+    if not (paired and got3 is not None):
+        raise StepAbort("re-commissioning failed")
+    res, lines = link.command("AT+MTFABRICS?")
+    s.check("2.11 fabrics 1 again",
+            res == 0 and lines == ["+MTFABRICS:1"], tag="P2")
+    link.drain(0.5)
+    res, _ = cmd_retry(link, "AT+MTFRESET", timeout=5.0)
+    s.check("2.11 MTFRESET -> OK", res == 0, tag="P2")
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    if not s.check("2.11 +MTREADY after MTFRESET", ready is not None,
+                   tag="P2"):
+        raise StepAbort("device did not come back from AT+MTFRESET")
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    s.check("2.11 fabrics 0 after MTFRESET",
+            res == 0 and lines == ["+MTFABRICS:0"], tag="P2")
+    res, lines = cmd_retry(link, "AT+MTEP?")
+    s.check("2.11 composition erased by MTFRESET",
+            res == 0 and lines == [], tag="P2")
+
+
 def step_cleanup_factory_fresh(ctx):
     """T2 addition (design spec section 4): leave the bench in the
     documented factory-fresh state and scored, because a cleanup that
@@ -593,7 +645,16 @@ def run_phase2(ctx):
     """Ordered execution with abort/skip semantics (T2) plus gates and
     -k deselection (T3): a gated-out step is operator intent and exits
     zero; a step whose prerequisite did not run is an abort-skip, so a
-    truncated chain still fails loudly."""
+    truncated chain still fails loudly. The capture is wrapped in
+    try/except OSError the same way recover_after_abort's own
+    AT+MTRESET is: a link already dead before the first step runs must
+    not stop the chain from at least reaching its skips, it just leaves
+    ctx.composition None."""
+    try:
+        res, lines = ctx.link.command("AT+MTEP?")
+        ctx.composition = lines if res == 0 else None
+    except OSError:
+        ctx.composition = None
     abort_reason = None
     ran = set()
     kw = getattr(ctx.opts, "keyword", None)
@@ -1276,6 +1337,8 @@ PHASE2_STEPS[:] = [
      "gate": "include_manual", "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.10 window expiry", "fn": step_2_10_window_expiry,
      "gate": "include_slow", "requires": ["2.3 commission ble-wifi"]},
+    {"name": "2.11 two resets", "fn": step_2_11_two_resets,
+     "requires": ["2.3 commission ble-wifi"]},
     {"name": "cleanup factory-fresh", "fn": step_cleanup_factory_fresh},
 ]
 
