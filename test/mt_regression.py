@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -238,6 +239,9 @@ class Phase2Context:
         self.manual = None
         self.node_id = getattr(opts, "node_id", 0x4845)
         self.subscriber_factory = None  # test seam; None means real Subscriber
+        self.relink = None        # installed by main(); steps 2.8/2.9 need it
+        self.swd_runner = None    # test seam for swd_reset
+        self.power_cycler = None  # test seam for operator_power_cycle
 
 
 def step_2_1_factory_fresh(ctx):
@@ -765,6 +769,73 @@ def cmd_retry(link, cmd, timeout=None):
     return res, lines
 
 
+OPENOCD_ARGV = ["openocd", "-f", "interface/cmsis-dap.cfg",
+                "-f", "target/rp2350.cfg",
+                "-c", "init; reset run; shutdown"]
+
+
+def swd_reset(runner=None):
+    """Reset the RP2350 over SWD (graph N22). The bridge sketch's setup()
+    then pulses PIN_ESP_RST, so this is the RP2350-driven warm C6 reboot
+    TESTING.md 2.8 names. The 1200-baud touch reset is NOT equivalent:
+    it drops the bridge into BOOTSEL."""
+    runner = runner or subprocess.run
+    try:
+        proc = runner(OPENOCD_ARGV, capture_output=True, text=True,
+                      timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if proc.returncode != 0:
+        return False, (proc.stdout or "") + (proc.stderr or "")
+    return True, ""
+
+
+def make_relink(link, port_path):
+    """Close the port, run action() while it is closed, wait for the
+    device path to come back (SWD reset and power cycles re-enumerate
+    USB), reopen and swap the transport in place. Use the by-id path as
+    --port or the reopen may chase a renumbered ttyACM."""
+    import serial
+
+    def relink(action):
+        try:
+            link.t.close()
+        except Exception:
+            pass
+        ok, detail = action()
+        if not ok:
+            return False, detail
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if os.path.exists(port_path):
+                try:
+                    link.t = serial.Serial(port_path, 115200, timeout=0.05)
+                    link._buf = b""
+                    return True, ""
+                except serial.SerialException:
+                    pass
+            time.sleep(0.2)
+        return False, "port did not come back: %s" % port_path
+    return relink
+
+
+def operator_power_cycle(port_path, printer=print,
+                         path_exists=os.path.exists, sleep=time.sleep,
+                         unplug_timeout=60.0, clock=time.monotonic):
+    """2.9's power cycle, observed rather than trusted: the device path
+    must actually disappear before the step counts the cycle as having
+    happened. A prompt alone would pass with no power cycle at all."""
+    printer("")
+    printer("  *** OPERATOR: unplug the Challenger's USB cable now. ***")
+    deadline = clock() + unplug_timeout
+    while path_exists(port_path):
+        if clock() > deadline:
+            return False, "power cycle not observed (device never vanished)"
+        sleep(0.2)
+    printer("  *** Power-off confirmed. Wait 5 seconds, then replug. ***")
+    return True, ""
+
+
 GATE_REFERENCE_QR = "MT:Y.K9042C00KA0648G00"
 
 
@@ -773,6 +844,9 @@ def phase2_gate(chip, args):
     exists, runs as this user (the 2026-07-29 root-owned counters file
     made every non-root run fail), and credentials are present. Returns
     an abort message or None."""
+    if shutil.which("openocd") is None:
+        return ("openocd not on PATH: the 2.8 warm reboot resets the "
+                "RP2350 over SWD (see graph N22)")
     if not getattr(args, "ssid", None) or not getattr(args, "psk", None):
         return ("phase 2 needs WiFi credentials: export MT_SSID and "
                 "MT_PSK (or pass --ssid/--psk)")
@@ -1076,6 +1150,7 @@ def main(argv=None):
             header["node_id"] = "0x%X" % args.node_id
             chip.wipe_storage()
             ctx = Phase2Context(link, chip, suite, args)
+            ctx.relink = make_relink(link, args.port)
             run_phase2(ctx)
             capture_header(link, header)
         elif args.phase != 0:
@@ -1103,7 +1178,10 @@ def main(argv=None):
         print("(link lost: %s)" % exc)
         truncated = True
     finally:
-        port.close()
+        try:
+            link.t.close()
+        except Exception:
+            pass
     suite.summary()
     if args.baseline:
         write_baseline(args.baseline, header, suite)

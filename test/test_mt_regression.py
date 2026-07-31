@@ -14,6 +14,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -681,13 +682,17 @@ class TestPhase2Gate(unittest.TestCase):
     def test_missing_creds_abort(self):
         with tempfile.TemporaryDirectory() as d:
             chip = ChipTool("/bin/true", d)
-            problem = phase2_gate(chip, self._args(ssid=None))
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem = phase2_gate(chip, self._args(ssid=None))
         self.assertIn("MT_SSID", problem)
 
     def test_missing_binary_abort(self):
         with tempfile.TemporaryDirectory() as d:
             chip = ChipTool(os.path.join(d, "nope"), d)
-            problem = phase2_gate(chip, self._args())
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem = phase2_gate(chip, self._args())
         self.assertIn("chip-tool", problem)
 
     def test_unparseable_reference_payload_abort(self):
@@ -697,7 +702,9 @@ class TestPhase2Gate(unittest.TestCase):
             open(binary, "w").close()
             os.chmod(binary, 0o755)
             chip = ChipTool(binary, d, runner=runner)
-            problem = phase2_gate(chip, self._args())
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem = phase2_gate(chip, self._args())
         self.assertIn("parse", problem)
 
     def test_healthy_gate_passes(self):
@@ -708,9 +715,75 @@ class TestPhase2Gate(unittest.TestCase):
             open(binary, "w").close()
             os.chmod(binary, 0o755)
             chip = ChipTool(binary, d, runner=runner)
-            self.assertIsNone(phase2_gate(chip, self._args()))
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                self.assertIsNone(phase2_gate(chip, self._args()))
         self.assertEqual(runner.calls[0][0][1:3],
                          ["payload", "parse-setup-payload"])
+
+    def test_missing_openocd_abort(self):
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool("/bin/true", d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value=None):
+                problem = phase2_gate(chip, self._args())
+        self.assertIn("openocd", problem)
+
+
+from mt_regression import swd_reset, operator_power_cycle
+
+
+class TestSwdReset(unittest.TestCase):
+    def test_argv_and_success(self):
+        calls = []
+        def runner(argv, capture_output, text, timeout):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        ok, _ = swd_reset(runner=runner)
+        self.assertTrue(ok)
+        self.assertEqual(calls[0][:2], ["openocd", "-f"])
+        self.assertIn("init; reset run; shutdown", calls[0])
+
+    def test_failure_and_exception_are_reported(self):
+        def bad(argv, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="x", stderr="y")
+        ok, detail = swd_reset(runner=bad)
+        self.assertFalse(ok)
+        self.assertIn("x", detail)
+        def raiser(argv, **kw):
+            raise OSError("no probe")
+        ok, detail = swd_reset(runner=raiser)
+        self.assertFalse(ok)
+        self.assertIn("no probe", detail)
+
+
+class TestOperatorPowerCycle(unittest.TestCase):
+    def _run(self, presence, clock_step=0.3, unplug_timeout=1.0):
+        """presence: list of booleans path_exists returns in order.
+        clock is a counter-based fake (ticks by clock_step per call)
+        instead of time.monotonic, so the unplug_timeout deadline is
+        crossed after a handful of calls rather than a real wall-clock
+        second: the sleep=lambda is a no-op, so a real clock would spin
+        the CPU for the full timeout instead of returning instantly."""
+        seq = iter(presence)
+        counter = {"t": 0.0}
+        def clock():
+            counter["t"] += clock_step
+            return counter["t"]
+        return operator_power_cycle(
+            "/dev/fake", printer=lambda *a: None,
+            path_exists=lambda p: next(seq, presence[-1]),
+            sleep=lambda s: None, unplug_timeout=unplug_timeout,
+            clock=clock)
+
+    def test_observed_cycle_passes(self):
+        ok, _ = self._run([True, True, False])
+        self.assertTrue(ok)
+
+    def test_never_unplugged_fails(self):
+        ok, detail = self._run([True] * 10000)
+        self.assertFalse(ok)
+        self.assertIn("not observed", detail)
 
 
 from mt_regression import (step_2_1_factory_fresh, step_2_2_codes_stable,
