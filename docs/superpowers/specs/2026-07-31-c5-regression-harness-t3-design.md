@@ -62,11 +62,12 @@ ChipTool instances never run concurrently, and neither runs while a
 Subscriber lives.
 
 **Composition capture and replay.** At phase start the runner captures the
-`+MTEP:` lines from `AT+MTEP?`. The cleanup replays them as `AT+MTEP=`
-declarations after the final `AT+MTFRESET`, reboots with `AT+MTRESET` so the
-boot rebuild applies them, and verifies the readback matches the capture.
-The exact declaration grammar is transcribed from `AT_MT_SPEC.md` section 3.9
-at plan time, not invented.
+`+MTEP:` lines from `AT+MTEP?`. The cleanup replays them after the final
+`AT+MTFRESET` with the section 3.9 staging grammar: `AT+MTEPCLEAR`, one
+`AT+MTEP=<device_type>` per captured endpoint in index order, then
+`AT+MTEPAPPLY`, which persists and reboots on its own. After the reboot the
+`AT+MTEP?` readback must match the capture (endpoint ids are reproducible by
+design, the boot rebuild allocates from the same base).
 
 ## 3. Sequencing, gates, and the exit contract
 
