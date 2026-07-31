@@ -811,6 +811,95 @@ class TestSwdReset(unittest.TestCase):
         self.assertIn("no probe", detail)
 
 
+from mt_regression import make_relink
+
+
+class TestMakeRelink(unittest.TestCase):
+    """Direct coverage for the reopen path, added after the first T3
+    hardware run: the USB CDC enumeration bounced after the SWD reset,
+    the first open succeeded, and the next read died mid-step as a
+    bogus link loss. The relink must catch the bounce itself."""
+
+    class _QuietPort:
+        """Open port that stays silent: the pump window passes clean."""
+        def __init__(self, rx=b""):
+            self.rx = rx
+            self.closed = False
+
+        def read(self, n=1):
+            chunk, self.rx = self.rx[:n], self.rx[n:]
+            return chunk
+
+        def write(self, data):
+            return len(data)
+
+        def close(self):
+            self.closed = True
+
+    def _mod(self, opens):
+        """Fake serial module: opens is a list whose items are either a
+        transport (returned) or an Exception instance (raised)."""
+        seq = list(opens)
+
+        def serial_ctor(path, baud, timeout):
+            item = seq.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        return types.SimpleNamespace(Serial=serial_ctor,
+                                     SerialException=OSError)
+
+    def _relink(self, link, mod, path_exists=lambda p: True):
+        return make_relink(link, "/dev/fake", settle=0.0, pump=0.05,
+                           deadline_s=1.0, path_exists=path_exists,
+                           sleep=lambda s: None, serial_mod=mod)
+
+    def test_action_failure_returns_without_opening(self):
+        link, _ = link_with_reply(b"")
+        relink = self._relink(link, self._mod([]))  # ctor would IndexError
+        ok, detail = relink(lambda: (False, "boom"))
+        self.assertEqual((ok, detail), (False, "boom"))
+
+    def test_bounced_open_is_retried(self):
+        link, _ = link_with_reply(b"")
+        good = self._QuietPort()
+        mod = self._mod([OSError("enumeration bounce"), good])
+        ok, _ = self._relink(link, mod)(lambda: (True, ""))
+        self.assertTrue(ok)
+        self.assertIs(link.t, good)
+
+    def test_dead_first_read_is_caught_and_reopened(self):
+        """The Task 11 failure shape: open succeeds, first read dies.
+        The pump must catch it inside relink, close the corpse, and
+        retry, instead of letting a step's await crash the run."""
+        link, _ = link_with_reply(b"")
+        dead = self._QuietPort()
+        dead.read = lambda n=1: (_ for _ in ()).throw(
+            OSError("returned no data"))
+        good = self._QuietPort()
+        mod = self._mod([dead, good])
+        ok, _ = self._relink(link, mod)(lambda: (True, ""))
+        self.assertTrue(ok)
+        self.assertTrue(dead.closed)
+        self.assertIs(link.t, good)
+
+    def test_early_urc_during_pump_is_queued_not_lost(self):
+        link, _ = link_with_reply(b"")
+        port = self._QuietPort(rx=b"+MTREADY\r\n")
+        ok, _ = self._relink(link, self._mod([port]))(lambda: (True, ""))
+        self.assertTrue(ok)
+        self.assertEqual(link.await_urc(r"\+MTREADY$", timeout=0.05),
+                         "+MTREADY")
+
+    def test_path_never_back_reports_failure(self):
+        link, _ = link_with_reply(b"")
+        relink = self._relink(link, self._mod([]),
+                              path_exists=lambda p: False)
+        ok, detail = relink(lambda: (True, ""))
+        self.assertFalse(ok)
+        self.assertIn("did not come back", detail)
+
+
 class TestOperatorPowerCycle(unittest.TestCase):
     def _run(self, presence, clock_step=0.3, unplug_timeout=1.0):
         """presence: list of booleans path_exists returns in order.
