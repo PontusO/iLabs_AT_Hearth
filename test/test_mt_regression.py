@@ -443,6 +443,17 @@ class TestChipTool(unittest.TestCase):
         self.assertEqual(argv[-2:], ["--storage-directory", d])
         self.assertEqual(timeout, 60)
 
+    def test_default_runner_timeout_is_scored_not_raised(self):
+        """A hung chip-tool must surface as a nonzero rc so the step
+        machinery scores it and skip semantics run; TimeoutExpired is a
+        SubprocessError, which nothing above the runner catches."""
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool(sys.executable, d)
+            rc, out = chip.run(["-c", "import time; time.sleep(10)"],
+                               timeout=0.5)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("timed out", out)
+
     def test_run_payload_family_omits_storage(self):
         # The real binary's payload subcommands take exactly one positional
         # argument and no options: appending --storage-directory makes them
