@@ -443,6 +443,20 @@ class TestChipTool(unittest.TestCase):
         self.assertEqual(argv[-2:], ["--storage-directory", d])
         self.assertEqual(timeout, 60)
 
+    def test_run_payload_family_omits_storage(self):
+        # The real binary's payload subcommands take exactly one positional
+        # argument and no options: appending --storage-directory makes them
+        # fail with "Wrong arguments number" (found on hardware, Task 11).
+        runner = FakeChipRunner([(0, "parsed")])
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool("/bin/chip-tool", d, runner=runner)
+            rc, out = chip.run(["payload", "parse-setup-payload",
+                                "MT:Y.K9042C00KA0648G00"])
+        self.assertEqual((rc, out), (0, "parsed"))
+        argv, _ = runner.calls[0]
+        self.assertNotIn("--storage-directory", argv)
+        self.assertEqual(argv[-1], "MT:Y.K9042C00KA0648G00")
+
     def test_wipe_storage_removes_files_keeps_dir(self):
         with tempfile.TemporaryDirectory() as d:
             open(os.path.join(d, "chip_tool_config.ini"), "w").close()

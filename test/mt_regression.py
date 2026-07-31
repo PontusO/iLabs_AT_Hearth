@@ -412,8 +412,9 @@ DEFAULT_CHIPTOOL = os.path.expanduser(
 
 class ChipTool:
     """One-shot chip-tool invocations (design spec section 2). Every call
-    carries --storage-directory so a stale fabric cannot leak between
-    runs, and the runner is injectable so self-tests never spawn."""
+    except the option-less payload family carries --storage-directory so
+    a stale fabric cannot leak between runs, and the runner is injectable
+    so self-tests never spawn."""
 
     def __init__(self, binary, storage_dir, runner=None):
         self.binary = binary
@@ -428,8 +429,12 @@ class ChipTool:
 
     def run(self, args, timeout=60):
         os.makedirs(self.storage_dir, exist_ok=True)
-        argv = ([self.binary] + list(args)
-                + ["--storage-directory", self.storage_dir])
+        argv = [self.binary] + list(args)
+        # The payload subcommands are pure parsers taking exactly one
+        # positional argument and no options; --storage-directory makes
+        # them fail with "Wrong arguments number" (found on hardware).
+        if args and args[0] != "payload":
+            argv += ["--storage-directory", self.storage_dir]
         return self._runner(argv, timeout)
 
     def wipe_storage(self):
