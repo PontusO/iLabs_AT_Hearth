@@ -296,6 +296,19 @@ def step_2_2_codes_stable(ctx):
             tag="P2")
 
 
+
+def _pairing_tail(out, psk=None, lines=5):
+    """A bounded tail of chip-tool output for a failed pairing, so the
+    log carries the controller's own error text instead of only an exit
+    code (a real flake cost a diagnosis round for want of this). The
+    PSK is scrubbed defensively; chip-tool does not normally echo argv,
+    but a committed log must not depend on that."""
+    tail = " | ".join((out or "").splitlines()[-lines:])
+    if psk:
+        tail = tail.replace(psk, "***")
+    return tail
+
+
 def step_2_3_commission(ctx):
     """TESTING.md 2.3 plus the DE24 window-event contract: the AT-side
     and controller-side views must agree, and exactly one +MTEVT:4 must
@@ -313,6 +326,9 @@ def step_2_3_commission(ctx):
                         ctx.opts.ssid, ctx.opts.psk,
                         str(passcode), str(discriminator)], timeout=120)
     paired = s.check("2.3 chip-tool pairing exits 0", rc == 0, tag="P2")
+    if not paired:
+        print("    (chip-tool tail: %s)"
+              % _pairing_tail(out, getattr(ctx.opts, "psk", None)))
     s.check("2.3 +MTEVT:1 session started",
             link.await_urc(r"\+MTEVT:1$", timeout=90.0) is not None,
             tag="P2")
@@ -393,7 +409,7 @@ def step_2_5_controller_to_host(ctx):
         s.check("2.5 unprompted +MTATTR after %s" % verb, got is not None,
                 tag="P2")
         res, lines = link.command("AT+MTATTR=1,6,0")
-        s.check("2.5 AT read agrees (%d)" % want,
+        s.check("2.5 AT read agrees after %s (%d)" % (verb, want),
                 res == 0 and lines == ["+MTATTR:1,6,0,%d" % want],
                 tag="P2")
         if not okc:
@@ -421,6 +437,9 @@ def step_2_7_second_fabric(ctx):
                          str(ctx.passcode), str(ctx.discriminator)],
                         timeout=120)
     paired = s.check("2.7 second controller pairs", rc == 0, tag="P2")
+    if not paired:
+        print("    (chip-tool tail: %s)"
+              % _pairing_tail(out, getattr(ctx.opts, "psk", None)))
     s.check("2.7 +MTEVT:1 session started",
             link.await_urc(r"\+MTEVT:1$", 90.0) is not None, tag="P2")
     got3 = link.await_urc_ts(r"\+MTEVT:3$", 90.0)
@@ -475,13 +494,12 @@ def step_2_8_warm_reboot(ctx):
     s.check("2.8 fabric survived",
             res == 0 and lines == ["+MTFABRICS:1"], tag="P2")
     res, lines = cmd_retry(link, "AT+MTATTR=1,6,0")
-    # Measured 2026-07-31 (T3 Task 11, n=2 per wait at 0/6/15 s between
-    # write and reset): OnOff always boots to 0, so the firmware does
-    # not persist it (bug B63, parked; OnOff carries the nonvolatile
-    # quality in the Matter data model). The harness pins the real
-    # behavior; if B63 is ever fixed this check flips to expect 1.
-    s.check("2.8 attribute resets to 0 (no persistence, B63)",
-            res == 0 and lines == ["+MTATTR:1,6,0,0"], tag="P2")
+    # B63 regression guard: the value survives the reboot since commit
+    # 8100af4 (StartUpOnOff null instead of esp-matter's boot-Off
+    # default). Before that fix every boot forcibly persisted a 0 over
+    # the healthy restore, and this check pinned that behavior.
+    s.check("2.8 attribute value survived (B63 guard)",
+            res == 0 and lines == ["+MTATTR:1,6,0,1"], tag="P2")
     res, lines = link.command("AT+MTSTATE?")
     s.check("2.8 state 2 (operational)",
             res == 0 and lines == ["+MTSTATE:2,1"], tag="P2")
@@ -490,18 +508,15 @@ def step_2_8_warm_reboot(ctx):
 
 
 def step_2_9_cold_boot(ctx):
-    """TESTING.md 2.9, the B4.3 boot-loop regression: a commissioned
-    device whose OnOff state changes at init fires a URC during
-    esp_matter::start(), before the AT UART exists. Only a cold boot
-    reaches that path at all, but while B63 stands nothing persists
-    across any reboot, warm (2.8) or cold, so the StartUpOnOff-at-init
-    path this step targets cannot currently arm. This step's present
-    regression value is narrower than its name: the commissioned device
-    coming cleanly through a cold boot to +MTREADY (see B63 and
-    TESTING.md's 2.9 caveat; the read regains its original sharpness
-    once persistence lands). A post-boot read of 1 means no state
-    change happened, and TESTING.md forbids calling that a pass: it
-    scores FAIL with an inconclusive note."""
+    """TESTING.md 2.9, the B4.3 boot-loop regression territory: a URC
+    fired during esp_matter::start(), before the AT UART exists, once
+    boot-looped the device forever. Since the B63 fix (8100af4,
+    StartUpOnOff null) no state changes at init, so that path only arms
+    if a controller configures StartUpOnOff to change state at boot;
+    what this step proves is the commissioned device coming cleanly
+    through a true power cycle to +MTREADY with its fabric AND its
+    OnOff value intact (the cold-boot half of the B63 guard, alongside
+    2.8's warm half)."""
     link, s = ctx.link, ctx.suite
     res, _ = link.command("AT+MTATTR=1,6,0,1")
     okw = res == 0
@@ -524,11 +539,8 @@ def step_2_9_cold_boot(ctx):
     s.check("2.9 fabric survived cold boot",
             res == 0 and lines == ["+MTFABRICS:1"], tag="P2")
     res, lines = cmd_retry(link, "AT+MTATTR=1,6,0")
-    toggled = res == 0 and lines == ["+MTATTR:1,6,0,0"]
-    s.check("2.9 StartUpOnOff toggled at init", toggled, tag="P2")
-    if res == 0 and lines == ["+MTATTR:1,6,0,1"]:
-        print("    (inconclusive: no state change at init, the guarded "
-              "path was never reached)")
+    s.check("2.9 value survived cold boot (B63 guard)",
+            res == 0 and lines == ["+MTATTR:1,6,0,1"], tag="P2")
 
 
 WINDOW_EXPIRY_RAISES_EVT5 = False  # T3 Task 1 findings (task-1-findings.md,
@@ -589,11 +601,14 @@ def step_2_11_two_resets(ctx):
     s.check("2.11 composition survives MTRESET",
             res == 0 and lines == before, tag="P2")
     chip.wipe_storage()  # the old fabric died with the reset
-    rc, _ = chip.run(["pairing", "ble-wifi", "0x%X" % ctx.node_id,
-                      ctx.opts.ssid, ctx.opts.psk,
-                      str(ctx.passcode), str(ctx.discriminator)],
-                     timeout=120)
+    rc, out = chip.run(["pairing", "ble-wifi", "0x%X" % ctx.node_id,
+                        ctx.opts.ssid, ctx.opts.psk,
+                        str(ctx.passcode), str(ctx.discriminator)],
+                       timeout=120)
     paired = s.check("2.11 re-commission exits 0", rc == 0, tag="P2")
+    if not paired:
+        print("    (chip-tool tail: %s)"
+              % _pairing_tail(out, getattr(ctx.opts, "psk", None)))
     got3 = link.await_urc_ts(r"\+MTEVT:3$", 90.0)
     s.check("2.11 +MTEVT:3 on re-commission", got3 is not None, tag="P2")
     if not (paired and got3 is not None):
