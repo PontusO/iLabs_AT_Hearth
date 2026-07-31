@@ -464,9 +464,10 @@ that as an inconclusive run rather than a pass.
 `AT+MTCOMMISSION=180` with no controller attaching: assert the window's end is
 reported and that `AT+MTSTATE?` returns to `2`. Gated behind `--include-slow`
 because of the ~200 s wall clock. (The 180 s floor is CHIP's Matter minimum;
-values below it are rejected with `+MTERR:1` since commit eb15d0f. Which URC
-ends a never-attached window, `+MTEVT:5` or only `+MTEVT:4`, is pinned when T3
-implements this test.)
+values below it are rejected with `+MTERR:1` since commit eb15d0f. Pinned on
+hardware 2026-07-31: a never-attached window ends with exactly one
+`+MTEVT:4` and no `+MTEVT:5`, about 180 s after the `OK`; `+MTEVT:5` is the
+fail-safe timer, which never arms without a PASE session.)
 
 **2.11 The two resets differ in exactly one respect**
 Run with a composition applied and a fabric commissioned.

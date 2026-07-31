@@ -329,7 +329,10 @@ for PASE", and it also fires when a commissioner establishes a session (the
 window is paused, not gone) and when a failed open cleans up a window that
 never existed. Both are deliberately suppressed. Before 2026-07-30 both
 leaked through: a successful commissioning showed two `+MTEVT:4`, and a
-failed `AT+MTCOMMISSION` showed one with no matching `+MTEVT:0`.
+failed `AT+MTCOMMISSION` showed one with no matching `+MTEVT:0`. A window
+that expires with no controller attach raises its single `+MTEVT:4` at the
+timeout; event `5` (fail-safe expired) does not fire, because the fail-safe
+only arms once a PASE session exists.
 
 Thread bits are **allocated but never emitted on a WiFi image**: transport is a
 build-time choice (§3.12), and a host may subscribe to them harmlessly. Fixing
