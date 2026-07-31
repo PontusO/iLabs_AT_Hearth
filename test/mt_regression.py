@@ -513,6 +513,40 @@ def step_2_9_cold_boot(ctx):
               "path was never reached)")
 
 
+WINDOW_EXPIRY_RAISES_EVT5 = False  # T3 Task 1 findings (task-1-findings.md,
+# finding (c)): a 200 s capture of a never-attached AT+MTCOMMISSION=180
+# window showed exactly one +MTEVT:4 at ~180.2 s and no +MTEVT:5 at any
+# point. Keep False; the True branch below documents the pinned
+# alternative but is not exercised here.
+
+
+def step_2_10_window_expiry(ctx):
+    """TESTING.md 2.10, gated behind --include-slow (~200 s). A window
+    nobody attaches to must end exactly once on the wire: the DE24 pair
+    holds with no PASE session ever established. The +MTEVT:5 half of
+    the contract was pinned on hardware in T3 Task 1."""
+    link, s = ctx.link, ctx.suite
+    wait = getattr(ctx.opts, "expiry_wait", 200.0)
+    res, _ = link.command("AT+MTCOMMISSION=180")
+    okw = s.check("2.10 MTCOMMISSION=180 -> OK", res == 0, tag="P2")
+    s.check("2.10 +MTEVT:0 window opened",
+            link.await_urc(r"\+MTEVT:0$", 5.0) is not None, tag="P2")
+    if not okw:
+        raise StepAbort("could not open the expiry window")
+    got4 = link.await_urc_ts(r"\+MTEVT:4$", wait)
+    s.check("2.10 window end reported (+MTEVT:4)", got4 is not None,
+            tag="P2")
+    if WINDOW_EXPIRY_RAISES_EVT5:
+        got5 = link.await_urc_ts(r"\+MTEVT:5$", 1.0)
+        s.check("2.10 fail-safe expiry (+MTEVT:5) accompanies the close",
+                got5 is not None, tag="P2")
+    s.check("2.10 no duplicate window-close",
+            link.assert_no_urc(r"\+MTEVT:4$", 10.0), tag="P2")
+    res, lines = link.command("AT+MTSTATE?")
+    s.check("2.10 state back to 2 (operational)",
+            res == 0 and lines == ["+MTSTATE:2,1"], tag="P2")
+
+
 def step_cleanup_factory_fresh(ctx):
     """T2 addition (design spec section 4): leave the bench in the
     documented factory-fresh state and scored, because a cleanup that
@@ -1240,6 +1274,8 @@ PHASE2_STEPS[:] = [
      "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.9 cold boot", "fn": step_2_9_cold_boot,
      "gate": "include_manual", "requires": ["2.3 commission ble-wifi"]},
+    {"name": "2.10 window expiry", "fn": step_2_10_window_expiry,
+     "gate": "include_slow", "requires": ["2.3 commission ble-wifi"]},
     {"name": "cleanup factory-fresh", "fn": step_cleanup_factory_fresh},
 ]
 

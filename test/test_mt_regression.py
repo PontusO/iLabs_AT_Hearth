@@ -1437,6 +1437,73 @@ class TestStep29(unittest.TestCase):
         self.assertGreater(ctx.suite.failed, 0)
 
 
+from mt_regression import step_2_10_window_expiry, WINDOW_EXPIRY_RAISES_EVT5
+
+
+class TestStep210(unittest.TestCase):
+    """T3 2.10: window expiry, asserting the DE24 baseline the T3 Task 1
+    bench findings pinned (task-1-findings.md, finding (c)): a window
+    nobody attaches to closes with exactly one +MTEVT:4 and no +MTEVT:5,
+    ~180 s after the OK, and AT+MTSTATE? reads 2,1 afterward. ctx.opts
+    .expiry_wait stands in for the real ~200 s wait: FakeLink's awaits are
+    synchronous queue scans, so with the URCs pre-released via
+    urcs_on_command/push_urcs the waits return instantly regardless of the
+    value passed, and the override just documents that the step never
+    sleeps in this self-test."""
+
+    @staticmethod
+    def _commands():
+        # Fresh dict per call: FakeLink.command() pops list-valued entries
+        # in place (the TestStep27 hazard TestStep28/29 already avoid).
+        return {
+            "AT+MTCOMMISSION=180": (0, []),
+            "AT+MTSTATE?": (0, ["+MTSTATE:2,1"]),
+        }
+
+    def test_constant_pinned_false(self):
+        # T3 Task 1 finding (c): no +MTEVT:5 was observed in 200 s of
+        # capture, only one +MTEVT:4 at ~180.2 s.
+        self.assertFalse(WINDOW_EXPIRY_RAISES_EVT5)
+
+    def test_happy_path_all_checks_pass(self):
+        link = FakeLink(
+            self._commands(), no_reset=True,
+            urcs_on_command={"AT+MTCOMMISSION=180": ["+MTEVT:0", "+MTEVT:4"]})
+        ctx = fresh_ctx(link)
+        ctx.opts.expiry_wait = 0.1
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_10_window_expiry(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_duplicate_window_close_fails_exactly_one_check(self):
+        link = FakeLink(
+            self._commands(), no_reset=True,
+            urcs_on_command={"AT+MTCOMMISSION=180": ["+MTEVT:0", "+MTEVT:4"]})
+        # A second +MTEVT:4 seeded independently of the command trigger,
+        # as if a duplicate close arrived during the 10 s watch.
+        link.push_urcs(["+MTEVT:4"])
+        ctx = fresh_ctx(link)
+        ctx.opts.expiry_wait = 0.1
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_10_window_expiry(ctx)
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.10 no duplicate window-close", failed_names)
+
+    def test_state_not_2_1_fails_its_check(self):
+        commands = self._commands()
+        commands["AT+MTSTATE?"] = (0, ["+MTSTATE:1,1"])
+        link = FakeLink(
+            commands, no_reset=True,
+            urcs_on_command={"AT+MTCOMMISSION=180": ["+MTEVT:0", "+MTEVT:4"]})
+        ctx = fresh_ctx(link)
+        ctx.opts.expiry_wait = 0.1
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_10_window_expiry(ctx)
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.10 state back to 2 (operational)", failed_names)
+        self.assertNotIn("2.10 window end reported (+MTEVT:4)", failed_names)
+
+
 class TestGateSkips(unittest.TestCase):
     def _ctx_with_steps(self, steps, **optkw):
         # fresh_ctx() exists; read it first and reuse its FakeLink/opts
