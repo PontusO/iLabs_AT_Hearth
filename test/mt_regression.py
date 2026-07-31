@@ -475,7 +475,12 @@ def parse_onoff_read(text):
 
 
 class Subscriber:
-    """Background `chip-tool onoff subscribe` (design spec section 2).
+    """Background subscription via `chip-tool interactive start` with the
+    subscribe command written to its stdin. Interactive mode is not a
+    choice (design spec section 8.1): the real binary's one-shot
+    subscribe command exits about 3 s after the priming report, before
+    any change-triggered report can arrive; only an interactive session
+    keeps the subscription alive. Found on hardware in Task 11.
 
     At most one instance alive, and no ChipTool.run() while it lives:
     chip-tool's ini storage is not safe for two processes. Its stdout
@@ -486,14 +491,24 @@ class Subscriber:
     def __init__(self, chip, node_id, endpoint=1, min_s=0, max_s=5,
                  popen=None):
         self.chip = chip
-        self.argv = [chip.binary, "onoff", "subscribe", "on-off",
-                     str(min_s), str(max_s), "0x%X" % node_id,
-                     str(endpoint), "--timeout", "120",
+        self.argv = [chip.binary, "interactive", "start",
                      "--storage-directory", chip.storage_dir]
+        self.subscribe_cmd = ("onoff subscribe on-off %d %d 0x%X %d"
+                              % (min_s, max_s, node_id, endpoint))
         self.out_path = os.path.join(chip.storage_dir, "subscribe.log")
         self._popen = popen or subprocess.Popen
         self._proc = None
         self._out = None
+
+    def _send(self, line):
+        """A failed write is not an error here: the process death it
+        implies is what start()'s poll and stop()'s escalation handle."""
+        try:
+            self._proc.stdin.write((line + "\n").encode())
+            self._proc.stdin.flush()
+            return True
+        except (OSError, ValueError):
+            return False
 
     def start(self, settle=10.0):
         """True once the priming report arrives, which is the proof the
@@ -501,8 +516,10 @@ class Subscriber:
         settle window passes silently."""
         os.makedirs(self.chip.storage_dir, exist_ok=True)
         self._out = open(self.out_path, "wb")
-        self._proc = self._popen(self.argv, stdout=self._out,
+        self._proc = self._popen(self.argv, stdin=subprocess.PIPE,
+                                 stdout=self._out,
                                  stderr=subprocess.STDOUT)
+        self._send(self.subscribe_cmd)
         deadline = time.monotonic() + settle
         while time.monotonic() < deadline:
             if self.reports():
@@ -533,6 +550,14 @@ class Subscriber:
         return not self.wait_new_report(count_before, window)
 
     def stop(self):
+        """quit() first so chip-tool can flush and release its ini
+        storage cleanly; SIGTERM and SIGKILL only as escalation."""
+        if self._proc is not None and self._proc.poll() is None:
+            if self._send("quit()"):
+                try:
+                    self._proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    pass
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
             try:
