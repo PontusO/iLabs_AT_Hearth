@@ -1086,12 +1086,26 @@ def swd_reset(runner=None):
     return True, ""
 
 
-def make_relink(link, port_path):
+def make_relink(link, port_path, settle=1.0, pump=2.5, deadline_s=30.0,
+                path_exists=None, sleep=None, serial_mod=None):
     """Close the port, run action() while it is closed, wait for the
     device path to come back (SWD reset and power cycles re-enumerate
     USB), reopen and swap the transport in place. Use the by-id path as
-    --port or the reopen may chase a renumbered ttyACM."""
-    import serial
+    --port or the reopen may chase a renumbered ttyACM.
+
+    Two hardenings from the first T3 hardware run: USB CDC enumeration
+    can bounce after a reset (the node appears, the first open works,
+    then the node drops and returns while the device reconfigures), so
+    the node must survive a settle window before the open is trusted,
+    and the fresh port is pumped briefly afterwards so a bounce that
+    kills the first read is caught HERE (close the corpse, retry)
+    instead of surfacing as a bogus link loss inside a step. Pumping
+    routes lines through the normal URC path, so a +MTREADY arriving
+    early is queued for the step's await, not lost."""
+    if serial_mod is None:
+        import serial as serial_mod
+    path_exists = path_exists or os.path.exists
+    sleep = sleep or time.sleep
 
     def relink(action):
         try:
@@ -1101,16 +1115,31 @@ def make_relink(link, port_path):
         ok, detail = action()
         if not ok:
             return False, detail
-        deadline = time.monotonic() + 30.0
+        deadline = time.monotonic() + deadline_s
         while time.monotonic() < deadline:
-            if os.path.exists(port_path):
+            if not path_exists(port_path):
+                sleep(0.2)
+                continue
+            sleep(settle)
+            if not path_exists(port_path):
+                continue
+            try:
+                cand = serial_mod.Serial(port_path, 115200, timeout=0.05)
+            except (serial_mod.SerialException, OSError):
+                sleep(0.2)
+                continue
+            link.t = cand
+            link._buf = b""
+            try:
+                pump_deadline = time.monotonic() + pump
+                while time.monotonic() < pump_deadline:
+                    link._pump_one(pump_deadline)
+                return True, ""
+            except (serial_mod.SerialException, OSError):
                 try:
-                    link.t = serial.Serial(port_path, 115200, timeout=0.05)
-                    link._buf = b""
-                    return True, ""
-                except serial.SerialException:
+                    cand.close()
+                except Exception:
                     pass
-            time.sleep(0.2)
         return False, "port did not come back: %s" % port_path
     return relink
 
