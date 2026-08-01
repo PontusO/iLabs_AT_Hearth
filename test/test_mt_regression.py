@@ -809,21 +809,30 @@ class TestPhase2Gate(unittest.TestCase):
         base.update(kw)
         return types.SimpleNamespace(**base)
 
+    @staticmethod
+    def _wifi_link():
+        return FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:WIFI,0,0,0"])})
+
     def test_missing_creds_abort(self):
         with tempfile.TemporaryDirectory() as d:
             chip = ChipTool("/bin/true", d)
             with mock.patch("mt_regression.shutil.which",
                             return_value="/usr/local/bin/openocd"):
-                problem = phase2_gate(chip, self._args(ssid=None))
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(ssid=None), self._wifi_link())
         self.assertIn("MT_SSID", problem)
+        self.assertEqual(transport, "WIFI")
+        self.assertIsNone(dataset)
 
     def test_missing_binary_abort(self):
         with tempfile.TemporaryDirectory() as d:
             chip = ChipTool(os.path.join(d, "nope"), d)
             with mock.patch("mt_regression.shutil.which",
                             return_value="/usr/local/bin/openocd"):
-                problem = phase2_gate(chip, self._args())
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), self._wifi_link())
         self.assertIn("chip-tool", problem)
+        self.assertEqual(transport, "WIFI")
 
     def test_unparseable_reference_payload_abort(self):
         runner = FakeChipRunner([(0, "garbage")])
@@ -834,8 +843,10 @@ class TestPhase2Gate(unittest.TestCase):
             chip = ChipTool(binary, d, runner=runner)
             with mock.patch("mt_regression.shutil.which",
                             return_value="/usr/local/bin/openocd"):
-                problem = phase2_gate(chip, self._args())
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), self._wifi_link())
         self.assertIn("parse", problem)
+        self.assertEqual(transport, "WIFI")
 
     def test_healthy_gate_passes(self):
         runner = FakeChipRunner(
@@ -847,7 +858,11 @@ class TestPhase2Gate(unittest.TestCase):
             chip = ChipTool(binary, d, runner=runner)
             with mock.patch("mt_regression.shutil.which",
                             return_value="/usr/local/bin/openocd"):
-                self.assertIsNone(phase2_gate(chip, self._args()))
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), self._wifi_link())
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "WIFI")
+        self.assertIsNone(dataset)
         self.assertEqual(runner.calls[0][0][1:3],
                          ["payload", "parse-setup-payload"])
 
@@ -856,8 +871,146 @@ class TestPhase2Gate(unittest.TestCase):
             chip = ChipTool("/bin/true", d)
             with mock.patch("mt_regression.shutil.which",
                             return_value=None):
-                problem = phase2_gate(chip, self._args())
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), self._wifi_link())
         self.assertIn("openocd", problem)
+        self.assertIsNone(transport)
+        self.assertIsNone(dataset)
+
+
+class TestPhase2GateTransport(unittest.TestCase):
+    """T4 task 3: the gate detects WiFi vs Thread from the device (or
+    takes --transport as an override) and branches: WiFi needs
+    credentials, Thread needs a live otbr-agent and a dataset."""
+
+    def _args(self, **kw):
+        base = {"ssid": "net", "psk": "secret", "transport": None,
+                "dataset": None, "ot_ctl": "/fake/ot-ctl"}
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    @staticmethod
+    def _healthy_chip(d):
+        runner = FakeChipRunner(
+            [(0, fixture("chiptool_parse_setup_payload.txt"))])
+        binary = os.path.join(d, "chip-tool")
+        open(binary, "w").close()
+        os.chmod(binary, 0o755)
+        return ChipTool(binary, d, runner=runner)
+
+    def test_wifi_detected_requires_credentials(self):
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:WIFI,0,0,0"])})
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(ssid=None, psk=None), link)
+        self.assertIn("MT_SSID", problem)
+        self.assertEqual(transport, "WIFI")
+        self.assertIsNone(dataset)
+
+    def test_thread_detected_skips_credentials_requires_otbr(self):
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+        ds_text = fixture("otctl_dataset_active.txt")
+
+        def fake_otctl(cmd_args, binary):
+            self.assertEqual(binary, "/fake/ot-ctl")
+            if cmd_args == ["state"]:
+                return 0, "leader\r\nDone\r\n"
+            if cmd_args == ["dataset", "active", "-x"]:
+                return 0, ds_text
+            raise AssertionError("unexpected ot-ctl call: %r" % (cmd_args,))
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(ssid=None, psk=None), link,
+                    otctl=fake_otctl)
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertEqual(dataset, parse_dataset(ds_text))
+
+    def test_thread_dead_otbr_aborts(self):
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+
+        def fake_otctl(cmd_args, binary):
+            return 1, "Error: no such device\n"
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), link, otctl=fake_otctl)
+        self.assertIsNotNone(problem)
+        self.assertIn("otbr-agent", problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertIsNone(dataset)
+
+    def test_thread_bad_role_aborts(self):
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+
+        def fake_otctl(cmd_args, binary):
+            if cmd_args == ["state"]:
+                return 0, "disabled\r\nDone\r\n"
+            raise AssertionError("dataset should not be fetched")
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), link, otctl=fake_otctl)
+        self.assertIsNotNone(problem)
+        self.assertIn("down", problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertIsNone(dataset)
+
+    def test_dataset_override_skips_otctl_fetch(self):
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+
+        def fake_otctl(cmd_args, binary):
+            if cmd_args == ["state"]:
+                return 0, "leader\r\nDone\r\n"
+            raise AssertionError("dataset fetch should be skipped: %r"
+                                % (cmd_args,))
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(dataset="deadbeef"), link,
+                    otctl=fake_otctl)
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertEqual(dataset, "deadbeef")
+
+    def test_transport_override_beats_detection(self):
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:WIFI,0,0,0"])})
+        ds_text = fixture("otctl_dataset_active.txt")
+
+        def fake_otctl(cmd_args, binary):
+            if cmd_args == ["state"]:
+                return 0, "leader\r\nDone\r\n"
+            if cmd_args == ["dataset", "active", "-x"]:
+                return 0, ds_text
+            raise AssertionError("unexpected ot-ctl call: %r" % (cmd_args,))
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(transport="THREAD"), link,
+                    otctl=fake_otctl)
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertEqual(dataset, parse_dataset(ds_text))
+        self.assertNotIn("AT+MTNET?", link.sent)
 
 
 from mt_regression import swd_reset, operator_power_cycle
