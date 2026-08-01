@@ -130,11 +130,20 @@ both patches and the app-level scrub.
   diagnostics cluster; hand OpenThread its platform config only when
   Thread is chosen; log the active transport and the measured dormant
   cost at boot, next to the D1 BLE figures.
-- **`mt_boot_window_policy` / P2**: unchanged in logic. The provisioned
-  checks for the dormant transport return not-provisioned through CHIP's
-  null-guarded accessors, which is exactly the semantics the mismatch
-  flow wants. The design asserts this on hardware rather than trusting
-  the trace (verification, below).
+- **`mt_boot_window_policy` / P2**: the policy itself is unchanged, but its
+  `mt_transport_is_provisioned()` helper cannot stay keyed on
+  `CHIP_DEVICE_CONFIG_ENABLE_THREAD` on the combined image: that macro is 1
+  there regardless of which stack actually booted, since both are compiled
+  in. Left on the compile-time macro, a WiFi-active, WiFi-commissioned
+  device would call `IsThreadProvisioned()`, get `false`, and be flagged as
+  transport-mismatched on every boot: a wrong window, a spurious
+  `+MTEVT:27`, on a device with nothing wrong. The helper dispatches on the
+  same latch `app_main` reads (`mt_active_transport_is_thread()`), so it
+  asks `IsWiFiStationProvisioned()` or `IsThreadProvisioned()` to match the
+  stack that is actually running. Single-stack builds are unaffected: the
+  macro is still the sole dispatch there, since `MT_COMBINED_IMAGE` is 0.
+  The design asserts this on hardware rather than trusting the trace
+  (verification, below).
 - **`AT+MTNET?`**: already reports the transport family; on the combined
   image it reports the ACTIVE transport, so hosts and the regression
   harness keep working unmodified.
