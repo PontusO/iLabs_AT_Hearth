@@ -173,11 +173,9 @@ idf.py -B build_combined -D SDKCONFIG=build_combined/sdkconfig \
 This is the first build that actually compiles the patched code paths:
 `build_b4` and `build_thread` each preprocess the guard away, since only one
 driver's Kconfig symbol is set in either. It built clean, no new errors
-inside the patch hunks. With no app-side definition of
-`mt_active_transport_is_thread()` yet, the unresolved weak symbol reads as
-null, which the patch treats as "not Thread," so this image boots
-WiFi-active; wiring the real boot-time selection is later work; this task is
-build-and-measure only.
+inside the patch hunks. At this point in the work the weak symbol still had
+no app-side definition, so it resolved to null and the patch treated that as
+"not Thread"; the app-side wiring described below closed that gap.
 
 Measured (`idf.py -B <dir> size`, `.bin` size on disk):
 
@@ -198,6 +196,58 @@ The factory slot is 3,840 KB (`0x3C0000`, `partitions.csv`); the combined
 image leaves 2,019,456 bytes (51%) free, per `esptool`'s own accounting
 during the build (`0x1ed080 bytes (51%) free`), comfortably inside the
 ~2.1 MB margin the single-app partition switch (section 4) was sized for.
+
+**`app_main` wired to the latch, 2026-08-01.** `main/mt_transport.c` owns the
+persisted choice (NVS `mt_cfg`/`transport`, default WIFI) and the strong
+definition of the weak hook the patchset calls. `app_main`, combined build
+only (`MT_COMBINED_IMAGE` in `mt_at_config.h`, derived from
+`CONFIG_ENABLE_WIFI_STATION && CONFIG_OPENTHREAD_ENABLED`), does five things
+in order, all before `esp_matter::start()`:
+
+1. `mt_transport_latch_active()`, reading the persisted choice into a static
+   once, before anything else can query it. Registration (the patch),
+   stack launch (the patch), the feature map, and the diagnostics scrub
+   below all read this one latch rather than the NVS value directly, so a
+   concurrent `AT+MTTRANSPORT=` cannot change the answer mid-boot.
+2. The root node's `NetworkCommissioning` feature map is set to
+   `kWiFiNetworkInterface` or `kThreadNetworkInterface` on `node::config_t`
+   before `node::create()`. Traced at implementation time (not assumed from
+   the design's "app-settable" note): `root_node::create()` forwards
+   `config->network_commissioning` straight into
+   `cluster::network_commissioning::create()`
+   (`esp_matter_endpoint.cpp`/`esp_matter_cluster.cpp`), which is where the
+   feature map decides which optional attributes the cluster even creates.
+   The struct's own default picks WiFi over Thread by `#if`/`#elif` on the
+   compile-time `CHIP_DEVICE_CONFIG_ENABLE_*` macros
+   (`esp_matter_cluster.h`), which is the wrong answer on a combined image
+   where both macros are defined; this override replaces it.
+3. Once `node::create()` returns, `esp_matter::cluster::get()` looks up the
+   dormant transport's diagnostics cluster on endpoint 0
+   (`WiFiNetworkDiagnostics::Id` or `ThreadNetworkDiagnostics::Id`) and
+   `esp_matter::cluster::destroy()`s it if present, closing the leak section
+   3's item 3 identified: both clusters attach at compile time with no
+   mutual exclusion. This runs after `node::create()` and before the
+   endpoint-composition rebuild, and needs no `ChipStackLock`: like the
+   composition rebuild, it runs before `esp_matter::start()`, so there is no
+   CHIP event loop yet to race.
+4. The existing Thread-image OpenThread platform-config handoff (needed
+   before `esp_matter::start()` calls `openthread_init_stack()`, which
+   asserts if it is missing) gains one more condition on the combined
+   image: it now runs only when the latch says Thread, so a WiFi-active
+   combined boot never hands OpenThread a config for a stack the patched
+   `esp_matter_core.cpp` was never going to launch anyway. The single-stack
+   Thread build keeps the unconditional call, byte-identical to before this
+   change.
+5. The free-heap figure already logged once `esp_matter::start()` and
+   `mt_at_start()` have run (next to the D1 BLE figures) gets one more line
+   on the combined image naming the active transport, so the dormant-stack
+   cost measured above is legible per boot rather than only at build time.
+
+`chip::app::Clusters::WiFiNetworkDiagnostics::Id` and
+`::ThreadNetworkDiagnostics::Id` needed no new include: both are reachable
+transitively through `esp_matter.h` (`esp_matter_client.h` pulls in
+`app-common/zap-generated/cluster-objects.h`, which pulls in every cluster's
+generated `Attributes.h`, which pulls in that cluster's `ClusterId.h`).
 
 ## 4. Partition layout: single-app + host OTA
 

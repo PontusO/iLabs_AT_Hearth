@@ -62,6 +62,8 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTEVT?` | query | `+MTEVTMASK:<hex32>` → `OK` |
 | `AT+MTEVT=<hexmask>` | set | `OK` (subscribe to platform events) |
 | `AT+MTNET?` | query | `+MTNET:<transport>,<enabled>,<connected>` → `OK` |
+| `AT+MTTRANSPORT?` | query | `+MTTRANSPORT:<active>,<stored>` → `OK` (combined image only) |
+| `AT+MTTRANSPORT=<WIFI\|THREAD>` | set | `OK` (persisted, no reboot; combined image only) |
 | `AT+MTBAUD?` | query | `+MTBAUD:<baud>` → `OK` |
 | `AT+MTBAUD=<baud>` | set | `OK` at the old rate, then the link switches |
 | `AT+MTFLOW?` | query | `+MTFLOW:<mode>` → `OK` |
@@ -356,13 +358,24 @@ AT+MTNET?  ->  +MTNET:<transport>,<enabled>,<connected>[,<mismatch>]
   host that parses the first three and ignores extras stays correct, which is
   why it was added at the end rather than inserted.
 
-Transport is fixed at build time. Matter-over-Thread is a Kconfig option
-(`ENABLE_MATTER_OVER_THREAD`, gated on `OPENTHREAD_ENABLED`), so the two
+Transport is fixed at build time on the two single-stack images (`build_b4`,
+`build_thread`). Matter-over-Thread is a Kconfig option
+(`ENABLE_MATTER_OVER_THREAD`, gated on `OPENTHREAD_ENABLED`), so those two
 variants are separate images selected by reflash, the same model used for the
-ESP-NOW and Matter personalities. There is deliberately no command to change it:
-the Root Node's NetworkCommissioning cluster advertises the transport's
-features, so it is part of the data model, and changing it on a commissioned
-device has the same consequences as changing the endpoint composition (§3.9).
+ESP-NOW and Matter personalities. There is deliberately no command to change it
+on those images: the Root Node's NetworkCommissioning cluster advertises the
+transport's features, so it is part of the data model, and changing it on a
+commissioned device has the same consequences as changing the endpoint
+composition (§3.9).
+
+**On the combined image** (`build_combined`, §3.12.2) both stacks are compiled
+in, and exactly one is active per boot. `<transport>` here reports the
+**active** stack, not a build-time constant, so a host or the regression
+harness reading `AT+MTNET?` needs no change to work against either image.
+`AT+MTTRANSPORT` (§3.12.2) is the command that changes which stack is active,
+and it exists only on this image for exactly the reason above: changing the
+active transport carries the same commissioned-device consequences that
+changing the composition does.
 
 #### 3.12.1 Transport mismatch: a fabric from the other image
 
@@ -392,6 +405,13 @@ transport-independent in Matter, so nothing about them is invalid. They are
 simply unreachable: the device has no credentials for the new transport, so it
 joins no network, and a commissioner cannot deliver any because it cannot
 reach the device.
+
+On the combined image (§3.12.2) the identical state is reachable without a
+reflash: `AT+MTTRANSPORT=` followed by a reboot changes which stack is active
+exactly as a reflash would, and the mismatch detection, `+MTEVT:27`, and the
+`AT+MTNET?` `<mismatch>` flag behave the same either way, since both routes
+end at the same condition, a fabric present on a transport that is not
+provisioned.
 
 Observed on hardware 2026-07-28, and the failure is the worst available shape.
 CHIP finds the fabric, logs `Fabric already commissioned. Disabling BLE
@@ -445,6 +465,51 @@ fabric usable on this transport*, not merely *has a fabric*.
 
 Blocked on D1 because a device in this state has already had BLE released, so
 opening a window achieves nothing until BLE stays resident.
+
+### 3.12.2 `AT+MTTRANSPORT`: transport selection (combined image only)
+
+```
+AT+MTTRANSPORT?               ->  +MTTRANSPORT:<active>,<stored>
+AT+MTTRANSPORT=<WIFI|THREAD>  ->  OK
+```
+
+Exists only on `build_combined`, the one image carrying both the WiFi and the
+Thread stack with exactly one active per boot. `build_b4` and `build_thread`
+never register this command, so `AT+MTTRANSPORT` there reaches the ordinary
+"unknown command" path and answers `+MTERR:8`, the same as any other command
+this firmware does not implement; there is no combined-image-only stub that
+always reports one fixed transport.
+
+- `<active>`: `WIFI` or `THREAD`, the stack this boot actually launched.
+  Latched once at boot, before `esp_matter::start()`, from whatever was
+  stored at that moment: it does not change while the device is running,
+  even if `AT+MTTRANSPORT=` stages a different value in the meantime.
+- `<stored>`: the persisted choice, which takes effect on the next boot.
+  Equal to `<active>` except while a switch is staged and not yet applied.
+- `AT+MTTRANSPORT=<WIFI|THREAD>` validates the argument (`+MTERR:1` for
+  anything else), persists it to NVS, and answers `OK`. **It has no reboot
+  side effect.** Unlike `AT+MTEPAPPLY`, which stages-then-reboots the
+  composition, this command only writes the choice; the host owns the
+  reboot (`AT+MTRESET`, `AT+MTFRESET`, the reset line, or power), the same
+  way `AT+MTEP=`/`AT+MTEPCLEAR` stage without reloading endpoints. An NVS
+  write failure answers `+MTERR:7`.
+
+**Persistence.** The stored choice survives both `AT+MTRESET` and
+`AT+MTFRESET`, like the endpoint composition (§3.9, §3.10): it is a product
+setting, not user data, and neither reset is a reason to fall back to WIFI on
+a device deliberately configured for Thread.
+
+**Switching with a live fabric is always allowed**, and deliberately not
+gated on commissioning state. The transport-mismatch flow (§3.12.1) already
+covers what happens next: the fabric is kept, a commissioning window opens
+because the newly active transport cannot reach it yet, and `AT+MTNET?`
+reports the mismatch until the device is commissioned on the transport it
+now runs. Switching back revives the original fabric with nothing to redo.
+Refusing to switch until a factory reset was considered and rejected for the
+same reason §3.12.1 rejected erasing on mismatch.
+
+Fresh-device default: `WIFI`, matching the single-stack images' shipping
+behaviour and the C4 host library's expectations.
 
 ### 3.13 `AT+MTBAUD`: AT link rate
 

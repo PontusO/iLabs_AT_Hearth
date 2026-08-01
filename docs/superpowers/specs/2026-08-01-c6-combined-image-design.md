@@ -84,9 +84,16 @@ contorting around it.
   combined sdkconfig enables).
 - **Patch 1** (`network_commissioning_integration.cpp`): when both
   drivers are compiled in, register exactly one on endpoint 0, chosen
-  through a new setter (`esp_matter_hearth`-namespaced, called by the
-  app before `esp_matter::start()`). Single-stack builds keep the stock
-  behavior byte-identically.
+  through a weak hook (`mt_active_transport_is_thread()`) rather than a
+  setter: the patch itself declares `extern "C" int
+  mt_active_transport_is_thread(void) __attribute__((weak))` and calls
+  it, so the SDK carries no dependency on an app header, and the app's
+  `mt_transport.c` supplies the strong definition. Same contract a setter
+  would have given (one choice, read once at boot, the app decides
+  before `esp_matter::start()`), reached without exporting an app-owned
+  SDK header into the app for the SDK to include back. Single-stack
+  builds keep the stock behavior byte-identically: the hook is only
+  called when both drivers are compiled in.
 - **Patch 2** (`esp_matter_core.cpp`): the WiFi stack init and the
   Thread stack launch each become conditional on the same runtime
   choice when both are compiled in. With WiFi chosen, OpenThread is
@@ -116,8 +123,9 @@ both patches and the app-level scrub.
     simpler and more honest: the command exists only on the combined
     image; single-transport images answer `+MTERR:8` (unknown command)
     naturally, and `AT+MTNET?` already tells the host what the image is.
-- **`app_main` (combined build only)**: read the choice; call the patch
-  setters; set the root-node network-commissioning feature map to match;
+- **`app_main` (combined build only)**: latch the choice
+  (`mt_transport_latch_active()`), which is what the patchset's weak hook
+  reads back; set the root-node network-commissioning feature map to match;
   after `node::create()`, `cluster::destroy()` the dormant transport's
   diagnostics cluster; hand OpenThread its platform config only when
   Thread is chosen; log the active transport and the measured dormant
