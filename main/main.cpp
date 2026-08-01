@@ -438,7 +438,25 @@ extern "C" int mt_matter_net_info(int *transport, int *enabled, int *connected)
         return -1;
     }
     ChipStackLock lock;
-#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+#if MT_COMBINED_IMAGE
+    /*
+     * Both stacks are compiled in here, so CHIP_DEVICE_CONFIG_ENABLE_THREAD
+     * alone cannot answer "which one is active": it is 1 on this image
+     * regardless of the boot-time choice. Dispatch on the latch instead
+     * (spec 3.12: AT+MTNET? reports the ACTIVE transport on the combined
+     * image), the same value node::create()'s feature map and the dormant-
+     * cluster scrub in app_main used.
+     */
+    if (mt_active_transport_is_thread()) {
+        *transport = MT_NET_THREAD;
+        *enabled   = 1;
+        *connected = chip::DeviceLayer::ConnectivityMgr().IsThreadAttached() ? 1 : 0;
+    } else {
+        *transport = MT_NET_WIFI;
+        *enabled   = 1;
+        *connected = chip::DeviceLayer::ConnectivityMgr().IsWiFiStationConnected() ? 1 : 0;
+    }
+#elif CHIP_DEVICE_CONFIG_ENABLE_THREAD
     *transport = MT_NET_THREAD;
     *enabled   = 1;
     *connected = chip::DeviceLayer::ConnectivityMgr().IsThreadAttached() ? 1 : 0;
@@ -579,11 +597,23 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
  *
  * Call only after esp_matter::start(): both read state the stack populates,
  * and both want the CHIP lock.
+ *
+ * On the combined image CHIP_DEVICE_CONFIG_ENABLE_THREAD is 1 regardless of
+ * which stack actually booted (both are compiled in), so it cannot be the
+ * dispatch key here: asking IsThreadProvisioned() unconditionally would flag
+ * a healthy WiFi-active, WiFi-commissioned device as mismatched, open an
+ * unwanted boot window, and raise a spurious +MTEVT:27. Dispatch on the
+ * latch instead, the same one node::create()'s feature map and the
+ * dormant-cluster scrub in app_main use.
  */
 static bool mt_transport_is_provisioned()
 {
     ChipStackLock lock;
-#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+#if MT_COMBINED_IMAGE
+    return mt_active_transport_is_thread()
+        ? chip::DeviceLayer::ConnectivityMgr().IsThreadProvisioned()
+        : chip::DeviceLayer::ConnectivityMgr().IsWiFiStationProvisioned();
+#elif CHIP_DEVICE_CONFIG_ENABLE_THREAD
     return chip::DeviceLayer::ConnectivityMgr().IsThreadProvisioned();
 #else
     return chip::DeviceLayer::ConnectivityMgr().IsWiFiStationProvisioned();
