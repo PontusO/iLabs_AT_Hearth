@@ -765,6 +765,8 @@ def run_phase2(ctx):
 DEFAULT_CHIPTOOL = os.path.expanduser(
     "~/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool")
 
+DEFAULT_OTCTL = "/mnt/f86c891c-33c6-4bb7-afe1-2c8846257177/src/git/ot-br-posix/build/otbr/third_party/openthread/repo/src/posix/ot-ctl"
+
 
 class ChipTool:
     """One-shot chip-tool invocations (design spec section 2). Every call
@@ -779,23 +781,8 @@ class ChipTool:
 
     @staticmethod
     def _default_runner(argv, timeout):
-        try:
-            proc = subprocess.run(argv, capture_output=True, text=True,
-                                  timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            # A hung chip-tool must become a scored failure with skip
-            # semantics, not a raw traceback: TimeoutExpired is a
-            # SubprocessError, which neither run_phase2 (StepAbort only)
-            # nor main (serial/OSError only) catches. subprocess.run has
-            # already killed the child. Partial output arrives as bytes
-            # despite text=True (CPython quirk).
-            def _txt(s):
-                if isinstance(s, bytes):
-                    return s.decode(errors="replace")
-                return s or ""
-            return 124, (_txt(exc.stdout) + _txt(exc.stderr)
-                         + "\n(chip-tool timed out after %s s)" % timeout)
-        return proc.returncode, proc.stdout + proc.stderr
+        # Delegate to the shared subprocess runner
+        return _subprocess_runner(argv, timeout)
 
     def run(self, args, timeout=60):
         os.makedirs(self.storage_dir, exist_ok=True)
@@ -961,6 +948,45 @@ class Subscriber:
         if self._out is not None:
             self._out.close()
             self._out = None
+
+
+def _subprocess_runner(argv, timeout):
+    """Shared subprocess runner for ChipTool and otctl_run. Runs argv with
+    the given timeout, converting TimeoutExpired to rc=124 (timeout code)."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        # A hung process must become a scored failure with skip semantics,
+        # not a raw traceback. subprocess.run has already killed the child.
+        # Partial output arrives as bytes despite text=True (CPython quirk).
+        def _txt(s):
+            if isinstance(s, bytes):
+                return s.decode(errors="replace")
+            return s or ""
+        return 124, (_txt(exc.stdout) + _txt(exc.stderr)
+                     + "\n(process timed out after %s s)" % timeout)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def otctl_run(args, binary, runner=None, timeout=10):
+    """One-shot ot-ctl invocation with the ChipTool runner contract:
+    a hung ot-ctl becomes a nonzero rc, not a raw TimeoutExpired."""
+    argv = (list(binary) if isinstance(binary, (list, tuple))
+            else [binary]) + list(args)
+    runner = runner or _subprocess_runner
+    return runner(argv, timeout)
+
+
+def parse_dataset(text):
+    """The active dataset hex from `ot-ctl dataset active -x` output:
+    the first line that is entirely hex and plausibly long. Validated
+    against the Task 1 fixture."""
+    for line in (text or "").splitlines():
+        line = line.strip().lstrip("> ")
+        if re.fullmatch(r"[0-9a-fA-F]{16,}", line):
+            return line
+    return None
 
 
 TESTS = []
