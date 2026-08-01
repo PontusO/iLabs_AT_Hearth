@@ -169,7 +169,8 @@ class TestEchoAndRaw(unittest.TestCase):
         self.assertEqual(res, -1)
 
 
-from mt_regression import Suite, capture_header, write_baseline, phase0
+from mt_regression import (Suite, capture_header, write_baseline, phase0,
+                           otctl_run, parse_dataset)
 
 
 class TestSuite(unittest.TestCase):
@@ -679,6 +680,29 @@ class TestSubscriber(unittest.TestCase):
                         "time.sleep(30)"]
             self.assertTrue(sub.start(settle=5.0))
             sub.stop()
+
+
+class TestOtCtl(unittest.TestCase):
+    def test_run_argv_and_result(self):
+        calls = []
+        def runner(argv, timeout):
+            calls.append((argv, timeout))
+            return 0, "hex\nDone\n"
+        rc, out = otctl_run(["dataset", "active", "-x"], "/x/ot-ctl",
+                            runner=runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0][0], ["/x/ot-ctl", "dataset", "active", "-x"])
+
+    def test_parse_dataset_fixture(self):
+        text = fixture("otctl_dataset_active.txt")
+        ds = parse_dataset(text)
+        self.assertIsNotNone(ds)
+        # Tighten to the literal hex from the fixture
+        self.assertEqual(ds,
+                         "0e08000000000001000000030000154a0300000b35060004001fffe002089b5864fe07dfa4f30708fde5dcea6594714c051069f744dc29fa6e61dfb0a81afa4d75c8030f4f70656e5468726561642d363638620102668b0410835ada6028421bb7d979a77ec974e9450c0402a0f7f8")
+
+    def test_parse_dataset_garbage_is_none(self):
+        self.assertIsNone(parse_dataset("Error 35: InvalidState\nDone\n"))
 
 
 class TestUrcHistory(unittest.TestCase):
