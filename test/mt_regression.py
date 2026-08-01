@@ -253,6 +253,8 @@ class Phase2Context:
         self.swd_runner = None    # test seam for swd_reset
         self.power_cycler = None  # test seam for operator_power_cycle
         self.composition = None   # +MTEP: lines captured by run_phase2
+        self.transport = "WIFI"   # set from phase2_gate's detection
+        self.dataset = None       # Thread active dataset hex, if any
 
 
 def step_2_1_factory_fresh(ctx):
@@ -1238,32 +1240,71 @@ def operator_power_cycle(port_path, printer=flush_print,
 GATE_REFERENCE_QR = "MT:Y.K9042C00KA0648G00"
 
 
-def phase2_gate(chip, args):
-    """Phase-2-only preflight, before anything destructive: chip-tool
-    exists, runs as this user (the 2026-07-29 root-owned counters file
-    made every non-root run fail), and credentials are present. Returns
-    an abort message or None."""
+def phase2_gate(chip, args, link, otctl=otctl_run):
+    """Phase-2-only preflight, before anything destructive. Detects the
+    transport from the device and branches: WiFi needs credentials,
+    Thread needs a live border router and its active dataset (design
+    spec T4 section 2). Also covers what the WiFi-only gate always did:
+    chip-tool exists and runs as this user (the 2026-07-29 root-owned
+    counters file made every non-root run fail). Returns
+    (problem, transport, dataset); problem is None on success.
+
+    otctl is a test seam, in the same style as ChipTool's injectable
+    runner: production call sites never pass it, so the real otctl_run
+    runs against the real binary; self-tests substitute a callable with
+    the same (args, binary) -> (rc, out) signature."""
     if shutil.which("openocd") is None:
         return ("openocd not on PATH: the 2.8 warm reboot resets the "
-                "RP2350 over SWD (see graph N22)")
-    if not getattr(args, "ssid", None) or not getattr(args, "psk", None):
-        return ("phase 2 needs WiFi credentials: export MT_SSID and "
-                "MT_PSK (or pass --ssid/--psk)")
+                "RP2350 over SWD (see graph N22)", None, None)
+    transport = getattr(args, "transport", None)
+    if transport is None:
+        res, lines = cmd_retry(link, "AT+MTNET?")
+        m = re.match(r"\+MTNET:(WIFI|THREAD),", lines[0]) \
+            if res == 0 and lines else None
+        if not m:
+            return ("cannot detect the transport: AT+MTNET? gave %r"
+                    % (lines,), None, None)
+        transport = m.group(1)
+    dataset = None
+    if transport == "THREAD":
+        rc, out = otctl(["state"], args.ot_ctl)
+        if rc != 0:
+            return ("otbr-agent is not answering (ot-ctl state failed): "
+                    "start it per the T4 runbook (graph F36: run "
+                    "otbr-agent directly, D-Bus policy required)",
+                    transport, None)
+        role = (out or "").strip().splitlines()[0].strip().lstrip("> ")
+        if role not in ("leader", "router", "child"):
+            return ("the Thread network is down (ot-ctl state: %s); "
+                    "bring it up before a Thread phase 2 run" % role,
+                    transport, None)
+        dataset = getattr(args, "dataset", None)
+        if not dataset:
+            rc, out = otctl(["dataset", "active", "-x"], args.ot_ctl)
+            dataset = parse_dataset(out) if rc == 0 else None
+        if not dataset:
+            return ("no usable Thread dataset (ot-ctl dataset active -x "
+                    "gave nothing; set MT_DATASET to override)",
+                    transport, None)
+    else:
+        if not getattr(args, "ssid", None) or not getattr(args, "psk", None):
+            return ("phase 2 needs WiFi credentials: export MT_SSID and "
+                    "MT_PSK (or pass --ssid/--psk)", transport, None)
     if not (os.path.isfile(chip.binary)
             and os.access(chip.binary, os.X_OK)):
         return ("chip-tool not executable: %s (set MT_CHIPTOOL or "
-                "--chip-tool)" % chip.binary)
+                "--chip-tool)" % chip.binary, transport, dataset)
     try:
         rc, out = chip.run(
             ["payload", "parse-setup-payload", GATE_REFERENCE_QR],
             timeout=15)
     except (OSError, subprocess.SubprocessError) as exc:
-        return "chip-tool failed to run: %s" % exc
+        return ("chip-tool failed to run: %s" % exc, transport, dataset)
     if rc != 0 or parse_setup_payload(out) is None:
         return ("chip-tool cannot parse the reference setup payload; "
                 "check it runs as this user (root-owned /tmp/chip_*.ini "
-                "is the known cause)")
-    return None
+                "is the known cause)", transport, dataset)
+    return None, transport, dataset
 
 
 def phase0(link, header):
@@ -1535,6 +1576,12 @@ def main(argv=None):
                          "(2.9 cold boot)")
     ap.add_argument("--chip-tool",
                     default=os.environ.get("MT_CHIPTOOL", DEFAULT_CHIPTOOL))
+    ap.add_argument("--transport", choices=["WIFI", "THREAD"], default=None,
+                    help="override transport detection (default: ask the "
+                         "device via AT+MTNET?)")
+    ap.add_argument("--dataset", default=os.environ.get("MT_DATASET"),
+                    help="Thread operational dataset hex (default: fetch "
+                         "from ot-ctl at the gate)")
     ap.add_argument("--ot-ctl", dest="ot_ctl",
                     default=os.environ.get("MT_OTCTL", DEFAULT_OTCTL))
     ap.add_argument("--storage",
@@ -1554,10 +1601,6 @@ def main(argv=None):
     chip = None
     if args.phase == 2:
         chip = ChipTool(args.chip_tool, args.storage)
-        problem = phase2_gate(chip, args)
-        if problem:
-            print("ABORT: " + problem)
-            return 2
 
     import serial
     try:
@@ -1583,9 +1626,15 @@ def main(argv=None):
             print("ABORT: " + problem)
             return 2
         if args.phase == 2:
+            problem, transport, dataset = phase2_gate(chip, args, link)
+            if problem:
+                print("ABORT: " + problem)
+                return 2
             header["node_id"] = "0x%X" % args.node_id
             chip.wipe_storage()
             ctx = Phase2Context(link, chip, suite, args)
+            ctx.transport = transport
+            ctx.dataset = dataset
             ctx.relink = make_relink(link, args.port)
             ctx.chip2 = ChipTool(args.chip_tool, args.storage + "-f2")
             ctx.chip2.wipe_storage()
