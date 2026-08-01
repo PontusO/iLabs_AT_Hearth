@@ -705,8 +705,12 @@ class TestOtCtl(unittest.TestCase):
         self.assertIsNone(parse_dataset("Error 35: InvalidState\nDone\n"))
 
     def test_run_timeout_label_is_ot_ctl(self):
-        # Verify the default runner labels timeouts as "ot-ctl timed out"
-        rc, out = otctl_run(["dummy"], "/bin/true", timeout=0.0001)
+        # Verify the default runner labels timeouts as "ot-ctl timed out".
+        # A real process that sleeps past the timeout, not /bin/true with
+        # a microsecond budget: the latter is a race on loaded machines,
+        # since /bin/true can exit before the timeout fires at all.
+        rc, out = otctl_run(["-c", "import time; time.sleep(10)"],
+                            sys.executable, timeout=0.5)
         self.assertNotEqual(rc, 0)
         self.assertIn("ot-ctl timed out", out)
 
@@ -956,6 +960,28 @@ class TestPhase2GateTransport(unittest.TestCase):
         def fake_otctl(cmd_args, binary):
             if cmd_args == ["state"]:
                 return 0, "disabled\r\nDone\r\n"
+            raise AssertionError("dataset should not be fetched")
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), link, otctl=fake_otctl)
+        self.assertIsNotNone(problem)
+        self.assertIn("down", problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertIsNone(dataset)
+
+    def test_thread_empty_role_aborts_without_traceback(self):
+        """rc 0 with empty stdout (a live otbr-agent that answered nothing
+        useful) must reach the named 'Thread network is down' abort, not
+        raise IndexError out of the splitlines()[0] parse."""
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+
+        def fake_otctl(cmd_args, binary):
+            if cmd_args == ["state"]:
+                return 0, ""
             raise AssertionError("dataset should not be fetched")
 
         with tempfile.TemporaryDirectory() as d:
