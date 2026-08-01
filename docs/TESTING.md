@@ -604,8 +604,10 @@ T1 is worth having on its own: it is the part that runs after every edit to
 - **`AT+MTOTA` is unimplemented** (spec §8), so the firmware-update path in
   `FIRMWARE_UPDATE_SPEC.md` is untested by this suite.
 - **Thread is built** (hardware-verified 2026-07-29) and Phase 1 runs on both
-  images with committed baselines. Phase 2's commissioning matrix is still
-  WiFi + BLE only; `chip-tool pairing ble-thread` cases are unwritten.
+  images with committed baselines. Phase 2's Thread commissioning matrix is
+  hardware-verified too (2026-08-01): three clean 89/89 `--include-slow
+  --include-manual` runs plus one clean 79/79-with-2-gated default run,
+  baseline committed at `test/baselines/thread-lifecycle.json`.
 - **Non-integer attributes** are unsupported by design and are only tested for
   correct rejection (`+MTERR:5`), not for behaviour. `AT+MTATTRX` will need its
   own cases when it lands.
