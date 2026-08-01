@@ -1,17 +1,21 @@
 # Host unit tests for the pure-C parts of the AT+MT firmware. No IDF, no
 # framework: plain gcc. Run with `make -C test/host run`.
 
-CFLAGS = -std=c11 -Wall -Wextra -Werror -g -I../../main/include
+CFLAGS = -std=c11 -Wall -Wextra -Werror -g -I../../main/include -DMT_HOST_TEST
 
-TESTS = test_mt_composition
+TESTS = test_mt_composition test_mt_transport
 
 all: $(TESTS)
 
 test_mt_composition: test_mt_composition.c ../../main/mt_composition.c
 	$(CC) $(CFLAGS) -o $@ $^
 
+test_mt_transport: test_mt_transport.c ../../main/mt_transport.c
+	$(CC) $(CFLAGS) -o $@ $^
+
 run: all
 	./test_mt_composition
+	./test_mt_transport
 
 clean:
 	rm -f $(TESTS)

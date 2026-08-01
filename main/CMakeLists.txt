@@ -8,6 +8,7 @@ idf_component_register(
         "mt_composition.c"
         "mt_comp_store.c"
         "mt_devtypes.cpp"
+        "mt_transport.c"
     INCLUDE_DIRS
         "include"
     PRIV_REQUIRES

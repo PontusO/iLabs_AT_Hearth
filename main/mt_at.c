@@ -32,6 +32,7 @@
 #include "mt_composition.h"
 #include "mt_devtypes.h"
 #include "mt_matter.h"
+#include "mt_transport.h"
 
 /* Longest +MTEVT line: "+MTEVT:31," plus a detail. Details are "0"/"1" today
  * (bits 10, 11 and 24); 48 leaves room without putting a 512-byte
@@ -571,6 +572,48 @@ static int cmd_mtflow(at_type_t type, char *args)
     return AT_R_DONE;
 }
 
+/* ---- transport selection (combined image only) ------------------------ */
+
+#if MT_COMBINED_IMAGE
+
+/*
+ * AT+MTTRANSPORT?              -> +MTTRANSPORT:<active>,<stored>
+ * AT+MTTRANSPORT=<WIFI|THREAD> -> persist the choice -> OK
+ *
+ * Combined-image only (see MT_COMBINED_IMAGE in mt_at_config.h):
+ * single-transport builds never register this command, so it answers the
+ * ordinary "unknown command" +MTERR:8 there.
+ *
+ * <active> is the transport this boot is actually running, latched once in
+ * app_main before esp_matter::start(). <stored> is whatever NVS holds right
+ * now; it only differs from <active> after a set that has not yet been
+ * followed by a reboot. Unlike AT+MTEP there is no apply/reboot step here:
+ * setting it just becomes <active> at the next boot, whenever that is.
+ */
+static int cmd_mttransport(at_type_t type, char *args)
+{
+    if (type == AT_QUERY) {
+        at_uart_write_line("+MTTRANSPORT:%s,%s",
+                           mt_transport_name(mt_transport_active()),
+                           mt_transport_name(mt_transport_stored()));
+        return AT_R_OK;
+    }
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+
+    mt_transport_t t;
+    if (mt_transport_parse(args, &t) != 0) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (mt_transport_store(t) != 0) {
+        return MT_ERR_PERSIST;
+    }
+    return AT_R_OK;
+}
+
+#endif /* MT_COMBINED_IMAGE */
+
 /* ---- dispatch table & registration ------------------------------------ */
 
 static const at_command_t s_cmds[] = {
@@ -592,6 +635,9 @@ static const at_command_t s_cmds[] = {
     { "MTNET",        cmd_mtnet       },
     { "MTBAUD",       cmd_mtbaud      },
     { "MTFLOW",       cmd_mtflow      },
+#if MT_COMBINED_IMAGE
+    { "MTTRANSPORT",  cmd_mttransport },
+#endif
 };
 
 /* Engine config for the Matter personality: "+MTERR" code space, the
