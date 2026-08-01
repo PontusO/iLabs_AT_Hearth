@@ -782,7 +782,7 @@ class ChipTool:
     @staticmethod
     def _default_runner(argv, timeout):
         # Delegate to the shared subprocess runner
-        return _subprocess_runner(argv, timeout)
+        return _subprocess_runner(argv, timeout, label="chip-tool")
 
     def run(self, args, timeout=60):
         os.makedirs(self.storage_dir, exist_ok=True)
@@ -950,22 +950,24 @@ class Subscriber:
             self._out = None
 
 
-def _subprocess_runner(argv, timeout):
+def _subprocess_runner(argv, timeout, label="process"):
     """Shared subprocess runner for ChipTool and otctl_run. Runs argv with
-    the given timeout, converting TimeoutExpired to rc=124 (timeout code)."""
+    the given timeout, converting TimeoutExpired to rc=124 (timeout code).
+    A hung process must become a scored failure with skip semantics, not a
+    raw traceback: TimeoutExpired is a SubprocessError, which neither
+    run_phase2 (StepAbort only) nor main (serial/OSError only) catches.
+    subprocess.run has already killed the child. Partial output arrives as
+    bytes despite text=True (CPython quirk)."""
     try:
         proc = subprocess.run(argv, capture_output=True, text=True,
                               timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        # A hung process must become a scored failure with skip semantics,
-        # not a raw traceback. subprocess.run has already killed the child.
-        # Partial output arrives as bytes despite text=True (CPython quirk).
         def _txt(s):
             if isinstance(s, bytes):
                 return s.decode(errors="replace")
             return s or ""
         return 124, (_txt(exc.stdout) + _txt(exc.stderr)
-                     + "\n(process timed out after %s s)" % timeout)
+                     + "\n(%s timed out after %s s)" % (label, timeout))
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -974,7 +976,8 @@ def otctl_run(args, binary, runner=None, timeout=10):
     a hung ot-ctl becomes a nonzero rc, not a raw TimeoutExpired."""
     argv = (list(binary) if isinstance(binary, (list, tuple))
             else [binary]) + list(args)
-    runner = runner or _subprocess_runner
+    if runner is None:
+        runner = lambda argv, timeout: _subprocess_runner(argv, timeout, label="ot-ctl")
     return runner(argv, timeout)
 
 
@@ -1532,6 +1535,8 @@ def main(argv=None):
                          "(2.9 cold boot)")
     ap.add_argument("--chip-tool",
                     default=os.environ.get("MT_CHIPTOOL", DEFAULT_CHIPTOOL))
+    ap.add_argument("--ot-ctl", dest="ot_ctl",
+                    default=os.environ.get("MT_OTCTL", DEFAULT_OTCTL))
     ap.add_argument("--storage",
                     default=os.environ.get("MT_CHIPTOOL_STORAGE",
                                            "/tmp/mt-regression"))

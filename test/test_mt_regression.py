@@ -544,7 +544,7 @@ class TestChipTool(unittest.TestCase):
             rc, out = chip.run(["-c", "import time; time.sleep(10)"],
                                timeout=0.5)
         self.assertNotEqual(rc, 0)
-        self.assertIn("timed out", out)
+        self.assertIn("chip-tool timed out", out)
 
     def test_run_payload_family_omits_storage(self):
         # The real binary's payload subcommands take exactly one positional
@@ -703,6 +703,12 @@ class TestOtCtl(unittest.TestCase):
 
     def test_parse_dataset_garbage_is_none(self):
         self.assertIsNone(parse_dataset("Error 35: InvalidState\nDone\n"))
+
+    def test_run_timeout_label_is_ot_ctl(self):
+        # Verify the default runner labels timeouts as "ot-ctl timed out"
+        rc, out = otctl_run(["dummy"], "/bin/true", timeout=0.0001)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("ot-ctl timed out", out)
 
 
 class TestUrcHistory(unittest.TestCase):
