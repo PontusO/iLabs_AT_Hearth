@@ -44,10 +44,12 @@
 #endif
 
 #include "mt_at.h"
+#include "mt_at_config.h"
 #include "mt_comp_store.h"
 #include "mt_composition.h"
 #include "mt_devtypes.h"
 #include "mt_matter.h"
+#include "mt_transport.h"
 
 static const char *TAG = "mt_main";
 
@@ -647,14 +649,71 @@ extern "C" void app_main(void)
     /* Platform NVS (fabric/credentials/attribute persistence live here). */
     nvs_flash_init();
 
+#if MT_COMBINED_IMAGE
+    /*
+     * One choice, read once, before node::create() and esp_matter::start():
+     * both the patched esp-matter (which driver registers, which stack
+     * launches) and the app-level scrub below key on this single latch for
+     * the whole boot. mt_transport_active()/_stored() differ only when
+     * AT+MTTRANSPORT= staged a switch that has not been rebooted into yet.
+     */
+    mt_transport_latch_active();
+    ESP_LOGI(TAG, "active transport: %s (stored: %s)",
+             mt_transport_name(mt_transport_active()),
+             mt_transport_name(mt_transport_stored()));
+#endif
+
     /* Matter node with the mandatory Root Node device type on endpoint 0. */
     node::config_t node_config;
+#if MT_COMBINED_IMAGE
+    /*
+     * Set the root node's NetworkCommissioning feature map to match the
+     * active transport. Verified settable pre-create: esp_matter's
+     * root_node::create() forwards config->network_commissioning straight
+     * into cluster::network_commissioning::create() (esp_matter_endpoint.cpp),
+     * whose feature_map gate decides which attributes (e.g.
+     * supported_wifi_bands) get created at all (esp_matter_cluster.cpp). The
+     * struct's own default (esp_matter_cluster.h) picks WiFi over Thread by
+     * #if/#elif on the compile-time CHIP_DEVICE_CONFIG_ENABLE_* macros, which
+     * is wrong on a combined image where both are defined and the real
+     * answer is a runtime choice; this overrides that default explicitly.
+     */
+    node_config.root_node.network_commissioning.feature_map = mt_active_transport_is_thread()
+        ? chip::to_underlying(chip::app::Clusters::NetworkCommissioning::Feature::kThreadNetworkInterface)
+        : chip::to_underlying(chip::app::Clusters::NetworkCommissioning::Feature::kWiFiNetworkInterface);
+#endif
     node_t *node = node::create(&node_config, app_attribute_update_cb, app_identification_cb);
     if (node == nullptr) {
         ESP_LOGE(TAG, "Failed to create Matter node");
         return;
     }
     (void)node; /* mt_devtype_create() reaches the node via node::get() */
+
+#if MT_COMBINED_IMAGE
+    /*
+     * Both WiFiNetworkDiagnostics and ThreadNetworkDiagnostics clusters
+     * attach to endpoint 0 at compile time with no mutual exclusion (design
+     * spec section 2, item 3), because on a single-stack image only one of
+     * them is ever compiled in. On the combined image both are, so the one
+     * belonging to the transport this boot did NOT choose has to be removed
+     * by hand or a controller reading endpoint 0's descriptor sees a stack
+     * that is not actually running. No ChipStackLock here: this runs before
+     * esp_matter::start(), same as the composition rebuild below, so there is
+     * no CHIP event loop yet to race.
+     */
+    {
+        endpoint_t *root = esp_matter::endpoint::get(node, 0);
+        uint32_t dormant = mt_active_transport_is_thread()
+            ? chip::app::Clusters::WiFiNetworkDiagnostics::Id
+            : chip::app::Clusters::ThreadNetworkDiagnostics::Id;
+        cluster_t *c = esp_matter::cluster::get(root, dormant);
+        if (c) {
+            esp_matter::cluster::destroy(c);
+            ESP_LOGI(TAG, "dormant %s diagnostics cluster removed",
+                     mt_active_transport_is_thread() ? "WiFi" : "Thread");
+        }
+    }
+#endif
 
     /*
      * Rebuild the endpoint composition the host declared over AT+MTEP. The
@@ -711,13 +770,27 @@ extern "C" void app_main(void)
      * Thread variant runs". The config guards in this file cover the AT
      * surface (the AT+MTNET? transport report, event bits 24 to 26); they do
      * not bring up the stack that surface describes.
+     *
+     * On the combined image both stacks are compiled in, so this must ALSO be
+     * conditioned on the latch (mt_transport_latch_active(), read above): the
+     * patched esp-matter only launches OpenThread when the latch says Thread
+     * (sdk-patches/esp-matter/0001-hearth-runtime-transport-selection.patch),
+     * and handing over a platform config for a stack that never launches is
+     * harmless but pointless. The single-stack Thread build has no latch to
+     * consult (MT_COMBINED_IMAGE is 0 there) and keeps this unconditional,
+     * byte-identical to before this task.
      */
-    esp_openthread_platform_config_t ot_config = {
-        .radio_config = MT_OT_RADIO_CONFIG(),
-        .host_config = MT_OT_HOST_CONFIG(),
-        .port_config = MT_OT_PORT_CONFIG(),
-    };
-    set_openthread_platform_config(&ot_config);
+#if MT_COMBINED_IMAGE
+    if (mt_active_transport_is_thread())
+#endif
+    {
+        esp_openthread_platform_config_t ot_config = {
+            .radio_config = MT_OT_RADIO_CONFIG(),
+            .host_config = MT_OT_HOST_CONFIG(),
+            .port_config = MT_OT_PORT_CONFIG(),
+        };
+        set_openthread_platform_config(&ot_config);
+    }
 #endif
 
     /* Bring up the Matter stack (BLE commissioning + WiFi or Thread transport). */
@@ -737,6 +810,14 @@ extern "C" void app_main(void)
 
     s_heap_at_startup = esp_get_free_heap_size();
     ESP_LOGI(TAG, "free heap at startup: %u (BLE resident)", (unsigned)s_heap_at_startup);
+#if MT_COMBINED_IMAGE
+    /* Same figure, annotated: the dormant stack's BSS/heap tax (Task 2's
+     * measured tens-of-KB deltas, ARCHITECTURE.md section 3.1) is baked into
+     * the number just logged above, so an SDK bump that changes it shows up
+     * here rather than needing a diff against build_b4/build_thread. */
+    ESP_LOGI(TAG, "combined image: active transport %s, dormant stack scrubbed",
+             mt_transport_name(mt_transport_active()));
+#endif
 
     /*
      * Boot-state events, replayed now that the AT interface exists.
