@@ -311,6 +311,18 @@ def _pairing_tail(out, psk=None, lines=5):
     return tail
 
 
+def pairing_argv(ctx):
+    """chip-tool pairing argv for the detected transport. ble-thread's
+    shape was pinned by the T4 Task 1 preflight; adjust here if the
+    findings differ, not at the call sites."""
+    node = "0x%X" % ctx.node_id
+    if ctx.transport == "THREAD":
+        return ["pairing", "ble-thread", node, "hex:" + ctx.dataset,
+                str(ctx.passcode), str(ctx.discriminator)]
+    return ["pairing", "ble-wifi", node, ctx.opts.ssid, ctx.opts.psk,
+            str(ctx.passcode), str(ctx.discriminator)]
+
+
 def step_2_3_commission(ctx):
     """TESTING.md 2.3 plus the DE24 window-event contract: the AT-side
     and controller-side views must agree, and exactly one +MTEVT:4 must
@@ -324,9 +336,7 @@ def step_2_3_commission(ctx):
         raise StepAbort("onboarding QR not machine-usable")
     passcode, discriminator = parsed
     ctx.passcode, ctx.discriminator = passcode, discriminator
-    rc, out = chip.run(["pairing", "ble-wifi", "0x%X" % ctx.node_id,
-                        ctx.opts.ssid, ctx.opts.psk,
-                        str(passcode), str(discriminator)], timeout=120)
+    rc, out = chip.run(pairing_argv(ctx), timeout=120)
     paired = s.check("2.3 chip-tool pairing exits 0", rc == 0, tag="P2")
     if not paired:
         print("    (chip-tool tail: %s)"
@@ -603,10 +613,7 @@ def step_2_11_two_resets(ctx):
     s.check("2.11 composition survives MTRESET",
             res == 0 and lines == before, tag="P2")
     chip.wipe_storage()  # the old fabric died with the reset
-    rc, out = chip.run(["pairing", "ble-wifi", "0x%X" % ctx.node_id,
-                        ctx.opts.ssid, ctx.opts.psk,
-                        str(ctx.passcode), str(ctx.discriminator)],
-                       timeout=120)
+    rc, out = chip.run(pairing_argv(ctx), timeout=120)
     paired = s.check("2.11 re-commission exits 0", rc == 0, tag="P2")
     if not paired:
         print("    (chip-tool tail: %s)"
