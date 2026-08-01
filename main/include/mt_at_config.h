@@ -61,3 +61,28 @@
  * stops until the next reset. Set to 1 on a board revision that routes them.
  */
 #define MT_UART_FLOWCTRL_WIRED  0
+
+/* ------------------------------------------------------------------ */
+/*  Combined-image detection                                           */
+/* ------------------------------------------------------------------ */
+
+#include "sdkconfig.h"
+
+/*
+ * True only on the combined WiFi+Thread image (sdkconfig.defaults.combined).
+ * Gates AT+MTTRANSPORT: a single-transport image never registers that
+ * command, so it answers the ordinary "unknown command" +MTERR:8 there
+ * rather than existing as a no-op that always reports one fixed transport.
+ *
+ * CONFIG_ENABLE_WIFI_STATION and CONFIG_OPENTHREAD_ENABLED were checked
+ * against the three generated sdkconfigs before picking this pair (see
+ * task-3-report.md): the WiFi-only build sets ENABLE_WIFI_STATION alone,
+ * the Thread-only build sets OPENTHREAD_ENABLED alone (sdkconfig.defaults.
+ * thread explicitly turns ENABLE_WIFI_STATION off), and the combined build
+ * is the only one of the three carrying both.
+ */
+#if defined(CONFIG_ENABLE_WIFI_STATION) && defined(CONFIG_OPENTHREAD_ENABLED)
+#define MT_COMBINED_IMAGE 1
+#else
+#define MT_COMBINED_IMAGE 0
+#endif
