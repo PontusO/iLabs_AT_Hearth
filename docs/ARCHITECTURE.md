@@ -153,6 +153,52 @@ patchset against the checkout named by `ESP_MATTER_PATH` (default
 off the pin, so an SDK bump forces a deliberate re-evaluation of the patches
 rather than a silent, possibly-broken re-apply.
 
+**The combined build variant, built and measured 2026-08-01.**
+`sdkconfig.defaults.combined` is the third overlay, alongside the WiFi-only
+base defaults and `sdkconfig.defaults.thread`: it starts from the Thread
+overlay (OpenThread platform settings, `CONFIG_ENABLE_OTA_REQUESTOR=n`) and
+adds back `CONFIG_ENABLE_WIFI_STATION=y` from the base defaults, so both
+stacks compile into one image. Both network-commissioning endpoint IDs are
+left at their default 0 (`CONFIG_THREAD_NETWORK_ENDPOINT_ID=0`,
+`CONFIG_WIFI_NETWORK_ENDPOINT_ID=0`, neither set by the overlay), matching
+the no-secondary-endpoint requirement above.
+
+```
+scripts/apply-sdk-patches.sh
+idf.py -B build_combined -D SDKCONFIG=build_combined/sdkconfig \
+  -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.combined" \
+  build
+```
+
+This is the first build that actually compiles the patched code paths:
+`build_b4` and `build_thread` each preprocess the guard away, since only one
+driver's Kconfig symbol is set in either. It built clean, no new errors
+inside the patch hunks. With no app-side definition of
+`mt_active_transport_is_thread()` yet, the unresolved weak symbol reads as
+null, which the patch treats as "not Thread," so this image boots
+WiFi-active; wiring the real boot-time selection is later work; this task is
+build-and-measure only.
+
+Measured (`idf.py -B <dir> size`, `.bin` size on disk):
+
+| variant | `.bin` size | DIRAM used | `.bss` |
+|---|---|---|---|
+| `build_b4` (WiFi only) | 1,618,112 B | 220,981 B | 79,520 B |
+| `build_thread` (Thread only) | 1,517,792 B | 184,271 B | 90,944 B |
+| `build_combined` (both) | 1,912,704 B | 255,765 B | 108,296 B |
+
+Combined vs `build_b4`: +294,592 B flash, +34,784 B DIRAM, +28,776 B
+`.bss`, the dormant-Thread tax on top of the WiFi image. Combined vs
+`build_thread`: +394,912 B flash, +71,494 B DIRAM, +17,352 B `.bss`, the
+dormant-WiFi tax on top of the Thread image, larger because the WiFi stack
+itself is bigger than OpenThread's. Both deltas land in the tens-of-KB range
+the design predicted, not hundreds.
+
+The factory slot is 3,840 KB (`0x3C0000`, `partitions.csv`); the combined
+image leaves 2,019,456 bytes (51%) free, per `esptool`'s own accounting
+during the build (`0x1ed080 bytes (51%) free`), comfortably inside the
+~2.1 MB margin the single-app partition switch (section 4) was sized for.
+
 ## 4. Partition layout: single-app + host OTA
 
 - The C6 does **not** self-update; the RP2350 host flashes it (see
