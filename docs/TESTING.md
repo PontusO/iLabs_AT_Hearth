@@ -584,6 +584,22 @@ python3 test/mt_regression.py \
   --phase 2 --include-slow --include-manual
 ```
 
+**otbr-agent bring-up, two things that are not obvious from the flags alone**
+(bug B72, found 2026-08-01):
+
+- Start `otbr-agent` with `-B` set to the host's **real LAN interface**
+  (`enp42s0` on this bench), never `lo`. Avahi ignores loopback, so with
+  `-B lo` BLE and the Thread join both look healthy and chip-tool only dies
+  later, at operational discovery, with "Avahi resolve failed". The gate's
+  own preflight cannot catch this: it asks `ot-ctl state`, which is happy on
+  `lo` too.
+- The D-Bus policy file install (graph F36) is a one-time step, but the
+  control socket ACL is not: after **every** `otbr-agent` start, re-grant it
+  with `sudo setfacl -m u:<user>:rw /run/openthread-wpan0.sock`. The agent
+  recreates the socket `0755 root:root` on each start, and this `ot-ctl`
+  build is a plain `AF_UNIX` client, so the D-Bus policy does nothing for
+  it; only the ACL grant does.
+
 ## 10. Build-out order
 
 | Step | Deliverable |

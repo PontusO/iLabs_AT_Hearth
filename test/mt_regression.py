@@ -1280,7 +1280,8 @@ def phase2_gate(chip, args, link, otctl=otctl_run):
                     "start it per the T4 runbook (graph F36: run "
                     "otbr-agent directly, D-Bus policy required)",
                     transport, None)
-        role = (out or "").strip().splitlines()[0].strip().lstrip("> ")
+        lines = (out or "").strip().splitlines()
+        role = (lines[0] if lines else "<empty>").strip().lstrip("> ")
         if role not in ("leader", "router", "child"):
             return ("the Thread network is down (ot-ctl state: %s); "
                     "bring it up before a Thread phase 2 run" % role,
