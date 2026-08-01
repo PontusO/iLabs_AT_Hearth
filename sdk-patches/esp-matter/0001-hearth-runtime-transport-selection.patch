@@ -1,0 +1,97 @@
+diff --git a/components/esp_matter/data_model_provider/clusters/network_commissioning_integration.cpp b/components/esp_matter/data_model_provider/clusters/network_commissioning_integration.cpp
+index 65916e6..3d2f33d 100644
+--- a/components/esp_matter/data_model_provider/clusters/network_commissioning_integration.cpp
++++ b/components/esp_matter/data_model_provider/clusters/network_commissioning_integration.cpp
+@@ -86,12 +86,28 @@ uint16_t GetServerIndex(EndpointId endpointId)
+ 
+ } // namespace
+ 
++#if defined(CONFIG_THREAD_NETWORK_COMMISSIONING_DRIVER) && defined(CONFIG_WIFI_NETWORK_COMMISSIONING_DRIVER)
++extern "C" int mt_active_transport_is_thread(void) __attribute__((weak));
++static bool mt_active_transport_is_thread_hook(void)
++{
++    return (&mt_active_transport_is_thread != nullptr) && mt_active_transport_is_thread();
++}
++#endif
++
+ void ESPMatterNetworkCommissioningClusterServerInitCallback(EndpointId endpointId)
+ {
+     uint16_t index = GetServerIndex(endpointId);
+     VerifyOrReturn(index != UINT16_MAX);
+ #ifdef CONFIG_THREAD_NETWORK_COMMISSIONING_DRIVER
+-    if (endpointId == CONFIG_THREAD_NETWORK_ENDPOINT_ID) {
++    if (endpointId == CONFIG_THREAD_NETWORK_ENDPOINT_ID
++#if defined(CONFIG_THREAD_NETWORK_COMMISSIONING_DRIVER) && defined(CONFIG_WIFI_NETWORK_COMMISSIONING_DRIVER)
++        /* Hearth: both drivers compiled in and sharing an endpoint would
++         * VerifyOrDie in ServerClusterInterfaceRegistry::Create. Exactly
++         * one registers per boot, chosen by the app's persisted
++         * transport (weak hook; absent means WiFi). */
++        && mt_active_transport_is_thread_hook()
++#endif
++        ) {
+         static DeviceLayer::NetworkCommissioning::GenericThreadDriver sThreadDriver;
+         gServers[index].Create(endpointId, &sThreadDriver, gBreadcrumbTracker);
+         gServers[index].Cluster().Init();
+@@ -99,7 +115,11 @@ void ESPMatterNetworkCommissioningClusterServerInitCallback(EndpointId endpointI
+     }
+ #endif
+ #ifdef CONFIG_WIFI_NETWORK_COMMISSIONING_DRIVER
+-    if (endpointId == CONFIG_WIFI_NETWORK_ENDPOINT_ID) {
++    if (endpointId == CONFIG_WIFI_NETWORK_ENDPOINT_ID
++#if defined(CONFIG_THREAD_NETWORK_COMMISSIONING_DRIVER) && defined(CONFIG_WIFI_NETWORK_COMMISSIONING_DRIVER)
++        && !mt_active_transport_is_thread_hook()
++#endif
++        ) {
+         gServers[index].Create(endpointId, &(DeviceLayer::NetworkCommissioning::ESPWiFiDriver::GetInstance()), gBreadcrumbTracker);
+         gServers[index].Cluster().Init();
+         (void)esp_matter::data_model::provider::get_instance().registry().Register(gServers[index].Registration());
+diff --git a/components/esp_matter/esp_matter_core.cpp b/components/esp_matter/esp_matter_core.cpp
+index 7b97e2e..e167621 100644
+--- a/components/esp_matter/esp_matter_core.cpp
++++ b/components/esp_matter/esp_matter_core.cpp
+@@ -71,6 +71,14 @@ static const char *TAG = "esp_matter_core";
+ static bool esp_matter_started = false;
+ static chip::CommonCaseDeviceServerInitParams *s_server_init_params = nullptr;
+ 
++#if CHIP_DEVICE_CONFIG_ENABLE_WIFI && CHIP_DEVICE_CONFIG_ENABLE_THREAD
++extern "C" int mt_active_transport_is_thread(void) __attribute__((weak));
++static bool mt_active_transport_is_thread_hook(void)
++{
++    return (&mt_active_transport_is_thread != nullptr) && mt_active_transport_is_thread();
++}
++#endif
++
+ namespace esp_matter {
+ 
+ #ifdef CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER
+@@ -281,6 +289,15 @@ static esp_err_t init_thread_stack_and_start_thread_task()
+ {
+ #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+ #ifdef CONFIG_ESP_MATTER_ENABLE_OPENTHREAD
++#if CHIP_DEVICE_CONFIG_ENABLE_WIFI
++    if (!mt_active_transport_is_thread_hook()) {
++        /* Hearth: WiFi is the active transport this boot; the OpenThread
++         * stack stays unlaunched (and its platform-config assert
++         * unreachable). CHIP's accessors null-guard the missing
++         * instance. */
++        return ESP_OK;
++    }
++#endif
+     VerifyOrReturnError(ThreadStackMgr().InitThreadStack() == CHIP_NO_ERROR, ESP_FAIL,
+                         ESP_LOGE(TAG, "Failed to initialize Thread stack"));
+ #if CHIP_CONFIG_ENABLE_ICD_SERVER
+@@ -353,7 +370,13 @@ esp_err_t start(event_callback_t callback, intptr_t callback_arg)
+     // as of it means that default event loop is already initialized and no additional actions should be done.
+     VerifyOrReturnError((err == ESP_OK || err == ESP_ERR_INVALID_STATE), err, ESP_LOGE(TAG, "Error create default event loop"));
+ #if CHIP_DEVICE_CONFIG_ENABLE_WIFI
+-    VerifyOrReturnError(chip::DeviceLayer::Internal::ESP32Utils::InitWiFiStack() == CHIP_NO_ERROR, ESP_FAIL, ESP_LOGE(TAG, "Error initializing Wi-Fi stack"));
++#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
++    if (!mt_active_transport_is_thread_hook())
++#endif
++    {
++        VerifyOrReturnError(chip::DeviceLayer::Internal::ESP32Utils::InitWiFiStack() == CHIP_NO_ERROR, ESP_FAIL,
++                            ESP_LOGE(TAG, "Error initializing Wi-Fi stack"));
++    }
+ #endif // CHIP_DEVICE_CONFIG_ENABLE_WIFI
+ #ifdef CONFIG_ESP_MATTER_ENABLE_DATA_MODEL
+     esp_matter_ota_requestor_init();

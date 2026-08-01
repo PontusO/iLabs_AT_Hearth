@@ -124,6 +124,35 @@ not a capability.
 **Precondition:** the Thread image must be proven on hardware first, so this is
 built on something known to work rather than on two unknowns at once.
 
+**The suppression hook, traced.** Both mechanisms above turned out
+insufficient alone: `CONFIG_ESP_MATTER_ENABLE_OPENTHREAD=n` removes Thread
+from the build entirely rather than choosing it at runtime, and the
+`CONFIG_*_NETWORK_COMMISSIONING_DRIVER` switches are compile-time. With both
+drivers compiled in, `ESPMatterNetworkCommissioningClusterServerInitCallback`
+registers both network commissioning clusters unconditionally and the second
+one to touch the shared endpoint `VerifyOrDie`s in
+`ServerClusterInterfaceRegistry::Create`. Suppressing the inactive driver
+needs a change inside esp-matter itself, so the fix lives as a small, pinned
+patchset against the SDK checkout rather than in app code:
+`sdk-patches/esp-matter/0001-hearth-runtime-transport-selection.patch`, base
+commit `21aa3d1` (`release/v1.5`). It edits two files:
+`network_commissioning_integration.cpp`, so exactly one driver registers per
+boot, and `esp_matter_core.cpp`, so `esp_matter::start()` initializes only the
+active transport's stack and the OpenThread launch is skipped when WiFi is
+active. Both edits gate on a weak C hook, `mt_active_transport_is_thread()`,
+absent meaning WiFi; the app supplies the real definition once boot-time
+transport selection exists. Every patched line sits inside a
+`CONFIG_THREAD_NETWORK_COMMISSIONING_DRIVER &&
+CONFIG_WIFI_NETWORK_COMMISSIONING_DRIVER` (or the CHIP-level WiFi-and-Thread
+equivalent) guard, so a build with only one driver compiled in preprocesses
+identically to stock esp-matter: this is what lets the WiFi-only and
+Thread-only images built earlier keep working unmodified once the patch is
+applied. `scripts/apply-sdk-patches.sh` applies, checks, and reverts the
+patchset against the checkout named by `ESP_MATTER_PATH` (default
+`~/esp/esp-matter`), and refuses outright if that checkout's `HEAD` has moved
+off the pin, so an SDK bump forces a deliberate re-evaluation of the patches
+rather than a silent, possibly-broken re-apply.
+
 ## 4. Partition layout: single-app + host OTA
 
 - The C6 does **not** self-update; the RP2350 host flashes it (see
