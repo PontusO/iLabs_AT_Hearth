@@ -1,0 +1,85 @@
+# iLabs AT Hearth - combined WiFi+Thread variant (C6 combined-image plan, task 2).
+#
+# Overlay, applied AFTER sdkconfig.defaults and sdkconfig.defaults.esp32c6:
+#
+#   scripts/apply-sdk-patches.sh
+#   idf.py -B build_combined -D SDKCONFIG=build_combined/sdkconfig \
+#     -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.combined" \
+#     build
+#
+# SDKCONFIG must be redirected into the build directory, same reason as
+# sdkconfig.defaults.thread: left at its default the combined configuration
+# would be written to ./sdkconfig and silently take over the WiFi build too.
+#
+# Both network stacks are compiled in; exactly one is active at runtime,
+# selected by the weak hook mt_active_transport_is_thread() that the
+# sdk-patches/esp-matter/0001-hearth-runtime-transport-selection.patch
+# patchset gates on (see ARCHITECTURE.md section 3.1). With no app-side
+# definition of that hook yet, an unresolved weak symbol reads as null,
+# which the patch treats as "not Thread", so this build boots WiFi-active.
+# That is expected for this task: task 2 is build + measure only, the app
+# wiring that lets the host choose is later work.
+#
+# Built starting from sdkconfig.defaults.thread (it already carries the
+# OpenThread platform settings and restates CONFIG_ENABLE_OTA_REQUESTOR=n
+# per F38) with the WiFi station enables from sdkconfig.defaults ADDED
+# rather than the Thread-only radio line kept: both stacks must actually
+# compile for the patchset's guarded code paths to be exercised at all.
+#
+# Both network-commissioning endpoint IDs are left at their default (0):
+# neither CONFIG_THREAD_NETWORK_ENDPOINT_ID nor
+# CONFIG_WIFI_NETWORK_ENDPOINT_ID is set here. c6_wifi_thread's
+# THREAD_NETWORK_ENDPOINT_ID=2 is exactly the secondary-endpoint shape
+# ARCHITECTURE.md section 3 rejects: C1's host-declared composition owns
+# the endpoint space above 0, and a compile-time secondary endpoint would
+# desynchronise every cached endpoint id the host holds.
+
+# Radio: both stacks compiled in. Thread platform settings copied verbatim
+# from sdkconfig.defaults.thread; CONFIG_ENABLE_WIFI_STATION=y is the one
+# line that file sets to n, restored here from sdkconfig.defaults so WiFi
+# actually builds alongside Thread.
+CONFIG_OPENTHREAD_ENABLED=y
+CONFIG_ENABLE_MATTER_OVER_THREAD=y
+CONFIG_ENABLE_WIFI_STATION=y
+CONFIG_ENABLE_WIFI_AP=n
+
+CONFIG_OPENTHREAD_SRP_CLIENT=y
+CONFIG_OPENTHREAD_DNS_CLIENT=y
+CONFIG_OPENTHREAD_LOG_LEVEL_DYNAMIC=n
+CONFIG_OPENTHREAD_LOG_LEVEL_NOTE=y
+
+# No OpenThread CLI, same reasoning as the Thread-only variant: the host
+# drives this device over AT+MT, and a second command interpreter on the
+# console would only be another way to desynchronise it.
+CONFIG_OPENTHREAD_CLI=n
+
+# lwIP: Thread's settings, not the WiFi image's. A Thread node gets its
+# addresses from network data, not router advertisements, and this holds
+# regardless of which transport ends up active at boot since the lwIP
+# config is compiled in, not runtime-switched.
+CONFIG_LWIP_IPV6_AUTOCONFIG=n
+CONFIG_LWIP_IPV6_NUM_ADDRESSES=8
+CONFIG_LWIP_MULTICAST_PING=y
+
+# Discovery: full mDNS responder and extended discovery, as the Thread
+# variant requires and as the WiFi variant already gets from CHIP defaults.
+CONFIG_USE_MINIMAL_MDNS=n
+CONFIG_ENABLE_EXTENDED_DISCOVERY=y
+
+CONFIG_LIBSODIUM_USE_MBEDTLS_SHA=y
+
+# BLE stays on, and resident (not BLE-only-for-commissioning, see
+# sdkconfig.defaults and CLAUDE.md D1): commissioning is over BLE on both
+# transports, and AT+MTCOMMISSION must be able to reopen a window on an
+# already-commissioned device on either one.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_EXT_ADV=n
+CONFIG_BT_NIMBLE_HCI_EVT_BUF_SIZE=70
+
+# No Matter OTA Requestor, restated per F38 same as sdkconfig.defaults.thread:
+# this firmware has one app partition and is flashed by the host over serial
+# (see partitions.csv and FIRMWARE_UPDATE_SPEC.md). sdkconfig.defaults already
+# sets it to n; restated here so a future edit to the base file cannot quietly
+# re-enable it for the combined image alone.
+CONFIG_ENABLE_OTA_REQUESTOR=n
