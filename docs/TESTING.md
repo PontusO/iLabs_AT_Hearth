@@ -364,6 +364,21 @@ operator at the bench); a step sat out this way counts as gated in the run
 summary, separately from a failure or an abort-skip, because it is operator
 intent and not a truncated run.
 
+Since T4 this whole chain also runs against the Thread image, unmodified: the
+gate detects the transport by asking `AT+MTNET?` (override with
+`--transport`) and branches its preconditions on the answer. On WiFi it still
+needs `MT_SSID`/`MT_PSK`; on Thread it instead needs a live `otbr-agent`
+(bring-up gotchas: `ARCHITECTURE.md` section 3, graph F36) answering an
+active role (leader, router or child) on `ot-ctl state`, and fetches the
+active dataset live via `ot-ctl dataset active -x` (override with
+`--dataset`/`MT_DATASET`). The only step code that differs by transport is
+the pairing verb in 2.3 and 2.11: `chip-tool pairing ble-wifi <node> <ssid>
+<psk> <passcode> <discriminator>` on WiFi, `chip-tool pairing ble-thread
+<node> hex:<dataset> <passcode> <discriminator>` on Thread. Every other
+assertion below is transport-neutral and unchanged. A full Thread run
+records its own baseline, `test/baselines/thread-lifecycle.json`, next to
+the WiFi one.
+
 **2.1 Factory-fresh baseline**
 `AT+MTRESET` returns `OK`, the device reboots, and `+MTREADY` arrives within 15 s.
 Then `AT+MTFABRICS?` is `0` and `AT+MTSTATE?` is `1` (a fresh device opens a
@@ -548,6 +563,26 @@ Where both suites test the same `at_core` behaviour (unknown command, non-AT
 line, trailing character after `?`, wrong command form) they must expect the same
 shape, differing only in the `+MTERR` / `+ENERR` prefix. A divergence between the
 two suites is itself a finding.
+
+The same "run it against both" discipline applies to Phase 2 across the two
+firmware images, since T4 made the chain transport-neutral (§7). Both use the
+by-id port so a re-enumerated `/dev/ttyACM*` cannot silently point the run at
+the wrong device:
+
+```sh
+# WiFi image
+export MT_SSID=... MT_PSK=...
+python3 test/mt_regression.py \
+  --port $(ls /dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_*-if00) \
+  --phase 2 --include-slow --include-manual
+
+# Thread image: otbr-agent already up (bring-up runbook, ARCHITECTURE.md
+# section 3, graph F36); no MT_SSID/MT_PSK needed, the transport is detected
+# from AT+MTNET?
+python3 test/mt_regression.py \
+  --port $(ls /dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_*-if00) \
+  --phase 2 --include-slow --include-manual
+```
 
 ## 10. Build-out order
 

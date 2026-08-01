@@ -1405,7 +1405,33 @@ class TestStep22(unittest.TestCase):
 
 
 from mt_regression import (step_2_3_commission, step_2_4_host_to_controller,
-                           step_2_5_controller_to_host)
+                           step_2_5_controller_to_host, pairing_argv)
+
+
+class TestPairingArgv(unittest.TestCase):
+    """T4: the pairing verb and its argv differ by transport; everything
+    else in 2.3/2.11 is untouched. WIFI keeps the pre-T4 shape, THREAD's
+    was pinned by the T4 Task 1 preflight (task-1-findings.md, finding
+    (c))."""
+
+    def _ctx(self, transport, dataset=None):
+        ctx = fresh_ctx()
+        ctx.transport = transport
+        ctx.dataset = dataset
+        ctx.passcode = 20202021
+        ctx.discriminator = 3840
+        return ctx
+
+    def test_wifi_argv(self):
+        argv = pairing_argv(self._ctx("WIFI"))
+        self.assertEqual(argv[:2], ["pairing", "ble-wifi"])
+        self.assertIn("0x4845", argv)
+
+    def test_thread_argv(self):
+        argv = pairing_argv(self._ctx("THREAD", dataset="0e08abc123"))
+        self.assertEqual(argv[:2], ["pairing", "ble-thread"])
+        self.assertIn("hex:0e08abc123", argv)
+        self.assertNotIn(None, argv)
 
 
 class TestStep23(unittest.TestCase):
@@ -1484,6 +1510,27 @@ class TestStep23(unittest.TestCase):
             with self.assertRaises(StepAbort):
                 step_2_3_commission(ctx)
         self.assertGreater(ctx.suite.failed, 0)
+
+    def test_thread_transport_uses_ble_thread(self):
+        """T4: ctx.transport = THREAD routes 2.3's pairing call through
+        pairing_argv's ble-thread branch instead of ble-wifi, with no
+        WiFi credentials in the argv."""
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(runner,
+                                ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4"])
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        pairing_argv_used = runner.calls[1][0]
+        self.assertIn("ble-thread", pairing_argv_used)
+        self.assertIn("hex:0e08abc123", pairing_argv_used)
+        self.assertNotIn(ctx.opts.ssid, pairing_argv_used)
+        self.assertNotIn(ctx.opts.psk, pairing_argv_used)
 
 
 class FakeSubscriber:
@@ -2009,6 +2056,25 @@ class TestStep211(unittest.TestCase):
             with self.assertRaises(StepAbort):
                 step_2_11_two_resets(ctx)
         self.assertGreater(ctx.suite.failed, 0)
+
+    def test_thread_transport_uses_ble_thread(self):
+        """T4: same rewiring as 2.3; the re-commission call in 2.11 routes
+        through pairing_argv's ble-thread branch on a THREAD ctx."""
+        runner = FakeChipRunner([
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, link = self._ctx(runner)
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        runner.on_call = self._release_on_pairing(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_11_two_resets(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        pairing_argv_used = runner.calls[0][0]
+        self.assertIn("ble-thread", pairing_argv_used)
+        self.assertIn("hex:0e08abc123", pairing_argv_used)
+        self.assertNotIn(ctx.opts.ssid, pairing_argv_used)
+        self.assertNotIn(ctx.opts.psk, pairing_argv_used)
 
 
 from mt_regression import step_2_12_rig_restore
