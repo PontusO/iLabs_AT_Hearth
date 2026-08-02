@@ -379,6 +379,12 @@ assertion below is transport-neutral and unchanged. A full Thread run
 records its own baseline, `test/baselines/thread-lifecycle.json`, next to
 the WiFi one.
 
+The combined image (`build_combined`, `AT+MTTRANSPORT` selects the active
+stack, spec §3.12.2) needs no baseline of its own: hardware-verified
+2026-08-02, a full run in each mode is PASS-identical to that mode's
+existing single-image baseline, and the transport switch/mismatch contract
+(spec §3.12.1) is proven in both directions on real hardware.
+
 **2.1 Factory-fresh baseline**
 `AT+MTRESET` returns `OK`, the device reboots, and `+MTREADY` arrives within 15 s.
 Then `AT+MTFABRICS?` is `0` and `AT+MTSTATE?` is `1` (a fresh device opens a
