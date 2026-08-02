@@ -159,8 +159,8 @@ both patches and the app-level scrub.
   reads back; set the root-node network-commissioning feature map to match;
   after `node::create()`, `cluster::destroy()` the dormant transport's
   diagnostics cluster; hand OpenThread its platform config only when
-  Thread is chosen; log the active transport and the measured dormant
-  cost at boot, next to the D1 BLE figures.
+  Thread is chosen; log the active transport alongside the existing
+  free-heap figure at boot, next to the D1 BLE figures.
 - **`mt_boot_window_policy` / P2**: the policy itself is unchanged, but its
   `mt_transport_is_provisioned()` helper cannot stay keyed on
   `CHIP_DEVICE_CONFIG_ENABLE_THREAD` on the combined image: that macro is 1

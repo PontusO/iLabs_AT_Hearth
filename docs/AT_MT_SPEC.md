@@ -285,6 +285,20 @@ correct answers about the composition:
 attestation certificate and passcode provisioned at manufacture; erasing it
 would destroy the unit's identity, and no AT command should be able to do that.
 
+**On `build_combined` (§3.12.2), "credentials" in the table means the active
+transport's.** The Matter fabric is always erased, by both resets, regardless
+of which stack is running. The network credentials are not symmetric: CHIP's
+per-transport erase call only reaches the stack that is actually initialized,
+so a reset issued while Thread is active clears the Thread network key and
+leaves any previously stored WiFi SSID/PSK exactly as they were, and a reset
+issued while WiFi is active leaves a previously stored Thread network key
+untouched in the same way. A host that commissioned a device over WiFi,
+switched it to Thread with `AT+MTTRANSPORT`, and then issued `AT+MTRESET`
+should not assume the WiFi credentials are gone: they are not, until a reset
+is issued back on WiFi. This asymmetry does not exist on `build_b4` or
+`build_thread`, which have only one transport's credentials to erase in the
+first place.
+
 Note that `AT+MTFRESET` is deliberately a separate command rather than a
 parameter on `AT+MTRESET`. A form like `AT+MTRESET=1` would give meaning to an
 input that is currently required to be rejected, and that rejection is an
@@ -336,9 +350,11 @@ that expires with no controller attach raises its single `+MTEVT:4` at the
 timeout; event `5` (fail-safe expired) does not fire, because the fail-safe
 only arms once a PASE session exists.
 
-Thread bits are **allocated but never emitted on a WiFi image**: transport is a
-build-time choice (§3.12), and a host may subscribe to them harmlessly. Fixing
-the layout before it is published avoids renumbering later.
+Thread bits are **allocated but never emitted while WiFi is the active
+transport**, and do emit whenever Thread is active: transport is a build-time
+choice on the two single-stack images and a boot-time choice on the combined
+image (§3.12), and a host may subscribe to them harmlessly against any of the
+three. Fixing the layout before it is published avoids renumbering later.
 
 The query answers `+MTEVTMASK`, not `+MTEVT`, deliberately. URCs may arrive
 between a command and its terminal response, so a `+MTEVT:<n>` reply would be

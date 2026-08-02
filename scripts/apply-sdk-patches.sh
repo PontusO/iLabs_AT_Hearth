@@ -13,16 +13,18 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ESP_MATTER_PATCHES="$HERE/sdk-patches/esp-matter"
 CHIP_PATCHES="$HERE/sdk-patches/connectedhomeip"
 
-esp_matter_head=$(git -C "$ESP_MATTER" rev-parse --short HEAD)
-if [ "$esp_matter_head" != "$ESP_MATTER_PINNED" ]; then
-    echo "refuse: esp-matter at $esp_matter_head, patchset pinned to $ESP_MATTER_PINNED" >&2
-    exit 1
-fi
-chip_head=$(git -C "$CHIP" rev-parse --short HEAD)
-if [ "$chip_head" != "$CHIP_PINNED" ]; then
-    echo "refuse: connectedhomeip at $chip_head, patchset pinned to $CHIP_PINNED" >&2
-    exit 1
-fi
+esp_matter_head=$(git -C "$ESP_MATTER" rev-parse HEAD)
+case "$esp_matter_head" in
+    "$ESP_MATTER_PINNED"*) ;;
+    *) echo "refuse: esp-matter at $esp_matter_head, patchset pinned to $ESP_MATTER_PINNED" >&2
+       exit 1 ;;
+esac
+chip_head=$(git -C "$CHIP" rev-parse HEAD)
+case "$chip_head" in
+    "$CHIP_PINNED"*) ;;
+    *) echo "refuse: connectedhomeip at $chip_head, patchset pinned to $CHIP_PINNED" >&2
+       exit 1 ;;
+esac
 case "${1:-apply}" in
   --check)
     for p in "$ESP_MATTER_PATCHES"/*.patch; do
