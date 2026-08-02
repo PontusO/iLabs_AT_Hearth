@@ -74,6 +74,13 @@ Hooks 1 and 2 require patching esp-matter (two files, both esp-matter's
 own, not CHIP core): this design accepts that openly rather than
 contorting around it.
 
+[Update, B83: the boundary drawn above did not hold. A third patched
+file was needed inside CHIP core itself, not just esp-matter, to fix a
+WiFi-active combined-boot spin in DNS-SD init that the original two
+patches did not anticipate. See the amendment below; the original claim
+is left in place rather than silently rewritten, because it is why the
+patchset needed a second pinned repo at all.]
+
 - The repo gains `sdk-patches/esp-matter/*.patch` plus
   `scripts/apply-sdk-patches.sh`. The script checks the esp-matter
   checkout is at the pinned base commit (21aa3d1, release/v1.5),
@@ -99,6 +106,30 @@ contorting around it.
   choice when both are compiled in. With WiFi chosen, OpenThread is
   never launched (its platform-config assert is therefore unreachable);
   with Thread chosen, the WiFi stack is never initialized.
+- **Patch 3** (`connectedhomeip/src/platform/ESP32/DnssdImpl.cpp`, added
+  for B83, base commit `b87051a9`): Patch 2 leaves `mOTInst` null on a
+  WiFi-active combined boot, by design, since OpenThread never launches.
+  But `ChipDnssdInit()` (CHIP core, not esp-matter) calls into
+  `OpenThreadDnssdInit()`/`_ClearSrpHost()` unconditionally whenever both
+  `CHIP_DEVICE_CONFIG_ENABLE_THREAD` and
+  `CHIP_DEVICE_CONFIG_ENABLE_THREAD_SRP_CLIENT` are compiled in, with no
+  runtime check for which transport is actually active. Against a null
+  `mOTInst` that call fails, which resets `DiscoveryImplPlatform`'s
+  state, which the SDK's own "succeeded, so re-arm" repost then retries
+  forever: an un-backed-off ping-pong between a real mdns success and a
+  synthetic OpenThread failure, starving `IDLE` and delaying
+  `+MTREADY` by seconds. The fix is the same weak-hook pattern, one file
+  deeper: skip the OpenThread-touching branches of `ChipDnssdInit`,
+  `ChipDnssdPublishService`, `ChipDnssdRemoveServices`, and
+  `ChipDnssdFinalizeServiceUpdate` when the hook says WiFi is active,
+  gated the same way as Patches 1 and 2, only inside the
+  already-both-stacks-compiled condition, so single-stack builds
+  preprocess unchanged. This is what widens the patchset from
+  esp-matter-only to two pinned repos: `scripts/apply-sdk-patches.sh`
+  gained a second checkout, checked and refused independently
+  (`CHIP_PATH`, default
+  `~/esp/esp-matter/connectedhomeip/connectedhomeip`, pinned to
+  `b87051a9`), with either repo off its pin refusing the whole apply.
 - The patchset is deliberately minimal and upstream-shaped: an issue
   proposing runtime driver selection goes to esp-matter, and if it
   lands, the patchset retires.

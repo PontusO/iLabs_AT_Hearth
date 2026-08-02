@@ -1,0 +1,80 @@
+diff --git a/src/platform/ESP32/DnssdImpl.cpp b/src/platform/ESP32/DnssdImpl.cpp
+index df83ec81..1198f983 100644
+--- a/src/platform/ESP32/DnssdImpl.cpp
++++ b/src/platform/ESP32/DnssdImpl.cpp
+@@ -32,6 +32,14 @@
+ using namespace ::chip::DeviceLayer;
+ using chip::DeviceLayer::Internal::ESP32Utils;
+ 
++#if CHIP_DEVICE_CONFIG_ENABLE_WIFI && CHIP_DEVICE_CONFIG_ENABLE_THREAD && CHIP_DEVICE_CONFIG_ENABLE_THREAD_SRP_CLIENT
++extern "C" int mt_active_transport_is_thread(void) __attribute__((weak));
++static bool mt_active_transport_is_thread_hook(void)
++{
++    return (&mt_active_transport_is_thread != nullptr) && mt_active_transport_is_thread();
++}
++#endif
++
+ namespace chip {
+ namespace Dnssd {
+ 
+@@ -41,6 +49,18 @@ CHIP_ERROR ChipDnssdInit(DnssdAsyncReturnCallback initCallback, DnssdAsyncReturn
+     ReturnErrorOnFailure(EspDnssdInit(initCallback, errorCallback, context));
+ #endif
+ #if CHIP_DEVICE_CONFIG_ENABLE_THREAD && CHIP_DEVICE_CONFIG_ENABLE_THREAD_SRP_CLIENT
++#if CHIP_DEVICE_CONFIG_ENABLE_WIFI
++    if (!mt_active_transport_is_thread_hook())
++    {
++        /* Hearth: WiFi is the active transport this boot; mOTInst is left
++         * null by esp_matter_core.cpp's matching skip of InitThreadStack(),
++         * so OpenThreadDnssdInit()'s _ClearSrpHost() would fail with
++         * CHIP_ERROR_INCORRECT_STATE and reset DiscoveryImplPlatform's
++         * mState, spinning Init() forever (B83). Skip the OT side; the
++         * ESP32/mdns side above already succeeded. */
++        return CHIP_NO_ERROR;
++    }
++#endif
+     ReturnErrorOnFailure(OpenThreadDnssdInit(initCallback, errorCallback, context));
+ #endif
+     return CHIP_NO_ERROR;
+@@ -54,7 +74,12 @@ CHIP_ERROR ChipDnssdPublishService(const DnssdService * service, DnssdPublishCal
+     ReturnErrorOnFailure(EspDnssdPublishService(service, callback, context));
+ #endif
+ #if CHIP_DEVICE_CONFIG_ENABLE_THREAD && CHIP_DEVICE_CONFIG_ENABLE_THREAD_SRP_CLIENT
+-    if (ConnectivityMgr().IsThreadProvisioned())
++    if (ConnectivityMgr().IsThreadProvisioned()
++#if CHIP_DEVICE_CONFIG_ENABLE_WIFI
++        /* Hearth: skip the OT side when WiFi is the active transport (B83). */
++        && mt_active_transport_is_thread_hook()
++#endif
++        )
+     {
+         ReturnErrorOnFailure(OpenThreadDnssdPublishService(service, callback, context));
+     }
+@@ -68,7 +93,12 @@ CHIP_ERROR ChipDnssdRemoveServices()
+     ReturnErrorOnFailure(EspDnssdRemoveServices());
+ #endif
+ #if CHIP_DEVICE_CONFIG_ENABLE_THREAD && CHIP_DEVICE_CONFIG_ENABLE_THREAD_SRP_CLIENT
+-    if (ConnectivityMgr().IsThreadProvisioned())
++    if (ConnectivityMgr().IsThreadProvisioned()
++#if CHIP_DEVICE_CONFIG_ENABLE_WIFI
++        /* Hearth: skip the OT side when WiFi is the active transport (B83). */
++        && mt_active_transport_is_thread_hook()
++#endif
++        )
+     {
+         ReturnErrorOnFailure(OpenThreadDnssdRemoveServices());
+     }
+@@ -79,7 +109,12 @@ CHIP_ERROR ChipDnssdRemoveServices()
+ CHIP_ERROR ChipDnssdFinalizeServiceUpdate()
+ {
+ #if CHIP_DEVICE_CONFIG_ENABLE_THREAD && CHIP_DEVICE_CONFIG_ENABLE_THREAD_SRP_CLIENT
+-    if (ConnectivityMgr().IsThreadProvisioned())
++    if (ConnectivityMgr().IsThreadProvisioned()
++#if CHIP_DEVICE_CONFIG_ENABLE_WIFI
++        /* Hearth: skip the OT side when WiFi is the active transport (B83). */
++        && mt_active_transport_is_thread_hook()
++#endif
++        )
+     {
+         ReturnErrorOnFailure(OpenThreadDnssdFinalizeServiceUpdate());
+     }

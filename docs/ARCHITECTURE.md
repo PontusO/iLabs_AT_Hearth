@@ -147,11 +147,33 @@ CONFIG_WIFI_NETWORK_COMMISSIONING_DRIVER` (or the CHIP-level WiFi-and-Thread
 equivalent) guard, so a build with only one driver compiled in preprocesses
 identically to stock esp-matter: this is what lets the WiFi-only and
 Thread-only images built earlier keep working unmodified once the patch is
-applied. `scripts/apply-sdk-patches.sh` applies, checks, and reverts the
-patchset against the checkout named by `ESP_MATTER_PATH` (default
-`~/esp/esp-matter`), and refuses outright if that checkout's `HEAD` has moved
-off the pin, so an SDK bump forces a deliberate re-evaluation of the patches
-rather than a silent, possibly-broken re-apply.
+applied.
+
+**The patchset widened to three files across two pinned repos, B83.** A
+WiFi-active combined boot spun `DnssdServer::StartServer()` forever: the
+same weak hook that correctly skips launching the OpenThread stack also
+leaves `mOTInst` null, and `ChipDnssdInit()` calls into
+`OpenThreadDnssdInit()`/`_ClearSrpHost()` unconditionally whenever both
+`CHIP_DEVICE_CONFIG_ENABLE_THREAD` and `CHIP_DEVICE_CONFIG_ENABLE_THREAD_SRP_CLIENT`
+are compiled in, so the null instance fails `Init()`, which resets
+`DiscoveryImplPlatform`'s state and re-arms itself via the very
+`kDnssdInitialized` repost meant to retry a transient failure: a tight,
+un-backed-off ping-pong between a "succeeded" `mdns_init()` and a "failed"
+OpenThread SRP call that starves `IDLE` and delays `+MTREADY` by seconds.
+The fix mirrors the same weak-hook pattern one file deeper, in CHIP core
+itself: `sdk-patches/connectedhomeip/0001-hearth-dnssd-transport-hook.patch`
+against the nested CHIP checkout's `src/platform/ESP32/DnssdImpl.cpp`
+(base commit `b87051a9`), skipping the OpenThread-touching branches of
+`ChipDnssdInit`/`PublishService`/`RemoveServices`/`FinalizeServiceUpdate`
+when the hook says WiFi is active, gated the same way: only inside the
+already-both-stacks-compiled condition, so single-stack builds preprocess
+unchanged. `scripts/apply-sdk-patches.sh` applies, checks, and reverts both
+patchsets together against the checkouts named by `ESP_MATTER_PATH` (default
+`~/esp/esp-matter`) and `CHIP_PATH` (default
+`~/esp/esp-matter/connectedhomeip/connectedhomeip`), and refuses outright,
+for both patchsets, if either checkout's `HEAD` has moved off its pin, so an
+SDK bump forces a deliberate re-evaluation of the patches rather than a
+silent, possibly-broken re-apply.
 
 **The combined build variant, built and measured 2026-08-01.**
 `sdkconfig.defaults.combined` is the third overlay, alongside the WiFi-only
