@@ -24,7 +24,12 @@ together, so the secondary network-commissioning endpoint never exists.
 - **All three images keep building** (`build_b4`, `build_thread`, and the
   new `build_combined`) until the combined image has passed the full
   regression suite in both modes on hardware. Retirement is a later,
-  evidence-based decision.
+  evidence-based decision. [Update, 2026-08-03: decided the other way.
+  All three variants stay supported indefinitely; single-stack images
+  remain useful (smaller footprint, simpler surface) and the patchset's
+  preprocessor-identity rule makes keeping them nearly free. The
+  single-stack neutrality guarantee is therefore permanent, not
+  transitional.]
 - **Fresh-device default: WIFI**, matching shipping behavior and the C4
   host library's expectations.
 
@@ -242,8 +247,9 @@ rationale and the dormant-Thread BSS figure once measured.
 
 - Live transport switching without reboot, and dual-active transports:
   both explicitly out per DE35.
-- Retiring the single-transport images (revisited only after combined
-  passes both-mode regression).
+- Retiring the single-transport images. [Update, 2026-08-03: closed as
+  no-retirement; all three variants stay supported indefinitely, see the
+  decision note in section 1.]
 - Upstreaming the patchset (proposed, but the design does not wait on
   it).
 - Harness changes: none are expected; if verification finds any, they go
