@@ -194,6 +194,14 @@ integer; it is interpreted according to the attribute's own type
 (bool/enum/bitmap/intN/uintN). String/array/float attributes are not
 supported over this command (`+MTERR:5`).
 
+Nullable numeric attributes (for example `CurrentLevel` or
+`TargetPositionLiftPercent100ths`) are supported the same way as their
+non-nullable counterparts. The one exception is reading one that currently
+holds null: the AT grammar has no null literal, so that read reports
+`+MTERR:5`, indistinguishable from an unsupported type. This is not a gap in
+practice: the write path here never produces null, so a nullable attribute
+this command has written always reads back a real value afterwards.
+
 `<mode>` selects how a write is published, default `1`:
 
 | Mode | Behaviour |
