@@ -203,21 +203,36 @@ Measured (`idf.py -B <dir> size`, `.bin` size on disk):
 
 | variant | `.bin` size | DIRAM used | `.bss` |
 |---|---|---|---|
-| `build_b4` (WiFi only) | 1,618,112 B | 220,981 B | 79,520 B |
-| `build_thread` (Thread only) | 1,517,792 B | 184,271 B | 90,944 B |
-| `build_combined` (both) | 1,912,704 B | 255,765 B | 108,296 B |
+| `build_b4` (WiFi only) | 1,662,160 B | 220,981 B | 79,520 B |
+| `build_thread` (Thread only) | 1,561,840 B | 184,271 B | 90,944 B |
+| `build_combined` (both) | 1,958,016 B | 255,765 B | 108,296 B |
 
-Combined vs `build_b4`: +294,592 B flash, +34,784 B DIRAM, +28,776 B
+Combined vs `build_b4`: +295,856 B flash, +34,784 B DIRAM, +28,776 B
 `.bss`, the dormant-Thread tax on top of the WiFi image. Combined vs
-`build_thread`: +394,912 B flash, +71,494 B DIRAM, +17,352 B `.bss`, the
+`build_thread`: +396,176 B flash, +71,494 B DIRAM, +17,352 B `.bss`, the
 dormant-WiFi tax on top of the Thread image, larger because the WiFi stack
 itself is bigger than OpenThread's. Both deltas land in the tens-of-KB range
 the design predicted, not hundreds.
 
 The factory slot is 3,840 KB (`0x3C0000`, `partitions.csv`); the combined
-image leaves 2,019,456 bytes (51%) free, per `esptool`'s own accounting
-during the build (`0x1ed080 bytes (51%) free`), comfortably inside the
-~2.1 MB margin the single-app partition switch (section 4) was sized for.
+image leaves 1,974,144 bytes (50%) free, comfortably inside the ~2.1 MB
+margin the single-app partition switch (section 4) was sized for.
+
+**All three flash figures above absorbed the device-type expansion's
+~44 KB (2026-08-03).** `.bin` size moved by +44,048 B (`build_b4`),
++44,048 B (`build_thread`) and +45,312 B (`build_combined`) once the 13
+new device types (§8.2) landed, because the change also removed four
+`CONFIG_SUPPORT_*_CLUSTER=n` lines from `sdkconfig.defaults`
+(`FAN_CONTROL`, `OCCUPANCY_SENSING`, `THERMOSTAT`, `WINDOW_COVERING`):
+those clusters' server code was previously excluded at link time, and a
+host must be able to compose a fan, an occupancy sensor, a thermostat or
+a window covering on any image, so exclusion could no longer be
+one-size-fits-all: with any of the four left off, the corresponding
+thunk compiles fine but the final link fails with undefined references
+to that cluster's `PluginServerInitCallback`/`SetDefaultDelegate`
+symbols, a failure mode a source-only review would not have caught. The
+old figures (1,618,112 / 1,517,792 / 1,912,704 B) are what the same
+three images measured before that change.
 
 **`app_main` wired to the latch, 2026-08-01.** `main/mt_transport.c` owns the
 persisted choice (NVS `mt_cfg`/`transport`, default WIFI) and the strong
@@ -356,14 +371,17 @@ every vendor's SDK shares, because they are all connectedhomeip underneath.
 | `mt_composition.c` | 80 | none; already host-tested |
 | `mt_comp_store.c` | 118 | NVS only |
 | `include/mt_matter.h` | 116 | none; pure C declarations |
-| `main.cpp` + `mt_devtypes.cpp` | 804 | the Matter SDK itself |
+| `main.cpp` + `mt_devtypes.cpp` | 1,167 | the Matter SDK itself |
 
 Every `esp_matter` and `CHIP` string in `mt_at.c` and `mt_matter.h` is in a
-comment. So the per-vendor surface is **804 lines of C++ behind a 116-line C
-header**: about a dozen `mt_matter_*` bridge functions, a device type table,
-storage, and UART plumbing. Above that line the entire AT surface moves
-unchanged, and `iLabs_Hearth` on the host never learns that anything changed,
-because it speaks a UART protocol and has no opinion about the silicon.
+comment. So the per-vendor surface is **1,167 lines of C++ behind a 116-line
+C header**: about a dozen `mt_matter_*` bridge functions, a 17-row device
+type table (§8.2), storage, and UART plumbing. Above that line the entire AT
+surface moves unchanged, and `iLabs_Hearth` on the host never learns that
+anything changed, because it speaks a UART protocol and has no opinion about
+the silicon. The 2026-07-29 measurement above read 804 lines against a
+4-row table; the 2026-08-03 device-type expansion (§8.2) is most of the
+growth.
 
 **The seam was not designed for this.** `mt_matter.h` exists because no
 esp_matter header may enter a C translation unit (a build-hygiene rule, see
@@ -384,6 +402,55 @@ per image, which is much less work and a materially worse product.
 the transport is Thread by construction: no build-time variant, `AT+MTNET?`
 always answers `THREAD`, and the whole transport-mismatch problem (§3.12.1 of
 the spec, and open question P2) cannot arise.
+
+## 8.2 Device types: the 13-type expansion (2026-08-03)
+
+Design record:
+`docs/superpowers/specs/2026-08-03-devtype-expansion-design.md`. Firmware
+change: commit `7cf4971`. `mt_devtypes.cpp` grew from 4 rows to 17:
+on/off, dimmable and colour-temperature lights and the temperature sensor
+were the C1 set; `AT+MTEP` now also accepts on/off and dimmable plug-in
+units, contact/occupancy/humidity/pressure/rain sensors, water-freeze and
+water-leak detectors, fan, window covering, thermostat and extended
+colour light (`AT_MT_SPEC.md` §3.9 carries the full 17-row table with IDs).
+
+**Two of the thirteen are abort traps, not error paths.** `window_covering`
+and `thermostat` both default `feature_flags` to 0, and esp-matter treats
+that as a hard failure rather than a recoverable one: both hit
+`VALIDATE_FEATURES_AT_LEAST_ONE` in cluster create
+(`esp_matter_cluster.cpp:2137` and `:1445`), which aborts the whole device,
+not just the one endpoint. That is a harsher failure than the existing
+composition rule that a failed `endpoint::create()` aborts the boot
+rebuild (see "Things that will bite you" in CLAUDE.md): a bad device type
+ID fails cleanly and is caught before any cluster is touched, a bad
+`feature_flags` value panics the device outright. This is why the two
+thunks own `feature_flags` rather than taking it from the host:
+`window_covering` sets Lift, Tilt and both position-aware bits;
+`thermostat` sets Heating and Cooling. A host declaring `AT+MTEP=0x0301`
+can never construct a thermostat that bricks the boot, because the only
+`feature_flags` value the firmware will ever build for it is the one that
+survives cluster create.
+
+**The StartUpCurrentLevel retrofit is B63's sibling.** `dimmable_light` and
+`color_temperature_light` already nulled `start_up_on_off` for B63
+(esp-matter's config default of 0 forces the light off at every boot and
+persists that forced value, so a stored state never survives a reboot),
+but had never nulled `level_control_lighting.start_up_current_level`,
+which defaults to 0 the same way and was doing the same thing to stored
+brightness. Fixed in the same commit with a `mt_startup_level_null()`
+helper, templated rather than typed to one `config_t` because
+`dimmable_plug_in_unit::config_t` declares the same field independently
+instead of inheriting it from `dimmable_light`.
+
+**`extended_color_light` diverges from stock esp-matter on purpose.** The
+standard namespace enables only ColorTemperature and XY; the host library
+mirrors arduino-esp32's HSV-driven API, so the thunk bolts
+`color_control::feature::hue_saturation` onto the cluster after the
+standard `create()` returns (safe because `color_control::create()` has
+no exclusivity validation between the three colour features). A host now
+sees `CurrentHue` and `CurrentSaturation` alongside XY and mireds on the
+same endpoint, all three colour representations live at once, with
+`AT+MTATTR` reaching whichever one a controller actually wrote.
 
 ## 9. Decision log (summary)
 

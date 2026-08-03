@@ -250,8 +250,37 @@ An **unconfigured** device (no stored composition) presents only the Root Node.
 Changing the composition of a commissioned device invalidates controller caches
 and may require re-commissioning.
 
-Device types implemented so far: `0x0100` On/Off Light, `0x0101` Dimmable Light,
-`0x010C` Colour Temperature Light, `0x0302` Temperature Sensor.
+Supported device types. `AT+MTEP=<id>` accepts any ID in this table; any ID
+outside it is rejected with `+MTERR:6`. This is the firmware's
+`main/mt_devtypes.cpp` table, rendered here, and it grows by rows as new
+device types are added.
+
+| ID (hex) | Device type |
+|---|---|
+| `0x0100` | On/Off Light |
+| `0x0101` | Dimmable Light |
+| `0x010C` | Colour Temperature Light |
+| `0x0302` | Temperature Sensor |
+| `0x010A` | On/Off Plug-in Unit |
+| `0x010B` | Dimmable Plug-in Unit |
+| `0x0015` | Contact Sensor |
+| `0x0107` | Occupancy Sensor |
+| `0x0307` | Humidity Sensor |
+| `0x0305` | Pressure Sensor |
+| `0x0044` | Rain Sensor |
+| `0x0041` | Water Freeze Detector |
+| `0x0043` | Water Leak Detector |
+| `0x002B` | Fan |
+| `0x0202` | Window Covering |
+| `0x0301` | Thermostat |
+| `0x010D` | Extended Colour Light |
+
+`0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
+bolts the HueSaturation feature onto the standard ColorControl configuration,
+so a host sees `CurrentHue` and `CurrentSaturation` alongside the XY and
+colour-temperature (mireds) attributes esp-matter enables by default. All
+three colour representations are live on the same endpoint at once;
+`AT+MTATTR` reaches whichever one a controller actually wrote.
 
 Example:
 ```
@@ -656,7 +685,6 @@ allocated here and kept semantically stable for a future merged binary.
   hex-encoded. Specified in the design spec; implemented with the first device
   type that needs it.
 - `+MTERR` codes `2` to `5` for specific attribute faults (phase C2).
-- Additional device types for the table in §3.9 (phase C-later).
 
 ## 9. Relationship to `AT+EN`
 
