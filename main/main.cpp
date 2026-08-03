@@ -98,6 +98,18 @@ using namespace esp_matter::endpoint;
 /*
  * Map an esp_matter attribute value to/from a plain integer for the AT+MTATTR
  * command (host sends/receives integers; strings/floats/arrays are unsupported).
+ *
+ * Nullable numeric attributes (ESP_MATTER_VAL_TYPE_NULLABLE_*, esp-matter's
+ * disjoint second family for every integer/bool/enum/bitmap type, offset by
+ * ESP_MATTER_VAL_NULLABLE_BASE) share the same union field as their plain
+ * sibling and convert the same way once a value is known to be present.
+ * A NULL value is a different question: the AT grammar has no null literal,
+ * and the host library's access pattern (begin() always writes an attribute
+ * before any read of it) never reads a never-written nullable in practice.
+ * So a null read answers exactly what an unsupported type answers today:
+ * attr_val_to_long() returns false and the caller reports +MTERR:5. Adding a
+ * way to WRITE null over AT is a separate, out-of-scope feature; see
+ * long_to_attr_val() below.
  */
 static bool attr_val_to_long(const esp_matter_attr_val_t *v, long *out)
 {
@@ -117,10 +129,68 @@ static bool attr_val_to_long(const esp_matter_attr_val_t *v, long *out)
     case ESP_MATTER_VAL_TYPE_BITMAP32: *out = (long)v->val.u32; return true;
     case ESP_MATTER_VAL_TYPE_INT64:    *out = (long)v->val.i64; return true;
     case ESP_MATTER_VAL_TYPE_UINT64:   *out = (long)v->val.u64; return true;
+
+    /* Nullable siblings. Same union field and cast as the plain arm above;
+     * chip::app::NumericAttributeTraits<T>::IsNullValue() is CHIP's own null
+     * check (the same one esp_matter's internal val_is_null() uses, which
+     * is not part of the public header so it is reproduced by type here). */
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BOOLEAN:
+        if (chip::app::NumericAttributeTraits<bool>::IsNullValue(*(const uint8_t *)&v->val.b)) return false;
+        *out = v->val.b; return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INTEGER:
+        if (chip::app::NumericAttributeTraits<int>::IsNullValue(v->val.i)) return false;
+        *out = v->val.i; return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT8:
+        if (chip::app::NumericAttributeTraits<int8_t>::IsNullValue(v->val.i8)) return false;
+        *out = v->val.i8; return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT8:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM8:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP8:
+        if (chip::app::NumericAttributeTraits<uint8_t>::IsNullValue(v->val.u8)) return false;
+        *out = v->val.u8; return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT16:
+        if (chip::app::NumericAttributeTraits<int16_t>::IsNullValue(v->val.i16)) return false;
+        *out = v->val.i16; return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT16:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM16:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP16:
+        if (chip::app::NumericAttributeTraits<uint16_t>::IsNullValue(v->val.u16)) return false;
+        *out = v->val.u16; return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT32:
+        if (chip::app::NumericAttributeTraits<int32_t>::IsNullValue(v->val.i32)) return false;
+        *out = v->val.i32; return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT32:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP32:
+        if (chip::app::NumericAttributeTraits<uint32_t>::IsNullValue(v->val.u32)) return false;
+        *out = (long)v->val.u32; return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT64:
+        if (chip::app::NumericAttributeTraits<int64_t>::IsNullValue(v->val.i64)) return false;
+        *out = (long)v->val.i64; return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT64:
+        if (chip::app::NumericAttributeTraits<uint64_t>::IsNullValue(v->val.u64)) return false;
+        *out = (long)v->val.u64; return true;
+
     default: return false;
     }
 }
 
+/*
+ * Same integer<->attr_val bridge, write direction. `v` arrives pre-populated
+ * by attribute::get_val() with the located attribute's real type (including
+ * NULLABLE_*), so this switches on that type exactly as attr_val_to_long()
+ * does; it never decides on its own whether an attribute is nullable.
+ *
+ * A nullable arm builds the val with its esp_matter_nullable_*() constructor
+ * rather than writing the union field directly, so the type tag it leaves
+ * behind is unambiguously the nullable one. This never produces a null:
+ * every value handed to it came from AT+MTATTR's integer grammar, which has
+ * no null literal, so writing null over AT is out of scope. The one
+ * exception is not a design choice but a property of Matter's own nullable
+ * encoding: each type reserves one sentinel value (all-ones for unsigned,
+ * the type minimum for signed) to mean null, and esp_matter_nullable_*()
+ * treats a value equal to that sentinel as null on construction, same as it
+ * would for a value CHIP itself produced.
+ */
 static bool long_to_attr_val(esp_matter_attr_val_t *v, long in)
 {
     switch (v->type) {
@@ -139,6 +209,23 @@ static bool long_to_attr_val(esp_matter_attr_val_t *v, long in)
     case ESP_MATTER_VAL_TYPE_BITMAP32: v->val.u32 = (uint32_t)in; return true;
     case ESP_MATTER_VAL_TYPE_INT64:    v->val.i64 = (int64_t)in;  return true;
     case ESP_MATTER_VAL_TYPE_UINT64:   v->val.u64 = (uint64_t)in; return true;
+
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BOOLEAN:  *v = esp_matter_nullable_bool((bool)in);          return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INTEGER:  *v = esp_matter_nullable_int((int)in);            return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT8:     *v = esp_matter_nullable_int8((int8_t)in);        return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT8:    *v = esp_matter_nullable_uint8((uint8_t)in);      return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM8:    *v = esp_matter_nullable_enum8((uint8_t)in);      return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP8:  *v = esp_matter_nullable_bitmap8((uint8_t)in);    return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT16:    *v = esp_matter_nullable_int16((int16_t)in);      return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT16:   *v = esp_matter_nullable_uint16((uint16_t)in);    return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM16:   *v = esp_matter_nullable_enum16((uint16_t)in);    return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP16: *v = esp_matter_nullable_bitmap16((uint16_t)in);  return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT32:    *v = esp_matter_nullable_int32((int32_t)in);      return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT32:   *v = esp_matter_nullable_uint32((uint32_t)in);    return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP32: *v = esp_matter_nullable_bitmap32((uint32_t)in);  return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT64:    *v = esp_matter_nullable_int64((int64_t)in);      return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT64:   *v = esp_matter_nullable_uint64((uint64_t)in);    return true;
+
     default: return false;
     }
 }
