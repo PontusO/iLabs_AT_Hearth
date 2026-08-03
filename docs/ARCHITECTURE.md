@@ -431,10 +431,17 @@ ID fails cleanly and is caught before any cluster is touched, a bad
 `feature_flags` value panics the device outright. This is why the two
 thunks own `feature_flags` rather than taking it from the host:
 `window_covering` sets Lift, Tilt and both position-aware bits;
-`thermostat` sets Heating and Cooling. A host declaring `AT+MTEP=0x0301`
-can never construct a thermostat that bricks the boot, because the only
-`feature_flags` value the firmware will ever build for it is the one that
-survives cluster create.
+`thermostat` sets Heating and Cooling, and also seeds the Heating and
+Cooling feature configs' setpoints to 1600/2400 hundredths (16 C / 24 C)
+instead of esp-matter's own 2000/2600 defaults, matching the boot values
+upstream arduino-esp32 devices use and that the host library's cache seeds
+assume (cross-layer finding I1, host library final review): left at
+esp-matter's defaults, a sketch's first setpoint write on a fresh device
+matches the library's cache guess and is silently swallowed by its
+equality check while the fabric still holds the un-upstreamed value. A
+host declaring `AT+MTEP=0x0301` can never construct a thermostat that
+bricks the boot, because the only `feature_flags` value the firmware will
+ever build for it is the one that survives cluster create.
 
 **The StartUpCurrentLevel retrofit is B63's sibling.** `dimmable_light` and
 `color_temperature_light` already nulled `start_up_on_off` for B63
