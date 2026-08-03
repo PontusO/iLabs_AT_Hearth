@@ -187,13 +187,22 @@ static endpoint_t *mk_thermostat(node_t *n)
     thermostat::config_t c;
     /* Default feature_flags of 0 ASSERTS in cluster create
      * (VALIDATE_FEATURES_AT_LEAST_ONE, esp_matter_cluster.cpp:1445): at least
-     * one of Heat/Cool is mandatory. Enable both; the setpoint feature
-     * configs (config->features.heating/cooling) default to 2000/2600
-     * (20 C / 26 C hundredths, esp_matter_feature.h:479-491) and need no
-     * explicit population. */
+     * one of Heat/Cool is mandatory. Enable both. */
     c.thermostat.feature_flags =
         cluster::thermostat::feature::heating::get_id() |
         cluster::thermostat::feature::cooling::get_id();
+    /* esp-matter's setpoint feature configs default to 2000/2600 hundredths
+     * (20 C / 26 C, esp_matter_feature.h:484/496), but upstream arduino-esp32
+     * devices boot at 1600/2400 (16 C / 24 C), and the host library's cache
+     * seeds assume those upstream values. Left at esp-matter's defaults, a
+     * fresh device and the library disagree on the starting setpoints: a
+     * sketch's first setCoolingSetpoint(24.0) matches the library's cache
+     * guess of 2400, is silently swallowed by its equality check, and never
+     * reaches the wire, while the fabric still holds esp-matter's 2600. Seed
+     * to upstream's boot values here so the first write is never a no-op.
+     * Cross-layer finding I1, host library final review. */
+    c.thermostat.features.heating.occupied_heating_setpoint = 1600;
+    c.thermostat.features.cooling.occupied_cooling_setpoint = 2400;
     return thermostat::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
 
