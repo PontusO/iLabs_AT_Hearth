@@ -153,10 +153,12 @@ static endpoint_t *mk_fan(node_t *n)
 static endpoint_t *mk_occupancy_sensor(node_t *n)
 {
     occupancy_sensor::config_t c;
-    /* The sensor-type feature must be selected explicitly; 1.5.1 calls the
+    /* Default feature_flags of 0 ASSERTS in cluster create
+     * (VALIDATE_FEATURES_AT_LEAST_ONE, esp_matter_cluster.cpp:2341-2346):
+     * setting a feature is load-bearing for boot safety, not optional.
+     * PIR is the sensor-type default upstream presents. 1.5.1 calls the
      * field feature_flags (1.4.1 called it features, cluster::occupancy_sensing
-     * ::config_t at esp_matter_cluster.h:735-746). PIR is the default upstream
-     * presents. */
+     * ::config_t at esp_matter_cluster.h:735-746). */
     c.occupancy_sensing.feature_flags =
         cluster::occupancy_sensing::feature::passive_infrared::get_id();
     return occupancy_sensor::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
