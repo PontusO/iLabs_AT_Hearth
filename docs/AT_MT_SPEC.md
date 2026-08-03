@@ -198,9 +198,12 @@ Nullable numeric attributes (for example `CurrentLevel` or
 `TargetPositionLiftPercent100ths`) are supported the same way as their
 non-nullable counterparts. The one exception is reading one that currently
 holds null: the AT grammar has no null literal, so that read reports
-`+MTERR:5`, indistinguishable from an unsupported type. This is not a gap in
-practice: the write path here never produces null, so a nullable attribute
-this command has written always reads back a real value afterwards.
+`+MTERR:5`, indistinguishable from an unsupported type. The write path here
+does not add a way to write null on purpose, but Matter's own nullable
+encoding reserves one sentinel value per type to mean null (255 for a u8,
+the type minimum for a signed type, and so on). A host that writes that
+exact sentinel gets a null back, same as if a controller had written it, and
+the next read then answers `+MTERR:5` for that reason.
 
 `<mode>` selects how a write is published, default `1`:
 
