@@ -207,6 +207,10 @@ Measured (`idf.py -B <dir> size`, `.bin` size on disk):
 | `build_thread` (Thread only) | 1,561,840 B | 184,271 B | 90,944 B |
 | `build_combined` (both) | 1,958,016 B | 255,765 B | 108,296 B |
 
+DIRAM and `.bss` columns measured 2026-08-01 (before device-type expansion).
+The four newly linked cluster servers plus the B98 fix add approximately 1 KB
+of `.bss` not yet remeasured; flash figures are current (2026-08-03).
+
 Combined vs `build_b4`: +295,856 B flash, +34,784 B DIRAM, +28,776 B
 `.bss`, the dormant-Thread tax on top of the WiFi image. Combined vs
 `build_thread`: +396,176 B flash, +71,494 B DIRAM, +17,352 B `.bss`, the
@@ -371,12 +375,13 @@ every vendor's SDK shares, because they are all connectedhomeip underneath.
 | `mt_composition.c` | 80 | none; already host-tested |
 | `mt_comp_store.c` | 118 | NVS only |
 | `include/mt_matter.h` | 116 | none; pure C declarations |
-| `main.cpp` + `mt_devtypes.cpp` | 1,167 | the Matter SDK itself |
+| `main.cpp` + `mt_devtypes.cpp` | 1,254 | the Matter SDK itself |
 
 Every `esp_matter` and `CHIP` string in `mt_at.c` and `mt_matter.h` is in a
-comment. So the per-vendor surface is **1,167 lines of C++ behind a 116-line
-C header**: about a dozen `mt_matter_*` bridge functions, a 17-row device
-type table (§8.2), storage, and UART plumbing. Above that line the entire AT
+comment. So the per-vendor surface is **1,254 lines of C++** (976 in
+`main.cpp`, 278 in `mt_devtypes.cpp`) **behind a 116-line C header**: about
+a dozen `mt_matter_*` bridge functions, a 17-row device type table (§8.2),
+storage, and UART plumbing. Above that line the entire AT
 surface moves unchanged, and `iLabs_Hearth` on the host never learns that
 anything changed, because it speaks a UART protocol and has no opinion about
 the silicon. The 2026-07-29 measurement above read 804 lines against a
@@ -414,12 +419,12 @@ units, contact/occupancy/humidity/pressure/rain sensors, water-freeze and
 water-leak detectors, fan, window covering, thermostat and extended
 colour light (`AT_MT_SPEC.md` §3.9 carries the full 17-row table with IDs).
 
-**Two of the thirteen are abort traps, not error paths.** `window_covering`
-and `thermostat` both default `feature_flags` to 0, and esp-matter treats
-that as a hard failure rather than a recoverable one: both hit
-`VALIDATE_FEATURES_AT_LEAST_ONE` in cluster create
-(`esp_matter_cluster.cpp:2137` and `:1445`), which aborts the whole device,
-not just the one endpoint. That is a harsher failure than the existing
+**Three of the thirteen are abort traps, not error paths.** `window_covering`,
+`occupancy_sensing`, and `thermostat` all default `feature_flags` to 0, and
+esp-matter treats that as a hard failure rather than a recoverable one: all
+three hit `VALIDATE_FEATURES_AT_LEAST_ONE` in cluster create
+(`esp_matter_cluster.cpp:2137`, `:2341-2346`, and `:1445` respectively),
+which aborts the whole device, not just the one endpoint. That is a harsher failure than the existing
 composition rule that a failed `endpoint::create()` aborts the boot
 rebuild (see "Things that will bite you" in CLAUDE.md): a bad device type
 ID fails cleanly and is caught before any cluster is touched, a bad
