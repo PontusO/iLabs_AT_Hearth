@@ -231,6 +231,20 @@ static endpoint_t *mk_extended_color_light(node_t *n)
     return ep;
 }
 
+static endpoint_t *mk_generic_switch(node_t *n)
+{
+    generic_switch::config_t c;
+    /* Exactly one of Latching/Momentary is mandatory: a default
+     * feature_flags of 0 ASSERTS in cluster create
+     * (VALIDATE_FEATURES_EXACT_ONE, esp_matter_cluster.cpp:2192-2194).
+     * Momentary matches the upstream arduino-esp32 class, and the feature
+     * add also registers the InitialPress event metadata that
+     * mt_matter_switch_click() emits. */
+    c.switch_cluster.feature_flags =
+        cluster::switch_cluster::feature::momentary_switch::get_id();
+    return generic_switch::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light"            },
@@ -250,6 +264,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { window_covering::get_device_type_id(),         mk_window_covering,         "window_covering"         },
     { thermostat::get_device_type_id(),              mk_thermostat,              "thermostat"              },
     { extended_color_light::get_device_type_id(),    mk_extended_color_light,    "extended_color_light"    },
+    { generic_switch::get_device_type_id(),          mk_generic_switch,          "generic_switch"          },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

@@ -111,6 +111,14 @@ int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out)
  */
 int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long val, bool notify);
 
+/*
+ * Emit the Switch cluster's InitialPress event (position 1) on ep, i.e. the
+ * upstream arduino-esp32 class's click(). Returns an mt_attr_result_t: 0 on
+ * success, MT_ATTR_ERR_ENDPOINT/MT_ATTR_ERR_CLUSTER for the usual lookup
+ * failures, MT_ATTR_ERR_FAILED if the event send itself fails.
+ */
+int mt_matter_switch_click(uint16_t ep);
+
 #ifdef __cplusplus
 }
 #endif
