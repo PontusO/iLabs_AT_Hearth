@@ -121,12 +121,15 @@ rows; IDs are read from esp-matter, never transcribed.
 
 The extended color light carries a hue/saturation addition beyond stock
 esp-matter, so hosts see `CurrentHue`/`CurrentSaturation` alongside XY and
-mireds. The generic switch has no attribute a host would write through
-`AT+MTATTR`; it is driven by `AT+MTSWITCH`, which raises a Switch cluster
-event. Deliberately absent, with reasons recorded in the design specs:
-Temperature Controlled Cabinet (needs the reserved `AT+MTATTRX`), and
-Color Light (no esp-matter namespace exists). See `docs/AT_MT_SPEC.md`
-section 3.9 for the authoritative table.
+mireds. The generic switch has no writable attribute (`CurrentPosition` and
+`NumberOfPositions` are both read-only, though a host can still read
+`CurrentPosition` over `AT+MTATTR` like any other attribute); it is driven
+instead by `AT+MTSWITCH`, which raises a Switch cluster event. Deliberately
+absent, with reasons recorded in the design specs: Temperature Controlled
+Cabinet (needs the reserved `AT+MTATTRX`), and Color Light (no distinct
+device type ID exists; the host library's `MatterColorLight` rides the
+`0x010D` row). See `docs/AT_MT_SPEC.md` section 3.9 for the authoritative
+table.
 
 ## Design
 
