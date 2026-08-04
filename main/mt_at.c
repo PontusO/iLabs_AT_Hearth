@@ -301,6 +301,39 @@ static int cmd_mtattr(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/*
+ * AT+MTSWITCH=<ep>[,<action>] -> emit a switch event on <ep>. Action 0 (the
+ * default) is InitialPress, the upstream click(). Other actions are reserved
+ * for the richer switch features and answer +MTERR:1 until they exist. The
+ * first event-emission command on this surface: nothing echoes back,
+ * controllers see it via their subscriptions.
+ */
+static int cmd_mtswitch(at_type_t type, char *args)
+{
+    char *f[2];
+    int n = at_split_args(args, f, 2);
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (n < 1) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long ep, action = 0;
+    if (!parse_u(f[0], &ep) || ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (n >= 2 && (!parse_u(f[1], &action) || action != 0)) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    int r = mt_matter_switch_click((uint16_t)ep);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
 /* ---- event subscription (C3) ------------------------------------------ */
 
 static uint32_t s_evt_mask = MT_EVT_MASK_DEFAULT;
@@ -628,6 +661,7 @@ static const at_command_t s_cmds[] = {
     { "MTRESET",      cmd_mtreset     },
     { "MTFRESET",     cmd_mtfreset    },
     { "MTATTR",       cmd_mtattr      },
+    { "MTSWITCH",     cmd_mtswitch    },
     { "MTEP",         cmd_mtep        },
     { "MTEPCLEAR",    cmd_mtepclear   },
     { "MTEPAPPLY",    cmd_mtepapply   },

@@ -653,6 +653,30 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
     return (err == ESP_OK) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }
 
+/*
+ * AT+MTSWITCH: emit the Switch cluster's InitialPress event, which is what
+ * the upstream arduino-esp32 class's click() does. Events are fire-and-forget
+ * toward subscribed controllers; nothing echoes on the AT link.
+ *
+ * EventLogging.h: "The consumer has to either lock the Matter stack lock or
+ * queue the event to the Matter event queue when using LogEvent. This
+ * function is not safe to call outside of the main Matter processing
+ * context." ChipStackLock provides that lock, same as every other bridge
+ * function here.
+ */
+extern "C" int mt_matter_switch_click(uint16_t ep)
+{
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::Switch::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    esp_err_t err = esp_matter::cluster::switch_cluster::event::send_initial_press(ep, 1);
+    return (err == ESP_OK) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+}
+
 /* --------------------------------------------------------------------------- */
 
 /*
