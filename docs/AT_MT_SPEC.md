@@ -55,6 +55,7 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTFRESET` | exec | `OK` → full factory reset (adds the composition) + reboot |
 | `AT+MTATTR=<ep>,<cl>,<attr>` | set (3) | `+MTATTR:<ep>,<cl>,<attr>,<val>` → `OK` (read) |
 | `AT+MTATTR=<ep>,<cl>,<attr>,<val>` | set (4) | `OK` (write) |
+| `AT+MTSWITCH=<ep>[,<action>]` | set | `OK` (switch event emitted) |
 | `AT+MTEP?` | query | `+MTEP:<idx>,<ep_id>,<devtype>` per endpoint → `OK` |
 | `AT+MTEP=<devtype>` | set | `OK` (append to the staged composition) |
 | `AT+MTEPCLEAR` | exec | `OK` (begin staging an empty composition) |
@@ -285,6 +286,7 @@ device types are added.
 | `0x0202` | Window Covering |
 | `0x0301` | Thermostat |
 | `0x010D` | Extended Colour Light |
+| `0x000F` | Generic Switch |
 
 `0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
 bolts the HueSaturation feature onto the standard ColorControl configuration,
@@ -292,6 +294,10 @@ so a host sees `CurrentHue` and `CurrentSaturation` alongside the XY and
 colour-temperature (mireds) attributes esp-matter enables by default. All
 three colour representations are live on the same endpoint at once;
 `AT+MTATTR` reaches whichever one a controller actually wrote.
+
+`0x000F` Generic Switch carries no readable attribute a host would write
+through `AT+MTATTR`; it is driven by `AT+MTSWITCH` (§3.15), which raises a
+Switch cluster event instead.
 
 Example:
 ```
@@ -623,6 +629,47 @@ Accepting a mode the board cannot honour would not degrade gracefully: it
 would gate the transmitter on an unbonded input and the link would stop
 mid-answer, needing a reset. `MT_UART_FLOWCTRL_WIRED` in `mt_at_config.h` is
 the one macro a board revision that routes the pair has to flip.
+
+### 3.15 `AT+MTSWITCH`: switch event emission
+
+Emits a Switch cluster event on `<ep>` rather than writing an attribute: the
+first command on this surface that raises an event instead of changing state.
+
+```
+AT+MTSWITCH=<ep>[,<action>]  ->  OK
+```
+
+- `<ep>`: the endpoint id.
+- `<action>`: optional, default `0`. `0` is InitialPress at position `1`,
+  matching the upstream arduino-esp32 class's `click()`. Any other value is
+  reserved for the switch's richer feature set (MultiPress, LongPress, and so
+  on, none implemented yet) and answers `+MTERR:1`.
+
+**Set-only.** `AT+MTSWITCH?` or a bare `AT+MTSWITCH` is the wrong command
+form and answers a plain `ERROR` (§5), the same convention every other
+set-only command in this spec follows.
+
+A failed access reports which level was wrong, the same two codes
+`AT+MTATTR` uses for the same lookups: `+MTERR:2` unknown endpoint,
+`+MTERR:3` an endpoint without a Switch cluster. A send failure at the
+esp_matter/CHIP layer itself (the event fails to queue, for example) is not
+one of the specific faults and answers a bare `ERROR`, §5's "unclassified
+runtime failure" case, the same as an unexpected `AT+MTATTR` write failure.
+
+**Events are fire-and-forget.** `AT+MTSWITCH` only tells the firmware to
+raise the InitialPress event toward whichever controllers are subscribed to
+it on this endpoint. It never echoes as a `+MTATTR` or any other URC on the
+AT link, and there is no command that reads an event back afterward: `OK`
+means the event was handed to the Matter stack, not that any controller
+received or acted on it.
+
+Example, a generic switch on endpoint 3:
+```
+AT+MTSWITCH=3     -> OK         (InitialPress, position 1)
+AT+MTSWITCH=3,0   -> OK         (equivalent, explicit default)
+AT+MTSWITCH=3,1   -> +MTERR:1   (reserved action)
+AT+MTSWITCH=9     -> +MTERR:2   (no endpoint 9)
+```
 
 ## 4. Unsolicited result codes (URCs)
 

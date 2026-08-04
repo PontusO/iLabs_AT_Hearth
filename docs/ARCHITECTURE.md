@@ -238,6 +238,21 @@ symbols, a failure mode a source-only review would not have caught. The
 old figures (1,618,112 / 1,517,792 / 1,912,704 B) are what the same
 three images measured before that change.
 
+**`generic_switch` (2026-08-04, commit `0aa85ea`) added a further
++3,184 B to all three images**, uniform because the Switch cluster's
+server code is the same regardless of which network stack is compiled
+in: `build_b4` 1,662,160 → 1,665,344 B (`0x196940`), `build_thread`
+1,561,840 → 1,565,024 B (`0x17e160`), `build_combined` 1,958,016 →
+1,961,200 B (`0x1decf0`). Same mechanism as the four-cluster delta
+above: `CONFIG_SUPPORT_SWITCH_CLUSTER=n` had excluded the Switch
+cluster's server implementation from the chip component archive
+(`SwitchServer::Instance()`, `SwitchServer::OnInitialPress()`,
+`MatterSwitchPluginServerInitCallback()`, one level different from the
+delegate-based clusters above since Switch's server is a singleton
+rather than a `SetDefaultDelegate` callback); `mt_devtypes.cpp`'s new
+`generic_switch` thunk (§8.2) needed it, so the line was removed rather
+than flipped, matching how the earlier four were handled.
+
 **`app_main` wired to the latch, 2026-08-01.** `main/mt_transport.c` owns the
 persisted choice (NVS `mt_cfg`/`transport`, default WIFI) and the strong
 definition of the weak hook the patchset calls. `app_main`, combined build
@@ -380,7 +395,7 @@ every vendor's SDK shares, because they are all connectedhomeip underneath.
 Every `esp_matter` and `CHIP` string in `mt_at.c` and `mt_matter.h` is in a
 comment. So the per-vendor surface is **1,254 lines of C++** (976 in
 `main.cpp`, 278 in `mt_devtypes.cpp`) **behind a 116-line C header**: about
-a dozen `mt_matter_*` bridge functions, a 17-row device type table (§8.2),
+a dozen `mt_matter_*` bridge functions, an 18-row device type table (§8.2),
 storage, and UART plumbing. Above that line the entire AT
 surface moves unchanged, and `iLabs_Hearth` on the host never learns that
 anything changed, because it speaks a UART protocol and has no opinion about
@@ -417,9 +432,11 @@ on/off, dimmable and colour-temperature lights and the temperature sensor
 were the C1 set; `AT+MTEP` now also accepts on/off and dimmable plug-in
 units, contact/occupancy/humidity/pressure/rain sensors, water-freeze and
 water-leak detectors, fan, window covering, thermostat and extended
-colour light (`AT_MT_SPEC.md` §3.9 carries the full 17-row table with IDs).
+colour light (`AT_MT_SPEC.md` §3.9 carries the current 18-row table with
+IDs; the eighteenth row, `generic_switch`, landed afterward in commit
+`0aa85ea`, 2026-08-04, and is covered below).
 
-**Three of the thirteen are abort traps, not error paths.** `window_covering`,
+**Four device types are abort traps, not error paths.** `window_covering`,
 `occupancy_sensing`, and `thermostat` all default `feature_flags` to 0, and
 esp-matter treats that as a hard failure rather than a recoverable one: all
 three hit `VALIDATE_FEATURES_AT_LEAST_ONE` in cluster create
@@ -442,6 +459,20 @@ equality check while the fabric still holds the un-upstreamed value. A
 host declaring `AT+MTEP=0x0301` can never construct a thermostat that
 bricks the boot, because the only `feature_flags` value the firmware will
 ever build for it is the one that survives cluster create.
+
+**`generic_switch` is the fourth trap, and a different macro.** Its
+`switch_cluster::config_t` defaults `feature_flags` to 0 the same way,
+but `switch_cluster::create()` (`esp_matter_cluster.cpp:2192-2194`) checks
+it with `VALIDATE_FEATURES_EXACT_ONE`, not `VALIDATE_FEATURES_AT_LEAST_ONE`:
+Latching and Momentary Switch are mutually exclusive as well as each
+individually optional, so zero bits set aborts exactly as before, but so
+would two. The `mk_generic_switch()` thunk sets exactly one bit,
+Momentary, matching the upstream arduino-esp32 class. The `generic_switch`
+device type is also this firmware's first **event-emission** bridge:
+`mt_matter_switch_click()` calls `switch_cluster::event::send_initial_press()`
+under `ChipStackLock` to raise the Switch cluster's InitialPress event
+(`AT+MTSWITCH`, `AT_MT_SPEC.md` §3.15) instead of writing an attribute
+through the read/write bridge every other device type uses.
 
 **The StartUpCurrentLevel retrofit is B63's sibling.** `dimmable_light` and
 `color_temperature_light` already nulled `start_up_on_off` for B63
