@@ -103,7 +103,7 @@ subscription (`AT+MTEVT`), and the transport query (`AT+MTNET?`).
 
 ## Supported device types
 
-`AT+MTEP=<id>` accepts these 17 device type IDs (firmware 0.3.0); anything
+`AT+MTEP=<id>` accepts these 18 device type IDs (firmware 0.3.1); anything
 else answers `+MTERR:6`. The table is `main/mt_devtypes.cpp`'s and grows by
 rows; IDs are read from esp-matter, never transcribed.
 
@@ -117,15 +117,16 @@ rows; IDs are read from esp-matter, never transcribed.
 | 0x010B | Dimmable Plug-in Unit | | 0x0305 | Pressure Sensor |
 | 0x002B | Fan | | 0x0107 | Occupancy Sensor |
 | 0x0202 | Window Covering | | 0x0015 | Contact Sensor |
-| 0x0301 | Thermostat | | | |
+| 0x0301 | Thermostat | | 0x000F | Generic Switch |
 
 The extended color light carries a hue/saturation addition beyond stock
 esp-matter, so hosts see `CurrentHue`/`CurrentSaturation` alongside XY and
-mireds. Deliberately absent, with reasons recorded in the design specs:
-Generic Switch (needs an AT event-emission surface), Temperature
-Controlled Cabinet (needs the reserved `AT+MTATTRX`), and Color Light (no
-esp-matter namespace exists). See `docs/AT_MT_SPEC.md` section 3.9 for the
-authoritative table.
+mireds. The generic switch has no attribute a host would write through
+`AT+MTATTR`; it is driven by `AT+MTSWITCH`, which raises a Switch cluster
+event. Deliberately absent, with reasons recorded in the design specs:
+Temperature Controlled Cabinet (needs the reserved `AT+MTATTRX`), and
+Color Light (no esp-matter namespace exists). See `docs/AT_MT_SPEC.md`
+section 3.9 for the authoritative table.
 
 ## Design
 
