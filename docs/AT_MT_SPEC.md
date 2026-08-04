@@ -295,9 +295,13 @@ colour-temperature (mireds) attributes esp-matter enables by default. All
 three colour representations are live on the same endpoint at once;
 `AT+MTATTR` reaches whichever one a controller actually wrote.
 
-`0x000F` Generic Switch carries no readable attribute a host would write
-through `AT+MTATTR`; it is driven by `AT+MTSWITCH` (§3.15), which raises a
-Switch cluster event instead.
+`0x000F` Generic Switch has no writable attribute. `switch_cluster::create()`
+unconditionally creates `NumberOfPositions` (default `2`) and
+`CurrentPosition` (default `0`), both read-only, so a host can still read
+`CurrentPosition` over `AT+MTATTR` (cluster `0x003B`) like any other
+attribute; there is just nothing on this device type `AT+MTATTR` can write.
+The command that drives it is `AT+MTSWITCH` (§3.15), which raises a Switch
+cluster event rather than writing state.
 
 Example:
 ```
