@@ -285,6 +285,20 @@ assertion that actually proves "rejected before any side effect".
 | `AT+MTATTR=0,0x0028,0x0005` | `+MTERR:5` (NodeLabel is a string: non-integer types are unsupported by design, spec §3.8) |
 | `AT+MTATTR?` | bare `ERROR` (wrong command form, not a bad parameter) |
 
+**`AT+MTSWITCH` argument validation:**
+
+| Command | Expected |
+|---|---|
+| `AT+MTSWITCH?` | bare `ERROR` (query form not accepted) |
+| `AT+MTSWITCH` | bare `ERROR` (exec form without arguments) |
+| `AT+MTSWITCH=` | `+MTERR:1` (empty argument) |
+| `AT+MTSWITCH=zz` | `+MTERR:1` (endpoint not numeric) |
+| `AT+MTSWITCH=99` | `+MTERR:2` (unknown endpoint) |
+| `AT+MTSWITCH=0` | `+MTERR:3` (root endpoint has no Switch cluster) |
+| `AT+MTSWITCH=1` | `OK` (success: endpoint has Switch cluster; event fired on fabric) |
+
+Note that `AT+MTSWITCH` does not return a value to the host; the event fire is fire-and-forget over the fabric. Controller-side observation is the positive check.
+
 **`AT+MTEVT` and `AT+MTNET`:**
 
 | Command | Expected |
