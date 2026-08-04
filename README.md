@@ -101,6 +101,32 @@ the data model (`AT+MTATTR` read/write with publish modes), the host-declared
 endpoint composition (`AT+MTEP` / `AT+MTEPCLEAR` / `AT+MTEPAPPLY`), event
 subscription (`AT+MTEVT`), and the transport query (`AT+MTNET?`).
 
+## Supported device types
+
+`AT+MTEP=<id>` accepts these 17 device type IDs (firmware 0.3.0); anything
+else answers `+MTERR:6`. The table is `main/mt_devtypes.cpp`'s and grows by
+rows; IDs are read from esp-matter, never transcribed.
+
+| ID | Device type | | ID | Device type |
+|---|---|---|---|---|
+| 0x0100 | On/Off Light | | 0x0044 | Rain Sensor |
+| 0x0101 | Dimmable Light | | 0x0041 | Water Freeze Detector |
+| 0x010C | Color Temperature Light | | 0x0043 | Water Leak Detector |
+| 0x010D | Extended Color Light | | 0x0302 | Temperature Sensor |
+| 0x010A | On/Off Plug-in Unit | | 0x0307 | Humidity Sensor |
+| 0x010B | Dimmable Plug-in Unit | | 0x0305 | Pressure Sensor |
+| 0x002B | Fan | | 0x0107 | Occupancy Sensor |
+| 0x0202 | Window Covering | | 0x0015 | Contact Sensor |
+| 0x0301 | Thermostat | | | |
+
+The extended color light carries a hue/saturation addition beyond stock
+esp-matter, so hosts see `CurrentHue`/`CurrentSaturation` alongside XY and
+mireds. Deliberately absent, with reasons recorded in the design specs:
+Generic Switch (needs an AT event-emission surface), Temperature
+Controlled Cabinet (needs the reserved `AT+MTATTRX`), and Color Light (no
+esp-matter namespace exists). See `docs/AT_MT_SPEC.md` section 3.9 for the
+authoritative table.
+
 ## Design
 
 The two-firmware-one-engine approach, the C6-only Matter-over-WiFi scope and the
