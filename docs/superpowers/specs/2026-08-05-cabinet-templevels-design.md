@@ -85,9 +85,11 @@ the reservation stays honest.
     printable ASCII, no double-quote character inside a label
     (+MTERR:1 otherwise). Commas inside labels are legal (the handler
     parses quotes itself; at_core is untouched).
-  - +MTERR:2 unknown endpoint; +MTERR:3 endpoint that is not a
-    TL-variant cabinet; on success the store updates and the attribute
-    reports dirty so subscribed controllers refresh.
+  - +MTERR:2 unknown endpoint; +MTERR:3 endpoint without a
+    TemperatureControl cluster; +MTERR:4 cluster present but no
+    SupportedTemperatureLevels (a number-variant cabinet), keeping the
+    established lookup-code semantics; on success the store updates and
+    the attribute reports dirty so subscribed controllers refresh.
   - Labels are NOT persisted: the sketch re-sends them after every
     boot (same philosophy as attribute state; the store starts empty
     and controllers read an empty list until the host sets it).
