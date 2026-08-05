@@ -1,4 +1,4 @@
-# Architecture & Design Decisions — iLabs AT Hearth (ESP32-C6)
+# Architecture & Design Decisions: iLabs AT Hearth (ESP32-C6)
 
 Status: **living document.** Consolidates the design of the Matter co-processor
 firmware and the decisions taken during Phase B. The phased build plan and the
@@ -25,11 +25,11 @@ the sibling of `iLabs_AT_ESP-now`, which exposes ESP-NOW over `AT+EN…`.
   (`at_register_commands`) and error namespace, so a future merged binary is a
   mechanical "register both tables" step.
 - **Matter personality files** (this repo, `main/`):
-  - `main.cpp` (C++) — the esp_matter runtime: node + on/off-light endpoint +
+  - `main.cpp` (C++): the esp_matter runtime: node + on/off-light endpoint +
     `esp_matter::start()`, the commissioning event callback, and the C-linkage
     `mt_matter_*` bridge into CHIP/esp_matter.
-  - `mt_at.c` (C) — the `AT+MT` command handlers on `at_core`.
-  - `mt_matter.h` / `mt_at.h` — C-linkage bridges so C (handlers) and C++
+  - `mt_at.c` (C): the `AT+MT` command handlers on `at_core`.
+  - `mt_matter.h` / `mt_at.h`: C-linkage bridges so C (handlers) and C++
     (esp_matter) call each other without name-mangling.
 
 ## 3. Transport decision: Matter-over-WiFi (not Thread) for v1
@@ -339,7 +339,7 @@ generated `Attributes.h`, which pulls in that cluster's `ClusterId.h`).
 ## 6. Toolchain
 
 - **ESP-IDF v5.4.1** + **esp-matter release/v1.5** (esp-matter's validated IDF
-  for C6). This is *separate* from the ESP-NOW firmware's IDF v5.5.4 — esp-matter
+  for C6). This is *separate* from the ESP-NOW firmware's IDF v5.5.4: esp-matter
   does not build on 5.5.4 (fails at `chip_gn`). The two firmwares therefore build
   against different IDFs; fine, since they are separate images. `at_core` compiles
   cleanly under both.

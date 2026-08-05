@@ -750,7 +750,7 @@ Example, a TemperatureLevel cabinet on endpoint 4:
 ```
 AT+MTTEMPLEVELS=4,"Low","Medium","High"  -> OK
 AT+MTTEMPLEVELS=4,"Wine, red","Wine, white"  -> OK   (commas inside labels)
-AT+MTTEMPLEVELS=4                        -> ERROR    (wrong command form)
+AT+MTTEMPLEVELS=4                        -> +MTERR:1 (no labels)
 AT+MTTEMPLEVELS=4,Low                    -> +MTERR:1 (missing quotes)
 AT+MTTEMPLEVELS=4,"Low","Lo\"w"          -> +MTERR:1 (quote inside a label)
 AT+MTTEMPLEVELS=9,"Low"                  -> +MTERR:2 (no endpoint 9)
