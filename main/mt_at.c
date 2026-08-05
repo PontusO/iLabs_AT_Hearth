@@ -447,8 +447,18 @@ static int cmd_mtepclear(at_type_t type, char *args)
 }
 
 /*
- * AT+MTEP?            -> +MTEP:<index>,<endpoint_id>,<device_type> per endpoint
- * AT+MTEP=<devtype>   -> append one endpoint to the staged composition
+ * AT+MTEP?                    -> +MTEP:<index>,<endpoint_id>,<device_type>[,<variant>]
+ *                                per endpoint; the 4th field appears only
+ *                                when the variant is nonzero, so an existing
+ *                                host that has never seen a variant reads
+ *                                byte-identical output.
+ * AT+MTEP=<devtype>[,<variant>] -> append one endpoint to the staged
+ *                                composition. <variant> defaults to 0 and
+ *                                must be legal for <devtype>
+ *                                (mt_devtype_variant_ok()); an unknown
+ *                                <devtype> answers +MTERR:6, a known
+ *                                <devtype> with an illegal <variant>
+ *                                answers +MTERR:1.
  *
  * The query always reports the LIVE composition, never the staged one.
  */
@@ -459,8 +469,14 @@ static int cmd_mtep(at_type_t type, char *args)
         for (uint16_t i = 0; i < n; i++) {
             uint32_t devtype;
             uint16_t ep_id;
-            if (mt_matter_endpoint_info(i, &devtype, &ep_id) == 0) {
-                at_uart_write_line("+MTEP:%u,%u,0x%04lX", i, ep_id, (unsigned long)devtype);
+            uint8_t  variant;
+            if (mt_matter_endpoint_info(i, &devtype, &ep_id, &variant) == 0) {
+                if (variant != 0) {
+                    at_uart_write_line("+MTEP:%u,%u,0x%04lX,%u", i, ep_id,
+                                       (unsigned long)devtype, (unsigned)variant);
+                } else {
+                    at_uart_write_line("+MTEP:%u,%u,0x%04lX", i, ep_id, (unsigned long)devtype);
+                }
             }
         }
         return AT_R_OK;
@@ -476,14 +492,29 @@ static int cmd_mtep(at_type_t type, char *args)
         return MT_ERR_COMP_REJECT;
     }
 
+    char *f[2];
+    int n = at_split_args(args, f, 2);
+    if (n < 1) {
+        return MT_ERR_BAD_PARAM;
+    }
+
     unsigned long devtype;
-    if (!parse_u(args, &devtype)) {
+    if (!parse_u(f[0], &devtype)) {
         return MT_ERR_BAD_PARAM;
     }
     if (!mt_devtype_is_known((uint32_t)devtype)) {
         return MT_ERR_DEVTYPE;
     }
 
+    unsigned long variant = 0;
+    if (n == 2 && !parse_u(f[1], &variant)) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (variant > 0xFF || !mt_devtype_variant_ok((uint32_t)devtype, (uint8_t)variant)) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    s_staged.variant[s_staged.count] = (uint8_t)variant;
     s_staged.devtype[s_staged.count++] = (uint32_t)devtype;
     return AT_R_OK;
 }

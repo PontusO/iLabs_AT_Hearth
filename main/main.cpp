@@ -558,6 +558,7 @@ extern "C" int mt_matter_net_info(int *transport, int *enabled, int *connected)
 /* The live composition, filled in by the boot rebuild in app_main. */
 static uint32_t s_live_devtype[MT_COMP_MAX_ENDPOINTS];
 static uint16_t s_live_ep_id[MT_COMP_MAX_ENDPOINTS];
+static uint8_t  s_live_variant[MT_COMP_MAX_ENDPOINTS];
 static uint16_t s_live_count = 0;
 
 extern "C" uint16_t mt_matter_endpoint_count(void)
@@ -565,23 +566,25 @@ extern "C" uint16_t mt_matter_endpoint_count(void)
     return s_live_count;
 }
 
-extern "C" int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id)
+extern "C" int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id, uint8_t *variant)
 {
-    if (index >= s_live_count || !devtype || !ep_id) {
+    if (index >= s_live_count || !devtype || !ep_id || !variant) {
         return -1;
     }
     *devtype = s_live_devtype[index];
     *ep_id   = s_live_ep_id[index];
+    *variant = s_live_variant[index];
     return 0;
 }
 
-extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id)
+extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant)
 {
     if (s_live_count >= MT_COMP_MAX_ENDPOINTS) {
         return;
     }
     s_live_devtype[s_live_count] = devtype;
     s_live_ep_id[s_live_count]   = ep_id;
+    s_live_variant[s_live_count] = variant;
     s_live_count++;
 }
 
@@ -878,7 +881,7 @@ extern "C" void app_main(void)
 
     for (uint16_t i = 0; i < comp.count; i++) {
         uint16_t ep_id = 0;
-        if (mt_devtype_create(comp.devtype[i], &ep_id) != 0) {
+        if (mt_devtype_create(comp.devtype[i], comp.variant[i], &ep_id) != 0) {
             /*
              * Abort the whole rebuild rather than skipping the failed entry.
              * endpoint::create() increments the id counter only after every
@@ -891,7 +894,7 @@ extern "C" void app_main(void)
             comp.count = 0;
             break;
         }
-        mt_matter_record_endpoint(comp.devtype[i], ep_id);
+        mt_matter_record_endpoint(comp.devtype[i], ep_id, comp.variant[i]);
     }
 
     ESP_LOGI(TAG, "composition rebuilt: %u endpoint(s)", mt_matter_endpoint_count());

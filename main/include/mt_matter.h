@@ -75,13 +75,13 @@ uint16_t mt_matter_endpoint_count(void);
 
 /*
  * Describe the index'th live endpoint in creation order. Writes its Matter
- * device type ID and assigned endpoint ID. Returns 0 on success, -1 when
- * index is out of range.
+ * device type ID, assigned endpoint ID and composition variant. Returns 0 on
+ * success, -1 when index is out of range.
  */
-int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id);
+int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id, uint8_t *variant);
 
 /* Record an endpoint in the live table as the boot rebuild creates it. */
-void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id);
+void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant);
 
 /*
  * Why an attribute access failed. The AT layer maps these onto +MTERR codes;
