@@ -495,6 +495,134 @@ sees `CurrentHue` and `CurrentSaturation` alongside XY and mireds on the
 same endpoint, all three colour representations live at once, with
 `AT+MTATTR` reaching whichever one a controller actually wrote.
 
+## 8.3 Temperature Controlled Cabinet: variants, the fifth trap, and the level delegate (2026-08-05)
+
+Design record: `docs/superpowers/specs/2026-08-05-cabinet-templevels-design.md`.
+Completes the 20-of-20 upstream device type set. Three firmware changes
+landed across this round: the composition blob grew a variant byte (commit
+`3c2882a`), the cabinet's two variants and `AT+MTEP`'s variant grammar landed
+together (commit `d9e7ba6`), and the level-label delegate plus
+`AT+MTTEMPLEVELS` closed it out. `AT_MT_SPEC.md` §3.9 and §3.16 are the
+host-facing contract; this section is why it is shaped the way it is.
+
+**Why a variant byte at all, rather than a second device type ID.** The
+cabinet's two Matter personalities, TemperatureNumber and TemperatureLevel,
+are not two device types in the Matter sense: both build the same
+`temperature_controlled_cabinet` device type ID (`0x0071`) with the same
+`TemperatureControl` cluster, differing only in which mutually-exclusive
+feature bit that cluster carries. Giving them separate rows in
+`mt_devtypes.cpp` would have meant inventing IDs Matter does not define. A
+per-endpoint variant byte generalises past this one case: any future device
+type that needs a build-time fork of its own cluster configuration gets one
+for free, at the cost of one byte per endpoint in the composition.
+
+**The composition blob format, v2.** `mt_composition.h`'s wire format grew a
+version discriminator so v1 blobs already on a device's NVS keep decoding:
+
+- v1 (legacy, decode-only): `u16 count`, then `count * u32` device type IDs,
+  no version byte. Every legal v1 composition has `0..16` endpoints
+  (`MT_COMP_MAX_ENDPOINTS`), so byte 0 (the low byte of `count`) is always
+  `<= 16`. That is the fact that makes `0xFF` safe as an unambiguous v2
+  sentinel: no legal v1 blob can ever start with it.
+- v2 (current, encode and decode): sentinel byte `0xFF`, then version byte
+  `0x02`, then `u16 count`, then per entry a `u32` device type ID followed by
+  one `u8` variant. `mt_comp_encode()` always writes v2; `mt_comp_decode()`
+  dispatches on byte 0 and accepts both, filling variant `0` for every entry
+  of a v1 blob, since a device with no variant ever stored has none to
+  recover. Blob max: `2 + 2 + 5 * MT_COMP_MAX_ENDPOINTS` = 84 bytes.
+- No in-place migration. A stored v1 blob decodes fine (every variant reads
+  as `0`, the only value that existed before this round) and is not rewritten
+  until the next `AT+MTEPAPPLY`, at which point `mt_comp_encode()`'s
+  always-v2 policy upgrades it as a side effect of the ordinary save path.
+
+**`AT+MTEP=<devtype>[,<variant>]` grammar.** `<variant>` defaults to `0`,
+which is legal for every device type that existed before this round (their
+`max_variant` is `0`), so an existing host's `AT+MTEP=<devtype>` with no
+second argument is unaffected. A variant that fails to parse or exceeds the
+device type's `max_variant` answers `+MTERR:1`, the same code as any other
+out-of-range parameter; an unknown device type ID still answers `+MTERR:6`
+regardless of what follows it, checked first. `AT+MTEP?`'s fourth field
+(`<variant>`) is printed only when nonzero, not as an always-present field
+that happens to read `0`: an empty trailing field would still change the wire
+bytes an existing host parses, and byte-identical output for every
+zero-variant composition (which is every composition that predates this
+round) was the requirement, not merely equivalent-when-parsed output.
+
+**The fifth abort trap.** `window_covering`, `occupancy_sensing`,
+`thermostat` and `generic_switch` were the first four (§8.2); the cabinet's
+`TemperatureControl` cluster is the fifth, and shares `generic_switch`'s
+macro rather than the other three's:
+
+```cpp
+        // check against O.a feature conformance for TN, TL
+        VALIDATE_FEATURES_EXACT_ONE("TemperatureNumber,TemperatureLevel", feature::temperature_number::get_id(),
+                                    feature::temperature_level::get_id());
+```
+
+(`esp_matter_cluster.cpp:2849-2850`, `namespace temperature_control { cluster_t
+*create(...) }`.) TemperatureNumber and TemperatureLevel are mutually
+exclusive and each individually optional in the Matter spec, so a
+default-constructed `config_t` with `feature_flags = 0` aborts cluster
+creation exactly as a default-constructed thermostat or window covering does,
+and two bits set would abort it too. `mk_temperature_controlled_cabinet()`
+(`mt_devtypes.cpp`) therefore branches on the composition variant with an
+if/else, never two independent `if`s, so the thunk can never construct the
+zero-bits or both-bits configuration CHIP rejects: variant `0` sets
+`temperature_number::get_id()`, variant `1` sets
+`temperature_level::get_id()`, and nothing else touches `feature_flags` for
+this cluster.
+
+**The level delegate.** `SupportedTemperatureLevels` is not an ordinary
+attribute. `attribute::create_supported_temperature_levels()`
+(`esp_matter_attribute.cpp`) marks it `ATTRIBUTE_FLAG_MANAGED_INTERNALLY`,
+which only makes `esp_matter::attribute::get()` find it for a presence check;
+the list content itself is served by CHIP's own
+`TemperatureControlAttrAccess` (`temperature-control-server.cpp`), an
+`AttributeAccessInterface` that queries a single, globally registered
+`SupportedTemperatureLevelsIteratorDelegate`
+(`supported-temperature-levels-manager.h`):
+
+```cpp
+    virtual uint8_t Size() = 0;
+    virtual CHIP_ERROR Next(MutableCharSpan & item) = 0;
+```
+
+plus a non-virtual `Reset(EndpointId endpoint)` on the base class that sets
+the protected `mEndpoint`/`mIndex` a derived class's `Size()`/`Next()` read.
+esp-matter ships no default implementation of this interface; every app in
+the vendored connectedhomeip tree that uses the TemperatureControl cluster's
+Level feature (refrigerator, chef, all-clusters) supplies its own, and this
+firmware's `HearthTempLevelsDelegate` (`main.cpp`) follows the same shape as
+the chef example's `AppSupportedTemperatureLevelsDelegate`: one instance,
+registered once via `SetInstance()` before `esp_matter::start()`, backed by a
+small per-endpoint store (`s_temp_levels`, `MT_COMP_MAX_ENDPOINTS` slots of up
+to `MT_TEMP_LEVEL_MAX_COUNT` labels each) that `Size()`/`Next()` linear-scan
+for the entry matching `mEndpoint`.
+
+`AT+MTTEMPLEVELS` is the only way to populate that store: the bridge,
+`mt_matter_temp_levels_set()`, validates endpoint, cluster and attribute
+presence the same three-level way `mt_matter_attr_read()`/`_write()` do
+(`MT_ATTR_ERR_ENDPOINT`/`_CLUSTER`/`_ATTRIBUTE`), copies the labels in under
+`ChipStackLock`, and then calls
+`MatterReportingAttributeChangeCallback(ep, TemperatureControl::Id,
+SupportedTemperatureLevels::Id)` (`app/reporting/reporting.h`) to mark the
+attribute dirty. This is the general-purpose reporting hook every cluster
+server in the SDK that mutates delegate-served state calls afterward (for
+example `service-area-server.cpp`'s `MatterReportingAttributeChangeCallback`
+calls after its own delegate mutations); there is no `esp_matter::attribute`
+equivalent, because `esp_matter::attribute::update()` only knows how to push
+its own internally-managed union value, and this attribute's real content
+never lives there.
+
+**Labels are not persisted, on purpose**, unlike the composition. The
+composition is a product definition (survives `AT+MTRESET`, only
+`AT+MTFRESET` erases it, §8.2/`AT_MT_SPEC.md` §3.10); the label list is
+current display text, the same category as every other attribute's runtime
+value, which a host is expected to (re-)send after `+MTREADY`. Persisting it
+would have meant inventing a second NVS-survives-reset story for one
+attribute where every other attribute already has a working one: the host
+resends its state at startup.
+
 ## 9. Decision log (summary)
 
 | Decision | Choice | Why |

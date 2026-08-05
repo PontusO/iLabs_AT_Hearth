@@ -11,6 +11,7 @@
  */
 
 #include <inttypes.h>
+#include <cstring>
 #include <stdio.h>
 
 #include <esp_err.h>
@@ -22,6 +23,12 @@
 #include <app/server/Server.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <setup_payload/OnboardingCodesUtil.h>
+
+/* C3: the SupportedTemperatureLevels delegate interface and the reporting
+ * call that marks its list dirty after a host writes new labels. */
+#include <app/clusters/temperature-control-server/supported-temperature-levels-manager.h>
+#include <app/reporting/reporting.h>
+#include <lib/support/Span.h>
 
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
@@ -680,6 +687,165 @@ extern "C" int mt_matter_switch_click(uint16_t ep)
     return (err == ESP_OK) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }
 
+/*
+ * ---- temperature level labels (C3) ----------------------------------------
+ *
+ * esp_matter has no delegate of its own for the TemperatureControl cluster's
+ * SupportedTemperatureLevels attribute: it is ATTRIBUTE_FLAG_MANAGED_INTERNALLY
+ * (attribute::create_supported_temperature_levels(), esp_matter_attribute.cpp),
+ * which only makes esp_matter::attribute::get() find it for a presence check;
+ * the actual list content is served by CHIP itself, through an
+ * AttributeAccessInterface (TemperatureControlAttrAccess in
+ * temperature-control-server.cpp) that queries a globally registered
+ * SupportedTemperatureLevelsIteratorDelegate. esp-matter ships no default
+ * implementation, so this firmware must supply one, same as the refrigerator
+ * and chef example apps in the vendored connectedhomeip tree do.
+ *
+ * The interface (connectedhomeip src/app/clusters/temperature-control-server/
+ * supported-temperature-levels-manager.h):
+ *
+ *   virtual uint8_t Size() = 0;
+ *   virtual CHIP_ERROR Next(MutableCharSpan & item) = 0;
+ *
+ * plus a non-virtual Reset(EndpointId endpoint) on the base class that sets
+ * the protected mEndpoint/mIndex this override reads. One instance serves
+ * every endpoint: TemperatureControlAttrAccess::Read() calls Reset(endpoint)
+ * then Size()/repeated Next() to encode the list for whichever endpoint a
+ * controller just read, so Size()/Next() below scan the per-endpoint store
+ * for the entry matching mEndpoint, the same pattern
+ * chef/common/clusters/temperature-control/static-supported-temperature-
+ * levels.cpp's AppSupportedTemperatureLevelsDelegate uses.
+ */
+
+/*
+ * Label store, one slot per live endpoint. Filled by AT+MTTEMPLEVELS
+ * (mt_matter_temp_levels_set() below); starts empty every boot, deliberately
+ * not persisted (mt_matter.h). "used" rather than a sentinel endpoint id
+ * because 0 is a legal-looking value to compare against by accident.
+ */
+struct mt_temp_level_entry_t {
+    bool    used;
+    uint16_t ep;
+    uint8_t  count;
+    char     labels[MT_TEMP_LEVEL_MAX_COUNT][MT_TEMP_LEVEL_MAX_LEN + 1];
+};
+static mt_temp_level_entry_t s_temp_levels[MT_COMP_MAX_ENDPOINTS];
+
+namespace {
+class HearthTempLevelsDelegate : public chip::app::Clusters::TemperatureControl::SupportedTemperatureLevelsIteratorDelegate {
+public:
+    uint8_t Size() override
+    {
+        for (auto &e : s_temp_levels) {
+            if (e.used && e.ep == mEndpoint) {
+                return e.count;
+            }
+        }
+        return 0;
+    }
+
+    CHIP_ERROR Next(chip::MutableCharSpan &item) override
+    {
+        for (auto &e : s_temp_levels) {
+            if (e.used && e.ep == mEndpoint) {
+                if (mIndex >= e.count) {
+                    return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+                }
+                chip::CharSpan label(e.labels[mIndex], strlen(e.labels[mIndex]));
+                CHIP_ERROR err = chip::CopyCharSpanToMutableCharSpan(label, item);
+                if (err != CHIP_NO_ERROR) {
+                    return err;
+                }
+                mIndex++;
+                return CHIP_NO_ERROR;
+            }
+        }
+        return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+    }
+};
+}  // namespace
+
+static HearthTempLevelsDelegate s_temp_levels_delegate;
+
+/*
+ * The bridge for AT+MTTEMPLEVELS. Label content (1..MT_TEMP_LEVEL_MAX_COUNT
+ * labels, 1..MT_TEMP_LEVEL_MAX_LEN printable-ASCII bytes each, no double
+ * quote) is validated by the handler in mt_at.c before this is ever called;
+ * the bounds re-checked here are defensive, not the primary gate.
+ */
+extern "C" int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count)
+{
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::TemperatureControl::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (esp_matter::attribute::get(ep, chip::app::Clusters::TemperatureControl::Id,
+                                   chip::app::Clusters::TemperatureControl::Attributes::SupportedTemperatureLevels::Id)
+        == nullptr) {
+        /* Cluster exists but this is a TemperatureNumber-variant cabinet:
+         * create_supported_temperature_levels() only runs on the
+         * TemperatureLevel branch of feature::temperature_level::add()
+         * (esp_matter_feature.cpp). */
+        return MT_ATTR_ERR_ATTRIBUTE;
+    }
+    if (count < 1 || count > MT_TEMP_LEVEL_MAX_COUNT) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_temp_level_entry_t *slot = nullptr;
+    for (auto &e : s_temp_levels) {
+        if (e.used && e.ep == ep) {
+            slot = &e;
+            break;
+        }
+    }
+    if (!slot) {
+        for (auto &e : s_temp_levels) {
+            if (!e.used) {
+                slot = &e;
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        /* Cannot happen in practice: the store has one slot per
+         * MT_COMP_MAX_ENDPOINTS, the same cap the composition itself
+         * enforces, so there is always a free or matching slot for a live
+         * endpoint. Kept as a defensive return rather than an assert. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(labels[i]);
+        if (len < 1 || len > MT_TEMP_LEVEL_MAX_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        memcpy(slot->labels[i], labels[i], len + 1);
+    }
+    slot->ep    = ep;
+    slot->count = count;
+    slot->used  = true;
+
+    /*
+     * Mark the attribute dirty so an active subscription sees the new list.
+     * MatterReportingAttributeChangeCallback(endpoint, clusterId, attributeId)
+     * (src/app/reporting/reporting.h:34) is what every cluster server in the
+     * SDK calls after mutating state served through a delegate or
+     * AttributeAccessInterface rather than esp_matter's own attribute store
+     * (e.g. service-area-server.cpp:418); there is no esp_matter equivalent
+     * here, because esp_matter::attribute::update() only knows how to push
+     * its own internally-managed union value, and this attribute's real
+     * content lives in s_temp_levels, read out through the delegate above.
+     */
+    MatterReportingAttributeChangeCallback(
+        ep, chip::app::Clusters::TemperatureControl::Id,
+        chip::app::Clusters::TemperatureControl::Attributes::SupportedTemperatureLevels::Id);
+    return MT_ATTR_OK;
+}
+
 /* --------------------------------------------------------------------------- */
 
 /*
@@ -936,6 +1102,16 @@ extern "C" void app_main(void)
         set_openthread_platform_config(&ot_config);
     }
 #endif
+
+    /*
+     * Register the SupportedTemperatureLevels delegate once, before start().
+     * CHIP's temperature-control-server queries this global singleton for
+     * every endpoint (TemperatureControlAttrAccess::Read(), see the delegate
+     * class above); a TemperatureLevel-variant cabinet in the composition
+     * just rebuilt would otherwise serve an empty list forever, since no
+     * later CHIP event goes back and re-checks whether an instance exists.
+     */
+    chip::app::Clusters::TemperatureControl::SetInstance(&s_temp_levels_delegate);
 
     /* Bring up the Matter stack (BLE commissioning + WiFi or Thread transport). */
     esp_err_t err = esp_matter::start(app_event_cb);

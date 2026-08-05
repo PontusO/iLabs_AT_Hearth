@@ -103,7 +103,7 @@ subscription (`AT+MTEVT`), and the transport query (`AT+MTNET?`).
 
 ## Supported device types
 
-`AT+MTEP=<id>` accepts these 18 device type IDs (firmware 0.3.1); anything
+`AT+MTEP=<id>` accepts these 19 device type IDs (firmware 0.3.2); anything
 else answers `+MTERR:6`. The table is `main/mt_devtypes.cpp`'s and grows by
 rows; IDs are read from esp-matter, never transcribed.
 
@@ -118,18 +118,24 @@ rows; IDs are read from esp-matter, never transcribed.
 | 0x002B | Fan | | 0x0107 | Occupancy Sensor |
 | 0x0202 | Window Covering | | 0x0015 | Contact Sensor |
 | 0x0301 | Thermostat | | 0x000F | Generic Switch |
+| 0x0071 | Temperature Controlled Cabinet | | | |
 
 The extended color light carries a hue/saturation addition beyond stock
 esp-matter, so hosts see `CurrentHue`/`CurrentSaturation` alongside XY and
 mireds. The generic switch has no writable attribute (`CurrentPosition` and
 `NumberOfPositions` are both read-only, though a host can still read
 `CurrentPosition` over `AT+MTATTR` like any other attribute); it is driven
-instead by `AT+MTSWITCH`, which raises a Switch cluster event. Deliberately
-absent, with reasons recorded in the design specs: Temperature Controlled
-Cabinet (needs the reserved `AT+MTATTRX`), and Color Light (no distinct
-device type ID exists; the host library's `MatterColorLight` rides the
-`0x010D` row). See `docs/AT_MT_SPEC.md` section 3.9 for the authoritative
-table.
+instead by `AT+MTSWITCH`, which raises a Switch cluster event. The
+temperature controlled cabinet is the first device type with a meaningful
+`AT+MTEP` variant: `AT+MTEP=0x0071` (variant 0) builds a numeric-setpoint
+cabinet reachable entirely over `AT+MTATTR`; `AT+MTEP=0x0071,1` builds a
+level-based one instead, whose `SupportedTemperatureLevels` label list is set
+with the dedicated `AT+MTTEMPLEVELS` command rather than `AT+MTATTR`, since it
+is a string list served by a CHIP delegate, not an ordinary attribute.
+Deliberately absent, with reasons recorded in the design specs: Color Light
+(no distinct device type ID exists; the host library's `MatterColorLight`
+rides the `0x010D` row). See `docs/AT_MT_SPEC.md` section 3.9 for the
+authoritative table.
 
 ## Design
 

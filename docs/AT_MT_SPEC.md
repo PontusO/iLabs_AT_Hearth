@@ -56,8 +56,9 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTATTR=<ep>,<cl>,<attr>` | set (3) | `+MTATTR:<ep>,<cl>,<attr>,<val>` → `OK` (read) |
 | `AT+MTATTR=<ep>,<cl>,<attr>,<val>` | set (4) | `OK` (write) |
 | `AT+MTSWITCH=<ep>[,<action>]` | set | `OK` (switch event emitted) |
-| `AT+MTEP?` | query | `+MTEP:<idx>,<ep_id>,<devtype>` per endpoint → `OK` |
-| `AT+MTEP=<devtype>` | set | `OK` (append to the staged composition) |
+| `AT+MTTEMPLEVELS=<ep>,"<l1>"[,...]` | set | `OK` (temperature level labels stored) |
+| `AT+MTEP?` | query | `+MTEP:<idx>,<ep_id>,<devtype>[,<variant>]` per endpoint → `OK` |
+| `AT+MTEP=<devtype>[,<variant>]` | set | `OK` (append to the staged composition) |
 | `AT+MTEPCLEAR` | exec | `OK` (begin staging an empty composition) |
 | `AT+MTEPAPPLY` | exec | `OK` → persist + reboot |
 | `AT+MTEVT?` | query | `+MTEVTMASK:<hex32>` → `OK` |
@@ -240,13 +241,22 @@ persisted in NVS and rebuilt by the firmware at every boot, so the device
 rejoins its fabric after a power cut without host involvement.
 
 - `AT+MTEP?` lists the **live** composition, one line per endpoint:
-  `+MTEP:<index>,<endpoint_id>,<device_type>`. Zero lines means the device is
-  unconfigured. It never reports a staged composition.
+  `+MTEP:<index>,<endpoint_id>,<device_type>[,<variant>]`. The fourth field
+  appears **only when the variant is nonzero**, so a host that has never seen
+  a variant reads byte-identical output to before this field existed. Zero
+  lines means the device is unconfigured. It never reports a staged
+  composition.
 - `AT+MTEPCLEAR` opens a staging session holding an empty composition.
-- `AT+MTEP=<device_type>` appends one endpoint. `<device_type>` is a standard
-  Matter device type ID, hex or decimal. Rejected with `+MTERR:10` outside a
-  staging session or past the 16-endpoint cap, and with `+MTERR:6` for a device
-  type this firmware does not implement. A rejected append consumes no slot.
+- `AT+MTEP=<device_type>[,<variant>]` appends one endpoint. `<device_type>` is
+  a standard Matter device type ID, hex or decimal. `<variant>` is an optional
+  per-device-type sub-selector, decimal, defaulting to `0`; every device type
+  in the table below has a `<variant>` range of `0` only except the
+  Temperature Controlled Cabinet, where `0` and `1` pick two structurally
+  different clusters (see its row's note). Rejected with `+MTERR:10` outside a
+  staging session or past the 16-endpoint cap, with `+MTERR:6` for a device
+  type this firmware does not implement, and with `+MTERR:1` for a `<variant>`
+  the device type does not define (including a value that does not parse as
+  an unsigned integer). A rejected append consumes no slot.
 - `AT+MTEPAPPLY` persists the staged composition, emits `OK`, and reboots. The
   host resynchronizes on the next `+MTREADY`.
 
@@ -287,6 +297,7 @@ device types are added.
 | `0x0301` | Thermostat |
 | `0x010D` | Extended Colour Light |
 | `0x000F` | Generic Switch |
+| `0x0071` | Temperature Controlled Cabinet |
 
 `0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
 bolts the HueSaturation feature onto the standard ColorControl configuration,
@@ -302,6 +313,18 @@ unconditionally creates `NumberOfPositions` (default `2`) and
 attribute; there is just nothing on this device type `AT+MTATTR` can write.
 The command that drives it is `AT+MTSWITCH` (§3.15), which raises a Switch
 cluster event rather than writing state.
+
+`0x0071` Temperature Controlled Cabinet is the first device type with a
+non-trivial variant. `AT+MTEP=0x0071` (variant `0`) builds a TemperatureNumber
+cabinet: `TemperatureSetpoint`, `MinTemperature`, `MaxTemperature` and `Step`
+are ordinary attributes reachable over `AT+MTATTR`, like any other numeric
+device type. `AT+MTEP=0x0071,1` builds a TemperatureLevel cabinet instead: the
+device exposes `SelectedTemperatureLevel` (an ordinary `u8`, also
+`AT+MTATTR`-reachable) alongside `SupportedTemperatureLevels`, a list of
+strings that is not an `AT+MTATTR` attribute at all. Its content is set with
+`AT+MTTEMPLEVELS` (§3.16). The two variants are mutually exclusive at the CHIP
+level: a cabinet endpoint always has exactly one of them, never both and never
+neither.
 
 Example:
 ```
@@ -673,6 +696,66 @@ AT+MTSWITCH=3     -> OK         (InitialPress, position 1)
 AT+MTSWITCH=3,0   -> OK         (equivalent, explicit default)
 AT+MTSWITCH=3,1   -> +MTERR:1   (reserved action)
 AT+MTSWITCH=9     -> +MTERR:2   (no endpoint 9)
+```
+
+### 3.16 `AT+MTTEMPLEVELS`: temperature level labels
+
+Stores the label list backing a TemperatureLevel-variant cabinet's
+`SupportedTemperatureLevels` attribute (§3.9, `AT+MTEP=0x0071,1`). Unlike
+every other attribute in this firmware, `SupportedTemperatureLevels` is a list
+of strings served by CHIP's own delegate mechanism, not by esp_matter's
+attribute store, so it has no `AT+MTATTR` path at all: this is the only way a
+host can set it.
+
+```
+AT+MTTEMPLEVELS=<ep>,"<label1>"[,"<label2>",...,"<labelN>"]  ->  OK
+```
+
+- `<ep>`: the endpoint id, a bare unsigned token (hex or decimal) ending at
+  the first comma.
+- `<label1>..<labelN>`: `1..16` double-quoted labels. Each label is `1..16`
+  bytes of printable ASCII (`0x20`..`0x7E`) and may not contain a `"`
+  character. A comma **inside** a quoted label is legal and is part of the
+  label's text; a comma **between** labels separates them. Violating any of
+  these (wrong count, empty or oversized label, non-printable byte, a bare
+  label with no quotes, an unterminated quote, or anything trailing after a
+  label's closing quote other than a comma or end of line) answers
+  `+MTERR:1`.
+
+**Set-only.** `AT+MTTEMPLEVELS?` or a bare `AT+MTTEMPLEVELS` is the wrong
+command form and answers a plain `ERROR` (§5), the same convention
+`AT+MTSWITCH` (§3.15) follows.
+
+**Lookup errors follow the established division.** `+MTERR:2` unknown
+endpoint; `+MTERR:3` the endpoint has no `TemperatureControl` cluster;
+`+MTERR:4` the cluster is present but is a TemperatureNumber-variant cabinet,
+so there is no `SupportedTemperatureLevels` attribute to set. A bare `ERROR`
+covers an unclassified runtime failure, the same as `AT+MTATTR` and
+`AT+MTSWITCH`.
+
+**On success the stored labels replace whatever was there before**, and the
+attribute is reported dirty so an active subscription sees the new list on
+its next report. There is no append or partial-update form: each
+`AT+MTTEMPLEVELS` call is a full replacement of the label list.
+
+**Labels are not persisted.** The store lives in RAM and starts empty every
+boot, the same policy the AT link rate (§3.13) and every attribute's runtime
+value follow: `SupportedTemperatureLevels` is current display text a host
+sets after `+MTREADY`, not a product definition like the endpoint composition
+(§3.9), which does survive a reboot. A `SupportedTemperatureLevels` read
+before the host has sent `AT+MTTEMPLEVELS` for that endpoint returns an empty
+list.
+
+Example, a TemperatureLevel cabinet on endpoint 4:
+```
+AT+MTTEMPLEVELS=4,"Low","Medium","High"  -> OK
+AT+MTTEMPLEVELS=4,"Wine, red","Wine, white"  -> OK   (commas inside labels)
+AT+MTTEMPLEVELS=4                        -> ERROR    (wrong command form)
+AT+MTTEMPLEVELS=4,Low                    -> +MTERR:1 (missing quotes)
+AT+MTTEMPLEVELS=4,"Low","Lo\"w"          -> +MTERR:1 (quote inside a label)
+AT+MTTEMPLEVELS=9,"Low"                  -> +MTERR:2 (no endpoint 9)
+AT+MTTEMPLEVELS=1,"Low"                  -> +MTERR:3 (ep 1 has no TemperatureControl cluster)
+AT+MTTEMPLEVELS=4,"Low"                  -> +MTERR:4 (ep 4 built as variant 0, TemperatureNumber)
 ```
 
 ## 4. Unsolicited result codes (URCs)
