@@ -710,8 +710,8 @@ extern "C" int mt_matter_switch_click(uint16_t ep)
  * plus a non-virtual Reset(EndpointId endpoint) on the base class that sets
  * the protected mEndpoint/mIndex this override reads. One instance serves
  * every endpoint: TemperatureControlAttrAccess::Read() calls Reset(endpoint)
- * then Size()/repeated Next() to encode the list for whichever endpoint a
- * controller just read, so Size()/Next() below scan the per-endpoint store
+ * then only Next() in a loop to encode the list for whichever endpoint a
+ * controller just read, so Next() below scans the per-endpoint store
  * for the entry matching mEndpoint, the same pattern
  * chef/common/clusters/temperature-control/static-supported-temperature-
  * levels.cpp's AppSupportedTemperatureLevelsDelegate uses.
