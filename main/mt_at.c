@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -328,6 +329,108 @@ static int cmd_mtswitch(at_type_t type, char *args)
     }
 
     int r = mt_matter_switch_click((uint16_t)ep);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
+/*
+ * AT+MTTEMPLEVELS=<ep>,"<label1>"[,"<label2>",...] -> store the label list
+ * backing a TemperatureLevel-variant cabinet's SupportedTemperatureLevels
+ * attribute. Set-only; the grammar's quoted, comma-separated label list is
+ * not at_split_args()'s job, since a comma inside a quoted label is legal
+ * and at_split_args() splits on every comma unconditionally. Parsed here
+ * instead, directly off the raw argument string, so at_core (shared with the
+ * ESP-NOW firmware) stays untouched.
+ *
+ * Grammar and content rules (violating any of these is +MTERR:1, decided
+ * here before mt_matter_temp_levels_set() is ever called):
+ *   - <ep>: a bare unsigned token, hex or decimal, up to the first comma.
+ *   - 1..MT_TEMP_LEVEL_MAX_COUNT labels, each double-quoted.
+ *   - each label 1..MT_TEMP_LEVEL_MAX_LEN bytes, printable ASCII
+ *     (0x20..0x7E) only.
+ *   - no double-quote character inside a label: since a label is scanned
+ *     up to its next raw '"', a quote inside the intended content always
+ *     closes the token early, leaving trailing bytes before the following
+ *     comma or end of string, which the "junk after the closing quote"
+ *     check below rejects.
+ */
+static int cmd_mttemplevels(at_type_t type, char *args)
+{
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (!args || *args == '\0') {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    char *comma = strchr(args, ',');
+    if (!comma) {
+        return MT_ERR_BAD_PARAM;
+    }
+    *comma = '\0';
+    char *p = comma + 1;
+
+    unsigned long ep;
+    if (!parse_u(args, &ep) || ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    const char *labels[MT_TEMP_LEVEL_MAX_COUNT];
+    char label_buf[MT_TEMP_LEVEL_MAX_COUNT][MT_TEMP_LEVEL_MAX_LEN + 1];
+    uint8_t count = 0;
+
+    while (*p != '\0') {
+        if (*p != '"') {
+            return MT_ERR_BAD_PARAM;
+        }
+        p++;
+        char *start = p;
+        while (*p != '"') {
+            if (*p == '\0') {
+                return MT_ERR_BAD_PARAM;  /* unterminated quote */
+            }
+            p++;
+        }
+        size_t len = (size_t)(p - start);
+        p++;  /* past the closing quote */
+
+        if (len < 1 || len > MT_TEMP_LEVEL_MAX_LEN) {
+            return MT_ERR_BAD_PARAM;
+        }
+        if (count >= MT_TEMP_LEVEL_MAX_COUNT) {
+            return MT_ERR_BAD_PARAM;
+        }
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)start[i];
+            if (c < 0x20 || c > 0x7E) {
+                return MT_ERR_BAD_PARAM;
+            }
+        }
+        memcpy(label_buf[count], start, len);
+        label_buf[count][len] = '\0';
+        labels[count] = label_buf[count];
+        count++;
+
+        if (*p == ',') {
+            p++;
+            if (*p == '\0') {
+                return MT_ERR_BAD_PARAM;  /* trailing comma, no next label */
+            }
+            continue;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        return MT_ERR_BAD_PARAM;  /* junk after the closing quote */
+    }
+
+    if (count < 1) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    int r = mt_matter_temp_levels_set((uint16_t)ep, labels, count);
     if (r != MT_ATTR_OK) {
         return attr_err_to_mterr(r);
     }
@@ -693,6 +796,7 @@ static const at_command_t s_cmds[] = {
     { "MTFRESET",     cmd_mtfreset    },
     { "MTATTR",       cmd_mtattr      },
     { "MTSWITCH",     cmd_mtswitch    },
+    { "MTTEMPLEVELS", cmd_mttemplevels },
     { "MTEP",         cmd_mtep        },
     { "MTEPCLEAR",    cmd_mtepclear   },
     { "MTEPAPPLY",    cmd_mtepapply   },

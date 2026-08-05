@@ -119,6 +119,38 @@ int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long val,
  */
 int mt_matter_switch_click(uint16_t ep);
 
+/* ---- temperature level labels (C3) -------------------------------------- */
+
+/*
+ * Bounds for AT+MTTEMPLEVELS. Shared between the handler (mt_at.c, which
+ * enforces them before calling the bridge below) and the label store the
+ * bridge writes into (main.cpp), so the two cannot drift apart.
+ */
+#define MT_TEMP_LEVEL_MAX_COUNT 16  /* labels per endpoint, 1..this many  */
+#define MT_TEMP_LEVEL_MAX_LEN   16  /* bytes per label, excluding the NUL */
+
+/*
+ * AT+MTTEMPLEVELS: store the label list backing ep's TemperatureControl
+ * SupportedTemperatureLevels attribute (TemperatureLevel-variant cabinets
+ * only, composition variant 1; see mt_devtypes.cpp) and mark it dirty so an
+ * active subscription refreshes. labels[0..count-1] are NUL-terminated
+ * strings; the handler has already checked count and every label against
+ * MT_TEMP_LEVEL_MAX_COUNT/MT_TEMP_LEVEL_MAX_LEN, printable ASCII, and no
+ * double quote, so this bridge trusts them and only re-checks bounds
+ * defensively.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when ep has no TemperatureControl cluster,
+ * MT_ATTR_ERR_ATTRIBUTE when the cluster is present but is a
+ * TemperatureNumber-variant cabinet (no SupportedTemperatureLevels
+ * attribute), MT_ATTR_ERR_FAILED for an internal failure.
+ *
+ * Not persisted, deliberately: the store starts empty every boot and the
+ * host is expected to re-send the labels, the same contract as any other
+ * attribute state a host writes at startup.
+ */
+int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count);
+
 #ifdef __cplusplus
 }
 #endif
