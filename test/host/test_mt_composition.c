@@ -100,6 +100,24 @@ static void test_decode_rejects(void)
 
     check("decode rejects a zero-length buffer", mt_comp_decode(NULL, 0, &out) == -1);
 
+    /* v1: declares 2 endpoints but carries only 1 (regression coverage for
+     * decode_v1's exact-length check, mt_composition.c). */
+    const uint8_t v1_truncated[6] = { 0x02, 0x00, 0x00, 0x01, 0x00, 0x00 };
+    check("decode rejects a truncated v1 blob", mt_comp_decode(v1_truncated, 6, &out) == -1);
+
+    /* v1: declares 1 endpoint but carries 2. */
+    const uint8_t v1_trailing[10] = {
+        0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00
+    };
+    check("decode rejects trailing bytes after a v1 blob", mt_comp_decode(v1_trailing, 10, &out) == -1);
+
+    /* v1: byte0 = 0 (<= cap) but byte1 is nonzero, so the full u16 count is
+     * 256, over MT_COMP_MAX_ENDPOINTS. byte0 alone is not enough to reject
+     * before decode_v1 combines both bytes. */
+    const uint8_t v1_count_overflow[2] = { 0x00, 0x01 };
+    check("decode rejects a v1 count made oversize by a nonzero high byte",
+          mt_comp_decode(v1_count_overflow, 2, &out) == -1);
+
     /* v2: declares 2 endpoints but carries only 1 entry (header + 5 bytes,
      * needs header + 10). */
     const uint8_t truncated[9] = {
@@ -129,6 +147,22 @@ static void test_decode_rejects(void)
     const uint8_t short_v2[2] = { 0xFF, 0x02 };
     check("decode rejects a v2 blob too short for its own header",
           mt_comp_decode(short_v2, 2, &out) == -1);
+
+    /* byte0 in 17..0xFE is neither a legal v1 count (0..16) nor the v2
+     * sentinel (0xFF): the dispatch-ambiguity branch, mt_composition.c's
+     * final "return -1" in mt_comp_decode(). Exercise both ends of that
+     * range so it is not merely off-by-one lucky. */
+    const uint8_t ambiguous_low[2] = { 0x11, 0x00 };  /* 17 */
+    check("decode rejects a discriminator byte just above the v1 cap",
+          mt_comp_decode(ambiguous_low, 2, &out) == -1);
+
+    const uint8_t ambiguous_high[2] = { 0xC8, 0x00 }; /* 200 */
+    check("decode rejects a discriminator byte in the middle of the ambiguous range",
+          mt_comp_decode(ambiguous_high, 2, &out) == -1);
+
+    const uint8_t ambiguous_near_sentinel[2] = { 0xFE, 0x00 }; /* one below 0xFF */
+    check("decode rejects a discriminator byte just below the v2 sentinel",
+          mt_comp_decode(ambiguous_near_sentinel, 2, &out) == -1);
 }
 
 static void test_equal(void)
