@@ -15,31 +15,36 @@ int mt_comp_encode(const mt_composition_t *comp, uint8_t *buf, size_t buf_len)
         return -1;
     }
 
-    size_t need = 2u + 4u * (size_t)comp->count;
+    /* Always v2: sentinel + version + u16 count, then per entry a u32 id
+     * followed by a variant byte. */
+    size_t need = 4u + 5u * (size_t)comp->count;
     if (buf_len < need) {
         return -1;
     }
 
-    buf[0] = (uint8_t)(comp->count & 0xFF);
-    buf[1] = (uint8_t)((comp->count >> 8) & 0xFF);
+    buf[0] = MT_COMP_BLOB_V2_SENTINEL;
+    buf[1] = MT_COMP_BLOB_VERSION;
+    buf[2] = (uint8_t)(comp->count & 0xFF);
+    buf[3] = (uint8_t)((comp->count >> 8) & 0xFF);
 
     for (uint16_t i = 0; i < comp->count; i++) {
         uint32_t v = comp->devtype[i];
-        buf[2 + 4 * i + 0] = (uint8_t)(v & 0xFF);
-        buf[2 + 4 * i + 1] = (uint8_t)((v >> 8) & 0xFF);
-        buf[2 + 4 * i + 2] = (uint8_t)((v >> 16) & 0xFF);
-        buf[2 + 4 * i + 3] = (uint8_t)((v >> 24) & 0xFF);
+        size_t off = 4u + 5u * (size_t)i;
+        buf[off + 0] = (uint8_t)(v & 0xFF);
+        buf[off + 1] = (uint8_t)((v >> 8) & 0xFF);
+        buf[off + 2] = (uint8_t)((v >> 16) & 0xFF);
+        buf[off + 3] = (uint8_t)((v >> 24) & 0xFF);
+        buf[off + 4] = comp->variant[i];
     }
 
     return (int)need;
 }
 
-int mt_comp_decode(const uint8_t *buf, size_t len, mt_composition_t *out)
+/* Decode a v1 (legacy) blob: u16 count, then count * u32 device type IDs,
+ * no version byte, variants all zero. Caller has already confirmed byte0
+ * is a legal v1 discriminator (<= MT_COMP_MAX_ENDPOINTS). */
+static int decode_v1(const uint8_t *buf, size_t len, mt_composition_t *out)
 {
-    if (!buf || !out || len < 2u) {
-        return -1;
-    }
-
     uint16_t count = (uint16_t)(buf[0] | ((uint16_t)buf[1] << 8));
     if (count > MT_COMP_MAX_ENDPOINTS) {
         return -1;
@@ -61,9 +66,63 @@ int mt_comp_decode(const uint8_t *buf, size_t len, mt_composition_t *out)
                         | ((uint32_t)p[1] << 8)
                         | ((uint32_t)p[2] << 16)
                         | ((uint32_t)p[3] << 24);
+        /* variant already 0 from the memset above */
     }
 
     return 0;
+}
+
+/* Decode a v2 blob: sentinel already matched by the caller. */
+static int decode_v2(const uint8_t *buf, size_t len, mt_composition_t *out)
+{
+    if (len < 4u) {
+        return -1;
+    }
+    if (buf[1] != MT_COMP_BLOB_VERSION) {
+        return -1;
+    }
+
+    uint16_t count = (uint16_t)(buf[2] | ((uint16_t)buf[3] << 8));
+    if (count > MT_COMP_MAX_ENDPOINTS) {
+        return -1;
+    }
+
+    if (len != 4u + 5u * (size_t)count) {
+        return -1;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->count = count;
+
+    for (uint16_t i = 0; i < count; i++) {
+        const uint8_t *p = &buf[4 + 5 * i];
+        out->devtype[i] = (uint32_t)p[0]
+                        | ((uint32_t)p[1] << 8)
+                        | ((uint32_t)p[2] << 16)
+                        | ((uint32_t)p[3] << 24);
+        out->variant[i] = p[4];
+    }
+
+    return 0;
+}
+
+int mt_comp_decode(const uint8_t *buf, size_t len, mt_composition_t *out)
+{
+    if (!buf || !out || len < 2u) {
+        return -1;
+    }
+
+    if (buf[0] == MT_COMP_BLOB_V2_SENTINEL) {
+        return decode_v2(buf, len, out);
+    }
+
+    if (buf[0] <= MT_COMP_MAX_ENDPOINTS) {
+        return decode_v1(buf, len, out);
+    }
+
+    /* Neither a legal v1 count nor the v2 sentinel: not a blob this decoder
+     * has ever written or is willing to guess at. */
+    return -1;
 }
 
 bool mt_comp_equal(const mt_composition_t *a, const mt_composition_t *b)
@@ -73,6 +132,9 @@ bool mt_comp_equal(const mt_composition_t *a, const mt_composition_t *b)
     }
     for (uint16_t i = 0; i < a->count; i++) {
         if (a->devtype[i] != b->devtype[i]) {
+            return false;
+        }
+        if (a->variant[i] != b->variant[i]) {
             return false;
         }
     }
