@@ -95,9 +95,9 @@ CONFIG_MBEDTLS_HKDF_C=y
 CONFIG_LWIP_IPV6_NUM_ADDRESSES=6
 
 # Exclude unused clusters to optimize flash and memory usage. FAN_CONTROL,
-# OCCUPANCY_SENSING, THERMOSTAT, WINDOW_COVERING and SWITCH were excluded
-# here too until the device-type expansion (mt_devtypes.cpp) started
-# creating those clusters: excluded, cluster::create() links but the
+# OCCUPANCY_SENSING, THERMOSTAT, WINDOW_COVERING, SWITCH and TEMPERATURE_CONTROL
+# were excluded here too until the device-type expansion (mt_devtypes.cpp)
+# started creating those clusters: excluded, cluster::create() links but the
 # plugin-server init and SetDefaultDelegate symbols for that cluster are
 # absent from the chip component archive, and the final link fails with
 # "undefined reference to <Cluster>PluginServerInitCallback" /
@@ -177,7 +177,6 @@ CONFIG_SUPPORT_SERVICE_AREA_CLUSTER=n
 CONFIG_SUPPORT_SMOKE_CO_ALARM_CLUSTER=n
 CONFIG_SUPPORT_SOFTWARE_DIAGNOSTICS_CLUSTER=n
 CONFIG_SUPPORT_TARGET_NAVIGATOR_CLUSTER=n
-CONFIG_SUPPORT_TEMPERATURE_CONTROL_CLUSTER=n
 CONFIG_SUPPORT_THERMOSTAT_USER_INTERFACE_CONFIGURATION_CLUSTER=n
 CONFIG_SUPPORT_THREAD_BORDER_ROUTER_MANAGEMENT_CLUSTER=n
 CONFIG_SUPPORT_THREAD_NETWORK_DIRECTORY_CLUSTER=n
