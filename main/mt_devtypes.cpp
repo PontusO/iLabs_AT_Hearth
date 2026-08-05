@@ -275,8 +275,14 @@ static endpoint_t *mk_temperature_controlled_cabinet(node_t *n, uint8_t variant)
         c.temperature_control.feature_flags =
             cluster::temperature_control::feature::temperature_level::get_id();
     } else {
+        /* Step (attr 0x0003) is NOT a TemperatureNumber attribute: it rides
+         * the separate TemperatureStep feature, added only when its flag is
+         * set alongside TN (esp_matter_cluster.cpp:2852-2857). The host
+         * library's begin() writes Step, so TN without TS answers +MTERR:4
+         * to every upstream sketch (found on hardware, bug B119). */
         c.temperature_control.feature_flags =
-            cluster::temperature_control::feature::temperature_number::get_id();
+            cluster::temperature_control::feature::temperature_number::get_id() |
+            cluster::temperature_control::feature::temperature_step::get_id();
     }
     return temperature_controlled_cabinet::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
