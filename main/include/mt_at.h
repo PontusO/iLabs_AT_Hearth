@@ -113,6 +113,25 @@ enum {
  */
 bool mt_at_event(int bit, const char *detail);
 
+/* ---- command forwarding (the verdict mailbox, C1) ---------------------- *
+ * Some Matter commands need an app-level decision the firmware cannot make
+ * on its own (e.g. a door lock's LockDoor). Those are forwarded to the host
+ * and answered within a deadline; see mt_cmdbox.h for the slot state
+ * machine backing this.                                                    */
+
+/*
+ * Forward a Matter command needing an app-level decision to the host, and
+ * block for its verdict. Raises "+MTCMD:<seq>,<ep>,<cluster>,<command>" as a
+ * URC, waits up to 1000 ms for the host to answer with AT+MTCMDRESP, and
+ * returns the verdict: true only for an explicit allow (verdict 1) that
+ * arrives inside the window. Every other outcome, a timeout, the AT link
+ * not being up yet, or an unregistered host callback, returns false. A lock
+ * fails closed. Task C2 calls this from the ember cluster callbacks, which
+ * run on the CHIP event loop task; see mt_at.c's cmd_mtcmdresp handler for
+ * why the reply path must never take the CHIP stack lock.
+ */
+bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command);
+
 #ifdef __cplusplus
 }
 #endif
