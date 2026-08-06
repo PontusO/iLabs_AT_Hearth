@@ -801,11 +801,16 @@ AT+MTCMDRESP=<seq>,<verdict>  ->  OK
   already named. `+MTERR:1` on bad grammar, a verdict outside `{0,1}`, or a
   `<seq>` that is not the one currently pending (wrong, stale, already
   answered, or already timed out).
-- **The verdict deadline is exactly 1000 ms**, measured from the `+MTCMD` URC
-  reaching the wire. A `AT+MTCMDRESP` that arrives after the deadline finds
-  no pending seq and answers `+MTERR:1`; the firmware additionally raises
-  `+MTCMDTO:<seq>` at the moment of the timeout, so a host that missed the
-  window learns it rather than waiting on a reply that will never come.
+- **The verdict deadline is exactly 1000 ms**, measured from the moment the
+  `+MTCMD` line is **queued for transmission** (`mt_at_urc()`'s
+  `at_uart_write_line()` call, which copies the line into the UART driver's
+  TX ring buffer), not from the line actually reaching the wire. Those two
+  moments are usually indistinguishable, but not always: anything already
+  ahead of it in the ring (a backlog of URCs or command responses the host
+  has not yet drained) delays the physical send, and the clock is already
+  running for the whole of that delay. A host under enough incoming traffic
+  to build a TX backlog therefore sees a shorter effective window than 1000
+  ms, not the full one.
 - **Default-deny.** A timeout, the AT link not being up, or no host ever
   having answered `AT+MTCMDRESP` for this firmware session: all are treated
   identically to an explicit deny. A lock fails closed, never open, on every
@@ -818,6 +823,21 @@ AT+MTCMDRESP=<seq>,<verdict>  ->  OK
   expires. `AT+MTCMDRESP` itself is exempt (it never takes that lock, see
   below), so the AT link stays responsive enough to actually answer the
   command that is holding everything else up.
+- **A forward that opens while a host bridge command is already at the
+  parser forfeits the window, by construction.** "Already at the parser"
+  means the AT parser task is inside an `mt_matter_*` handler for a command
+  the host sent moments earlier (any AT-backed query or setter, e.g.
+  `AT+MTFABRICS?`), which needs the CHIP stack lock to answer; if the
+  `+MTCMD` this section describes opened because the CHIP task is holding
+  that same lock for its own up-to-1000-ms wait, the parser task blocks
+  taking it and cannot get back to reading the next line, including the
+  host's own eventual `AT+MTCMDRESP`, until the lock frees. There is no
+  fix inside this window: the deadline expires, the firmware default-denies
+  as documented above, and `+MTCMDTO:<seq>` follows. A host that needs
+  verdicts to land reliably keeps bridge traffic off whatever loop also
+  needs to answer forwarded commands; see `docs/TESTING.md`'s chatty-host
+  bench case and the `iLabs_Hearth` library README's "Hearth originals"
+  section for the same limitation from the host side.
 
 **`AT+MTCMDRESP` never takes the CHIP stack lock**, unlike every other
 `mt_matter_*` bridge call in this firmware. The CHIP task is blocked inside

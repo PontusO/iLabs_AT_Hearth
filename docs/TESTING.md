@@ -309,6 +309,56 @@ exists without FreeRTOS. It is a bench/inspection concern, verified by
 reading the timing and by exercising `AT+MTCMDRESP` against a live forwarded
 command once Task C2 wires a caller in, not by an automated regression here.
 
+**`AT+MTCMDRESP` argument validation:**
+
+| Command | Expected |
+|---|---|
+| `AT+MTCMDRESP?` | bare `ERROR` (query form not accepted, `AT+MTSWITCH` pattern: no "current pending command" to report) |
+| `AT+MTCMDRESP` | bare `ERROR` (exec form without arguments) |
+| `AT+MTCMDRESP=1` | `+MTERR:1` (fewer than 2 parameters) |
+| `AT+MTCMDRESP=1,1,1` | `+MTERR:1` (more than 2 parameters) |
+| `AT+MTCMDRESP=zz,1` | `+MTERR:1` (seq not numeric) |
+| `AT+MTCMDRESP=1,zz` | `+MTERR:1` (verdict not numeric) |
+| `AT+MTCMDRESP=1,2` | `+MTERR:1` (verdict outside `{0,1}`) |
+| `AT+MTCMDRESP=99,1` (no forward pending) | `+MTERR:1` (seq not the one currently `PENDING`) |
+| `AT+MTCMDRESP=<seq>,1` (seq already answered or expired) | `+MTERR:1` (same code; wrong, stale, future and already-answered are not distinguished, per the wire contract) |
+
+**`AT+MTLOCK` argument validation:**
+
+| Command | Expected |
+|---|---|
+| `AT+MTLOCK?` | bare `ERROR` (query form not accepted, `AT+MTSWITCH`/`AT+MTTEMPLEVELS` pattern) |
+| `AT+MTLOCK` | bare `ERROR` (exec form without arguments) |
+| `AT+MTLOCK=1` | `+MTERR:1` (fewer than 2 parameters) |
+| `AT+MTLOCK=1,1,1,1` | `+MTERR:1` (more than 3 parameters) |
+| `AT+MTLOCK=zz,1` | `+MTERR:1` (endpoint not numeric) |
+| `AT+MTLOCK=1,zz` | `+MTERR:1` (state not numeric) |
+| `AT+MTLOCK=1,3` | `+MTERR:1` (state outside `0..2`) |
+| `AT+MTLOCK=1,1,zz` | `+MTERR:1` (source not numeric) |
+| `AT+MTLOCK=1,1,11` | `+MTERR:1` (source above `mt_matter_lock_source_max()`, i.e. outside `0..10`) |
+| `AT+MTLOCK=99,1` | `+MTERR:2` (unknown endpoint) |
+| `AT+MTLOCK=<non-door-lock ep>,1` | `+MTERR:3` (endpoint has no `DoorLock` cluster) |
+| `AT+MTLOCK=<door-lock ep>,1` | `OK` (state accepted; follow with `AT+MTATTR` read of `LockState` to confirm) |
+
+**Chatty-host bench case: a bridge command already in flight when a forward
+opens.** Exercises `AT_MT_SPEC.md` §3.17's own by-construction limitation and
+the `iLabs_Hearth` library README's "Hearth originals" section from the other
+side of the link: have the host poll `AT+MTFABRICS?` on every pass of its own
+loop (standing in for any chatty per-loop status query, e.g.
+`Matter.isDeviceCommissioned()`), then have the controller invoke `LockDoor`
+so a `+MTCMD` opens while that poll is in flight. Expected: the AT parser
+task is still inside the `AT+MTFABRICS?` handler, blocked taking
+`ChipStackLock` (held for the wait by the CHIP task processing the invoke, see
+`ARCHITECTURE.md` §8.4), so `AT+MTCMDRESP` cannot reach `cmd_mtcmdresp()` in
+time even if the host sends it; the window expires, the firmware
+default-denies, `+MTCMDTO:<seq>` is raised, and the controller observes
+`Status::Failure` on the `LockDoor` invoke (door-lock-server.cpp's
+`OperationErrorEnum::kUnspecified` path). Not a bug to chase: the fix is a
+host-side one (keep chatty per-loop status polling off any loop that also
+needs to answer forwarded commands), so this case exists to confirm the
+documented outcome actually reproduces on the bench, not to find a firmware
+regression.
+
 **`AT+MTEVT` and `AT+MTNET`:**
 
 | Command | Expected |

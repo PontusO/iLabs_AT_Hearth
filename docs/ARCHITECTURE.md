@@ -675,6 +675,15 @@ either, because they already run **on** the CHIP event-loop task (the same
 reasoning `app_event_cb()` already established for platform events), so
 taking it would self-deadlock a second way.
 
+This freedom is `cmd_mtcmdresp()`'s own, not a guarantee about the whole
+window: if `AT+MTCMDRESP` arrives while the AT parser task is still stuck
+inside an *earlier* `mt_matter_*` handler blocked taking `ChipStackLock`
+(held for the wait's duration by the very ember callback `mt_cmd_forward()`
+is running inside of, per above), `cmd_mtcmdresp()` cannot be reached until
+that handler unblocks, and the deadline expires regardless of how
+lock-free it is (see `AT_MT_SPEC.md` §3.17's own note on the same
+limitation).
+
 **Default-deny.** Every outcome that is not an explicit `AT+MTCMDRESP=<seq>,1`
 inside the 1000 ms window collapses to the same answer: timeout, the AT link
 not being up (`s_at_up` false, e.g. a command that somehow fires before
