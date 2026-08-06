@@ -102,7 +102,8 @@ confirmed against 3.3.8).
   `SetLockState` through a new ChipStackLock bridge
   (`mt_matter_lock_state_set`), so LockOperation events emit (F4).
   `<state>`: 0 NotFullyLocked, 1 Locked, 2 Unlocked (DlLockState
-  values). `<source>` defaults to 2 (kManual); accepted values are
+  values). `<source>` defaults to kManual (numeric value read from the pinned
+  header, never transcribed); accepted values are
   OperationSourceEnum's, with the upper bound read from the pinned
   CHIP header at implementation time (never transcribed), `+MTERR:1`
   outside it. Lookup
@@ -138,7 +139,9 @@ confirmed against 3.3.8).
   gets a "Hearth originals" section distinct from the parity table.
 - API, house conventions throughout: `begin(bool locked = true)`;
   `onLock(cb)` / `onUnlock(cb)` with `bool cb(void)` returning the
-  verdict; `setLockState(uint8_t state, uint8_t source = 2)` mapping
+  verdict; `setLockState(uint8_t state, uint8_t source = kManual)` (the
+  enum value from the pinned header, exposed as a library constant)
+  mapping
   to AT+MTLOCK; `getLockState()` (cache fed by +MTATTR URCs);
   `lock()` / `unlock()` conveniences calling setLockState with
   kManual. Unregistered callback: Hearth.poll() answers deny
