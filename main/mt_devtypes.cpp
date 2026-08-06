@@ -442,7 +442,7 @@ static endpoint_t *mk_pump(node_t *n, uint8_t variant)
     pump::config_t c;
     /* Sixth abort trap: pump_configuration_and_control::create() runs
      * VALIDATE_FEATURES_AT_LEAST_ONE across the operation-mode features
-     * (esp_matter_cluster.cpp:2675-2677). Constant speed is the
+     * (esp_matter_cluster.cpp:2675-2679). Constant speed is the
      * least-constrained mode. */
     c.pump_configuration_and_control.feature_flags =
         cluster::pump_configuration_and_control::feature::constant_speed::get_id();
