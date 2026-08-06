@@ -353,9 +353,12 @@ rather than esp-matter's generic attribute store (bug B139: esp-matter marks
 the attribute managed-internally and nothing behind it answers a read).
 `AT+MTATTR` behaves identically on the wire for reads and for the value
 grammar: an integer `0`-`6`, exactly like any other attribute. One
-exception: a mode-`0` write (§3.8, "no report") still raises the `+MTATTR`
-URC, because the CHIP server instance always reports a successful update
-itself and has no silent-set path the way the generic attribute store does.
+exception, hardware-verified: a write to this attribute never echoes the
+`+MTATTR` URC, in either mode. The echo comes from esp-matter's attribute
+callback, which managed-internally attributes bypass; the server instance
+reports the change to fabric subscribers instead, so controllers still see
+it, but the host must rely on the `OK` alone. The `<mode>` field is
+accepted and has no effect here.
 
 Example:
 ```

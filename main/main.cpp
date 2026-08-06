@@ -804,12 +804,16 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
      * honored here: mode 0 (attribute::set_val(), no report) has no
      * counterpart in the Instance API. UpdateAirQuality() always calls
      * MatterReportingAttributeChangeCallback() itself (air-quality-
-     * server.cpp) with no silent-set alternative, so a host reflecting a
-     * controller-driven AirQuality change with AT+MTATTR=...,0 will echo it
-     * back rather than staying quiet the way it can for every other
-     * attribute. Documented here rather than worked around: reaching into
-     * the Instance's private state to bypass its own reporting call would
-     * fight the class instead of using it. */
+     * server.cpp) with no silent-set alternative. Hardware-verified
+     * consequence, the OPPOSITE of what an early draft of this comment
+     * guessed: that report feeds the fabric's reporting engine only. The
+     * host-side +MTATTR echo URC comes from esp-matter's attribute update
+     * callback, which managed-internally attributes bypass, so writes to
+     * this attribute never echo a URC in ANY mode; controllers still see
+     * the change through their subscriptions, and the host has the OK.
+     * Documented here and in AT_MT_SPEC 3.9 rather than worked around:
+     * reaching into the Instance's private state would fight the class
+     * instead of using it. */
     if (cluster == chip::app::Clusters::AirQuality::Id &&
         attr == chip::app::Clusters::AirQuality::Attributes::AirQuality::Id) {
         if (esp_matter::endpoint::get(ep) == nullptr) {
