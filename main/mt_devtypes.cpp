@@ -274,7 +274,23 @@ static endpoint_t *mk_door_lock(node_t *n, uint8_t variant)
      * here, and none is to be invented (spec F5). Feature map stays 0 by
      * design (spec F3): no PIN/USER/COTA features this round. */
     door_lock::config_t c;
-    return door_lock::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    endpoint_t *ep = door_lock::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep != nullptr) {
+        /* AutoRelockTime must exist even though it is optional: after a
+         * successful unlock the 6-arg SetLockState insists on reading it
+         * (VerifyOrReturnError(GetAutoRelockTime(...), false),
+         * door-lock-server.cpp:207) and reports FALSE for an unlock that
+         * actually happened, which turned every host unlock via AT+MTLOCK
+         * into a bare ERROR with the state changed underneath (bug B129).
+         * 0 disables auto-relock. If a controller writes it nonzero, the
+         * server relocks at expiry and the host observes the LockState
+         * change as a +MTATTR URC, the same path as any controller write. */
+        cluster_t *cl = cluster::get(ep, chip::app::Clusters::DoorLock::Id);
+        if (cl != nullptr) {
+            cluster::door_lock::attribute::create_auto_relock_time(cl, 0);
+        }
+    }
+    return ep;
 }
 
 static endpoint_t *mk_temperature_controlled_cabinet(node_t *n, uint8_t variant)
