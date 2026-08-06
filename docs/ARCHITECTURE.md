@@ -783,6 +783,33 @@ using it exists in `mt_devtypes.cpp`.
 | `build_thread` (Thread) | 1,583,840 B (`0x1828e0`) | 60% |
 | `build_combined` (WiFi + Thread) | 1,975,344 B (`0x1e3430`) | 50% |
 
+## 8.5 Ten-type swoop: survey verdict classes and the 20-to-30 lift (2026-08-06)
+
+Design record: `docs/superpowers/specs/2026-08-06-ten-type-swoop-design.md`,
+survey graph node D132. A full census of esp-matter 21aa3d1's endpoint
+namespaces crossed against the Matter 1.5.1 Device Library Specification
+found every remaining device type falls into one of four verdict classes,
+recorded in full in the design spec's section 6: **mechanical** (rides the
+existing thunk table and `AT+MTATTR` unchanged, no new firmware or host
+mechanism needed: the ten types landed in this round), **tier 2** (needs one
+new mechanism the firmware already has a shape for, e.g. `+MTCMD` forwarding
+for Water Valve or a Power Source device mandate for Smoke/CO Alarm, but not
+yet spent on this type), **tier 3** (several types sharing one not-yet-built
+mechanism, e.g. the laundry/dishwasher trio behind a single OperationalState
+delegate), and **composition-tree** (Refrigerator/Oven/Irrigation/Cook
+Surface, blocked on parent-child `AT+MTEP` endpoint composition, a capability
+this firmware does not have). Only the mechanical class was in scope here;
+the other three are a ledger of future rounds, not a todo inside this one.
+Two more `CONFIG_SUPPORT_*_CLUSTER` exclusions joined the door-lock-era
+precedent (§8.4) in the same lift-on-demand shape: `AIR_QUALITY_CLUSTER`
+(known in advance, since Air Quality Sensor's only cluster is excluded by
+default) and `PUMP_CONFIGURATION_AND_CONTROL_CLUSTER` (found the same way
+the prior six were: the image links, then fails at the final ELF link with
+undefined references to `MatterPumpConfigurationAndControlPluginServerInitCallback`
+and its sibling ember callbacks, because the esp_matter config struct exists
+regardless of the Kconfig flag but the cluster's server implementation does
+not compile into the chip component archive without it).
+
 ## 9. Decision log (summary)
 
 | Decision | Choice | Why |

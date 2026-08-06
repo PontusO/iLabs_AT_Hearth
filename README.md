@@ -103,7 +103,7 @@ subscription (`AT+MTEVT`), and the transport query (`AT+MTNET?`).
 
 ## Supported device types
 
-`AT+MTEP=<id>` accepts these 20 device type IDs (firmware 0.3.3); anything
+`AT+MTEP=<id>` accepts these 30 device type IDs (firmware 0.4.0); anything
 else answers `+MTERR:6`. The table is `main/mt_devtypes.cpp`'s and grows by
 rows; IDs are read from esp-matter, never transcribed.
 
@@ -119,6 +119,11 @@ rows; IDs are read from esp-matter, never transcribed.
 | 0x0202 | Window Covering | | 0x0015 | Contact Sensor |
 | 0x0301 | Thermostat | | 0x000F | Generic Switch |
 | 0x0071 | Temperature Controlled Cabinet | | 0x000A | Door Lock |
+| 0x0106 | Light Sensor | | 0x002D | Air Purifier |
+| 0x0306 | Flow Sensor | | 0x007A | Extractor Hood |
+| 0x002C | Air Quality Sensor | | 0x0072 | Room Air Conditioner |
+| 0x010F | Mounted On/Off Control | | 0x0078 | Cooktop |
+| 0x0110 | Mounted Dimmable Load Control | | 0x0303 | Pump |
 
 The extended color light carries a hue/saturation addition beyond stock
 esp-matter, so hosts see `CurrentHue`/`CurrentSaturation` alongside XY and

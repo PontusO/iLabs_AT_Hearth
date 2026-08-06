@@ -299,6 +299,16 @@ device types are added.
 | `0x000F` | Generic Switch |
 | `0x0071` | Temperature Controlled Cabinet |
 | `0x000A` | Door Lock |
+| `0x0106` | Light Sensor |
+| `0x0306` | Flow Sensor |
+| `0x002C` | Air Quality Sensor |
+| `0x010F` | Mounted On/Off Control |
+| `0x0110` | Mounted Dimmable Load Control |
+| `0x002D` | Air Purifier |
+| `0x007A` | Extractor Hood |
+| `0x0072` | Room Air Conditioner |
+| `0x0078` | Cooktop |
+| `0x0303` | Pump |
 
 `0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
 bolts the HueSaturation feature onto the standard ColorControl configuration,
