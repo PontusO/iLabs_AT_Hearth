@@ -334,7 +334,30 @@ static endpoint_t *mk_air_quality_sensor(node_t *n, uint8_t variant)
 {
     (void)variant;
     air_quality_sensor::config_t c;
-    return air_quality_sensor::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    endpoint_t *ep = air_quality_sensor::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    /* The base AirQuality cluster only mandates Unknown/Good/Poor; Fair,
+     * Moderate, VeryPoor and ExtremelyPoor are each gated behind their own
+     * feature bit (esp_matter_feature.h:587-617, namespaces
+     * cluster::air_quality::feature::{fair,moderate,very_poor,
+     * extremely_poor}). The host library's AirQuality_t enum publishes all
+     * seven SDK values (kUnknown, kGood, kFair, kModerate, kPoor,
+     * kVeryPoor, kExtremelyPoor), so the endpoint must advertise all four
+     * optional features or the library can report a value the fabric's
+     * feature map does not admit. air_quality::config_t is common::config_t
+     * (empty, esp_matter_cluster.h:66-70), so the features are added after
+     * create() rather than seeded on it, the same shape as the door lock
+     * thunk's AutoRelockTime. */
+    cluster_t *cl = cluster::get(ep, chip::app::Clusters::AirQuality::Id);
+    if (cl != nullptr) {
+        cluster::air_quality::feature::fair::add(cl);
+        cluster::air_quality::feature::moderate::add(cl);
+        cluster::air_quality::feature::very_poor::add(cl);
+        cluster::air_quality::feature::extremely_poor::add(cl);
+    }
+    return ep;
 }
 
 static endpoint_t *mk_mounted_on_off_control(node_t *n, uint8_t variant)
@@ -384,14 +407,32 @@ static endpoint_t *mk_room_air_conditioner(node_t *n, uint8_t variant)
      * endpoint add() unconditionally ORs feature::cooling into
      * config->thermostat.feature_flags before create(), and unconditionally
      * adds dead_front_behavior to the on_off cluster
-     * (esp_matter_endpoint.cpp:1279-1287). Do not re-add flags. The setpoint
-     * lives under features.cooling, not directly on config_t (cluster::
-     * thermostat::config_t at esp_matter_cluster.h:397-421 nests it in the
-     * heating/cooling/... features struct, unlike the brief's flat sketch);
-     * 2600 matches feature::cooling::config_t's own default
-     * (esp_matter_feature.h:493-497), so this line is a self-documenting
-     * seed rather than a behaviour change. */
-    c.thermostat.features.cooling.occupied_cooling_setpoint = 2600;
+     * (esp_matter_endpoint.cpp:1279-1287). OR in heating here too: the
+     * Room Air Conditioner device type's cluster requirements and element
+     * requirements tables (Matter 1.5.1 Device Library Spec section 13.3.6
+     * and 13.3.8) require the Thermostat cluster (M) but do not restrict it
+     * to Cool-only, and the host library's MatterRoomAirConditioner class
+     * writes OccupiedHeatingSetpoint unconditionally. This |= runs before
+     * create(), so esp-matter's own OR of cooling lands on top and both
+     * bits survive; do not also re-add cooling here. The setpoint lives
+     * under features.cooling/features.heating, not directly on config_t
+     * (cluster::thermostat::config_t at esp_matter_cluster.h:397-421 nests
+     * it in the heating/cooling/... features struct, unlike the brief's
+     * flat sketch). Seeds match the thermostat row's upstream boot values
+     * (16 C / 24 C) rather than esp-matter's own defaults (20 C / 26 C,
+     * esp_matter_feature.h:484/496): left at esp-matter's defaults, the
+     * host library's cache (seeded from upstream's boot values) disagrees
+     * with the fabric, and a sketch's first setpoint write is silently
+     * swallowed by the cache's equality check and never reaches the wire
+     * (see the thermostat row's comment above, cross-layer finding I1). */
+    c.thermostat.feature_flags = cluster::thermostat::feature::heating::get_id();
+    c.thermostat.features.heating.occupied_heating_setpoint = 1600;
+    c.thermostat.features.cooling.occupied_cooling_setpoint = 2400;
+    /* esp-matter's config_t constructor defaults system_mode to 1 (Auto,
+     * esp_matter_cluster.h:414), but the library caches mode 0 (Off,
+     * SystemModeEnum::kOff) at begin(); seed to match for the same
+     * first-write-swallowed reason as the setpoints above. */
+    c.thermostat.system_mode = 0;
     return room_air_conditioner::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
 
@@ -401,7 +442,7 @@ static endpoint_t *mk_pump(node_t *n, uint8_t variant)
     pump::config_t c;
     /* Sixth abort trap: pump_configuration_and_control::create() runs
      * VALIDATE_FEATURES_AT_LEAST_ONE across the operation-mode features
-     * (esp_matter_cluster.cpp:2675-2679). Constant speed is the
+     * (esp_matter_cluster.cpp:2675-2677). Constant speed is the
      * least-constrained mode. */
     c.pump_configuration_and_control.feature_flags =
         cluster::pump_configuration_and_control::feature::constant_speed::get_id();
