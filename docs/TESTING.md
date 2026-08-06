@@ -299,6 +299,16 @@ assertion that actually proves "rejected before any side effect".
 
 Note that `AT+MTSWITCH` does not return a value to the host; the event fire is fire-and-forget over the fabric. Controller-side observation is the positive check.
 
+**`AT+MTCMDRESP` / the verdict mailbox (command forwarding, C1):** the state
+machine (`mt_cmdbox.c`) is host-tested exhaustively (`test/host/test_mt_cmdbox.c`).
+The FreeRTOS glue around it in `mt_at.c` (`mt_cmd_forward`'s 1000 ms wait, the
+two non-blocking semaphore drains that make a timeout-boundary race
+self-healing rather than a permanent instant-deny, the critical sections
+across two tasks) has no host-test coverage by construction: none of it
+exists without FreeRTOS. It is a bench/inspection concern, verified by
+reading the timing and by exercising `AT+MTCMDRESP` against a live forwarded
+command once Task C2 wires a caller in, not by an automated regression here.
+
 **`AT+MTEVT` and `AT+MTNET`:**
 
 | Command | Expected |

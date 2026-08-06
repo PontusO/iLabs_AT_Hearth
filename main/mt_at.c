@@ -826,10 +826,39 @@ bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command)
     if (!s_at_up) {
         return false;
     }
+    /* Fail closed if the semaphore never came up (xSemaphoreCreateBinary()
+     * returned NULL, e.g. heap exhaustion). Without this, xSemaphoreTake()
+     * below on a NULL handle is undefined behaviour, not a clean deny. */
+    if (!s_cmd_sem) {
+        return false;
+    }
 
     taskENTER_CRITICAL(&s_cmdbox_mux);
     uint32_t seq = mt_cmdbox_open(ep, cluster, command);
     taskEXIT_CRITICAL(&s_cmdbox_mux);
+
+    /*
+     * Drain any stale give before waiting, non-blocking.
+     *
+     * The timeout branch below expires the slot and then drains too, but
+     * there is a narrow window between this function's OWN previous call
+     * timing out and that drain running: if the host's AT+MTCMDRESP for
+     * that earlier seq lands in exactly that window, cmd_mtcmdresp() still
+     * finds the slot PENDING (mt_cmdbox_expire() has not taken the mux
+     * yet), accepts the verdict, and gives the semaphore - but the
+     * forward() call that give belongs to has already committed to
+     * returning false and will never consume it. Left there, THIS call's
+     * xSemaphoreTake() would take that stale give immediately and deny in
+     * microseconds without ever waiting for the host; the same trap would
+     * then repeat for every call after this one, forever, since a stale
+     * give is left behind every time an answer wins that race. One narrow
+     * race at the 1000 ms boundary would otherwise cascade into permanent,
+     * silent instant-deny of the whole forwarding feature until reboot.
+     * This drain and the one in the timeout branch below are what make the
+     * mailbox self-healing: every forward() starts from a guaranteed-empty
+     * semaphore, so a stale give can survive at most until the next call.
+     */
+    xSemaphoreTake(s_cmd_sem, 0);
 
     char line[MT_CMD_LINE_MAX];
     snprintf(line, sizeof(line), "+MTCMD:%lu,%u,%lu,%lu",
@@ -848,6 +877,16 @@ bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command)
     taskENTER_CRITICAL(&s_cmdbox_mux);
     mt_cmdbox_expire(seq);
     taskEXIT_CRITICAL(&s_cmdbox_mux);
+
+    /*
+     * Drain again, non-blocking: this is the other half of the cascade fix
+     * described above. A give can slip in between the failed
+     * xSemaphoreTake() a few lines up and mt_cmdbox_expire() taking the
+     * mux, on THIS call's own seq. Without this drain, that give would sit
+     * on the semaphore and be taken by the NEXT forward() instead of this
+     * one, denying it instantly and starting the same cascade.
+     */
+    xSemaphoreTake(s_cmd_sem, 0);
 
     char to_line[MT_CMD_LINE_MAX];
     snprintf(to_line, sizeof(to_line), "+MTCMDTO:%lu", (unsigned long)seq);
@@ -962,15 +1001,23 @@ static const at_engine_cfg_t s_engine_cfg = {
 void mt_at_start(void)
 {
     at_uart_init();
-    at_register_commands(s_cmds, sizeof(s_cmds) / sizeof(s_cmds[0]));
-    at_parser_start(&s_engine_cfg);
 
-    /* Verdict mailbox bring-up: the slot state machine and the semaphore
-     * cmd_mtcmdresp() gives and mt_cmd_forward() waits on. Both are ready
-     * before s_at_up goes true below, same reasoning as everything else in
-     * this function: nothing may observe a partially-initialized AT link. */
+    /*
+     * Verdict mailbox bring-up: the slot state machine and the semaphore
+     * cmd_mtcmdresp() gives and mt_cmd_forward() waits on. Done before
+     * at_register_commands()/at_parser_start() below, not after, so the
+     * mailbox existing is structural rather than incidental: cmd_mtcmdresp()
+     * cannot run until the parser task is registered and started, so doing
+     * this first guarantees it is never reachable before the mailbox is
+     * ready, rather than relying on BSS zero-init happening to leave the
+     * slot in a safe IDLE state and on the host obeying +MTREADY to not ask
+     * before the semaphore exists.
+     */
     mt_cmdbox_init();
     s_cmd_sem = xSemaphoreCreateBinary();
+
+    at_register_commands(s_cmds, sizeof(s_cmds) / sizeof(s_cmds[0]));
+    at_parser_start(&s_engine_cfg);
 
     /*
      * Boot marker so the host can synchronize after a reset (mirrors +ENREADY).
