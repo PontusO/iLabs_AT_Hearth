@@ -5,6 +5,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "mt_at.c"
+        "mt_cmdbox.c"
         "mt_composition.c"
         "mt_comp_store.c"
         "mt_devtypes.cpp"

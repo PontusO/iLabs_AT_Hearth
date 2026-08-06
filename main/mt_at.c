@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "esp_system.h"
@@ -29,6 +30,7 @@
 #include "at_parser.h"
 #include "mt_at_config.h"
 #include "mt_at.h"
+#include "mt_cmdbox.h"
 #include "mt_comp_store.h"
 #include "mt_composition.h"
 #include "mt_devtypes.h"
@@ -39,6 +41,13 @@
  * (bits 10, 11 and 24); 48 leaves room without putting a 512-byte
  * MT_AT_LINE_MAX buffer on the CHIP task's stack. Truncation is safe. */
 #define MT_EVT_LINE_MAX 48
+
+/* Longest +MTCMD/+MTCMDTO line: "+MTCMD:" + up to three u32 fields (10
+ * digits each) plus the u16 ep (5 digits) and three commas: 7 + 10 + 1 + 5 +
+ * 1 + 10 + 1 + 10 = 45, plus the terminating NUL. 56 leaves the same kind of
+ * headroom MT_EVT_LINE_MAX does for +MTEVT, again off the CHIP task's stack
+ * rather than the 512-byte MT_AT_LINE_MAX buffer. */
+#define MT_CMD_LINE_MAX 56
 
 /* +MTERR:<n> code space (mirrors the ESP-NOW layout: 1..99 carry a code,
  * >= MT_ERR_GENERIC is a plain "ERROR"). Real codes are assigned in B4. */
@@ -54,6 +63,11 @@
 #define MT_ERR_COMP_REJECT  10  /* nothing staged, or endpoint cap hit    */
 #define MT_ERR_GENERIC      100 /* plain ERROR, no +MTERR line            */
 #define MT_R_ERROR          MT_ERR_GENERIC
+
+/* Set once the AT UART (and its TX mutex) exist. See mt_at_urc(). Declared
+ * up here, rather than next to mt_at_start() below, because mt_cmd_forward()
+ * needs to read it and is defined ahead of mt_at_start() in this file. */
+static volatile bool s_at_up = false;
 
 /* ---- identity (3GPP TS 27.007 style, mirrors the ESP-NOW image) ------- */
 
@@ -781,6 +795,122 @@ static int cmd_mttransport(at_type_t type, char *args)
 
 #endif /* MT_COMBINED_IMAGE */
 
+/* ---- command forwarding: the verdict mailbox (C1) ---------------------- *
+ * mt_cmdbox.c is the pure-C, host-tested slot state machine. Everything
+ * that needs FreeRTOS, the AT link, or knowledge of both tasks involved
+ * lives here: the critical sections around every mailbox call, the
+ * semaphore mt_cmd_forward() blocks on, and the AT+MTCMDRESP handler that
+ * answers it.                                                              */
+
+/*
+ * Guards every call into mt_cmdbox.c. mt_cmd_forward() runs on the CHIP
+ * event loop task (called from an ember cluster callback); cmd_mtcmdresp()
+ * below runs on the AT parser task. mt_cmdbox.c has no locking of its own,
+ * by design (it stays host-testable with no FreeRTOS headers), so the
+ * mailbox's single slot needs a critical section here around each
+ * individual open/answer/take/expire call.
+ */
+static portMUX_TYPE s_cmdbox_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* Given by cmd_mtcmdresp() on a successful verdict, waited on by
+ * mt_cmd_forward(). Created in mt_at_start() alongside the rest of the AT
+ * link bring-up, before s_at_up is set, so it exists by the time a forward
+ * could possibly be called. */
+static SemaphoreHandle_t s_cmd_sem = NULL;
+
+bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command)
+{
+    /* Fail closed with no URC at all if the AT link is not up yet: there is
+     * no host to forward to, and raising one before mt_at_start() has run
+     * is exactly what mt_at_urc()'s s_at_up guard exists to prevent. */
+    if (!s_at_up) {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_cmdbox_mux);
+    uint32_t seq = mt_cmdbox_open(ep, cluster, command);
+    taskEXIT_CRITICAL(&s_cmdbox_mux);
+
+    char line[MT_CMD_LINE_MAX];
+    snprintf(line, sizeof(line), "+MTCMD:%lu,%u,%lu,%lu",
+             (unsigned long)seq, ep, (unsigned long)cluster, (unsigned long)command);
+    mt_at_urc(line);
+
+    if (xSemaphoreTake(s_cmd_sem, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        taskENTER_CRITICAL(&s_cmdbox_mux);
+        int verdict = mt_cmdbox_take(seq);
+        taskEXIT_CRITICAL(&s_cmdbox_mux);
+        return verdict == 1;
+    }
+
+    /* Timed out: drop the slot so a late answer for this seq is rejected,
+     * tell the host it missed the window, and deny. */
+    taskENTER_CRITICAL(&s_cmdbox_mux);
+    mt_cmdbox_expire(seq);
+    taskEXIT_CRITICAL(&s_cmdbox_mux);
+
+    char to_line[MT_CMD_LINE_MAX];
+    snprintf(to_line, sizeof(to_line), "+MTCMDTO:%lu", (unsigned long)seq);
+    mt_at_urc(to_line);
+    return false;
+}
+
+/*
+ * AT+MTCMDRESP=<seq>,<verdict> -> deliver the host's verdict for a command
+ * that was forwarded via a "+MTCMD:<seq>,..." URC. Set-only: bare/query
+ * forms answer plain ERROR, the AT+MTSWITCH pattern, since there is no
+ * "current pending command" to report, only the seq the URC already named.
+ *
+ * verdict is 1 (allow) or 0 (deny). A malformed line, a verdict outside
+ * {0,1}, or a seq mt_cmdbox_answer() does not recognise as the one
+ * currently PENDING (wrong, stale, future, or already expired) all answer
+ * +MTERR:1, per the wire contract; nothing about those is distinguished
+ * further.
+ *
+ * NO ChipStackLock here, unlike every other mt_matter_* bridge call in this
+ * file, and this is deliberate rather than an oversight. mt_cmd_forward()
+ * is called from an ember cluster callback running ON the CHIP event loop
+ * task, which at that moment effectively holds the CHIP stack lock; it is
+ * blocked inside xSemaphoreTake(), waiting for this handler. If this
+ * handler (running on the AT parser task) tried to take ChipStackLock too,
+ * it would block on that very same CHIP task and wait out the full 1000 ms
+ * deadline on every single command: a guaranteed deadlock until
+ * mt_cmd_forward()'s own timeout gives up and releases the lock. This
+ * handler must only touch the mailbox and the semaphore, never the CHIP
+ * stack, so any future edit here needs to preserve that.
+ */
+static int cmd_mtcmdresp(at_type_t type, char *args)
+{
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+
+    char *f[2];
+    int n = at_split_args(args, f, 2);
+    if (n != 2) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long seq, verdict;
+    if (!parse_u(f[0], &seq) || seq > 0xFFFFFFFFUL) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!parse_u(f[1], &verdict) || verdict > 1) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    taskENTER_CRITICAL(&s_cmdbox_mux);
+    int r = mt_cmdbox_answer((uint32_t)seq, (int)verdict);
+    taskEXIT_CRITICAL(&s_cmdbox_mux);
+
+    if (r != 0) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    xSemaphoreGive(s_cmd_sem);
+    return AT_R_OK;
+}
+
 /* ---- dispatch table & registration ------------------------------------ */
 
 static const at_command_t s_cmds[] = {
@@ -804,6 +934,7 @@ static const at_command_t s_cmds[] = {
     { "MTNET",        cmd_mtnet       },
     { "MTBAUD",       cmd_mtbaud      },
     { "MTFLOW",       cmd_mtflow      },
+    { "MTCMDRESP",    cmd_mtcmdresp   },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif
@@ -828,14 +959,18 @@ static const at_engine_cfg_t s_engine_cfg = {
  * marker. Called from app_main() after esp_matter::start(). C linkage so the
  * C++ entry point can call it without pulling at_core's C headers into C++.
  */
-/* Set once the AT UART (and its TX mutex) exist. See mt_at_urc(). */
-static volatile bool s_at_up = false;
-
 void mt_at_start(void)
 {
     at_uart_init();
     at_register_commands(s_cmds, sizeof(s_cmds) / sizeof(s_cmds[0]));
     at_parser_start(&s_engine_cfg);
+
+    /* Verdict mailbox bring-up: the slot state machine and the semaphore
+     * cmd_mtcmdresp() gives and mt_cmd_forward() waits on. Both are ready
+     * before s_at_up goes true below, same reasoning as everything else in
+     * this function: nothing may observe a partially-initialized AT link. */
+    mt_cmdbox_init();
+    s_cmd_sem = xSemaphoreCreateBinary();
 
     /*
      * Boot marker so the host can synchronize after a reset (mirrors +ENREADY).
