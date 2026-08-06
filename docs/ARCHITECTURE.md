@@ -810,6 +810,15 @@ and its sibling ember callbacks, because the esp_matter config struct exists
 regardless of the Kconfig flag but the cluster's server implementation does
 not compile into the chip component archive without it).
 
+**Correction (task C1b, bug B139): Air Quality Sensor was misclassified as
+mechanical.** The census checked whether esp-matter's endpoint namespace
+existed and its attribute walk found `AirQuality`, but missed that
+esp-matter creates the attribute `ATTRIBUTE_FLAG_MANAGED_INTERNALLY` with no
+server behind it: CHIP's air-quality-server is Instance/
+`AttributeAccessInterface`-based, the same shape as the C3 temperature-levels
+delegate (§8.3), and needed one before `AT+MTATTR=<ep>,91,0` answered
+anything but bare `ERROR`.
+
 ## 9. Decision log (summary)
 
 | Decision | Choice | Why |

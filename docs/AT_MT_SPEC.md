@@ -347,6 +347,13 @@ the two commands that leave the ordinary `AT+MTATTR` path. Feature map `0`:
 no PIN/user/credential (COTA) surface in this round, so controllers may only
 send bare `LockDoor`/`UnlockDoor`, never a PIN-carrying command.
 
+`0x002C` Air Quality Sensor's `AirQuality` attribute (cluster `0x005B`,
+attribute `0x0000`) is served through a per-endpoint CHIP server instance
+rather than esp-matter's generic attribute store (bug B139: esp-matter marks
+the attribute managed-internally and nothing behind it answers a read).
+`AT+MTATTR` behaves identically on the wire regardless: reading and writing
+an integer `0`-`6` exactly like any other attribute.
+
 Example:
 ```
 AT+MTEPCLEAR           -> OK
