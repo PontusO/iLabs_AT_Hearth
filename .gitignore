@@ -17,3 +17,6 @@ task-graph.json
 
 # WiFi credentials for the phase-2 regression harness, never committed
 .env
+
+# CSA specification PDFs, downloaded locally, never committed (copyright)
+matter/
