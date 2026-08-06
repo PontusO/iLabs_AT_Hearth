@@ -12,6 +12,7 @@
 
 #include <inttypes.h>
 #include <cstring>
+#include <new>
 #include <stdio.h>
 
 #include <esp_err.h>
@@ -38,6 +39,11 @@
  * match the SDK's prototypes without repeating those `using`s here. */
 #include <app/clusters/door-lock-server/door-lock-server.h>
 #include <app-common/zap-generated/callback.h>
+
+/* C1b (bug B139): the AirQuality cluster's own attribute-access interface.
+ * See the registry comment ahead of mt_air_quality_register_all() below for
+ * why esp-matter's generic attribute path cannot serve this cluster. */
+#include <app/clusters/air-quality-server/air-quality-server.h>
 
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
@@ -605,6 +611,110 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
 }
 
 /*
+ * ---- air quality (C1b, bug B139) -------------------------------------
+ *
+ * AT+MTATTR=<ep>,91,0 (AirQuality cluster, AirQuality attribute) answered
+ * bare ERROR both directions. Root cause: esp-matter creates the AirQuality
+ * attribute ATTRIBUTE_FLAG_MANAGED_INTERNALLY (esp_matter_attribute.cpp:2283-
+ * 2287, air_quality::attribute::create_air_quality()), which only makes
+ * esp_matter::attribute::get() find the attribute for a presence check;
+ * nothing in esp-matter or ember ever serves its value. CHIP's
+ * air-quality-server is Instance/AttributeAccessInterface based
+ * (src/app/clusters/air-quality-server/air-quality-server.h): the
+ * application has to construct and Init() a
+ * chip::app::Clusters::AirQuality::Instance per endpoint before anything
+ * answers a read, and mutate the value through Instance::UpdateAirQuality(),
+ * never through esp_matter's own attribute store. This is the same shape the
+ * C3 SupportedTemperatureLevels delegate above works around for the same
+ * esp-matter gap. The parity census (AT_MT_SPEC.md: "AT+MTATTR therefore
+ * covers essentially the whole parity surface") missed it because a census
+ * of esp-matter's attribute table cannot see a cluster whose real server
+ * lives entirely in CHIP with no esp-matter counterpart at all.
+ *
+ * Relevant CHIP signatures (air-quality-server.h):
+ *
+ *   Instance(EndpointId aEndpointId, BitMask<Feature> aFeature);
+ *   CHIP_ERROR Init();
+ *   Protocols::InteractionModel::Status UpdateAirQuality(AirQualityEnum aNewAirQuality);
+ *   AirQualityEnum GetAirQuality();
+ *
+ * FeatureMap authority: Instance::Read() (air-quality-server.cpp) handles
+ * both Attributes::AirQuality::Id and Attributes::FeatureMap::Id itself,
+ * ahead of ember's attribute store. Once an Instance is registered for an
+ * endpoint, ITS mFeature bitmask is what a controller reads back for
+ * FeatureMap, not the ember global attribute mk_air_quality_sensor()'s
+ * cluster::air_quality::feature::*::add() calls set up (2fcfc04). Both are
+ * kept: the ember adds still gate which AirQualityEnum values esp-matter's
+ * own data model believes are legal (used nowhere at runtime once the
+ * Instance exists, but harmless to leave), and the Instance below is
+ * constructed with the identical four features (Fair, Moderate, VeryPoor,
+ * ExtremelyPoor) so the two never disagree if that ever changes.
+ *
+ * Read path: GetAirQuality() is a real public accessor (unlike the
+ * temperature-levels delegate above, which has none), so AT reads call it
+ * directly; no shadow value is kept.
+ *
+ * Storage: Instance has no default constructor (BitMask<Feature> must be
+ * supplied at construction), so a plain static array of Instance is not an
+ * option the way s_temp_levels above is. Raw aligned storage plus
+ * placement-new gives static allocation with no heap churn.
+ */
+struct mt_air_quality_entry_t {
+    bool used;
+    uint16_t ep;
+    chip::app::Clusters::AirQuality::Instance *instance;
+};
+static mt_air_quality_entry_t s_air_quality[MT_COMP_MAX_ENDPOINTS];
+
+alignas(chip::app::Clusters::AirQuality::Instance)
+    static uint8_t s_air_quality_storage[MT_COMP_MAX_ENDPOINTS][sizeof(chip::app::Clusters::AirQuality::Instance)];
+
+static mt_air_quality_entry_t *mt_air_quality_find(uint16_t ep)
+{
+    for (auto &e : s_air_quality) {
+        if (e.used && e.ep == ep) {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+/*
+ * Walk the live composition and construct an Instance for every endpoint
+ * that carries an AirQuality cluster. Called from app_main after the
+ * composition rebuild and before esp_matter::start(), the same window the
+ * SupportedTemperatureLevels delegate registers in (see the comment there):
+ * Instance::Init() calls emberAfContainsServer() and the
+ * AttributeAccessInterfaceRegistry, both of which need the composition's
+ * clusters to already exist, but nothing here touches the CHIP event loop
+ * or arms a timer, so it is safe ahead of start() for the same reason the
+ * dormant-cluster scrub and the delegate registration are.
+ */
+static void mt_air_quality_register_all(void)
+{
+    using chip::app::Clusters::AirQuality::Feature;
+    using chip::app::Clusters::AirQuality::Instance;
+    chip::BitMask<Feature> features(Feature::kFair, Feature::kModerate,
+                                    Feature::kVeryPoor, Feature::kExtremelyPoor);
+
+    for (uint16_t i = 0; i < s_live_count && i < MT_COMP_MAX_ENDPOINTS; i++) {
+        uint16_t ep = s_live_ep_id[i];
+        if (esp_matter::cluster::get(ep, chip::app::Clusters::AirQuality::Id) == nullptr) {
+            continue;
+        }
+        Instance *inst = new (&s_air_quality_storage[i]) Instance(ep, features);
+        if (inst->Init() != CHIP_NO_ERROR) {
+            ESP_LOGE(TAG, "AirQuality instance init failed for endpoint %u", ep);
+            inst->~Instance();
+            continue;
+        }
+        s_air_quality[i].used     = true;
+        s_air_quality[i].ep       = ep;
+        s_air_quality[i].instance = inst;
+    }
+}
+
+/*
  * Walk endpoint -> cluster -> attribute so a failure can say WHICH level was
  * missing. esp_matter::attribute::get_val() collapses all three into one error,
  * which leaves the host unable to tell a typo in the endpoint from a typo in
@@ -635,6 +745,28 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
      * is none in its attribute.cpp), so the walk of the data model and the
      * report that update() triggers both race the CHIP task. */
     ChipStackLock lock;
+
+    /* B139: AirQuality/AirQuality (91/0) is not on the generic path at all.
+     * See the registry comment ahead of mt_air_quality_register_all() above. */
+    if (cluster == chip::app::Clusters::AirQuality::Id &&
+        attr == chip::app::Clusters::AirQuality::Attributes::AirQuality::Id) {
+        if (esp_matter::endpoint::get(ep) == nullptr) {
+            return MT_ATTR_ERR_ENDPOINT;
+        }
+        if (esp_matter::cluster::get(ep, chip::app::Clusters::AirQuality::Id) == nullptr) {
+            return MT_ATTR_ERR_CLUSTER;
+        }
+        mt_air_quality_entry_t *e = mt_air_quality_find(ep);
+        if (e == nullptr) {
+            /* Cluster present but no registered Instance: cannot happen in
+             * practice, since mt_air_quality_register_all() walks every live
+             * endpoint carrying this cluster at boot. Defensive only. */
+            return MT_ATTR_ERR_FAILED;
+        }
+        *out = static_cast<long>(e->instance->GetAirQuality());
+        return MT_ATTR_OK;
+    }
+
     esp_matter::attribute_t *a = nullptr;
     mt_attr_result_t r = attr_locate(ep, cluster, attr, &a);
     if (r != MT_ATTR_OK) {
@@ -651,6 +783,41 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
 extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long in, bool notify)
 {
     ChipStackLock lock;
+
+    /* B139: same special case as the read side above. `notify` is not
+     * honored here: mode 0 (attribute::set_val(), no report) has no
+     * counterpart in the Instance API. UpdateAirQuality() always calls
+     * MatterReportingAttributeChangeCallback() itself (air-quality-
+     * server.cpp) with no silent-set alternative, so a host reflecting a
+     * controller-driven AirQuality change with AT+MTATTR=...,0 will echo it
+     * back rather than staying quiet the way it can for every other
+     * attribute. Documented here rather than worked around: reaching into
+     * the Instance's private state to bypass its own reporting call would
+     * fight the class instead of using it. */
+    if (cluster == chip::app::Clusters::AirQuality::Id &&
+        attr == chip::app::Clusters::AirQuality::Attributes::AirQuality::Id) {
+        if (esp_matter::endpoint::get(ep) == nullptr) {
+            return MT_ATTR_ERR_ENDPOINT;
+        }
+        if (esp_matter::cluster::get(ep, chip::app::Clusters::AirQuality::Id) == nullptr) {
+            return MT_ATTR_ERR_CLUSTER;
+        }
+        mt_air_quality_entry_t *e = mt_air_quality_find(ep);
+        if (e == nullptr) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        /* AirQualityEnum runs kUnknown(0)..kExtremelyPoor(6); anything past
+         * that is a type violation (+MTERR:1), not a data-model lookup
+         * failure, matching this codebase's +MTERR split. */
+        if (in < 0 || in > 6) {
+            return MT_ATTR_ERR_TYPE;
+        }
+        auto status = e->instance->UpdateAirQuality(
+            static_cast<chip::app::Clusters::AirQuality::AirQualityEnum>(in));
+        return (status == chip::Protocols::InteractionModel::Status::Success)
+                   ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+    }
+
     esp_matter::attribute_t *a = nullptr;
     mt_attr_result_t r = attr_locate(ep, cluster, attr, &a);
     if (r != MT_ATTR_OK) {
@@ -1243,6 +1410,15 @@ extern "C" void app_main(void)
      * later CHIP event goes back and re-checks whether an instance exists.
      */
     chip::app::Clusters::TemperatureControl::SetInstance(&s_temp_levels_delegate);
+
+    /*
+     * C1b (bug B139): construct the AirQuality server Instance for every
+     * live endpoint that carries the cluster, same window as the delegate
+     * registration just above and for the same reason: this needs the
+     * composition's clusters to already exist and must land before
+     * esp_matter::start() so nothing races the CHIP event loop.
+     */
+    mt_air_quality_register_all();
 
     /* Bring up the Matter stack (BLE commissioning + WiFi or Thread transport). */
     esp_err_t err = esp_matter::start(app_event_cb);
