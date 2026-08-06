@@ -316,6 +316,98 @@ static endpoint_t *mk_temperature_controlled_cabinet(node_t *n, uint8_t variant)
     return temperature_controlled_cabinet::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
 
+static endpoint_t *mk_light_sensor(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    light_sensor::config_t c;
+    return light_sensor::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static endpoint_t *mk_flow_sensor(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    flow_sensor::config_t c;
+    return flow_sensor::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static endpoint_t *mk_air_quality_sensor(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    air_quality_sensor::config_t c;
+    return air_quality_sensor::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static endpoint_t *mk_mounted_on_off_control(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    mounted_on_off_control::config_t c;
+    mt_startup_on_off_null(&c);
+    return mounted_on_off_control::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static endpoint_t *mk_mounted_dimmable_load_control(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    mounted_dimmable_load_control::config_t c;
+    mt_startup_on_off_null(&c);
+    mt_startup_level_null(&c);
+    return mounted_dimmable_load_control::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static endpoint_t *mk_air_purifier(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    air_purifier::config_t c;
+    return air_purifier::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static endpoint_t *mk_extractor_hood(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    extractor_hood::config_t c;
+    return extractor_hood::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static endpoint_t *mk_cooktop(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    cooktop::config_t c;
+    return cooktop::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static endpoint_t *mk_room_air_conditioner(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    room_air_conditioner::config_t c;
+    /* The thermostat trap (VALIDATE_FEATURES_AT_LEAST_ONE Heat,Cool,
+     * esp_matter_cluster.cpp:1445) is pre-satisfied here: esp-matter's own
+     * endpoint add() unconditionally ORs feature::cooling into
+     * config->thermostat.feature_flags before create(), and unconditionally
+     * adds dead_front_behavior to the on_off cluster
+     * (esp_matter_endpoint.cpp:1279-1287). Do not re-add flags. The setpoint
+     * lives under features.cooling, not directly on config_t (cluster::
+     * thermostat::config_t at esp_matter_cluster.h:397-421 nests it in the
+     * heating/cooling/... features struct, unlike the brief's flat sketch);
+     * 2600 matches feature::cooling::config_t's own default
+     * (esp_matter_feature.h:493-497), so this line is a self-documenting
+     * seed rather than a behaviour change. */
+    c.thermostat.features.cooling.occupied_cooling_setpoint = 2600;
+    return room_air_conditioner::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+static endpoint_t *mk_pump(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    pump::config_t c;
+    /* Sixth abort trap: pump_configuration_and_control::create() runs
+     * VALIDATE_FEATURES_AT_LEAST_ONE across the operation-mode features
+     * (esp_matter_cluster.cpp:2675-2679). Constant speed is the
+     * least-constrained mode. */
+    c.pump_configuration_and_control.feature_flags =
+        cluster::pump_configuration_and_control::feature::constant_speed::get_id();
+    return pump::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -339,6 +431,17 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { temperature_controlled_cabinet::get_device_type_id(), mk_temperature_controlled_cabinet,
       "temperature_controlled_cabinet", 1 },
     { door_lock::get_device_type_id(),                mk_door_lock,               "door_lock",               0 },
+    { light_sensor::get_device_type_id(),             mk_light_sensor,            "light_sensor",            0 },
+    { flow_sensor::get_device_type_id(),              mk_flow_sensor,             "flow_sensor",             0 },
+    { air_quality_sensor::get_device_type_id(),       mk_air_quality_sensor,      "air_quality_sensor",      0 },
+    { mounted_on_off_control::get_device_type_id(),   mk_mounted_on_off_control,  "mounted_on_off_control",  0 },
+    { mounted_dimmable_load_control::get_device_type_id(), mk_mounted_dimmable_load_control,
+      "mounted_dimmable_load_control", 0 },
+    { air_purifier::get_device_type_id(),             mk_air_purifier,            "air_purifier",            0 },
+    { extractor_hood::get_device_type_id(),           mk_extractor_hood,          "extractor_hood",          0 },
+    { room_air_conditioner::get_device_type_id(),     mk_room_air_conditioner,    "room_air_conditioner",    0 },
+    { cooktop::get_device_type_id(),                  mk_cooktop,                 "cooktop",                 0 },
+    { pump::get_device_type_id(),                     mk_pump,                    "pump",                    0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);
