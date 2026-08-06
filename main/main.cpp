@@ -647,8 +647,10 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
  * kept: the ember adds still gate which AirQualityEnum values esp-matter's
  * own data model believes are legal (used nowhere at runtime once the
  * Instance exists, but harmless to leave), and the Instance below is
- * constructed with the identical four features (Fair, Moderate, VeryPoor,
- * ExtremelyPoor) so the two never disagree if that ever changes.
+ * constructed from mt_air_quality_feature_mask() (mt_matter.h), the same
+ * accessor mk_air_quality_sensor() (mt_devtypes.cpp) reads to decide which
+ * ember adds to make, so the two cannot drift apart (fix round 1: they
+ * used to be two independently-hardcoded lists of the same four features).
  *
  * Read path: GetAirQuality() is a real public accessor (unlike the
  * temperature-levels delegate above, which has none), so AT reads call it
@@ -680,6 +682,21 @@ static mt_air_quality_entry_t *mt_air_quality_find(uint16_t ep)
 }
 
 /*
+ * Fix round 1: the single source of truth for the enabled AirQuality
+ * features, declared in mt_matter.h next to mt_matter_lock_source_max()'s
+ * accessor precedent. mk_air_quality_sensor() (mt_devtypes.cpp) reads the
+ * same bits to decide which ember cluster::air_quality::feature::*::add()
+ * calls to make, so the ember feature map and this Instance's BitMask
+ * cannot drift apart the way two hardcoded lists could.
+ */
+extern "C" uint32_t mt_air_quality_feature_mask(void)
+{
+    using chip::app::Clusters::AirQuality::Feature;
+    return static_cast<uint32_t>(Feature::kFair) | static_cast<uint32_t>(Feature::kModerate) |
+           static_cast<uint32_t>(Feature::kVeryPoor) | static_cast<uint32_t>(Feature::kExtremelyPoor);
+}
+
+/*
  * Walk the live composition and construct an Instance for every endpoint
  * that carries an AirQuality cluster. Called from app_main after the
  * composition rebuild and before esp_matter::start(), the same window the
@@ -694,8 +711,7 @@ static void mt_air_quality_register_all(void)
 {
     using chip::app::Clusters::AirQuality::Feature;
     using chip::app::Clusters::AirQuality::Instance;
-    chip::BitMask<Feature> features(Feature::kFair, Feature::kModerate,
-                                    Feature::kVeryPoor, Feature::kExtremelyPoor);
+    chip::BitMask<Feature> features(mt_air_quality_feature_mask());
 
     for (uint16_t i = 0; i < s_live_count && i < MT_COMP_MAX_ENDPOINTS; i++) {
         uint16_t ep = s_live_ep_id[i];
@@ -807,10 +823,17 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
             return MT_ATTR_ERR_FAILED;
         }
         /* AirQualityEnum runs kUnknown(0)..kExtremelyPoor(6); anything past
-         * that is a type violation (+MTERR:1), not a data-model lookup
-         * failure, matching this codebase's +MTERR split. */
+         * that is a bad parameter on a valid, existing attribute (+MTERR:1,
+         * MT_ATTR_ERR_VALUE), not a type/lookup failure (+MTERR:5,
+         * MT_ATTR_ERR_TYPE would be the wrong class here: that code means
+         * "this attribute is not the kind AT+MTATTR can carry at all",
+         * which is not the case for AirQuality). Fix round 1: an earlier
+         * version of this returned MT_ATTR_ERR_TYPE for this check, which
+         * mapped to the wrong +MTERR code; mt_attr_result_t/mt_at.c gained
+         * MT_ATTR_ERR_VALUE for exactly this case rather than mt_at.c's
+         * wire grammar or handlers changing at all. */
         if (in < 0 || in > 6) {
-            return MT_ATTR_ERR_TYPE;
+            return MT_ATTR_ERR_VALUE;
         }
         auto status = e->instance->UpdateAirQuality(
             static_cast<chip::app::Clusters::AirQuality::AirQualityEnum>(in));

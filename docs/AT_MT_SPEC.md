@@ -351,8 +351,11 @@ send bare `LockDoor`/`UnlockDoor`, never a PIN-carrying command.
 attribute `0x0000`) is served through a per-endpoint CHIP server instance
 rather than esp-matter's generic attribute store (bug B139: esp-matter marks
 the attribute managed-internally and nothing behind it answers a read).
-`AT+MTATTR` behaves identically on the wire regardless: reading and writing
-an integer `0`-`6` exactly like any other attribute.
+`AT+MTATTR` behaves identically on the wire for reads and for the value
+grammar: an integer `0`-`6`, exactly like any other attribute. One
+exception: a mode-`0` write (§3.8, "no report") still raises the `+MTATTR`
+URC, because the CHIP server instance always reports a successful update
+itself and has no silent-set path the way the generic attribute store does.
 
 Example:
 ```

@@ -94,6 +94,15 @@ typedef enum {
     MT_ATTR_ERR_ATTRIBUTE,  /* no such attribute in that cluster      */
     MT_ATTR_ERR_TYPE,       /* not an integer-valued attribute        */
     MT_ATTR_ERR_FAILED,     /* runtime failure                        */
+    /* C1b/B139 fix round 1: a value out of range for an attribute that
+     * IS integer-valued and DOES exist. Distinct from MT_ATTR_ERR_TYPE
+     * (which means "this attribute is not the kind AT+MTATTR can carry
+     * at all"): this is a bad parameter on a valid attribute, mapped to
+     * MT_ERR_BAD_PARAM (+MTERR:1) in mt_at.c, not MT_ERR_ATTR_TYPE
+     * (+MTERR:5). mt_attr_result_t had no such code before this; added
+     * here rather than overloading MT_ATTR_ERR_TYPE, which would have
+     * mapped an out-of-range value to the wrong +MTERR class. */
+    MT_ATTR_ERR_VALUE,
 } mt_attr_result_t;
 
 /* Read an integer-valued attribute into *out. Returns an mt_attr_result_t. */
@@ -189,6 +198,29 @@ uint8_t mt_matter_lock_source_manual(void);
  * decoding an out-of-range wire value); this is the highest value below it.
  */
 uint8_t mt_matter_lock_source_max(void);
+
+/* ---- air quality (C1b, bug B139) ------------------------------------ */
+
+/*
+ * The four optional AirQuality features (Fair, Moderate, VeryPoor,
+ * ExtremelyPoor) have to be identical on both sides of the C1b bridge: the
+ * ember cluster's feature map (mt_devtypes.cpp's mk_air_quality_sensor(),
+ * esp-matter's per-feature cluster::air_quality::feature::*::add() calls)
+ * and the CHIP server Instance's BitMask<Feature> (main.cpp's
+ * mt_air_quality_register_all()). Fix round 1: these used to be two
+ * independently-hardcoded lists (four esp-matter namespace calls in one
+ * file, four CHIP Feature enum values in the other) with nothing stopping
+ * them drifting apart if a feature were ever added or removed on one side
+ * only. This accessor is now the single source of truth for the enabled
+ * set, same precedent as mt_matter_lock_source_max() above: read the SDK's
+ * own bit values through a function at call time, don't transcribe them
+ * into two places. Bit assignment matches the CHIP Feature enum exactly
+ * (AirQuality/Enums.h: kFair=0x1, kModerate=0x2, kVeryPoor=0x4,
+ * kExtremelyPoor=0x8), which is also what mt_devtypes.cpp tests each bit
+ * against since it has no reason to pull in the CHIP Feature enum type
+ * itself for four plain add() calls.
+ */
+uint32_t mt_air_quality_feature_mask(void);
 
 #ifdef __cplusplus
 }
