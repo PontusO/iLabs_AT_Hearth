@@ -151,6 +151,45 @@ int mt_matter_switch_click(uint16_t ep);
  */
 int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count);
 
+/* ---- door lock (C2) ------------------------------------------------------ */
+
+/*
+ * AT+MTLOCK: drive the DoorLock cluster's LockState through the 6-arg
+ * DoorLockServer::SetLockState() (main.cpp), so the LockOperation event
+ * controllers expect is emitted (spec F4); the 2-arg overload writes the
+ * attribute silently and is not used here. The firmware never calls this on
+ * its own after an allowed AT+MTCMD verdict: actuation timing belongs to the
+ * host, this bridge only reports the outcome once the host has acted.
+ *
+ * <state> is a DlLockState protocol value (0 NotFullyLocked, 1 Locked, 2
+ * Unlocked); mt_at.c checks the 0..2 range itself, since those are wire
+ * protocol values documented in the AT contract, not SDK enum values that
+ * would need reading through an accessor. <source> is an OperationSourceEnum
+ * value, checked by mt_at.c against mt_matter_lock_source_max() below.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when ep has no DoorLock cluster, MT_ATTR_ERR_FAILED
+ * when SetLockState() itself reports failure.
+ */
+int mt_matter_lock_state_set(uint16_t ep, uint8_t state, uint8_t source);
+
+/*
+ * The two accessors mt_at.c's AT+MTLOCK handler validates <source> against,
+ * so this C translation unit never transcribes an SDK enum value: both
+ * return values read from OperationSourceEnum in the pinned CHIP header at
+ * call time, not literals copied into this file.
+ */
+
+/* OperationSourceEnum::kManual: the default <source> when AT+MTLOCK omits it. */
+uint8_t mt_matter_lock_source_manual(void);
+
+/*
+ * The highest legal OperationSourceEnum value. kUnknownEnumValue, the enum's
+ * true upper bound, is explicitly not a valid source (it exists only for
+ * decoding an out-of-range wire value); this is the highest value below it.
+ */
+uint8_t mt_matter_lock_source_max(void);
+
 #ifdef __cplusplus
 }
 #endif

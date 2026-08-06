@@ -451,6 +451,60 @@ static int cmd_mttemplevels(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/*
+ * AT+MTLOCK=<ep>,<state>[,<source>] -> report the DoorLock cluster's LockState
+ * on <ep> (typically after the host has physically actuated the lock).
+ * Set-only, the AT+MTSWITCH/AT+MTTEMPLEVELS convention: bare/query forms
+ * answer a plain ERROR.
+ *
+ * <state>: 0 NotFullyLocked, 1 Locked, 2 Unlocked (DlLockState protocol
+ * values, spec 3.9/3.18). These are wire protocol values fixed by the Matter
+ * spec, not SDK enum constants, so checking the 0..2 range here rather than
+ * through an accessor is not a transcription of anything: the AT contract IS
+ * the source of truth for this range.
+ *
+ * <source>: optional, defaults to mt_matter_lock_source_manual()
+ * (OperationSourceEnum::kManual, read from the pinned CHIP header, never
+ * transcribed into this file). Validated against
+ * mt_matter_lock_source_max(): a value above it is +MTERR:1, the same as any
+ * other out-of-range parameter.
+ *
+ * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
+ * +MTERR:3 the endpoint has no DoorLock cluster. A bare ERROR covers an
+ * unclassified runtime failure, routed through attr_err_to_mterr() like
+ * every other bridge call in this file.
+ */
+static int cmd_mtlock(at_type_t type, char *args)
+{
+    char *f[3];
+    int n = at_split_args(args, f, 3);
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (n < 2) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long ep, state;
+    if (!parse_u(f[0], &ep) || ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!parse_u(f[1], &state) || state > 2) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long source = mt_matter_lock_source_manual();
+    if (n == 3 && (!parse_u(f[2], &source) || source > mt_matter_lock_source_max())) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    int r = mt_matter_lock_state_set((uint16_t)ep, (uint8_t)state, (uint8_t)source);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
 /* ---- event subscription (C3) ------------------------------------------ */
 
 static uint32_t s_evt_mask = MT_EVT_MASK_DEFAULT;
@@ -974,6 +1028,7 @@ static const at_command_t s_cmds[] = {
     { "MTBAUD",       cmd_mtbaud      },
     { "MTFLOW",       cmd_mtflow      },
     { "MTCMDRESP",    cmd_mtcmdresp   },
+    { "MTLOCK",       cmd_mtlock      },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif

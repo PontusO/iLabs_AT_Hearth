@@ -298,6 +298,7 @@ device types are added.
 | `0x010D` | Extended Colour Light |
 | `0x000F` | Generic Switch |
 | `0x0071` | Temperature Controlled Cabinet |
+| `0x000A` | Door Lock |
 
 `0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
 bolts the HueSaturation feature onto the standard ColorControl configuration,
@@ -325,6 +326,16 @@ strings that is not an `AT+MTATTR` attribute at all. Its content is set with
 `AT+MTTEMPLEVELS` (§3.16). The two variants are mutually exclusive at the CHIP
 level: a cabinet endpoint always has exactly one of them, never both and never
 neither.
+
+`0x000A` Door Lock is Hearth's first device type beyond arduino-esp32 parity:
+upstream has no door lock class or example. Its `LockDoor`/`UnlockDoor`
+commands are **not** answered directly from the data model: they are
+forwarded to the host for adjudication (§3.17) and the host reports the
+outcome back with `AT+MTLOCK` (§3.18). `AT+MTATTR` still reads `LockState`
+(cluster `0x0101`, attribute `0x0000`) like any other attribute; it is only
+the two commands that leave the ordinary `AT+MTATTR` path. Feature map `0`:
+no PIN/user/credential (COTA) surface in this round, so controllers may only
+send bare `LockDoor`/`UnlockDoor`, never a PIN-carrying command.
 
 Example:
 ```
@@ -758,6 +769,133 @@ AT+MTTEMPLEVELS=1,"Low"                  -> +MTERR:3 (ep 1 has no TemperatureCon
 AT+MTTEMPLEVELS=4,"Low"                  -> +MTERR:4 (ep 4 built as variant 0, TemperatureNumber)
 ```
 
+### 3.17 Command forwarding: `+MTCMD` / `AT+MTCMDRESP`
+
+Some Matter commands need an app-level decision the firmware cannot make on
+its own; the Door Lock's `LockDoor`/`UnlockDoor` (§3.9, `0x000A`) are the
+first consumers. The firmware forwards the command to the host over a URC
+and waits for a verdict, rather than deciding on its own or refusing the
+command outright. This is a generic frame: the door lock is its first
+registered consumer, not the protocol's shape, so a future app-adjudicated
+command reuses it rather than inventing a second one.
+
+```
++MTCMD:<seq>,<ep>,<cluster>,<command>          (URC, decimal fields)
+AT+MTCMDRESP=<seq>,<verdict>  ->  OK
++MTCMDTO:<seq>                                 (URC, only on a missed window)
+```
+
+- `+MTCMD:<seq>,<ep>,<cluster>,<command>`: raised when a controller invokes a
+  command that needs adjudication. `<seq>` identifies this specific request;
+  `<ep>` the endpoint; `<cluster>` and `<command>` the Matter cluster and
+  command IDs, decimal, the same convention `AT+MTATTR` (§3.8) uses for its
+  own `<cluster>`/`<attr>` fields. The door lock registers cluster `257`
+  (`0x0101`) commands `0` (`LockDoor`) and `1` (`UnlockDoor`). No payload
+  field in v1: the bare commands this firmware forwards carry none the host
+  needs to see. A future consumer that needs one adds a fifth field without
+  breaking a host that only reads the first four.
+- `AT+MTCMDRESP=<seq>,<verdict>`: the host's answer. `<verdict>` is `1`
+  (allow) or `0` (deny). **Set-only**; a bare or query form answers a plain
+  `ERROR` (§5), the same convention `AT+MTSWITCH` (§3.15) follows, since
+  there is no "current pending command" to report beyond the seq the URC
+  already named. `+MTERR:1` on bad grammar, a verdict outside `{0,1}`, or a
+  `<seq>` that is not the one currently pending (wrong, stale, already
+  answered, or already timed out).
+- **The verdict deadline is exactly 1000 ms**, measured from the `+MTCMD` URC
+  reaching the wire. A `AT+MTCMDRESP` that arrives after the deadline finds
+  no pending seq and answers `+MTERR:1`; the firmware additionally raises
+  `+MTCMDTO:<seq>` at the moment of the timeout, so a host that missed the
+  window learns it rather than waiting on a reply that will never come.
+- **Default-deny.** A timeout, the AT link not being up, or no host ever
+  having answered `AT+MTCMDRESP` for this firmware session: all are treated
+  identically to an explicit deny. A lock fails closed, never open, on every
+  path that is not an explicit allow inside the window.
+- **Concurrent bridge commands queue behind the open window.** Matter
+  serializes command invokes on the CHIP event-loop task, so at most one
+  forward is ever in flight, but while it is, the CHIP stack lock is held for
+  the whole wait (worst case 1 s): any other `mt_matter_*` bridge call
+  (`AT+MTATTR` and friends) blocks until the verdict lands or the deadline
+  expires. `AT+MTCMDRESP` itself is exempt (it never takes that lock, see
+  below), so the AT link stays responsive enough to actually answer the
+  command that is holding everything else up.
+
+**`AT+MTCMDRESP` never takes the CHIP stack lock**, unlike every other
+`mt_matter_*` bridge call in this firmware. The CHIP task is blocked inside
+the cluster callback that raised `+MTCMD`, waiting on `AT+MTCMDRESP`; if the
+handler tried to take the same lock, it would block on the very task it is
+trying to answer, a guaranteed deadlock lasting the full 1000 ms until
+`mt_cmd_forward()`'s own timeout gives up. `AT+MTCMDRESP` only touches the
+verdict mailbox and a semaphore, never the CHIP stack, by design.
+
+Example, a controller sending `LockDoor` to endpoint 5:
+```
+                                    +MTCMD:1,5,257,0
+AT+MTCMDRESP=1,1                -> OK              (allow; controller sees Status::Success)
+AT+MTCMDRESP=1,1                -> +MTERR:1         (seq 1 already answered)
+AT+MTCMDRESP=99,1               -> +MTERR:1         (no such seq)
+```
+Silent host (deadline missed):
+```
+                                    +MTCMD:2,5,257,0
+                                    +MTCMDTO:2       (1000 ms later; controller sees Status::Failure)
+AT+MTCMDRESP=2,1                -> +MTERR:1         (seq 2 already expired)
+```
+
+### 3.18 `AT+MTLOCK`: door lock state reporting
+
+Reports the Door Lock cluster's `LockState` on `<ep>`, typically once the
+host has actually driven the physical lock. This is the other half of the
+door lock's split ownership: the firmware never decides *whether* a lock
+moves (that is `AT+MTCMDRESP`'s job, §3.17) and never decides *that* it has
+moved either (spec F4: `LockState` is deliberately not written on an allowed
+verdict; the app owns the actuation and its timing may not be immediate). A
+host that allows `LockDoor` and then calls `AT+MTLOCK` once the bolt has
+actually thrown is the intended flow; `LockState` reads keep working over
+`AT+MTATTR` (§3.8) exactly as any other attribute unchanged by this command.
+
+```
+AT+MTLOCK=<ep>,<state>[,<source>]  ->  OK
+```
+
+- `<ep>`: the endpoint id.
+- `<state>`: `0` NotFullyLocked, `1` Locked, `2` Unlocked (`DlLockState`
+  protocol values fixed by the Matter spec). Anything else `+MTERR:1`.
+- `<source>`: optional, decimal, defaults to `1` (`OperationSourceEnum::
+  kManual`). Accepted values are `0`..`10` (every defined `OperationSourceEnum`
+  value except the SDK's internal `kUnknownEnumValue`, which is not a valid
+  source to report); outside that range `+MTERR:1`.
+
+Driving `SetLockState` with a source and a real state change is what makes
+the cluster emit its `LockOperation` event, which is what a subscribed
+controller actually sees change; writing `LockState` through `AT+MTATTR`
+instead would change the attribute silently, with no event, which is why
+`AT+MTLOCK` exists as its own command rather than folding into `AT+MTATTR`.
+
+**Set-only.** `AT+MTLOCK?` or a bare `AT+MTLOCK` is the wrong command form
+and answers a plain `ERROR` (§5), the same convention `AT+MTSWITCH` (§3.15)
+and `AT+MTTEMPLEVELS` (§3.16) follow.
+
+**Lookup errors follow the established division.** `+MTERR:2` unknown
+endpoint; `+MTERR:3` the endpoint has no `DoorLock` cluster. A bare `ERROR`
+covers an unclassified runtime failure (the `SetLockState` call itself
+reporting failure), the same as `AT+MTATTR` and `AT+MTSWITCH`.
+
+**The firmware never calls this on its own.** Neither an allowed
+`AT+MTCMDRESP` verdict nor anything else in the firmware triggers
+`AT+MTLOCK`'s effect automatically: actuation timing belongs entirely to the
+host, which is expected to call `AT+MTLOCK` itself once its own lock
+mechanism confirms the new state.
+
+Example, a door lock on endpoint 5:
+```
+AT+MTLOCK=5,1        -> OK         (Locked, source defaults to kManual)
+AT+MTLOCK=5,2,1      -> OK         (Unlocked, kManual explicit)
+AT+MTLOCK=5,3        -> +MTERR:1   (3 is not a valid DlLockState for this command)
+AT+MTLOCK=5,1,99     -> +MTERR:1   (99 exceeds the highest valid OperationSourceEnum value)
+AT+MTLOCK=9,1        -> +MTERR:2   (no endpoint 9)
+AT+MTLOCK=1,1        -> +MTERR:3   (ep 1 has no DoorLock cluster)
+```
+
 ## 4. Unsolicited result codes (URCs)
 
 | URC | Meaning |
@@ -766,6 +904,8 @@ AT+MTTEMPLEVELS=4,"Low"                  -> +MTERR:4 (ep 4 built as variant 0, T
 | `+MTEVT:<bit>[,<detail>]` | A subscribed platform event fired (§3.11). |
 | `+MTATTR:<ep>,<cluster>,<attr>,<val>` | An attribute changed on one of the declared endpoints (controller-driven or local). The root endpoint (0) is intentionally not reported, to keep boot-time init noise off the link. |
 | `+MTIDENT:<ep>,<enabled>` | The Identify cluster started (`1`) or stopped (`0`) on an endpoint. Backs the per-endpoint identify callback; the host decides how to indicate it. |
+| `+MTCMD:<seq>,<ep>,<cluster>,<command>` | A command needing an app-level verdict was invoked; answer with `AT+MTCMDRESP` within 1000 ms (§3.17). |
+| `+MTCMDTO:<seq>` | The `AT+MTCMDRESP` window for `<seq>` closed with no answer; the command was denied by default (§3.17). |
 
 **`+MTCOMMISSION:STARTED` / `:COMPLETE` / `:FAILED` were removed** in phase C3
 and are now `+MTEVT:0`, `+MTEVT:3` and `+MTEVT:5`. All three are in the default

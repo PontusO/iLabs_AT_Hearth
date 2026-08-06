@@ -623,6 +623,157 @@ would have meant inventing a second NVS-survives-reset story for one
 attribute where every other attribute already has a working one: the host
 resends its state at startup.
 
+## 8.4 Command forwarding: the verdict mailbox and the door lock (2026-08-06)
+
+Design record: `docs/superpowers/specs/2026-08-06-command-forwarding-design.md`.
+Takes on the challenge parked in the cabinet round (task-graph node I110):
+some Matter commands need a synchronous app-level decision, and the app
+lives on the other side of a UART. First consumer: the Door Lock device
+type (`0x000A`), Hearth's first device type beyond arduino-esp32 parity
+(upstream has no door lock class or example; confirmed against 3.3.8).
+Landed in two parts: task C1 built the mailbox and `AT+MTCMDRESP` (commits
+`06bf96a`..`ce6f890`); this section covers task C2, the door lock endpoint,
+the ember callbacks that call into the mailbox, and `AT+MTLOCK`.
+`AT_MT_SPEC.md` §3.17/§3.18 are the host-facing contract; this section is
+why they are shaped the way they are.
+
+**Why a synchronous host round-trip rather than a firmware policy.** The
+alternative designs considered and rejected: always-allow (defeats the
+point of a lock), always-deny (defeats the point of a controller), or a
+firmware-local allow-list (re-invents access control the host already has,
+duplicating a policy surface that must then be kept in sync over the AT
+link). Forwarding the decision keeps exactly one copy of "who may lock this
+door" and it lives where the rest of the product's access control already
+lives: the host.
+
+**One mailbox slot, not a queue.** `emberAfPluginDoorLockOnDoorLockCommand`
+and `...OnDoorUnlockCommand` return `bool` inline
+(door-lock-server.h:1112-1146) with no async completion path
+(`HandleRemoteLockOperation` writes the command status in the same call
+frame, door-lock-server.cpp:3711/:3726), and Matter serializes command
+invokes on the CHIP event-loop task, so at most one adjudication is ever in
+flight. `mt_cmdbox.c` (task C1) is therefore a single `{seq, ep, cluster,
+command, verdict, state}` slot plus a FreeRTOS binary semaphore, not a
+queue: a queue would be solving a concurrency problem this system does not
+have, at the cost of bounded-memory reasoning a fixed slot gives for free.
+
+**The lock-free responder.** `cmd_mtcmdresp()` (`mt_at.c`, runs on the AT
+parser task) is the one `mt_at.c` handler in this firmware that does **not**
+take `ChipStackLock` before touching Matter-adjacent state. Every other
+bridge call does, by the pattern `mt_matter_attr_write()` and its siblings
+established. Here that pattern would deadlock: the CHIP task is parked
+inside `mt_cmd_forward()`'s `xSemaphoreTake()`, itself called from inside
+the ember callback, which at that moment holds the CHIP stack's logical
+ownership for the full duration of the wait. If `cmd_mtcmdresp()` blocked on
+the same lock, it would be waiting on the very task it exists to unblock,
+for the full 1000 ms, every single time, until `mt_cmd_forward()`'s own
+timeout gave up and the "deadlock" resolved itself into "always times out".
+`cmd_mtcmdresp()` therefore touches only the mailbox (`taskENTER_CRITICAL`
+around `mt_cmdbox_answer()`) and gives the semaphore; nothing about the CHIP
+stack. The two ember callbacks in `main.cpp` mirror this: no `ChipStackLock`
+either, because they already run **on** the CHIP event-loop task (the same
+reasoning `app_event_cb()` already established for platform events), so
+taking it would self-deadlock a second way.
+
+**Default-deny.** Every outcome that is not an explicit `AT+MTCMDRESP=<seq>,1`
+inside the 1000 ms window collapses to the same answer: timeout, the AT link
+not being up (`s_at_up` false, e.g. a command that somehow fires before
+`mt_at_start()`), or no host ever implementing `AT+MTCMDRESP` at all. All of
+them return `false` from `mt_cmd_forward()`, the callback sets
+`OperationErrorEnum::kUnspecified`, and the controller sees `Status::Failure`
+plus the server's own `LockOperationError` event. A lock that fails open on
+an ambiguous outcome is a worse defect than a spurious deny, so the mailbox
+was built to make "deny" the only reachable answer for every code path that
+is not a confirmed allow, rather than trying to enumerate every honest
+failure and picking a bespoke response for each.
+
+**The 1000 ms deadline and its queuing consequence.** Chosen against
+`kExpectedIMProcessingTime` (2 s, `InteractionModelTimeout.h:27`) plus MRP
+margins on the controller side, so a full window is still inside the
+controller's own patience. The cost: while the CHIP task waits (up to 1 s),
+every other `mt_matter_*` bridge call queues behind `ChipStackLock`, since
+the CHIP task is what those calls' locks ultimately serialize against
+holding. `AT+MTATTR` and friends are still correct when this happens, only
+slower; the AT link itself stays responsive throughout, since the parser
+task keeps running and `AT+MTCMDRESP` (§3.17) is exactly the one command
+that was built not to queue behind that same lock. Accepted rather than
+engineered away: the alternative was a second lock-free path for every
+bridge call, which would have meant re-deriving the "why is this safe"
+argument for each one instead of once.
+
+**The door lock endpoint has no fifth-trap analogue.** `door_lock::config_t`
+has no `feature_flags` field at all (`esp_matter_endpoint.h:543-555`,
+`esp_matter_cluster.h:634-651`), and `cluster::door_lock::create()` runs no
+`VALIDATE_FEATURES` macro (`esp_matter_cluster.cpp:2054-2098`): unlike
+`window_covering`/`occupancy_sensing`/`thermostat`/`generic_switch`/
+`temperature_control` (§8.2/§8.3), there is no default-construction abort
+trap to route around, so `mk_door_lock()` is a plain thunk. The feature map
+esp-matter hard-codes is `0` (`global::attribute::create_feature_map(cluster,
+0)`, `esp_matter_cluster.cpp:2070`), which happens to be exactly what this
+round wants (spec F3): with no PIN/USER/COTA features, a supplied PIN is
+rejected by the server itself before the app callback ever runs
+(door-lock-server.cpp:3653-3708), so bare `LockDoor`/`UnlockDoor` are the
+only commands this firmware's callbacks are ever asked to adjudicate.
+
+**The app owns the state change, deliberately.** The server does not set
+`LockState` on a successful command; its own comment says so
+(door-lock-server.cpp:3712, "The app should trigger the lock state change as
+it may take a while"). This firmware's ember callbacks therefore never call
+`SetLockState`: `AT+MTLOCK` (§3.18) is the host's own, separate report of
+what the physical lock actually did, on its own schedule, through the 6-arg
+`DoorLockServer::SetLockState(ep, state, opSource, ...)` overload
+(door-lock-server.h:144-148) so the `LockOperation` event a subscribed
+controller expects is actually emitted; the 2-arg overload
+(door-lock-server.h:160) writes the attribute with no event and is not used.
+Two separate commands for two separate authorities: `AT+MTCMDRESP` answers
+"may this happen", `AT+MTLOCK` reports "this happened", and the firmware
+never promotes one into the other on the host's behalf.
+
+**`emberAfDoorLockClusterInitCallback` has no weak default anywhere in the
+vendored connectedhomeip tree**, unlike the three `OnDoorLock`/`OnDoorUnlock`/
+`OnDoorUnbolt` command callbacks, which `door-lock-server-callback.cpp:46-71`
+does supply weak deny-everything defaults for. Verified by grepping `src/`
+and `zzz_generated/` for the symbol: only the zap-generated declaration
+exists. Confirmed at the linker: building with the callback commented out
+(a deliberate, reverted experiment for this round) fails with exactly one
+undefined reference,
+`emberAfDoorLockClusterInitCallback(unsigned short)`, from
+`esp_matter_cluster.cpp:2045`'s `function_list` array, which is where
+`door_lock::create()` (task C2's `mk_door_lock()`, via `door_lock::create()`
+in `esp_matter_endpoint.cpp`) registers it as a `CLUSTER_FLAG_INIT_FUNCTION`
+callback, called once per DoorLock server instance regardless of ember's own
+generic per-endpoint init dispatch. The implementation
+(`DoorLockServer::Instance().InitServer(endpoint)`) is verbatim from
+esp-matter's own example, `examples/door_lock/main/lock/
+door_lock_callbacks.cpp:20-24`, minus that example's
+`BoltLockMgr().InitLockState()` call, which belongs to its own unused
+lock-state simulation rather than to `InitServer()` itself.
+
+**`CONFIG_SUPPORT_DOOR_LOCK_CLUSTER` needed the same flip as five clusters
+before it.** `sdkconfig.defaults` excluded it (`=n`) the same way
+`FAN_CONTROL`/`OCCUPANCY_SENSING`/`THERMOSTAT`/`WINDOW_COVERING` (§8.2) and
+`SWITCH`/`TEMPERATURE_CONTROL` (§8.3) were: with the line left in place,
+`door_lock::create()` links fine (esp_matter's own config struct exists
+either way) but the final image link fails with undefined references to
+`DoorLockServer::Instance()`, `DoorLockServer::SetLockState()`,
+`MatterDoorLockPluginServerInitCallback()`, and the three
+`MatterDoorLockClusterServer*Callback` symbols the cluster's own
+`function_list`/delegate-init path calls, plus
+`emberAfDoorLockClusterLockDoorCallback`/`...UnlockDoorCallback`, the
+generated command dispatch entries `esp_matter_command.cpp` calls into. The
+line was removed rather than flipped to `=y`, matching how the five
+predecessors were handled: this is now the sixth cluster that needed its
+`CONFIG_SUPPORT_*_CLUSTER` exclusion lifted purely because a device type
+using it exists in `mt_devtypes.cpp`.
+
+**Measured 2026-08-06, firmware 0.3.3, all three images:**
+
+| image | size | free in the 3.75 MB slot |
+|---|---|---|
+| `build_b4` (WiFi) | 1,691,712 B (`0x19b040`) | 57% |
+| `build_thread` (Thread) | 1,583,840 B (`0x1828e0`) | 60% |
+| `build_combined` (WiFi + Thread) | 1,975,344 B (`0x1e3430`) | 50% |
+
 ## 9. Decision log (summary)
 
 | Decision | Choice | Why |
@@ -634,3 +785,4 @@ resends its state at startup.
 | Matter OTA Requestor | Disabled | Redundant with host OTA; frees flash. |
 | Radio owner (Matter) | esp_matter (link_mgr reserved) | Separate image; link_mgr for the merge. |
 | Co-processor vendor | ESP32-C6 for now, not locked in | `AT+MT` is vendor-neutral; port surface is 804 lines behind a C header (§8.1). |
+| App-adjudicated commands (door lock) | Host decides, firmware forwards and defaults to deny | One copy of access-control policy, on the host; single mailbox slot, 1000 ms deadline, lock-free responder (§8.4). |

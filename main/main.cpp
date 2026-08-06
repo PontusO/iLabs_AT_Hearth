@@ -30,6 +30,15 @@
 #include <app/reporting/reporting.h>
 #include <lib/support/Span.h>
 
+/* C2: the door lock server instance (DoorLockServer::Instance()) and the
+ * ember plugin-command callback signatures (LockDoor/UnlockDoor) this file
+ * implements. Also pulls in OperationErrorEnum/OperationSourceEnum/
+ * DlLockState/Nullable/Optional at global scope via `using` declarations
+ * (door-lock-server.h:44-64), which is why the callback signatures below
+ * match the SDK's prototypes without repeating those `using`s here. */
+#include <app/clusters/door-lock-server/door-lock-server.h>
+#include <app-common/zap-generated/callback.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -844,6 +853,128 @@ extern "C" int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels,
         ep, chip::app::Clusters::TemperatureControl::Id,
         chip::app::Clusters::TemperatureControl::Attributes::SupportedTemperatureLevels::Id);
     return MT_ATTR_OK;
+}
+
+/*
+ * ---- door lock (C2) --------------------------------------------------------
+ *
+ * The DoorLock cluster's LockDoor/UnlockDoor commands need an app-level
+ * verdict the firmware cannot supply on its own (design spec F1: the
+ * callback returns bool inline, no async completion path exists). Both
+ * ember callbacks below forward to the host over the C1 verdict mailbox
+ * (mt_cmd_forward(), mt_at.c) and return its answer; the two-second
+ * controller-side invoke budget (F2) is what makes the mailbox's 1000 ms
+ * deadline safe to block on here.
+ *
+ * NO ChipStackLock in this block, unlike every mt_matter_* bridge function
+ * below: these callbacks already run ON the CHIP event-loop task (F2), the
+ * same reasoning as app_event_cb(). mt_cmd_forward() takes no lock of its
+ * own either, for the same reason.
+ */
+
+/*
+ * One helper for both commands, differing only in the command id forwarded:
+ * design spec section 5. On deny (mt_cmd_forward() returns false, which
+ * covers both an explicit deny and every fail-closed path: timeout, link
+ * down, or no host callback registered) sets err to OperationErrorEnum::
+ * kUnspecified, which is what the server reports to the controller as
+ * Status::Failure plus a LockOperationError event (F6, spec section 3).
+ */
+static bool mt_door_lock_adjudicate(chip::EndpointId endpointId, uint32_t command, OperationErrorEnum &err)
+{
+    if (mt_cmd_forward(endpointId, chip::app::Clusters::DoorLock::Id, command)) {
+        return true;
+    }
+    err = OperationErrorEnum::kUnspecified;
+    return false;
+}
+
+/*
+ * Signature verbatim from door-lock-server.h:1112-1114 (connectedhomeip,
+ * vendored under esp-matter release/v1.5.1).
+ */
+bool emberAfPluginDoorLockOnDoorLockCommand(chip::EndpointId endpointId, const Nullable<chip::FabricIndex> &fabricIdx,
+                                            const Nullable<chip::NodeId> &nodeId, const Optional<chip::ByteSpan> &pinCode,
+                                            OperationErrorEnum &err)
+{
+    /* fabricIdx/nodeId/pinCode: not used. F3 means a PIN-carrying command
+     * never reaches this callback at all (feature map 0 registers no
+     * credential validation, so the server refuses it before the app is
+     * consulted); fabricIdx/nodeId are event-annotation fields the app has
+     * no adjudication use for in v1. */
+    (void)fabricIdx;
+    (void)nodeId;
+    (void)pinCode;
+    return mt_door_lock_adjudicate(endpointId, chip::app::Clusters::DoorLock::Commands::LockDoor::Id, err);
+}
+
+/*
+ * Signature verbatim from door-lock-server.h:1128-1130.
+ */
+bool emberAfPluginDoorLockOnDoorUnlockCommand(chip::EndpointId endpointId, const Nullable<chip::FabricIndex> &fabricIdx,
+                                              const Nullable<chip::NodeId> &nodeId, const Optional<chip::ByteSpan> &pinCode,
+                                              OperationErrorEnum &err)
+{
+    (void)fabricIdx;
+    (void)nodeId;
+    (void)pinCode;
+    return mt_door_lock_adjudicate(endpointId, chip::app::Clusters::DoorLock::Commands::UnlockDoor::Id, err);
+}
+
+/*
+ * Cluster init callback: esp_matter's door_lock::create() (esp_matter_cluster
+ * .cpp:2046) registers this by address in its own CLUSTER_FLAG_INIT_FUNCTION
+ * table, not through ember's generic per-endpoint dispatch, so it is called
+ * once per DoorLock server instance regardless.
+ *
+ * No weak/default definition exists anywhere in the vendored connectedhomeip
+ * tree for this symbol (checked: door-lock-server-callback.cpp supplies weak
+ * defaults for the OnDoorLock/OnDoorUnlock/OnDoorUnbolt command callbacks
+ * only, and grep across src/ and zzz_generated/ for
+ * emberAfDoorLockClusterInitCallback finds only the zap-generated
+ * declaration). Leaving it undefined is therefore a link failure, not a
+ * silent no-op default; see the task report for the exact linker line.
+ * Pattern verbatim from esp-matter's own example,
+ * examples/door_lock/main/lock/door_lock_callbacks.cpp:20-24, minus its
+ * BoltLockMgr().InitLockState() call, which belongs to that example's own
+ * (unused here) lock-state simulation, not to InitServer() itself.
+ */
+void emberAfDoorLockClusterInitCallback(chip::EndpointId endpoint)
+{
+    DoorLockServer::Instance().InitServer(endpoint);
+}
+
+/*
+ * AT+MTLOCK bridge: report the host's own actuation as the DoorLock cluster's
+ * LockState, through the 6-arg SetLockState() so LockOperation fires (F4).
+ * The firmware never calls this after an allowed AT+MTCMD verdict on its
+ * own; the host decides when the physical lock has actually moved and calls
+ * AT+MTLOCK itself.
+ */
+extern "C" int mt_matter_lock_state_set(uint16_t ep, uint8_t state, uint8_t source)
+{
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::DoorLock::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    bool ok = DoorLockServer::Instance().SetLockState(ep, (DlLockState)state, (OperationSourceEnum)source);
+    return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+}
+
+extern "C" uint8_t mt_matter_lock_source_manual(void)
+{
+    return (uint8_t)OperationSourceEnum::kManual;
+}
+
+extern "C" uint8_t mt_matter_lock_source_max(void)
+{
+    /* kUnknownEnumValue (DoorLock/Enums.h:336) is one past the last real
+     * source and is not itself a valid source (mt_matter.h); kAliro
+     * (DoorLock/Enums.h:331) is the highest one that is. */
+    return (uint8_t)OperationSourceEnum::kAliro;
 }
 
 /* --------------------------------------------------------------------------- */

@@ -103,7 +103,7 @@ subscription (`AT+MTEVT`), and the transport query (`AT+MTNET?`).
 
 ## Supported device types
 
-`AT+MTEP=<id>` accepts these 19 device type IDs (firmware 0.3.2); anything
+`AT+MTEP=<id>` accepts these 20 device type IDs (firmware 0.3.3); anything
 else answers `+MTERR:6`. The table is `main/mt_devtypes.cpp`'s and grows by
 rows; IDs are read from esp-matter, never transcribed.
 
@@ -118,7 +118,7 @@ rows; IDs are read from esp-matter, never transcribed.
 | 0x002B | Fan | | 0x0107 | Occupancy Sensor |
 | 0x0202 | Window Covering | | 0x0015 | Contact Sensor |
 | 0x0301 | Thermostat | | 0x000F | Generic Switch |
-| 0x0071 | Temperature Controlled Cabinet | | | |
+| 0x0071 | Temperature Controlled Cabinet | | 0x000A | Door Lock |
 
 The extended color light carries a hue/saturation addition beyond stock
 esp-matter, so hosts see `CurrentHue`/`CurrentSaturation` alongside XY and
@@ -136,6 +136,17 @@ Deliberately absent, with reasons recorded in the design specs: Color Light
 (no distinct device type ID exists; the host library's `MatterColorLight`
 rides the `0x010D` row). See `docs/AT_MT_SPEC.md` section 3.9 for the
 authoritative table.
+
+The Door Lock (`0x000A`) is the first device type beyond arduino-esp32
+parity, and the first whose commands the firmware cannot answer on its own:
+`LockDoor`/`UnlockDoor` are forwarded to the host as a `+MTCMD` URC and held
+open for up to 1000 ms awaiting `AT+MTCMDRESP`, defaulting to deny on a
+timeout, a missed link, or no answer at all. `AT+MTLOCK` is the separate
+command the host uses to report the lock's actual state once it has moved,
+so a subscribed controller sees the `LockOperation` event Matter expects.
+`+MTCMD`/`AT+MTCMDRESP` are a generic frame, not specific to locks: a future
+command needing the same kind of app-level verdict reuses it. See
+`docs/AT_MT_SPEC.md` sections 3.17 and 3.18.
 
 ## Design
 

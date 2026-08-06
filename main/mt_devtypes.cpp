@@ -264,6 +264,19 @@ static endpoint_t *mk_generic_switch(node_t *n, uint8_t variant)
     return generic_switch::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
 
+static endpoint_t *mk_door_lock(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    /* Plain thunk: door_lock::config_t has no feature_flags field at all
+     * (esp_matter_endpoint.h:543-555, esp_matter_cluster.h:634-651), and
+     * cluster::door_lock::create() runs no VALIDATE_FEATURES macro
+     * (esp_matter_cluster.cpp:2054-2098): there is no fifth-trap analogue
+     * here, and none is to be invented (spec F5). Feature map stays 0 by
+     * design (spec F3): no PIN/USER/COTA features this round. */
+    door_lock::config_t c;
+    return door_lock::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
 static endpoint_t *mk_temperature_controlled_cabinet(node_t *n, uint8_t variant)
 {
     temperature_controlled_cabinet::config_t c;
@@ -309,6 +322,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { generic_switch::get_device_type_id(),          mk_generic_switch,          "generic_switch",          0 },
     { temperature_controlled_cabinet::get_device_type_id(), mk_temperature_controlled_cabinet,
       "temperature_controlled_cabinet", 1 },
+    { door_lock::get_device_type_id(),                mk_door_lock,               "door_lock",               0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);
