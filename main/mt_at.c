@@ -252,6 +252,9 @@ static int attr_err_to_mterr(int r)
     case MT_ATTR_ERR_CLUSTER:   return MT_ERR_NO_CLUSTER;
     case MT_ATTR_ERR_ATTRIBUTE: return MT_ERR_NO_ATTRIBUTE;
     case MT_ATTR_ERR_TYPE:      return MT_ERR_ATTR_TYPE;
+    /* C1b/B139 fix round 1: an out-of-range value on a valid, existing
+     * integer attribute is a bad parameter, not a type/lookup failure. */
+    case MT_ATTR_ERR_VALUE:     return MT_ERR_BAD_PARAM;
     default:                    return MT_R_ERROR;
     }
 }

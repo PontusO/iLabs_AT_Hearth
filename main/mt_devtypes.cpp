@@ -16,6 +16,7 @@
 #include <esp_matter_endpoint.h>
 
 #include "mt_devtypes.h"
+#include "mt_matter.h"
 
 using namespace esp_matter;
 using namespace esp_matter::endpoint;
@@ -349,13 +350,36 @@ static endpoint_t *mk_air_quality_sensor(node_t *n, uint8_t variant)
      * feature map does not admit. air_quality::config_t is common::config_t
      * (empty, esp_matter_cluster.h:66-70), so the features are added after
      * create() rather than seeded on it, the same shape as the door lock
-     * thunk's AutoRelockTime. */
+     * thunk's AutoRelockTime.
+     *
+     * Fix round 1 (C1b, bug B139): which four bits get added here has to
+     * match what C1b's AirQuality server Instance constructs its
+     * BitMask<Feature> from (main.cpp's mt_air_quality_register_all()), or
+     * the ember feature map and the Instance's FeatureMap answer (which the
+     * Instance serves once it exists, ahead of ember; see main.cpp) would
+     * disagree. mt_air_quality_feature_mask() (mt_matter.h) is the single
+     * accessor both sites read, so a feature added or removed on one side
+     * without touching the other cannot compile silently mismatched: this
+     * loop and the Instance's BitMask both trace back to the same bits. The
+     * bit values themselves (0x1/0x2/0x4/0x8) are the CHIP Feature enum's
+     * own (AirQuality/Enums.h: kFair/kModerate/kVeryPoor/kExtremelyPoor),
+     * not transcribed here since this file has no other reason to pull in
+     * that CHIP header for four plain add() calls. */
     cluster_t *cl = cluster::get(ep, chip::app::Clusters::AirQuality::Id);
     if (cl != nullptr) {
-        cluster::air_quality::feature::fair::add(cl);
-        cluster::air_quality::feature::moderate::add(cl);
-        cluster::air_quality::feature::very_poor::add(cl);
-        cluster::air_quality::feature::extremely_poor::add(cl);
+        uint32_t mask = mt_air_quality_feature_mask();
+        if (mask & 0x1u) {
+            cluster::air_quality::feature::fair::add(cl);
+        }
+        if (mask & 0x2u) {
+            cluster::air_quality::feature::moderate::add(cl);
+        }
+        if (mask & 0x4u) {
+            cluster::air_quality::feature::very_poor::add(cl);
+        }
+        if (mask & 0x8u) {
+            cluster::air_quality::feature::extremely_poor::add(cl);
+        }
     }
     return ep;
 }
