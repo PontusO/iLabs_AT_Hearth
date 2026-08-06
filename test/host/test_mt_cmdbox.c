@@ -88,6 +88,40 @@ static void test_reopen_after_expire_fresh_seq(void)
     check("take returns the verdict for the fresh seq", mt_cmdbox_take(seq2) == 1);
 }
 
+/*
+ * Final review of the command-forwarding round, fix wave. mt_cmdbox_open()'s
+ * own header comment documents that a second open() while the single slot
+ * is already PENDING or ANSWERED "simply discards whatever was there" --
+ * no existing test above actually pinned that claim: every case up to here
+ * opens exactly once per mt_cmdbox_init(). Pinned here directly, both
+ * discard paths, since PENDING (never answered) and ANSWERED (answered but
+ * not yet taken) are reached through different call sequences and both
+ * need their own late-arrival check.
+ */
+static void test_reopen_discards_pending_or_answered_slot(void)
+{
+    mt_cmdbox_init();
+    uint32_t seq1 = mt_cmdbox_open(1, 0x0006, 0x02); /* PENDING, never answered */
+    uint32_t seq2 = mt_cmdbox_open(2, 0x0101, 0x00); /* a second forward opens over it */
+    check("reopening over a still-PENDING slot issues a fresh seq", seq2 == seq1 + 1);
+    check("a late answer for the discarded PENDING seq is rejected",
+          mt_cmdbox_answer(seq1, 1) == -1);
+    check("the fresh seq answers normally", mt_cmdbox_answer(seq2, 1) == 0);
+
+    mt_cmdbox_init();
+    uint32_t seq3 = mt_cmdbox_open(1, 0x0006, 0x02);
+    check("seq3 answers, leaving the slot ANSWERED but not yet taken",
+          mt_cmdbox_answer(seq3, 1) == 0);
+    uint32_t seq4 = mt_cmdbox_open(2, 0x0101, 0x00); /* a second forward opens over the un-taken answer */
+    check("reopening over an un-taken ANSWERED slot issues a fresh seq", seq4 == seq3 + 1);
+    check("a late answer for the discarded ANSWERED seq is rejected",
+          mt_cmdbox_answer(seq3, 1) == -1);
+    check("a take() of the discarded ANSWERED seq is rejected too",
+          mt_cmdbox_take(seq3) == -1);
+    check("the fresh seq answers and takes normally",
+          mt_cmdbox_answer(seq4, 0) == 0 && mt_cmdbox_take(seq4) == 0);
+}
+
 int main(void)
 {
     printf("\n===== mt_cmdbox tests =====\n");
@@ -98,6 +132,7 @@ int main(void)
     test_answer_bad_verdict_rejected();
     test_expire_drops_pending();
     test_reopen_after_expire_fresh_seq();
+    test_reopen_discards_pending_or_answered_slot();
     printf("\n===== RESULT: %d passed, %d failed =====\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
