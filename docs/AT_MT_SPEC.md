@@ -804,6 +804,8 @@ command reuses it rather than inventing a second one.
 
 ```
 +MTCMD:<seq>,<ep>,<cluster>,<command>          (URC, decimal fields)
++MTCMD:<seq>,<ep>,<cluster>,<command>,<payload> (URC, decimal fields, reserved fifth field)
++MTCMD:0,<ep>,<cluster>,<command>              (URC, decimal fields, notify-only)
 AT+MTCMDRESP=<seq>,<verdict>  ->  OK
 +MTCMDTO:<seq>                                 (URC, only on a missed window)
 ```
@@ -813,10 +815,23 @@ AT+MTCMDRESP=<seq>,<verdict>  ->  OK
   `<ep>` the endpoint; `<cluster>` and `<command>` the Matter cluster and
   command IDs, decimal, the same convention `AT+MTATTR` (§3.8) uses for its
   own `<cluster>`/`<attr>` fields. The door lock registers cluster `257`
-  (`0x0101`) commands `0` (`LockDoor`) and `1` (`UnlockDoor`). No payload
-  field in v1: the bare commands this firmware forwards carry none the host
-  needs to see. A future consumer that needs one adds a fifth field without
-  breaking a host that only reads the first four.
+  (`0x0101`) commands `0` (`LockDoor`) and `1` (`UnlockDoor`).
+- `+MTCMD:<seq>,<ep>,<cluster>,<command>,<payload>`: the same adjudicated
+  form, plus one reserved fifth field for a command that carries a single
+  value the host needs to see. `<payload>` is decimal, the same convention as
+  the other fields. This is the extension the four-field form above always
+  reserved: a host parser that reads exactly four fields and ignores anything
+  past the fourth comma keeps working unchanged when a consumer adds the
+  fifth. First consumer: chime's `PlayChimeSound` `chimeID`.
+- `+MTCMD:0,<ep>,<cluster>,<command>` (notify-only): raised for a command
+  whose ember callback has nothing to report back up the stack, so there is
+  no verdict to wait for and none is requested. Sequence `0` is reserved for
+  this form and is never issued by the adjudicated forms above; the firmware
+  opens no mailbox slot, blocks nothing, and returns as soon as the line is
+  queued. `AT+MTCMDRESP=0,...` always answers `+MTERR:1`, the same as any
+  other seq the mailbox does not recognise as currently pending, because
+  there is structurally nothing pending under seq `0` to answer. First
+  consumer: `SelfTestRequest`.
 - `AT+MTCMDRESP=<seq>,<verdict>`: the host's answer. `<verdict>` is `1`
   (allow) or `0` (deny). **Set-only**; a bare or query form answers a plain
   `ERROR` (§5), the same convention `AT+MTSWITCH` (§3.15) follows, since
@@ -947,7 +962,8 @@ AT+MTLOCK=1,1        -> +MTERR:3   (ep 1 has no DoorLock cluster)
 | `+MTEVT:<bit>[,<detail>]` | A subscribed platform event fired (§3.11). |
 | `+MTATTR:<ep>,<cluster>,<attr>,<val>` | An attribute changed on one of the declared endpoints (controller-driven or local). The root endpoint (0) is intentionally not reported, to keep boot-time init noise off the link. |
 | `+MTIDENT:<ep>,<enabled>` | The Identify cluster started (`1`) or stopped (`0`) on an endpoint. Backs the per-endpoint identify callback; the host decides how to indicate it. |
-| `+MTCMD:<seq>,<ep>,<cluster>,<command>` | A command needing an app-level verdict was invoked; answer with `AT+MTCMDRESP` within 1000 ms (§3.17). |
+| `+MTCMD:<seq>,<ep>,<cluster>,<command>[,<payload>]` | A command needing an app-level verdict was invoked; answer with `AT+MTCMDRESP` within 1000 ms (§3.17). |
+| `+MTCMD:0,<ep>,<cluster>,<command>` | Notify-only: the command was invoked with no verdict to give; `AT+MTCMDRESP=0,...` always answers `+MTERR:1` (§3.17). |
 | `+MTCMDTO:<seq>` | The `AT+MTCMDRESP` window for `<seq>` closed with no answer; the command was denied by default (§3.17). |
 
 **`+MTCOMMISSION:STARTED` / `:COMPLETE` / `:FAILED` were removed** in phase C3

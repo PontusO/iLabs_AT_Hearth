@@ -50,7 +50,10 @@ uint32_t mt_cmdbox_open(uint16_t ep, uint32_t cluster, uint32_t command);
  * (deny) or 1 (allow); seq must match the slot currently PENDING.
  * Returns 0 and moves the slot to ANSWERED on success; returns -1 and
  * changes nothing for a wrong/stale/future seq, a slot not PENDING, or an
- * out-of-range verdict.
+ * out-of-range verdict. seq 0 is always rejected, structurally rather than
+ * by the seq-mismatch check alone: it is reserved for the +MTCMD
+ * notify-only wire form (no mailbox slot is ever opened for it), so
+ * AT+MTCMDRESP=0,... must answer +MTERR:1 unconditionally.
  */
 int mt_cmdbox_answer(uint32_t seq, int verdict);
 
