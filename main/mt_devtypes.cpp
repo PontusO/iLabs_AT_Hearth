@@ -592,6 +592,60 @@ static endpoint_t *mk_laundry_dryer(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * F4/trap seven: smoke_co_alarm::create() runs VALIDATE_FEATURES_AT_LEAST_ONE
+ * on SmokeAlarm/COAlarm (esp_matter_cluster.cpp:2019). Enable both so both
+ * the SmokeState and COState attributes exist: AT+MTALARM's field table
+ * (mt_matter.h's mt_matter_alarm_set()) covers both without a variant to pick
+ * one over the other, and the eleven-field surface is uniform across every
+ * smoke_co_alarm endpoint this firmware creates.
+ */
+static endpoint_t *mk_smoke_co_alarm(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    smoke_co_alarm::config_t c;
+    c.smoke_co_alarm.feature_flags =
+        cluster::smoke_co_alarm::feature::smoke_alarm::get_id() |
+        cluster::smoke_co_alarm::feature::co_alarm::get_id();
+    return smoke_co_alarm::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
+/*
+ * F5/trap eight: power_source::create() runs VALIDATE_FEATURES_EXACT_ONE on
+ * Wired/Battery (esp_matter_cluster.cpp:982). Battery matches upstream's
+ * battery-powered smoke/CO alarm devices. This is a FLAT sibling endpoint,
+ * not a composed one: the Smoke/CO Alarm device type's mandate for a power
+ * source is node-scoped, so a standalone Power Source endpoint elsewhere on
+ * the node satisfies it, no composition tree needed (design spec decision
+ * log, 2026-08-07).
+ *
+ * BatPercentRemaining has a creator (attribute::create_bat_percent_remaining,
+ * esp_matter_attribute.h:933) but no endpoint path calls it: F5 confirms the
+ * standard power_source::add() (esp_matter_endpoint.cpp) never does, so the
+ * thunk adds it by hand after create(), the same "creator exists, nothing
+ * wires it, add it after create()" shape mk_air_quality_sensor() and
+ * mk_door_lock() above use for their own hand-added attributes. Bounds 0..200
+ * (0.5% steps per the Matter spec's BatPercentRemaining) and a null default
+ * (no battery reading available at boot) match the one other place in this
+ * SDK revision that creates this attribute, the battery_storage device type
+ * (esp_matter_endpoint.cpp's battery_storage::add()).
+ */
+static endpoint_t *mk_power_source(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    power_source::config_t c;
+    c.power_source.feature_flags = cluster::power_source::feature::battery::get_id();
+    endpoint_t *ep = power_source::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    cluster_t *cl = cluster::get(ep, chip::app::Clusters::PowerSource::Id);
+    if (cl != nullptr) {
+        cluster::power_source::attribute::create_bat_percent_remaining(cl, nullable<uint8_t>(), 0, 200);
+    }
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -631,6 +685,8 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { laundry_washer::get_device_type_id(),           mk_laundry_washer,          "laundry_washer",          0 },
     { dish_washer::get_device_type_id(),              mk_dish_washer,             "dish_washer",             0 },
     { laundry_dryer::get_device_type_id(),            mk_laundry_dryer,           "laundry_dryer",           0 },
+    { smoke_co_alarm::get_device_type_id(),           mk_smoke_co_alarm,          "smoke_co_alarm",          0 },
+    { power_source::get_device_type_id(),             mk_power_source,            "power_source",            0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

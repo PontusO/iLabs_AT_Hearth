@@ -419,6 +419,45 @@ command once Task C2 wires a caller in, not by an automated regression here.
 | `AT+MTOPSTATE=<non-opstate ep>,1` | `+MTERR:3` (endpoint has no `OperationalState` cluster) |
 | `AT+MTOPSTATE=<washer/dishwasher/dryer ep>,1` | `OK` (state accepted; `AT+MTATTR` has no path to `OperationalState` to read it back, per `AT_MT_SPEC.md` §3.21, so confirm via a commissioned controller reading the attribute) |
 
+**`AT+MTALARM` argument validation:**
+
+| Command | Expected |
+|---|---|
+| `AT+MTALARM?` | bare `ERROR` (query form not accepted, `AT+MTOPSTATE` pattern) |
+| `AT+MTALARM` | bare `ERROR` (exec form without arguments) |
+| `AT+MTALARM=1,1` | `+MTERR:1` (fewer than 3 parameters) |
+| `AT+MTALARM=1,1,1,1` | `+MTERR:1` (more than 3 parameters) |
+| `AT+MTALARM=zz,1,1` | `+MTERR:1` (endpoint not numeric) |
+| `AT+MTALARM=1,zz,1` | `+MTERR:1` (field not numeric) |
+| `AT+MTALARM=1,0,0` | `+MTERR:1` (field `0`/`ExpressedState` is derived, not settable) |
+| `AT+MTALARM=1,12,0` | `+MTERR:1` (field outside `1..11`) |
+| `AT+MTALARM=1,1,zz` | `+MTERR:1` (value not numeric) |
+| `AT+MTALARM=<alarm ep>,1,3` | `+MTERR:1` (`3` is not a valid `AlarmStateEnum` value: field `1`/SmokeState's range is `0..2`) |
+| `AT+MTALARM=<alarm ep>,4,2` | `+MTERR:1` (`2` is not a valid `MuteStateEnum` value: field `4`/DeviceMuted's range is `0..1`) |
+| `AT+MTALARM=<alarm ep>,5,2` | `+MTERR:1` (field `5`/TestInProgress is boolean: `2` is outside `0..1`) |
+| `AT+MTALARM=<alarm ep>,10,4` | `+MTERR:1` (`4` is not a valid `ContaminationStateEnum` value: field `10`'s range is `0..3`) |
+| `AT+MTALARM=99,1,1` | `+MTERR:2` (unknown endpoint) |
+| `AT+MTALARM=<non-alarm ep>,1,1` | `+MTERR:3` (endpoint has no `SmokeCoAlarm` cluster) |
+| `AT+MTALARM=<alarm ep>,1,1` | `OK` (SmokeState set to Warning; fires the `SmokeAlarm` event, per `AT_MT_SPEC.md` §3.22, so confirm via a commissioned controller observing the event or reading the attribute, since `AT+MTATTR` reads the same storage but this command's whole point is the event a raw write would skip) |
+| `AT+MTALARM=<alarm ep>,5,0` | `OK` (TestInProgress false; fires `SelfTestComplete`, the self-test completion path, below) |
+
+**`AT+MTALARM` self-test bench case:** unlike the rest of this command's
+grammar table, exercising the self-test round trip needs a commissioned
+controller, the same caveat `AT+MTCMDRESP`'s live-forwarding note above
+carries: `chip-tool smokecoalarm self-test-request <node> <ep>` invokes
+`SelfTestRequest`, which the SDK answers `Status::Success` immediately
+(there is no adjudication to wait on) and, from inside that same callback,
+raises `+MTCMD:0,<ep>,92,0` on the AT link. Assert the URC arrives
+unprompted, that it carries seq `0` (never a nonzero mailbox seq), and that
+`AT+MTCMDRESP=0,1` (or any verdict) answers `+MTERR:1` rather than `OK`,
+since seq `0` has nothing pending to answer. Completing the loop with
+`AT+MTALARM=<ep>,5,0` should then be observed, via the controller, as a
+`SelfTestComplete` event and `TestInProgress` reading back `0`. This is the
+closest this command family has to Phase 2's controller round-trip cases
+(section 7), but it stays in this section because, like `AT+MTCMDRESP`'s
+own note, the URC/mailbox mechanics it exercises are the same
+non-host-testable FreeRTOS glue, not new grammar.
+
 **Chatty-host bench case: a bridge command already in flight when a forward
 opens.** Exercises `AT_MT_SPEC.md` §3.17's own by-construction limitation and
 the `iLabs_Hearth` library README's "Hearth originals" section from the other

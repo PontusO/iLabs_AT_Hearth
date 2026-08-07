@@ -73,6 +73,7 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTVALVE=<ep>,<state>[,<level>]` | set | `OK` (valve state/level reported) |
 | `AT+MTMODES=<ep>,<mode>,"<label>"[,...]` | set | `OK` (ModeSelect SupportedModes list stored) |
 | `AT+MTOPSTATE=<ep>,<state>` | set | `OK` (OperationalState transition reported) |
+| `AT+MTALARM=<ep>,<field>,<value>` | set | `OK` (SmokeCoAlarm state field reported) |
 
 ## 3. Command reference
 
@@ -317,6 +318,8 @@ device types are added.
 | `0x0073` | Laundry Washer |
 | `0x0075` | Dishwasher |
 | `0x007C` | Laundry Dryer |
+| `0x0076` | Smoke/CO Alarm |
+| `0x0011` | Power Source |
 
 `0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
 bolts the HueSaturation feature onto the standard ColorControl configuration,
@@ -367,6 +370,29 @@ callback, which managed-internally attributes bypass; the server instance
 reports the change to fabric subscribers instead, so controllers still see
 it, but the host must rely on the `OK` alone. The `<mode>` field is
 accepted and has no effect here.
+
+`0x0076` Smoke/CO Alarm enables both the `SmokeAlarm` and `CoAlarm` feature
+bits, so both `SmokeState` and `COState` exist on every endpoint of this
+type; there is no variant to pick one over the other. `AT+MTALARM` (§3.22)
+is the only way to drive its state: the cluster's eleven `Set*` methods fire
+the spec's events and the critical-alarm auto-unmute, which a raw
+`AT+MTATTR` write to the same ember-managed storage would silently skip, so
+`AT+MTATTR` is not the intended path to this cluster's state even though
+some of its attributes are, mechanically, plain integers.
+
+`0x0011` Power Source is a **flat sibling**, not a device composed onto
+another endpoint: the Smoke/CO Alarm device type's Matter specification
+mandates a power source be present somewhere on the node, and that mandate
+is node-scoped, not endpoint-scoped, so a standalone Power Source endpoint
+elsewhere in the composition satisfies it with no composition tree needed
+(design spec decision log, 2026-08-07). The endpoint enables the `Battery`
+feature only (`Wired`/`Battery` are mutually exclusive, spec F5), which
+publishes `BatChargeLevel`, `BatReplacementNeeded` and `BatReplaceability`
+alongside the base `Status`/`Order`/`Description`, all ordinary
+`AT+MTATTR`-reachable integers. `BatPercentRemaining` is hand-added by the
+thunk (`0`-`200` in half-percent steps per the Matter spec, nullable,
+defaulting to null) since no endpoint-creation path in this SDK revision
+wires it on its own; it too is a plain `AT+MTATTR` attribute once added.
 
 Example:
 ```
@@ -847,7 +873,10 @@ AT+MTCMDRESP=<seq>,<verdict>  ->  OK
   queued. `AT+MTCMDRESP=0,...` always answers `+MTERR:1`, the same as any
   other seq the mailbox does not recognise as currently pending, because
   there is structurally nothing pending under seq `0` to answer. First
-  consumer: `SelfTestRequest`.
+  consumer: the Smoke/CO Alarm's `SelfTestRequest` (§3.22), cluster `92`
+  (`0x005C`) command `0`; the SDK has already answered the controller before
+  the ember callback this fires from ever runs (§3.22's self-test lifecycle
+  note), which is exactly why there is no verdict left for the host to give.
 - `AT+MTCMDRESP=<seq>,<verdict>`: the host's answer. `<verdict>` is `1`
   (allow) or `0` (deny). **Set-only**; a bare or query form answers a plain
   `ERROR` (§5), the same convention `AT+MTSWITCH` (§3.15) follows, since
@@ -1195,6 +1224,79 @@ AT+MTOPSTATE=8,3        -> +MTERR:1   (3/Error is reserved, not settable here)
 AT+MTOPSTATE=8,4        -> +MTERR:1   (4 is not a valid OperationalStateEnum value)
 AT+MTOPSTATE=99,1       -> +MTERR:2   (no endpoint 99)
 AT+MTOPSTATE=1,1        -> +MTERR:3   (ep 1 has no OperationalState cluster)
+```
+
+### 3.22 `AT+MTALARM`: Smoke/CO Alarm state reporting
+
+Reports an event-emitting `SmokeCoAlarm` cluster (`92`/`0x005C`) state change
+on `<ep>`, through one of the cluster's own eleven `Set*` methods rather than
+a raw `AT+MTATTR` write to the same attribute: the setters fire the cluster's
+spec-mandated events (`SmokeAlarm`, `COAlarm`, `MuteEnded`, `HardwareFault`,
+`EndOfService`, `AllClear`, `LowBattery`, `SelfTestComplete`) and the
+critical-alarm auto-unmute, both of which a raw write would silently skip.
+
+```
+AT+MTALARM=<ep>,<field>,<value>  ->  OK
+```
+
+- `<ep>`: the endpoint id.
+- `<field>`: which state to set, `1`-`11`:
+
+| `<field>` | State | Setter | `<value>` |
+|---|---|---|---|
+| `1` | SmokeState | `SetSmokeState` | `AlarmStateEnum`: `0` Normal, `1` Warning, `2` Critical |
+| `2` | COState | `SetCOState` | `AlarmStateEnum` (as above) |
+| `3` | BatteryAlert | `SetBatteryAlert` | `AlarmStateEnum` (as above) |
+| `4` | DeviceMuted | `SetDeviceMuted` | `MuteStateEnum`: `0` NotMuted, `1` Muted |
+| `5` | TestInProgress | `SetTestInProgress` | `0` or `1` (bool); `0` after a self-test notify is the completion path, below |
+| `6` | HardwareFaultAlert | `SetHardwareFaultAlert` | `0` or `1` (bool) |
+| `7` | EndOfServiceAlert | `SetEndOfServiceAlert` | `EndOfServiceEnum`: `0` Normal, `1` Expired |
+| `8` | InterconnectSmokeAlarm | `SetInterconnectSmokeAlarm` | `AlarmStateEnum` (as above) |
+| `9` | InterconnectCOAlarm | `SetInterconnectCOAlarm` | `AlarmStateEnum` (as above) |
+| `10` | ContaminationState | `SetContaminationState` | `ContaminationStateEnum`: `0` Normal, `1` Low, `2` Warning, `3` Critical |
+| `11` | SmokeSensitivityLevel | `SetSmokeSensitivityLevel` | `SensitivityEnum`: `0` High, `1` Standard, `2` Low |
+
+`<field>` `0` (`ExpressedState`) is not in this table because it is derived
+by the server from the ten states above and is never settable directly: `0`
+and anything outside `1`-`11` answer `+MTERR:1`. `<value>` outside the range
+its own field's enum defines (or, for the two boolean fields, outside
+`0`/`1`) also answers `+MTERR:1`; the range comes from the SDK's own enum
+(its `kUnknownEnumValue` bound), never a literal copied into this firmware.
+
+**The self-test lifecycle.** A controller's `SelfTestRequest` command
+(cluster `0x005C`, command `0`) is not adjudicated the way `AT+MTLOCK`'s or
+`AT+MTOPSTATE`'s commands are: `SmokeCoAlarmServer::HandleRemoteSelfTestRequest`
+sets `TestInProgress` true and `ExpressedState` `Testing`, answers the
+controller `Status::Success`, and only *then* calls the app-level hook this
+firmware wires to the notify-only `+MTCMD` form (§3.17):
+`+MTCMD:0,<ep>,92,0` arrives with no verdict to give, since the wire response
+is already sent. The host runs whatever self-test it actually performs, then
+reports completion with `AT+MTALARM=<ep>,5,0` (`TestInProgress` false), which
+the SDK's own `SetTestInProgress` recognises as the field's true-to-false
+edge and fires `SelfTestComplete` on the fabric. `AT+MTCMDRESP=0,...` always
+answers `+MTERR:1`: there is nothing pending seq `0` could ever answer.
+
+**Set-only.** `AT+MTALARM?` or a bare `AT+MTALARM` is the wrong command form
+and answers a plain `ERROR` (§5), the `AT+MTLOCK`/`AT+MTVALVE`/`AT+MTOPSTATE`
+convention.
+
+**Lookup errors follow the established division.** `+MTERR:2` unknown
+endpoint; `+MTERR:3` the endpoint has no `SmokeCoAlarm` cluster. A bare
+`ERROR` covers an unclassified runtime failure, for example a setter
+returning false because the field already held that value, the same as
+`AT+MTATTR` and the rest of this family.
+
+Example, a smoke/CO alarm on endpoint 9:
+```
+AT+MTALARM=9,1,1        -> OK          (SmokeState Warning; fires SmokeAlarm)
+AT+MTALARM=9,1,2        -> OK          (SmokeState Critical; fires SmokeAlarm + MuteEnded)
+AT+MTALARM=9,4,1        -> OK          (DeviceMuted; silences the alarm)
+AT+MTALARM=9,5,0        -> OK          (self-test complete; fires SelfTestComplete)
+AT+MTALARM=9,1,3        -> +MTERR:1    (3 is not a valid AlarmStateEnum value)
+AT+MTALARM=9,0,0        -> +MTERR:1    (field 0/ExpressedState is derived, not settable)
+AT+MTALARM=9,12,0       -> +MTERR:1    (field outside 1..11)
+AT+MTALARM=99,1,1       -> +MTERR:2    (no endpoint 99)
+AT+MTALARM=1,1,1        -> +MTERR:3    (ep 1 has no SmokeCoAlarm cluster)
 ```
 
 ## 4. Unsolicited result codes (URCs)
