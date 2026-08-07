@@ -199,6 +199,58 @@ uint8_t mt_matter_lock_source_manual(void);
  */
 uint8_t mt_matter_lock_source_max(void);
 
+/* ---- water valve (seven-type batch, task C2) ---------------------------- */
+
+/*
+ * The delegate-pool handout pattern later tasks in this batch copy (chime;
+ * washer/dishwasher/dryer's OperationalState instances): the endpoint id a
+ * pool object serves is not known until esp_matter::endpoint::create()
+ * returns it (assigned inside create() itself, per the endpoint-
+ * reproducibility rule in the project's CLAUDE.md), but the config struct
+ * create() consumes needs the delegate pointer BEFORE that call. So the
+ * thunk (mt_devtypes.cpp, which must stay free of CHIP/esp_matter delegate
+ * types per this header's own file comment) hands out a slot first with
+ * mt_matter_valve_delegate_alloc(), passes it through
+ * config.valve_configuration_and_control.delegate, calls create(), then
+ * fixes the real endpoint with mt_matter_valve_delegate_set_endpoint() once
+ * the id is known. Both accessors trade in an opaque void*: mt_devtypes.cpp
+ * never names HearthValveDelegate (main.cpp) or any CHIP type, the same
+ * separation mt_air_quality_feature_mask() below keeps for a scalar value.
+ *
+ * mt_matter_valve_delegate_alloc() returns nullptr once
+ * MT_COMP_MAX_ENDPOINTS slots are handed out, so the caller can abort the
+ * boot rebuild the same way a failed create() itself would: a failed
+ * endpoint create consumes no id, and this firmware aborts the whole
+ * composition on any single failure rather than silently skip an entry
+ * (see CLAUDE.md, "A failed endpoint::create() consumes no endpoint ID").
+ */
+void *mt_matter_valve_delegate_alloc(void);
+void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep);
+
+/*
+ * AT+MTVALVE: report the host's own actuation as the
+ * ValveConfigurationAndControl cluster's CurrentState (and, when level is
+ * present, CurrentLevel too), through UpdateCurrentState()/
+ * UpdateCurrentLevel() so the ValveStateChanged event a subscribed
+ * controller expects is actually emitted (design spec F1). Same split as
+ * AT+MTLOCK/mt_matter_lock_state_set() above: the firmware never calls this
+ * on its own after an allowed +MTCMD verdict, and doubly so here, since the
+ * SDK ignores that verdict's return value regardless (F1: the delegate's
+ * Open/Close callbacks cannot fail the command on the wire) and only the
+ * host knows when the valve has actually moved.
+ *
+ * <state> is a ValveStateEnum wire value (0 Closed, 1 Open, 2
+ * Transitioning); mt_at.c checks the 0..2 range itself, the same "wire
+ * protocol value documented in the AT contract" reasoning AT+MTLOCK's
+ * <state> follows. <level> is 0..100, or -1 for "absent": mt_at.c has
+ * already validated the range for any value it passes through here.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when ep has no ValveConfigurationAndControl cluster,
+ * MT_ATTR_ERR_FAILED when the underlying CHIP_ERROR is not CHIP_NO_ERROR.
+ */
+int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level);
+
 /* ---- air quality (C1b, bug B139) ------------------------------------ */
 
 /*

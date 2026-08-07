@@ -473,6 +473,36 @@ static endpoint_t *mk_pump(node_t *n, uint8_t variant)
     return pump::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
 
+static endpoint_t *mk_water_valve(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    /*
+     * The delegate must exist before create(): water_valve::create() ->
+     * valve_configuration_and_control::create() consumes config.delegate
+     * synchronously (it stashes the pointer for esp_matter's own deferred
+     * delegate-init callback, esp_matter_cluster.cpp), but the real
+     * endpoint id is not assigned until create() returns it. Hand out a
+     * pool slot first, fix its endpoint after (mt_matter.h). On pool
+     * exhaustion, abort loudly by returning nullptr, same as any other
+     * failed create() here: the boot rebuild aborts the whole composition
+     * rather than create an endpoint whose command adjudication would have
+     * nowhere to go.
+     */
+    void *delegate = mt_matter_valve_delegate_alloc();
+    if (delegate == nullptr) {
+        ESP_LOGE(TAG, "water valve delegate pool exhausted");
+        return nullptr;
+    }
+    water_valve::config_t c;
+    c.valve_configuration_and_control.delegate = delegate;
+    endpoint_t *ep = water_valve::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    mt_matter_valve_delegate_set_endpoint(delegate, endpoint::get_id(ep));
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -507,6 +537,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { room_air_conditioner::get_device_type_id(),     mk_room_air_conditioner,    "room_air_conditioner",    0 },
     { cooktop::get_device_type_id(),                  mk_cooktop,                 "cooktop",                 0 },
     { pump::get_device_type_id(),                     mk_pump,                    "pump",                    0 },
+    { water_valve::get_device_type_id(),              mk_water_valve,             "water_valve",             0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

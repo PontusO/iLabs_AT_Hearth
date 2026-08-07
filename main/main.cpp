@@ -45,6 +45,12 @@
  * why esp-matter's generic attribute path cannot serve this cluster. */
 #include <app/clusters/air-quality-server/air-quality-server.h>
 
+/* C2 (seven-type batch, water valve): the ValveConfigurationAndControl
+ * Delegate interface (pulled in transitively via
+ * valve-configuration-and-control-delegate.h) and the app-side reporting
+ * calls, UpdateCurrentState()/UpdateCurrentLevel(). */
+#include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-cluster.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -1169,6 +1175,158 @@ extern "C" uint8_t mt_matter_lock_source_max(void)
      * source and is not itself a valid source (mt_matter.h); kAliro
      * (DoorLock/Enums.h:331) is the highest one that is. */
     return (uint8_t)OperationSourceEnum::kAliro;
+}
+
+/*
+ * ---- water valve (seven-type batch, task C2) -------------------------------
+ *
+ * ValveConfigurationAndControl::Delegate has exactly three pure virtuals
+ * (valve-configuration-and-control-delegate.h:40-42, connectedhomeip
+ * vendored under esp-matter release/v1.5.1):
+ *
+ *   virtual DataModel::Nullable<chip::Percent> HandleOpenValve(DataModel::Nullable<chip::Percent> level) = 0;
+ *   virtual CHIP_ERROR HandleCloseValve()                                                                = 0;
+ *   virtual void HandleRemainingDurationTick(uint32_t duration)                                          = 0;
+ *
+ * Design spec F1: the cluster server calls both synchronously but IGNORES
+ * what they return (valve-configuration-and-control-cluster.cpp:303 wraps
+ * the HandleCloseValve() call in TEMPORARY_RETURN_IGNORED; :361-365 reads
+ * HandleOpenValve()'s level back but only to conditionally call
+ * UpdateCurrentLevel(), never to fail the command) and answers the
+ * controller Status::Success regardless, every time. The verdict this
+ * firmware forwards over +MTCMD therefore gates only whether the host
+ * actually opens/closes the valve; it has no effect on what the wire
+ * response says, which is already fixed at Success before the delegate is
+ * ever called. Documented here rather than fought: there is no return path
+ * back into the ember callback for a deny to take.
+ *
+ * The base Delegate class carries no endpoint member (verified against the
+ * header above: no field, no accessor), but HandleOpenValve()/
+ * HandleCloseValve() need one to forward through
+ * mt_cmd_forward(ep, cluster, command). Each pool slot stores it, set once
+ * by the thunk (mt_devtypes.cpp's mk_water_valve()) right after create()
+ * returns: the real id is not knowable any earlier, since esp_matter
+ * assigns it inside create() itself. See mt_matter_valve_delegate_alloc()/
+ * mt_matter_valve_delegate_set_endpoint() (mt_matter.h) for the handout
+ * protocol this depends on.
+ */
+class HearthValveDelegate : public chip::app::Clusters::ValveConfigurationAndControl::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+
+    /*
+     * F1: the return is read by the one caller (SetValveLevel(),
+     * cluster.cpp:361) only to decide whether to report a CurrentLevel; it
+     * never fails the command. Forward for adjudication and report the
+     * level the host was asked for on allow (the caller republishes it as
+     * CurrentLevel when the Level feature is present), DataModel::
+     * NullNullable on deny, i.e. "no level to report", not a failure.
+     */
+    chip::app::DataModel::Nullable<chip::Percent> HandleOpenValve(
+        chip::app::DataModel::Nullable<chip::Percent> level) override
+    {
+        if (mt_cmd_forward(m_ep, chip::app::Clusters::ValveConfigurationAndControl::Id,
+                            chip::app::Clusters::ValveConfigurationAndControl::Commands::Open::Id)) {
+            return level;
+        }
+        return chip::app::DataModel::NullNullable;
+    }
+
+    /*
+     * F1: TEMPORARY_RETURN_IGNORED at the only call site (cluster.cpp:303);
+     * whatever this returns, CloseValve() itself always answers
+     * CHIP_NO_ERROR and the controller sees Status::Success. Forward for
+     * adjudication anyway: the verdict is what gates the host's own
+     * actuation, which is the whole point of forwarding it.
+     */
+    CHIP_ERROR HandleCloseValve() override
+    {
+        mt_cmd_forward(m_ep, chip::app::Clusters::ValveConfigurationAndControl::Id,
+                        chip::app::Clusters::ValveConfigurationAndControl::Commands::Close::Id);
+        return CHIP_NO_ERROR;
+    }
+
+    /*
+     * Fires once a second while a timed open counts down
+     * (valve-configuration-and-control-cluster.cpp's
+     * startRemainingDurationTick()). Nothing in this firmware's AT surface
+     * exposes RemainingDuration's countdown as an event to forward, so
+     * there is nothing to do here; the attribute itself still updates
+     * (esp-matter manages it internally, see mt_matter.h's AT+MTVALVE
+     * comment) and stays readable over AT+MTATTR regardless.
+     */
+    void HandleRemainingDurationTick(uint32_t duration) override
+    {
+        (void)duration;
+    }
+
+private:
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+};
+
+/*
+ * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, handed out in composition
+ * order by mk_water_valve() (mt_devtypes.cpp). Static rather than heap: the
+ * composition rebuild runs once at boot and the objects must outlive the
+ * device, the same shape as s_temp_levels_delegate above but per-endpoint
+ * instead of singleton. This is the pool-handout pattern the rest of the
+ * seven-type batch (chime; washer/dishwasher/dryer's OperationalState
+ * instances) copies.
+ *
+ * Exposed to mt_devtypes.cpp, a separate C++ translation unit that must stay
+ * free of CHIP/esp_matter delegate types (this file's own header comment),
+ * through the opaque void* pair declared in mt_matter.h.
+ */
+static HearthValveDelegate s_valve_delegates[MT_COMP_MAX_ENDPOINTS];
+static size_t              s_valve_delegate_next = 0;
+
+extern "C" void *mt_matter_valve_delegate_alloc(void)
+{
+    if (s_valve_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
+        return nullptr;
+    }
+    return &s_valve_delegates[s_valve_delegate_next++];
+}
+
+extern "C" void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    static_cast<HearthValveDelegate *>(delegate)->set_endpoint(ep);
+}
+
+/*
+ * AT+MTVALVE bridge: report the host's own actuation as the
+ * ValveConfigurationAndControl cluster's CurrentState (and, when level is
+ * present, CurrentLevel), through the SDK's own UpdateCurrentState()/
+ * UpdateCurrentLevel() so the ValveStateChanged event controllers expect is
+ * emitted (design spec F1). The firmware never calls this on its own after
+ * an allowed +MTCMD verdict, same split as AT+MTLOCK: the host decides when
+ * the physical valve has actually moved.
+ *
+ * level == -1 means absent (mt_at.c's cmd_mtvalve has already validated
+ * 0..100 for any value it does pass through).
+ */
+extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
+{
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::ValveConfigurationAndControl::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    CHIP_ERROR err = chip::app::Clusters::ValveConfigurationAndControl::UpdateCurrentState(
+        ep, (chip::app::Clusters::ValveConfigurationAndControl::ValveStateEnum)state);
+    if (err != CHIP_NO_ERROR) {
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (level >= 0) {
+        err = chip::app::Clusters::ValveConfigurationAndControl::UpdateCurrentLevel(ep, (chip::Percent)level);
+        if (err != CHIP_NO_ERROR) {
+            return MT_ATTR_ERR_FAILED;
+        }
+    }
+    return MT_ATTR_OK;
 }
 
 /* --------------------------------------------------------------------------- */
