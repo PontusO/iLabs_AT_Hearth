@@ -382,6 +382,27 @@ command once Task C2 wires a caller in, not by an automated regression here.
 | `AT+MTVALVE=<valve ep>,1` | `OK` (state accepted; follow with `AT+MTATTR` read of `CurrentState` to confirm) |
 | `AT+MTVALVE=<valve ep>,1,50` | `OK` (state and level both accepted; per `AT_MT_SPEC.md` §3.19 the level does not publish as an attribute on this SDK revision, so there is nothing to read back for it) |
 
+**`AT+MTMODES` argument validation:**
+
+| Command | Expected |
+|---|---|
+| `AT+MTMODES?` | bare `ERROR` (query form not accepted, `AT+MTTEMPLEVELS` pattern) |
+| `AT+MTMODES` | bare `ERROR` (exec form without arguments) |
+| `AT+MTMODES=1` | `+MTERR:1` (no pairs after the endpoint) |
+| `AT+MTMODES=zz,0,"Quiet"` | `+MTERR:1` (endpoint not numeric) |
+| `AT+MTMODES=1,zz,"Quiet"` | `+MTERR:1` (mode not numeric) |
+| `AT+MTMODES=1,0,Quiet` | `+MTERR:1` (missing quotes) |
+| `AT+MTMODES=1,0,"Lo\"w"` | `+MTERR:1` (quote character inside a label) |
+| `AT+MTMODES=1,0,""` | `+MTERR:1` (empty label) |
+| `AT+MTMODES=1,0,"12345678901234567890123456789012X"` | `+MTERR:1` (label over 32 bytes) |
+| `AT+MTMODES=1,0,"Quiet",0,"Silent"` | `+MTERR:1` (mode `0` repeated in the same command) |
+| `AT+MTMODES=1,0,"A",1,"B",2,"C",3,"D",4,"E",5,"F",6,"G",7,"H",8,"I"` | `+MTERR:1` (9 pairs, over the `1..8` limit) |
+| `AT+MTMODES=99,0,"Quiet"` | `+MTERR:2` (unknown endpoint) |
+| `AT+MTMODES=<non-mode-select ep>,0,"Quiet"` | `+MTERR:3` (endpoint has no `ModeSelect` cluster) |
+| `AT+MTMODES=<mode-select ep>,0,"Quiet"` | `OK` (list stored; `AT+MTATTR` has no path to `SupportedModes` to read it back, per `AT_MT_SPEC.md` §3.20, so confirm via a commissioned controller reading the attribute, or a subsequent `ChangeToMode` to mode `0` succeeding) |
+| `AT+MTMODES=<mode-select ep>,0,"Eco, low"` | `OK` (comma inside a label, same `AT+MTTEMPLEVELS` rule) |
+| `AT+MTATTR=<mode-select ep>,80,3` | `+MTATTR:<ep>,80,3,<val>` → `OK` (`CurrentMode` is a plain attribute, not part of `AT+MTMODES`; readable/writable over `AT+MTATTR` like any integer attribute, per `AT_MT_SPEC.md` §3.20) |
+
 **Chatty-host bench case: a bridge command already in flight when a forward
 opens.** Exercises `AT_MT_SPEC.md` §3.17's own by-construction limitation and
 the `iLabs_Hearth` library README's "Hearth originals" section from the other

@@ -71,6 +71,7 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTFLOW?` | query | `+MTFLOW:<mode>` → `OK` |
 | `AT+MTFLOW=<mode>` | set | `OK` at the old setting, then the link switches |
 | `AT+MTVALVE=<ep>,<state>[,<level>]` | set | `OK` (valve state/level reported) |
+| `AT+MTMODES=<ep>,<mode>,"<label>"[,...]` | set | `OK` (ModeSelect SupportedModes list stored) |
 
 ## 3. Command reference
 
@@ -311,6 +312,7 @@ device types are added.
 | `0x0078` | Cooktop |
 | `0x0303` | Pump |
 | `0x0042` | Water Valve |
+| `0x0027` | Mode Select |
 
 `0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
 bolts the HueSaturation feature onto the standard ColorControl configuration,
@@ -1030,6 +1032,78 @@ AT+MTVALVE=6,3        -> +MTERR:1   (3 is not a valid ValveStateEnum for this co
 AT+MTVALVE=6,1,101    -> +MTERR:1   (101 is out of range for <level>)
 AT+MTVALVE=9,1        -> +MTERR:2   (no endpoint 9)
 AT+MTVALVE=1,1        -> +MTERR:3   (ep 1 has no ValveConfigurationAndControl cluster)
+```
+
+### 3.20 `AT+MTMODES`: Mode Select supported-modes list
+
+Stores the `ModeSelect` cluster's `SupportedModes` list on `<ep>`: up to 8
+`<mode>,"<label>"` pairs, each pair a `uint8` mode value and the display
+label a controller shows for it. Like `AT+MTTEMPLEVELS` (§3.16), this
+attribute is served by CHIP's own `SupportedModesManager` mechanism rather
+than esp_matter's attribute store, so it has no `AT+MTATTR` path: this is the
+only way a host can set it.
+
+```
+AT+MTMODES=<ep>,<mode>,"<label>"[,<mode>,"<label>",...]  ->  OK
+```
+
+- `<ep>`: the endpoint id, a bare unsigned token (hex or decimal) ending at
+  the first comma.
+- `<mode>,"<label>"`: `1..8` pairs. `<mode>` is a bare unsigned token (hex or
+  decimal), `0..255`; no two pairs in the same command may repeat a mode
+  value. `<label>` is `1..32` bytes of double-quoted printable ASCII
+  (`0x20`..`0x7E`) and may not contain a `"` character. A comma **inside** a
+  quoted label is legal and is part of the label's text; a comma **between**
+  pairs separates them. Violating any of these (wrong count, a repeated mode
+  value, an empty or oversized label, a non-printable byte, a bare label with
+  no quotes, an unterminated quote, or anything trailing after a label's
+  closing quote other than a comma or end of line) answers `+MTERR:1`.
+
+**Set-only.** `AT+MTMODES?` or a bare `AT+MTMODES` is the wrong command form
+and answers a plain `ERROR` (§5), the same convention `AT+MTTEMPLEVELS`
+follows.
+
+**Lookup errors follow the established division.** `+MTERR:2` unknown
+endpoint; `+MTERR:3` the endpoint has no `ModeSelect` cluster. A bare `ERROR`
+covers an unclassified runtime failure, the same as `AT+MTATTR` and
+`AT+MTTEMPLEVELS`.
+
+**On success the stored list replaces whatever was there before**, and
+`SupportedModes` is reported dirty so an active subscription sees the new
+list on its next report. There is no append or partial-update form: each
+`AT+MTMODES` call is a full replacement of the mode list.
+
+**Not persisted.** The store lives in RAM and starts empty every boot, the
+same policy `AT+MTTEMPLEVELS` follows: `SupportedModes` is current display
+content a host sets after `+MTREADY`, not a product definition like the
+endpoint composition (§3.9). A controller's `ChangeToMode` command against a
+mode value not currently in the list is rejected by the SDK itself
+(`InvalidCommand`) before this firmware sees it; a `SupportedModes` read
+before the host has sent `AT+MTMODES` for that endpoint returns an empty
+list, and `ChangeToMode` against an empty list is rejected the same way
+(`UnsupportedCluster`).
+
+**`CurrentMode` is a plain attribute, not part of this command.** Unlike
+`SupportedModes`, `CurrentMode` is a normal esp_matter-managed `uint8`
+attribute: readable and writable over `AT+MTATTR` like any other integer
+attribute (cluster `80`/`0x0050`, attribute `3`/`0x0003`). A controller's
+`ChangeToMode` command sets `CurrentMode` itself, inside the SDK, after
+validating the requested mode is in the `SupportedModes` list; the host sees
+that the ordinary way, a `+MTATTR` URC (§4) from the attribute-change
+callback, not a URC specific to this command.
+
+Example, a Mode Select endpoint on endpoint 7:
+```
+AT+MTMODES=7,0,"Quiet"                          -> OK   (one mode)
+AT+MTMODES=7,0,"Quiet",1,"Normal",2,"Boost"      -> OK   (replaces the list above)
+AT+MTMODES=7,0,"Eco, low"                        -> OK   (comma inside a label)
+AT+MTMODES=7                                     -> +MTERR:1 (no pairs)
+AT+MTMODES=7,0,Quiet                             -> +MTERR:1 (missing quotes)
+AT+MTMODES=7,0,"Quiet",0,"Silent"                -> +MTERR:1 (mode 0 repeated)
+AT+MTMODES=9,0,"Quiet"                           -> +MTERR:2 (no endpoint 9)
+AT+MTMODES=1,0,"Quiet"                           -> +MTERR:3 (ep 1 has no ModeSelect cluster)
+AT+MTATTR=7,80,3                                 -> +MTATTR:7,80,3,0   (read CurrentMode)
+AT+MTATTR=7,80,3,1                               -> OK                 (write CurrentMode directly)
 ```
 
 ## 4. Unsolicited result codes (URCs)

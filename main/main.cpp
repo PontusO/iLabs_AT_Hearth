@@ -51,6 +51,12 @@
  * calls, UpdateCurrentState()/UpdateCurrentLevel(). */
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-cluster.h>
 
+/* C3 (seven-type batch, mode select): the SupportedModesManager interface
+ * (ModeOptionsProvider, ModeOptionStruct/SemanticTagStruct via cluster-
+ * objects.h transitively) this file's HearthSupportedModesManager
+ * implements. */
+#include <app/clusters/mode-select-server/supported-modes-manager.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -1326,6 +1332,202 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
             return MT_ATTR_ERR_FAILED;
         }
     }
+    return MT_ATTR_OK;
+}
+
+/*
+ * ---- mode select (seven-type batch, task C3) -------------------------------
+ *
+ * F2: SupportedModes is served through ONE GLOBAL SupportedModesManager
+ * (chip::app::Clusters::ModeSelect::setSupportedModesManager(), called by
+ * esp_matter's ModeSelectDelegateInitCB for every mode_select endpoint the
+ * boot rebuild creates,
+ * esp_matter_delegate_callbacks.cpp:458-462:
+ *   "void ModeSelectDelegateInitCB(void *delegate, uint16_t endpoint_id)
+ *    {
+ *        VerifyOrReturn(delegate != nullptr);
+ *        ModeSelect::SupportedModesManager *supported_modes_manager =
+ *            static_cast<ModeSelect::SupportedModesManager*>(delegate);
+ *        ModeSelect::setSupportedModesManager(supported_modes_manager);
+ *    }"
+ * note endpoint_id is accepted but never read) whose two virtuals both take
+ * an EndpointId and dispatch on it internally (supported-modes-manager.h:
+ * 69-80). There is no per-endpoint object for the SDK to ask for; a single
+ * instance covers every mode_select endpoint in the composition.
+ * mk_mode_select() (mt_devtypes.cpp) sets config.mode_select.delegate to
+ * mt_matter_mode_select_manager() on every mode_select endpoint it creates,
+ * so ModeSelectDelegateInitCB re-runs setSupportedModesManager() with the
+ * same pointer each time a second (or third...) mode_select endpoint is
+ * built: harmless, since the global is already this object
+ * (esp_matter_cluster.cpp:2722-2727's mode_select::create() only calls the
+ * InitCB when config->delegate is non-null, and every call installs the
+ * identical pointer).
+ *
+ * The ModeOptionsProvider the SDK reads (supported-modes-manager.h:42-62) is
+ * two raw pointers over a contiguous ModeOptionStructType array:
+ *   "struct ModeOptionsProvider
+ *    {
+ *        using pointer = const ModeOptionStructType *;
+ *        inline pointer begin() const { return mBegin; }
+ *        inline pointer end() const { return mEnd; }
+ *        ...
+ *    };"
+ * Nothing in the interface requires static or NVS-backed storage (F2), so a
+ * runtime, host-fed store is legal. Backing store: MT_COMP_MAX_ENDPOINTS
+ * slots x MT_MODES_MAX_COUNT entries, each holding the u8 mode value, a
+ * (MT_MODES_MAX_LABEL_LEN + 1)-byte label buffer, and a ModeOptionStructType
+ * whose CharSpan.label points into that same buffer
+ * (ModeSelect/Structs.h:71-81: "chip::CharSpan label; uint8_t mode; ...
+ * semanticTags;").
+ *
+ * CharSpan lifetime: both the label bytes (mt_mode_entry_t::label) and the
+ * ModeOptionStructType array (mt_mode_slot_t::structs) are static storage
+ * (s_mode_slots below), never heap or stack, so neither is freed while the
+ * program runs. The struct array is rebuilt IN PLACE on every AT+MTMODES
+ * write to the same slot (mt_matter_modes_set() below), never reallocated or
+ * moved, so a ModeOptionsProvider handed out by getModeOptionsProvider()
+ * stays valid for as long as anything could hold it: the SDK re-reads
+ * through the manager on every access rather than caching a provider across
+ * calls (ModeSelectAttrAccess::Read(), mode-select-server.cpp, calls
+ * getModeOptionsProvider() fresh for each SupportedModes read; ChangeToMode()
+ * calls getModeOptionByMode() fresh for each command). Spans therefore never
+ * dangle. SemanticTags is mandatory-but-empty-legal (F2): every entry
+ * publishes a default-constructed List (Span's default ctor is
+ * mDataBuf=nullptr, mDataLen=0, Span.h:46), i.e. List<const
+ * SemanticTagStruct::Type>(nullptr, 0).
+ */
+struct mt_mode_entry_t {
+    uint8_t mode;
+    char    label[MT_MODES_MAX_LABEL_LEN + 1];
+};
+
+struct mt_mode_slot_t {
+    bool     used;
+    uint16_t ep;
+    uint8_t  count;
+    mt_mode_entry_t entries[MT_MODES_MAX_COUNT];
+    chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type structs[MT_MODES_MAX_COUNT];
+};
+static mt_mode_slot_t s_mode_slots[MT_COMP_MAX_ENDPOINTS];
+
+class HearthSupportedModesManager : public chip::app::Clusters::ModeSelect::SupportedModesManager
+{
+private:
+    /*
+     * SupportedModesManager declares its own ModeOptionStructType alias
+     * BEFORE its "public:" (supported-modes-manager.h:36), so it is private
+     * to the base class and not nameable here even though a public base
+     * virtual's signature uses it: a derived class inherits the member but
+     * not access to its name. The esp32 platform's own
+     * StaticSupportedModesManager (static-supported-modes-manager.h:31) hits
+     * the same thing and works around it exactly this way, a private alias
+     * of its own that shadows the inaccessible one for this class's override
+     * signature below.
+     */
+    using ModeOptionStructType = chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type;
+
+public:
+    ModeOptionsProvider getModeOptionsProvider(chip::EndpointId endpointId) const override
+    {
+        for (auto &slot : s_mode_slots) {
+            if (slot.used && slot.ep == endpointId) {
+                return ModeOptionsProvider(slot.structs, slot.structs + slot.count);
+            }
+        }
+        return ModeOptionsProvider();  /* begin == end == nullptr: no entry for this endpoint */
+    }
+
+    chip::Protocols::InteractionModel::Status getModeOptionByMode(
+        chip::EndpointId endpointId, uint8_t mode, const ModeOptionStructType **dataPtr) const override
+    {
+        for (auto &slot : s_mode_slots) {
+            if (slot.used && slot.ep == endpointId) {
+                for (uint8_t i = 0; i < slot.count; i++) {
+                    if (slot.structs[i].mode == mode) {
+                        *dataPtr = &slot.structs[i];
+                        return chip::Protocols::InteractionModel::Status::Success;
+                    }
+                }
+                return chip::Protocols::InteractionModel::Status::InvalidCommand;
+            }
+        }
+        return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+    }
+};
+static HearthSupportedModesManager s_mode_select_manager;
+
+extern "C" void *mt_matter_mode_select_manager(void)
+{
+    return &s_mode_select_manager;
+}
+
+/*
+ * The bridge for AT+MTMODES. Grammar and content rules are enforced by
+ * cmd_mtmodes() in mt_at.c before this is ever called; the bounds re-checked
+ * here are defensive, not the primary gate (same split as
+ * mt_matter_temp_levels_set() above).
+ */
+extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels, uint8_t count)
+{
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::ModeSelect::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1 || count > MT_MODES_MAX_COUNT) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_mode_slot_t *slot = nullptr;
+    for (auto &s : s_mode_slots) {
+        if (s.used && s.ep == ep) {
+            slot = &s;
+            break;
+        }
+    }
+    if (!slot) {
+        for (auto &s : s_mode_slots) {
+            if (!s.used) {
+                slot = &s;
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        /* Cannot happen in practice: one slot per MT_COMP_MAX_ENDPOINTS, the
+         * same cap the composition itself enforces, same reasoning as
+         * mt_matter_temp_levels_set() above. Kept as a defensive return
+         * rather than an assert. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(labels[i]);
+        if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        slot->entries[i].mode = modes[i];
+        memcpy(slot->entries[i].label, labels[i], len + 1);
+    }
+    slot->ep    = ep;
+    slot->count = count;
+    slot->used  = true;
+
+    /* Rebuild the struct array in place, contiguous, each CharSpan pointing
+     * into the static label buffer above: see the CharSpan-lifetime comment
+     * ahead of this class. */
+    for (uint8_t i = 0; i < count; i++) {
+        slot->structs[i].mode  = slot->entries[i].mode;
+        slot->structs[i].label = chip::CharSpan::fromCharString(slot->entries[i].label);
+        slot->structs[i].semanticTags =
+            chip::app::DataModel::List<const chip::app::Clusters::ModeSelect::Structs::SemanticTagStruct::Type>();
+    }
+
+    MatterReportingAttributeChangeCallback(
+        ep, chip::app::Clusters::ModeSelect::Id,
+        chip::app::Clusters::ModeSelect::Attributes::SupportedModes::Id);
     return MT_ATTR_OK;
 }
 

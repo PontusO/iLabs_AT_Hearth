@@ -503,6 +503,27 @@ static endpoint_t *mk_water_valve(node_t *n, uint8_t variant)
     return ep;
 }
 
+static endpoint_t *mk_mode_select(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    /*
+     * F2: one GLOBAL SupportedModesManager serves every mode_select
+     * endpoint (main.cpp's HearthSupportedModesManager); this thunk only
+     * points the delegate slot at it. esp_matter's ModeSelectDelegateInitCB
+     * calls chip::app::Clusters::ModeSelect::setSupportedModesManager()
+     * with whatever config.delegate is and discards endpoint_id entirely
+     * (main.cpp's comment ahead of HearthSupportedModesManager has the full
+     * citation), so running this thunk again for a second mode_select
+     * endpoint re-sets the SAME global pointer: harmless, since it is
+     * already this object. Opaque void*, same shape as the water valve
+     * delegate pool above: this file never has to name
+     * HearthSupportedModesManager or any CHIP delegate type.
+     */
+    mode_select::config_t c;
+    c.mode_select.delegate = mt_matter_mode_select_manager();
+    return mode_select::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -538,6 +559,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { cooktop::get_device_type_id(),                  mk_cooktop,                 "cooktop",                 0 },
     { pump::get_device_type_id(),                     mk_pump,                    "pump",                    0 },
     { water_valve::get_device_type_id(),              mk_water_valve,             "water_valve",             0 },
+    { mode_select::get_device_type_id(),              mk_mode_select,             "mode_select",             0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);
