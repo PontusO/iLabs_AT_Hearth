@@ -72,6 +72,7 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTFLOW=<mode>` | set | `OK` at the old setting, then the link switches |
 | `AT+MTVALVE=<ep>,<state>[,<level>]` | set | `OK` (valve state/level reported) |
 | `AT+MTMODES=<ep>,<mode>,"<label>"[,...]` | set | `OK` (ModeSelect SupportedModes list stored) |
+| `AT+MTOPSTATE=<ep>,<state>` | set | `OK` (OperationalState transition reported) |
 
 ## 3. Command reference
 
@@ -313,6 +314,9 @@ device types are added.
 | `0x0303` | Pump |
 | `0x0042` | Water Valve |
 | `0x0027` | Mode Select |
+| `0x0073` | Laundry Washer |
+| `0x0075` | Dishwasher |
+| `0x007C` | Laundry Dryer |
 
 `0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
 bolts the HueSaturation feature onto the standard ColorControl configuration,
@@ -822,7 +826,12 @@ AT+MTCMDRESP=<seq>,<verdict>  ->  OK
   (`0x0101`) commands `0` (`LockDoor`) and `1` (`UnlockDoor`); the water
   valve (§3.19) registers cluster `129` (`0x0081`) commands `0` (`Open`) and
   `1` (`Close`) the same way, though per §3.19 its verdict never changes the
-  wire response, only whether the host actually actuates.
+  wire response, only whether the host actually actuates. The OperationalState
+  trio (§3.21, Laundry Washer / Dishwasher / Laundry Dryer) registers cluster
+  `96` (`0x0060`) commands `0` (`Pause`), `1` (`Stop`), `2` (`Start`), `3`
+  (`Resume`): unlike the valve, here the verdict IS the wire response (the
+  SDK copies the filled error straight into the command's reply), so a deny
+  genuinely fails the command, the same as the door lock.
 - `+MTCMD:<seq>,<ep>,<cluster>,<command>,<payload>`: the same adjudicated
   form, plus one reserved fifth field for a command that carries a single
   value the host needs to see. `<payload>` is decimal, the same convention as
@@ -1104,6 +1113,88 @@ AT+MTMODES=9,0,"Quiet"                           -> +MTERR:2 (no endpoint 9)
 AT+MTMODES=1,0,"Quiet"                           -> +MTERR:3 (ep 1 has no ModeSelect cluster)
 AT+MTATTR=7,80,3                                 -> +MTATTR:7,80,3,0   (read CurrentMode)
 AT+MTATTR=7,80,3,1                               -> OK                 (write CurrentMode directly)
+```
+
+### 3.21 `AT+MTOPSTATE`: OperationalState transition reporting
+
+Reports the `OperationalState` cluster's `OperationalState` attribute on
+`<ep>`, typically once the host has actually finished executing an allowed
+`Pause`/`Resume`/`Start`/`Stop` `+MTCMD` verdict (cluster `96`/`0x0060`,
+commands `0`-`3`; §3.17). This is the device type behind Laundry Washer
+(`0x0073`), Dishwasher (`0x0075`) and Laundry Dryer (`0x007C`) (§3.9), all
+three of which wire the identical base `OperationalState` cluster with no
+device-specific extension.
+
+Unlike the water valve (§3.19), where the SDK discards the delegate's
+verdict and always answers the controller `Status::Success`, here the
+adjudication verdict **is** the wire response: the SDK copies the filled
+`GenericOperationalError` straight into the command's
+`OperationalCommandResponse`. `+MTCMDRESP=<seq>,0` (deny) therefore fails
+the `Pause`/`Resume`/`Start`/`Stop` command the controller sees, with
+`ErrorStateID` `0x02` (`UnableToCompleteOperation`); an allow answers
+`0x00` (`NoError`). `AT+MTOPSTATE` is the other half of the split, the same
+shape as `AT+MTLOCK`/`AT+MTVALVE`: the firmware never decides *that* the
+appliance has actually reached the new state, or reports it reaching one, on
+its own; the host calls this once its own control loop confirms the
+transition really happened.
+
+```
+AT+MTOPSTATE=<ep>,<state>  ->  OK
+```
+
+- `<ep>`: the endpoint id.
+- `<state>`: `0` Stopped, `1` Running, `2` Paused (`OperationalStateEnum`
+  wire values). `3` (`Error`) is rejected with `+MTERR:1`: `Error` is
+  reserved for the device's own fault-detection path
+  (`OnOperationalErrorDetected`, not exposed on the AT surface this round),
+  never a state this command may set directly. Anything else outside
+  `0`..`3` is also `+MTERR:1`.
+
+Reported through the cluster's own `Instance::SetOperationalState()` (not a
+raw attribute write), so the `OperationalState` attribute report a
+subscribed controller expects is actually emitted, the same reasoning
+`AT+MTLOCK`/`AT+MTVALVE` follow for their own cluster's setter.
+
+**`PhaseList` ships null.** This firmware defines no phases for any of the
+three device types: `GetOperationalPhaseAtIndex` answers
+`CHIP_ERROR_NOT_FOUND` at index `0` unconditionally, which is what the SDK
+defines as "the `PhaseList` attribute is null" rather than an empty list.
+`CurrentPhase` is likewise never set. A v2 surface once a consumer actually
+needs phases, alongside `CountdownTime` (also unconditionally null this
+round: no consumer needs it yet) and `OnOperationalErrorDetected` (the
+device-fault path, distinct from the host-adjudicated commands this section
+covers).
+
+**Set-only.** `AT+MTOPSTATE?` or a bare `AT+MTOPSTATE` is the wrong command
+form and answers a plain `ERROR` (§5), the `AT+MTLOCK`/`AT+MTVALVE`
+convention.
+
+**Lookup errors follow the established division.** `+MTERR:2` unknown
+endpoint; `+MTERR:3` the endpoint has no `OperationalState` cluster. A bare
+`ERROR` covers an unclassified runtime failure, the same as `AT+MTATTR` and
+`AT+MTLOCK`/`AT+MTVALVE`.
+
+**Every `OperationalState` attribute is managed internally.** All six
+(`PhaseList`, `CurrentPhase`, `OperationalStateList`, `OperationalState`,
+`OperationalError`, and the derived-cluster-only `CountdownTime`) are served
+by the SDK's own `Instance`, not esp-matter's generic attribute store, so
+none of them is reachable over `AT+MTATTR`: `AT+MTOPSTATE` is the only way a
+host observes or sets the current state.
+
+**The firmware never calls this on its own.** Same split as
+`AT+MTLOCK`/`AT+MTVALVE` (§3.18/§3.19): actuation timing belongs entirely to
+the host, which is expected to call `AT+MTOPSTATE` itself once its own
+control loop confirms the appliance has reached the new state.
+
+Example, a laundry washer on endpoint 8:
+```
+AT+MTOPSTATE=8,1        -> OK         (Running)
+AT+MTOPSTATE=8,2        -> OK         (Paused)
+AT+MTOPSTATE=8,0        -> OK         (Stopped)
+AT+MTOPSTATE=8,3        -> +MTERR:1   (3/Error is reserved, not settable here)
+AT+MTOPSTATE=8,4        -> +MTERR:1   (4 is not a valid OperationalStateEnum value)
+AT+MTOPSTATE=99,1       -> +MTERR:2   (no endpoint 99)
+AT+MTOPSTATE=1,1        -> +MTERR:3   (ep 1 has no OperationalState cluster)
 ```
 
 ## 4. Unsolicited result codes (URCs)

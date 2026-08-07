@@ -57,6 +57,12 @@
  * implements. */
 #include <app/clusters/mode-select-server/supported-modes-manager.h>
 
+/* C4 (seven-type batch, OperationalState trio): Delegate/Instance,
+ * GenericOperationalState/GenericOperationalError and ErrorStateEnum/
+ * OperationalStateEnum (operational-state-cluster-objects.h, pulled in
+ * transitively) this file's HearthOpStateDelegate implements. */
+#include <app/clusters/operational-state-server/operational-state-server.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -1542,6 +1548,292 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
     MatterReportingAttributeChangeCallback(
         ep, chip::app::Clusters::ModeSelect::Id,
         chip::app::Clusters::ModeSelect::Attributes::SupportedModes::Id);
+    return MT_ATTR_OK;
+}
+
+/*
+ * ---- OperationalState trio (seven-type batch, task C4) --------------------
+ *
+ * F7: the Delegate interface for the base OperationalState cluster (0x0060),
+ * shared verbatim by all three device types this task adds (dish_washer,
+ * laundry_washer, laundry_dryer wire the SAME cluster: esp_matter_endpoint.cpp's
+ * dish_washer::add()/laundry_washer::add()/laundry_dryer::add() bodies are
+ * byte-identical apart from the device type id, each just calling
+ * operational_state::create() and event::create_operation_completion()).
+ * Seven pure virtuals (operational-state-server.h:279-372):
+ *
+ *   virtual app::DataModel::Nullable<uint32_t> GetCountdownTime() = 0;
+ *   virtual CHIP_ERROR GetOperationalStateAtIndex(size_t index, GenericOperationalState & operationalState) = 0;
+ *   virtual CHIP_ERROR GetOperationalPhaseAtIndex(size_t index, MutableCharSpan & operationalPhase) = 0;
+ *   virtual void HandlePauseStateCallback(GenericOperationalError & err) = 0;
+ *   virtual void HandleResumeStateCallback(GenericOperationalError & err) = 0;
+ *   virtual void HandleStartStateCallback(GenericOperationalError & err) = 0;
+ *   virtual void HandleStopStateCallback(GenericOperationalError & err) = 0;
+ *
+ * GetCountdownTime: NullNullable. Out of scope this round (design spec
+ * section 8: "OperationalState phases, countdown, and
+ * OnOperationalErrorDetected: v2 surface once a consumer needs them").
+ *
+ * GetOperationalStateAtIndex: serves the four standard states at indices
+ * 0..3, CHIP_ERROR_NOT_FOUND past that. The exact list content was verified
+ * against an in-tree delegate rather than assumed: the dishwasher example's
+ * own list (operational-state-delegate-impl.h:90-95,
+ * examples/dishwasher-app/dishwasher-common) is
+ *   "const GenericOperationalState dishwasherOpStateList[4] = {
+ *        GenericOperationalState(to_underlying(OperationalStateEnum::kStopped)),
+ *        GenericOperationalState(to_underlying(OperationalStateEnum::kRunning)),
+ *        GenericOperationalState(to_underlying(OperationalStateEnum::kPaused)),
+ *        GenericOperationalState(to_underlying(OperationalStateEnum::kError)),
+ *    };"
+ * i.e. index 0 Stopped, 1 Running, 2 Paused, 3 Error, exactly the order this
+ * class serves.
+ *
+ * GetOperationalPhaseAtIndex: CHIP_ERROR_NOT_FOUND at index 0 always, so
+ * PhaseList reads null (no phases defined at all). Direct from the header's
+ * own doc comment on the virtual (server.h:305-317): "If CHIP_ERROR_NOT_FOUND
+ * is returned for index 0, that indicates that the PhaseList attribute is
+ * null (there are no phases defined at all)." Out of scope this round, same
+ * v2-parking note as GetCountdownTime above.
+ *
+ * The four Handle*StateCallback: forward to the host over mt_cmd_forward()
+ * for adjudication (the door lock/valve pattern) and fill err by reference.
+ * UNLIKE the valve (F1: the SDK discards the delegate's return and always
+ * answers Success), here err IS the wire response: the only caller of each,
+ * Instance::HandlePauseState() (operational-state-server.cpp:414-447),
+ * copies err straight into the command response after calling the delegate -
+ *   "mDelegate->HandlePauseStateCallback(err);
+ *    ...
+ *    Commands::OperationalCommandResponse::Type response;
+ *    response.commandResponseState = err;
+ *    ctx.mCommandHandler.AddResponse(ctx.mRequestPath, response);"
+ * - and HandleStopState/HandleStartState/HandleResumeState follow the same
+ * shape. A deny here genuinely fails the command on the wire, unlike the
+ * valve.
+ *
+ * err.Set() takes an ErrorStateEnum value (Enums.h): kNoError = 0x00 on
+ * allow, kUnableToCompleteOperation = 0x02 on deny, verified rather than
+ * guessed -
+ *   "enum class ErrorStateEnum : uint8_t
+ *    {
+ *        kNoError                   = 0x00,
+ *        kUnableToStartOrResume     = 0x01,
+ *        kUnableToCompleteOperation = 0x02,
+ *        kCommandInvalidInState     = 0x03,
+ *        ...
+ *    };"
+ * kUnableToCompleteOperation, not e.g. kUnableToStartOrResume, matches the
+ * in-tree example's own choice for a generic delegate-side denial
+ * (dishwasher-common's placeholder implementation uses the same code for
+ * every one of its four callbacks).
+ *
+ * Deliberately does NOT call Instance::SetOperationalState() itself on
+ * allow: same split-ownership shape as the door lock/valve (AT_MT_SPEC.md
+ * 3.18/3.19). The delegate's job is only the adjudication verdict; the
+ * actual OperationalState transition is reported once the host confirms it
+ * really executed the transition, via AT+MTOPSTATE / mt_matter_opstate_set()
+ * below. (dishwasher-common's placeholder callback calls
+ * SetOperationalState() directly, which is reasonable for a self-contained
+ * example but wrong for this firmware, where "the host decided" and "the
+ * host actually did it" are different moments, same reasoning as
+ * AT+MTLOCK/AT+MTVALVE.)
+ *
+ * Endpoint id: same problem the valve pool solves. HandlePauseStateCallback
+ * et al. are not handed one, but mt_cmd_forward() needs it. Same fix: an
+ * m_ep member set once by the thunk (mt_devtypes.cpp) right after create()
+ * returns the real id.
+ *
+ * Instance reachability, F7's other half. The Instance object is not
+ * constructed by the thunk or by create(): esp_matter defers it to its own
+ * init-callback pass (OperationalStateDelegateInitCB,
+ * esp_matter_delegate_callbacks.cpp:309-323), which news one
+ * OperationalState::Instance per endpoint into a FILE-STATIC
+ * std::unordered_map (esp_matter_delegate_callbacks.cpp:68,
+ * "s_operational_state_instances") with no getter anywhere in the component:
+ * esp_matter_delegate_callbacks.h declares only the *DelegateInitCB
+ * functions, nothing that reads the map back. That init pass itself only
+ * runs, for endpoints created before esp_matter::start() (this firmware's
+ * own rule, CLAUDE.md), during provider::Startup()
+ * (esp_matter_data_model_provider.cpp:297-302: "Call the init callbacks for
+ * the endpoints which are created before esp_matter::start()").
+ *
+ * So esp-matter's own map is unusable from here, and a registry filled at
+ * thunk time cannot work either: the Instance does not exist yet at thunk
+ * time, only after esp_matter::start() runs. The mechanism actually used
+ * needs no registry at all. The Instance constructor calls the delegate's
+ * own SetInstance() on itself (operational-state-server.cpp:43-48):
+ *   "Instance::Instance(Delegate * aDelegate, EndpointId aEndpointId, ClusterId aClusterId) :
+ *        ...
+ *    {
+ *        ...
+ *        mDelegate->SetInstance(this);
+ *    }"
+ * and Delegate::SetInstance() (server.h:349-372) stores it in the base
+ * class's own mInstance, readable back through a PROTECTED GetInstance()
+ * accessor:
+ *   "void SetInstance(Instance * aInstance)
+ *    {
+ *        VerifyOrDie(mInstance == nullptr || aInstance == nullptr || mInstance == aInstance);
+ *        mInstance = aInstance;
+ *    }
+ *    ...
+ *    protected:
+ *        Instance * GetInstance() { return mInstance; }"
+ * (the VerifyOrDie is F7's "one delegate OBJECT per endpoint is mandatory":
+ * a second Instance sharing this delegate would abort the device outright).
+ * Since HearthOpStateDelegate derives from Delegate, its own member
+ * functions may call the protected GetInstance() on themselves (standard
+ * C++ access: a derived class reaches a base's protected member through an
+ * object of its own type). A public one-line passthrough, instance() below,
+ * is what mt_matter_opstate_set() calls: no parallel registry, no map, no
+ * getter esp-matter does not provide. It reads null until
+ * esp_matter::start() runs the init-callback pass, which always completes
+ * before mt_at_start() lets any AT+MTOPSTATE reach this bridge (the same
+ * s_at_up ordering CLAUDE.md documents for URCs), so a null instance() here
+ * would mean something is badly out of sequence, not an expected runtime
+ * state; the bridge still checks for it and answers FAILED rather than
+ * assume.
+ */
+class HearthOpStateDelegate : public chip::app::Clusters::OperationalState::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+
+    /* GetInstance() is protected in the base Delegate; this passthrough is
+     * how mt_matter_opstate_set() (below) reaches the Instance the SDK
+     * attached via SetInstance(), see the class comment above. */
+    chip::app::Clusters::OperationalState::Instance *instance() { return GetInstance(); }
+
+    chip::app::DataModel::Nullable<uint32_t> GetCountdownTime() override
+    {
+        return chip::app::DataModel::NullNullable;
+    }
+
+    CHIP_ERROR GetOperationalStateAtIndex(
+        size_t index, chip::app::Clusters::OperationalState::GenericOperationalState &operationalState) override
+    {
+        using chip::app::Clusters::OperationalState::OperationalStateEnum;
+        static const OperationalStateEnum states[] = {
+            OperationalStateEnum::kStopped,
+            OperationalStateEnum::kRunning,
+            OperationalStateEnum::kPaused,
+            OperationalStateEnum::kError,
+        };
+        if (index >= (sizeof(states) / sizeof(states[0]))) {
+            return CHIP_ERROR_NOT_FOUND;
+        }
+        operationalState.Set(chip::to_underlying(states[index]));
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR GetOperationalPhaseAtIndex(size_t index, chip::MutableCharSpan &operationalPhase) override
+    {
+        /* PhaseList ships null: no phase exists at index 0. See the class
+         * comment above; index/operationalPhase are unused on this path. */
+        (void)index;
+        (void)operationalPhase;
+        return CHIP_ERROR_NOT_FOUND;
+    }
+
+    void HandlePauseStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Pause::Id, err);
+    }
+
+    void HandleResumeStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Resume::Id, err);
+    }
+
+    void HandleStartStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Start::Id, err);
+    }
+
+    void HandleStopStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Stop::Id, err);
+    }
+
+private:
+    void forward(uint32_t command, chip::app::Clusters::OperationalState::GenericOperationalError &err)
+    {
+        using chip::app::Clusters::OperationalState::ErrorStateEnum;
+        bool allow = mt_cmd_forward(m_ep, chip::app::Clusters::OperationalState::Id, command);
+        err.Set(chip::to_underlying(allow ? ErrorStateEnum::kNoError : ErrorStateEnum::kUnableToCompleteOperation));
+    }
+
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+};
+
+/*
+ * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, same shape as
+ * s_valve_delegates above: dish_washer/laundry_washer/laundry_dryer each
+ * hand out their own object from this SHARED pool (F7: one delegate object
+ * per endpoint, never shared between two Instances - VerifyOrDie above).
+ * Exposed to mt_devtypes.cpp through the same opaque void* pair pattern as
+ * the valve pool, so that file never has to name HearthOpStateDelegate or
+ * any CHIP delegate type.
+ */
+static HearthOpStateDelegate s_opstate_delegates[MT_COMP_MAX_ENDPOINTS];
+static size_t                s_opstate_delegate_next = 0;
+
+extern "C" void *mt_matter_opstate_delegate_alloc(void)
+{
+    if (s_opstate_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
+        return nullptr;
+    }
+    return &s_opstate_delegates[s_opstate_delegate_next++];
+}
+
+extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    static_cast<HearthOpStateDelegate *>(delegate)->set_endpoint(ep);
+}
+
+/*
+ * AT+MTOPSTATE bridge: find ep's delegate in the pool (the same pool
+ * mt_matter_opstate_delegate_alloc() hands out from) and, through it, the
+ * Instance the SDK attached (HearthOpStateDelegate::instance(), see the
+ * class comment above for the mechanism), then call
+ * Instance::SetOperationalState() directly - it is declared to take a plain
+ * uint8_t, not an enum (operational-state-server.h:97), so state is passed
+ * through unconverted.
+ *
+ * mt_at.c's cmd_mtopstate has already rejected state == 3 (Error) with
+ * +MTERR:1 before this is ever called: kError is reserved for
+ * OnOperationalErrorDetected (F7), not a state AT+MTOPSTATE may set
+ * directly, so only 0..2 ever reach here. SetOperationalState() itself
+ * enforces the identical rule independently
+ * (operational-state-server.cpp:101-107: "if (aOpState ==
+ * to_underlying(OperationalStateEnum::kError) || !IsSupportedOperationalState(aOpState))
+ * { return CHIP_ERROR_INVALID_ARGUMENT; }"), so a state that somehow slipped
+ * past the handler would map to MT_ATTR_ERR_FAILED here rather than being
+ * silently accepted.
+ */
+extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
+{
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::OperationalState::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    chip::app::Clusters::OperationalState::Instance *inst = nullptr;
+    for (auto &d : s_opstate_delegates) {
+        if (d.endpoint() == ep) {
+            inst = d.instance();
+            break;
+        }
+    }
+    if (inst == nullptr) {
+        return MT_ATTR_ERR_FAILED;
+    }
+    CHIP_ERROR err = inst->SetOperationalState(state);
+    if (err != CHIP_NO_ERROR) {
+        return MT_ATTR_ERR_FAILED;
+    }
     return MT_ATTR_OK;
 }
 

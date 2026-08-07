@@ -132,9 +132,14 @@ bool mt_at_event(int bit, const char *detail);
  * (the water valve's HandleOpenValve/HandleCloseValve, seven-type batch
  * task C2, cluster 0x0081 commands 0/1: unlike the door lock, its verdict
  * cannot fail the command on the wire, since the SDK discards what the
- * delegate returns and answers Success regardless, see AT_MT_SPEC.md 3.19);
- * see mt_at.c's cmd_mtcmdresp handler for why the reply path must never
- * take the CHIP stack lock.
+ * delegate returns and answers Success regardless, see AT_MT_SPEC.md 3.19;
+ * the OperationalState trio's HandlePause/Resume/Start/StopStateCallback,
+ * seven-type batch task C4, cluster 0x0060 commands 0-3, are the same
+ * Delegate-method shape but the OPPOSITE of the valve on this point: the
+ * filled GenericOperationalError becomes the command response directly, so
+ * here a deny genuinely does fail the command on the wire, see
+ * AT_MT_SPEC.md 3.21); see mt_at.c's cmd_mtcmdresp handler for why the
+ * reply path must never take the CHIP stack lock.
  */
 bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command);
 

@@ -299,6 +299,59 @@ void *mt_matter_mode_select_manager(void);
  */
 int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels, uint8_t count);
 
+/* ---- OperationalState trio (seven-type batch, task C4) ------------------ */
+
+/*
+ * The delegate-pool handout pattern (see mt_matter_valve_delegate_alloc()
+ * above, which this mirrors exactly): F7 requires one delegate OBJECT per
+ * endpoint (esp-matter's OperationalState::Delegate::SetInstance()
+ * VerifyOrDies if a second Instance tries to share one), so dish_washer,
+ * laundry_washer and laundry_dryer each hand out their own object from this
+ * ONE shared pool rather than pointing at a single global the way mode
+ * select does. The real endpoint id is not known until create() returns it,
+ * same reasoning as the valve pool, so the thunk (mt_devtypes.cpp) allocates
+ * a slot first, passes it through config.operational_state.delegate, calls
+ * create(), then fixes the real endpoint with
+ * mt_matter_opstate_delegate_set_endpoint() once it is known. Opaque void*,
+ * so mt_devtypes.cpp never has to name HearthOpStateDelegate or any CHIP
+ * delegate type.
+ *
+ * mt_matter_opstate_delegate_alloc() returns nullptr once
+ * MT_COMP_MAX_ENDPOINTS slots are handed out, so the caller aborts the boot
+ * rebuild the same way a failed create() itself would (see
+ * mt_matter_valve_delegate_alloc()'s doc comment above for the full
+ * reasoning).
+ */
+void *mt_matter_opstate_delegate_alloc(void);
+void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep);
+
+/*
+ * AT+MTOPSTATE: set ep's OperationalState cluster (0x0060) CurrentState
+ * through the SDK's own Instance::SetOperationalState(), so the
+ * OperationalState attribute report a subscribed controller expects is
+ * actually emitted (main.cpp's HearthOpStateDelegate class comment has the
+ * full F7 citation trail, including why this needs no registry beyond the
+ * delegate pool itself). Same split-ownership shape as AT+MTLOCK/AT+MTVALVE:
+ * the firmware never calls this on its own after an allowed +MTCMD verdict
+ * (Pause/Resume/Start/Stop, cluster 0x0060 commands 0-3), since only the
+ * host knows when the physical appliance has actually completed the
+ * transition.
+ *
+ * <state> is an OperationalStateEnum wire value: 0 Stopped, 1 Running, 2
+ * Paused. mt_at.c rejects 3 (Error) itself before calling this, since kError
+ * is reserved for the error-detection path (F7), never a state this command
+ * may set directly; SetOperationalState() enforces the identical rule
+ * independently (see main.cpp), so a state that somehow slipped past the
+ * handler would still be refused here, not silently accepted.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when ep has no OperationalState cluster,
+ * MT_ATTR_ERR_FAILED when no delegate/Instance is reachable for ep (should
+ * not happen once esp_matter::start() has run, see main.cpp) or
+ * SetOperationalState() itself reports failure.
+ */
+int mt_matter_opstate_set(uint16_t ep, uint8_t state);
+
 /* ---- air quality (C1b, bug B139) ------------------------------------ */
 
 /*

@@ -524,6 +524,74 @@ static endpoint_t *mk_mode_select(node_t *n, uint8_t variant)
     return mode_select::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
 }
 
+/*
+ * F7: unlike mode select's single global manager, OperationalState needs one
+ * delegate OBJECT per endpoint (SetInstance() VerifyOrDies on sharing), so
+ * each of the three thunks below hands out its own slot from the ONE shared
+ * pool mt_matter_opstate_delegate_alloc() manages (main.cpp), the same
+ * before-create()/after-create() endpoint-fixup shape mk_water_valve() uses.
+ * dish_washer::config_t, laundry_washer::config_t and laundry_dryer::config_t
+ * are all literally the same type (esp_matter_endpoint.h's
+ * app_with_operational_state_config, aliased three times) and their add()
+ * bodies are identical apart from the device type id
+ * (esp_matter_endpoint.cpp: each just calls operational_state::create() then
+ * event::create_operation_completion()), so the three thunks below differ
+ * only in which namespace's create() they call.
+ */
+static endpoint_t *mk_laundry_washer(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    void *delegate = mt_matter_opstate_delegate_alloc();
+    if (delegate == nullptr) {
+        ESP_LOGE(TAG, "operational state delegate pool exhausted");
+        return nullptr;
+    }
+    laundry_washer::config_t c;
+    c.operational_state.delegate = delegate;
+    endpoint_t *ep = laundry_washer::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    mt_matter_opstate_delegate_set_endpoint(delegate, endpoint::get_id(ep));
+    return ep;
+}
+
+static endpoint_t *mk_dish_washer(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    void *delegate = mt_matter_opstate_delegate_alloc();
+    if (delegate == nullptr) {
+        ESP_LOGE(TAG, "operational state delegate pool exhausted");
+        return nullptr;
+    }
+    dish_washer::config_t c;
+    c.operational_state.delegate = delegate;
+    endpoint_t *ep = dish_washer::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    mt_matter_opstate_delegate_set_endpoint(delegate, endpoint::get_id(ep));
+    return ep;
+}
+
+static endpoint_t *mk_laundry_dryer(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    void *delegate = mt_matter_opstate_delegate_alloc();
+    if (delegate == nullptr) {
+        ESP_LOGE(TAG, "operational state delegate pool exhausted");
+        return nullptr;
+    }
+    laundry_dryer::config_t c;
+    c.operational_state.delegate = delegate;
+    endpoint_t *ep = laundry_dryer::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    mt_matter_opstate_delegate_set_endpoint(delegate, endpoint::get_id(ep));
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -560,6 +628,9 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { pump::get_device_type_id(),                     mk_pump,                    "pump",                    0 },
     { water_valve::get_device_type_id(),              mk_water_valve,             "water_valve",             0 },
     { mode_select::get_device_type_id(),              mk_mode_select,             "mode_select",             0 },
+    { laundry_washer::get_device_type_id(),           mk_laundry_washer,          "laundry_washer",          0 },
+    { dish_washer::get_device_type_id(),              mk_dish_washer,             "dish_washer",             0 },
+    { laundry_dryer::get_device_type_id(),            mk_laundry_dryer,           "laundry_dryer",           0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

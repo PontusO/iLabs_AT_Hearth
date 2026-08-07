@@ -403,6 +403,22 @@ command once Task C2 wires a caller in, not by an automated regression here.
 | `AT+MTMODES=<mode-select ep>,0,"Eco, low"` | `OK` (comma inside a label, same `AT+MTTEMPLEVELS` rule) |
 | `AT+MTATTR=<mode-select ep>,80,3` | `+MTATTR:<ep>,80,3,<val>` → `OK` (`CurrentMode` is a plain attribute, not part of `AT+MTMODES`; readable/writable over `AT+MTATTR` like any integer attribute, per `AT_MT_SPEC.md` §3.20) |
 
+**`AT+MTOPSTATE` argument validation:**
+
+| Command | Expected |
+|---|---|
+| `AT+MTOPSTATE?` | bare `ERROR` (query form not accepted, `AT+MTVALVE` pattern) |
+| `AT+MTOPSTATE` | bare `ERROR` (exec form without arguments) |
+| `AT+MTOPSTATE=1` | `+MTERR:1` (fewer than 2 parameters) |
+| `AT+MTOPSTATE=1,1,1` | `+MTERR:1` (more than 2 parameters) |
+| `AT+MTOPSTATE=zz,1` | `+MTERR:1` (endpoint not numeric) |
+| `AT+MTOPSTATE=1,zz` | `+MTERR:1` (state not numeric) |
+| `AT+MTOPSTATE=1,3` | `+MTERR:1` (state 3/Error is reserved, not settable via this command, per `AT_MT_SPEC.md` §3.21) |
+| `AT+MTOPSTATE=1,4` | `+MTERR:1` (state outside `0..3`) |
+| `AT+MTOPSTATE=99,1` | `+MTERR:2` (unknown endpoint) |
+| `AT+MTOPSTATE=<non-opstate ep>,1` | `+MTERR:3` (endpoint has no `OperationalState` cluster) |
+| `AT+MTOPSTATE=<washer/dishwasher/dryer ep>,1` | `OK` (state accepted; `AT+MTATTR` has no path to `OperationalState` to read it back, per `AT_MT_SPEC.md` §3.21, so confirm via a commissioned controller reading the attribute) |
+
 **Chatty-host bench case: a bridge command already in flight when a forward
 opens.** Exercises `AT_MT_SPEC.md` §3.17's own by-construction limitation and
 the `iLabs_Hearth` library README's "Hearth originals" section from the other
