@@ -2024,6 +2024,15 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
  * (mt_cmd_forward_payload(), C1) so the host sees WHICH chime was requested,
  * and return the verdict directly: Status::Success on allow, Status::Failure
  * on deny.
+ *
+ * This delegate call is not unconditional, though: ChimeCluster::
+ * HandlePlayChimeSound() (ChimeCluster.cpp) answers the controller itself,
+ * without ever calling PlayChimeSound() below, in two cases: Enabled is
+ * false (answers Status::Success with no delegate call and no event), or an
+ * explicit chimeID in the command is not one AT+MTCHIMESOUNDS installed
+ * (answers Status::NotFound). Neither case reaches mt_cmd_forward_payload(),
+ * so no +MTCMD is raised for either; a host that has set Enabled false will
+ * see PlayChimeSound invokes stop reaching +MTCMD entirely, not fail it.
  */
 struct mt_chime_entry_t {
     uint8_t id;
@@ -2076,7 +2085,10 @@ public:
     }
 
     /* The one verdict on this firmware's +MTCMD surface passed straight
-     * through to the wire: see the class comment above. */
+     * through to the wire: see the class comment above. Only reached when
+     * Enabled is true and any explicit chimeID is one this endpoint
+     * installed; the SDK answers the controller itself, without calling
+     * here, for a disabled chime or an unknown chimeID (class comment). */
     chip::Protocols::InteractionModel::Status PlayChimeSound(uint8_t chimeID) override
     {
         using chip::Protocols::InteractionModel::Status;
