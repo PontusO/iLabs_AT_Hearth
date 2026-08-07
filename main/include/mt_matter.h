@@ -375,6 +375,42 @@ int mt_matter_opstate_set(uint16_t ep, uint8_t state);
  */
 uint32_t mt_air_quality_feature_mask(void);
 
+/* ---- smoke/co alarm (seven-type batch, task C5) -------------------------- */
+
+/*
+ * AT+MTALARM: set field <field> (1..11) of ep's SmokeCoAlarm cluster through
+ * one of the cluster's own eleven event-emitting Set* methods
+ * (SmokeCoAlarmServer::Instance(), design spec F4), never a raw AT+MTATTR
+ * write: the setters fire the cluster's spec-mandated events (SmokeAlarm,
+ * COAlarm, MuteEnded, HardwareFault, EndOfService, AllClear, LowBattery,
+ * SelfTestComplete) and the critical-alarm auto-unmute, both of which a raw
+ * write to the same ember-managed attribute storage would silently skip.
+ *
+ * mt_at.c's cmd_mtalarm has already rejected field outside 1..11 with
+ * +MTERR:1 before this is ever called (field 0, ExpressedState, is derived
+ * by the server from the other ten and is never settable directly, so it is
+ * not in that range at all). This bridge maps field to the matching setter
+ * and range-checks <value> against THAT field's own SDK enum bound (each
+ * setter takes a differently-typed enum, so mt_at.c, plain C with no SDK
+ * access, cannot do this itself); the two boolean fields (TestInProgress,
+ * HardwareFaultAlert) are checked against 0/1 instead. An out-of-range value
+ * returns MT_ATTR_ERR_VALUE (+MTERR:1, the C1b/B139 precedent); a setter
+ * returning false (the field already held that value, or the underlying
+ * ember write failed) maps to MT_ATTR_ERR_FAILED, a bare ERROR.
+ *
+ * Field 5 (TestInProgress) value 0 is the self-test completion path: the
+ * SDK's own SetTestInProgress() recognises the true->false edge and fires
+ * SelfTestComplete, the far end of the notify-only +MTCMD:0,... a
+ * controller's SelfTestRequest raises (mt_cmd_notify(), C1; see
+ * emberAfPluginSmokeCoAlarmSelfTestRequestCommand() in main.cpp).
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when ep has no SmokeCoAlarm cluster, MT_ATTR_ERR_VALUE
+ * for a <value> outside the field's own range, MT_ATTR_ERR_FAILED when the
+ * setter itself reports failure.
+ */
+int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value);
+
 #ifdef __cplusplus
 }
 #endif

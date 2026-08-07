@@ -63,6 +63,12 @@
  * transitively) this file's HearthOpStateDelegate implements. */
 #include <app/clusters/operational-state-server/operational-state-server.h>
 
+/* C5 (seven-type batch, smoke/co alarm): SmokeCoAlarmServer::Instance() and
+ * its eleven event-emitting Set* methods, and the enum types (AlarmStateEnum,
+ * MuteStateEnum, EndOfServiceEnum, ContaminationStateEnum, SensitivityEnum)
+ * this file's mt_matter_alarm_set() validates AT+MTALARM's <value> against. */
+#include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -1835,6 +1841,138 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
         return MT_ATTR_ERR_FAILED;
     }
     return MT_ATTR_OK;
+}
+
+/*
+ * ---- smoke/co alarm (seven-type batch, task C5) ----------------------------
+ *
+ * Signature verbatim from smoke-co-alarm-server.h:178 (connectedhomeip,
+ * vendored under esp-matter release/v1.5.1). Design spec F4: this is the
+ * cluster's one mandatory link symbol, no weak default exists anywhere in the
+ * vendored tree, so leaving it undefined is a link failure, not a silent
+ * no-op, the same shape emberAfDoorLockClusterInitCallback's comment above
+ * documents for its own cluster.
+ *
+ * SmokeCoAlarmServer::HandleRemoteSelfTestRequest (smoke-co-alarm-server.cpp)
+ * has already set TestInProgress true, ExpressedState Testing, and answered
+ * the controller Status::Success BEFORE calling this: there is no verdict
+ * left to give back, only a fire-and-forget notice that a test was
+ * requested. This is the C1 notify-only +MTCMD form's first consumer
+ * (mt_cmd_notify(), mt_at.h): seq 0, no mailbox slot, never blocks. Runs on
+ * the CHIP task (the same reasoning the door lock/valve ember callbacks
+ * above give for their own lack of ChipStackLock), so none is taken here
+ * either.
+ *
+ * The host is expected to run its own test and report completion with
+ * AT+MTALARM=<ep>,5,0 (TestInProgress false), which fires SelfTestComplete
+ * on the SmokeCoAlarmServer singleton; see mt_matter_alarm_set() below.
+ */
+void emberAfPluginSmokeCoAlarmSelfTestRequestCommand(chip::EndpointId endpointId)
+{
+    mt_cmd_notify(endpointId, chip::app::Clusters::SmokeCoAlarm::Id,
+                  chip::app::Clusters::SmokeCoAlarm::Commands::SelfTestRequest::Id);
+}
+
+/*
+ * AT+MTALARM bridge: dispatch <field> (already checked 1..11 by
+ * mt_at.c's cmd_mtalarm) to the matching SmokeCoAlarmServer setter, after
+ * range-checking <value> against THAT field's own SDK enum
+ * (smoke-co-alarm-server.h:40-46 aliases the five enum types off
+ * chip::app::Clusters::SmokeCoAlarm::*Enum). Every AlarmStateEnum field
+ * (SmokeState/COState/BatteryAlert/InterconnectSmokeAlarm/
+ * InterconnectCOAlarm) shares one bound: kUnknownEnumValue = 3
+ * (SmokeCoAlarm/Enums.h). MuteStateEnum's bound is 2, EndOfServiceEnum's is
+ * 2, ContaminationStateEnum's is 4, SensitivityEnum's is 3 (same file); the
+ * two boolean fields (TestInProgress, HardwareFaultAlert) are checked
+ * against 0/1 directly, since bool has no kUnknownEnumValue to read. The
+ * cast to each field's enum type happens only AFTER its own bound check
+ * passes, never before.
+ */
+extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
+{
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::SmokeCoAlarm::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+
+    SmokeCoAlarmServer &srv = SmokeCoAlarmServer::Instance();
+    bool ok;
+    switch (field) {
+    case 1: /* SmokeState */
+        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetSmokeState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        break;
+    case 2: /* COState */
+        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetCOState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        break;
+    case 3: /* BatteryAlert */
+        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetBatteryAlert(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        break;
+    case 4: /* DeviceMuted */
+        if (value >= (uint8_t)SmokeCoAlarmServer::MuteStateEnum::kUnknownEnumValue) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetDeviceMuted(ep, (SmokeCoAlarmServer::MuteStateEnum)value);
+        break;
+    case 5: /* TestInProgress: bool, the self-test completion path at 0 */
+        if (value > 1) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetTestInProgress(ep, value != 0);
+        break;
+    case 6: /* HardwareFaultAlert: bool */
+        if (value > 1) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetHardwareFaultAlert(ep, value != 0);
+        break;
+    case 7: /* EndOfServiceAlert */
+        if (value >= (uint8_t)SmokeCoAlarmServer::EndOfServiceEnum::kUnknownEnumValue) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetEndOfServiceAlert(ep, (SmokeCoAlarmServer::EndOfServiceEnum)value);
+        break;
+    case 8: /* InterconnectSmokeAlarm */
+        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetInterconnectSmokeAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        break;
+    case 9: /* InterconnectCOAlarm */
+        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetInterconnectCOAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        break;
+    case 10: /* ContaminationState */
+        if (value >= (uint8_t)SmokeCoAlarmServer::ContaminationStateEnum::kUnknownEnumValue) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetContaminationState(ep, (SmokeCoAlarmServer::ContaminationStateEnum)value);
+        break;
+    case 11: /* SmokeSensitivityLevel */
+        if (value >= (uint8_t)SmokeCoAlarmServer::SensitivityEnum::kUnknownEnumValue) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        ok = srv.SetSmokeSensitivityLevel(ep, (SmokeCoAlarmServer::SensitivityEnum)value);
+        break;
+    default:
+        /* mt_at.c's cmd_mtalarm already rejects field outside 1..11 with
+         * +MTERR:1; kept for defensiveness, unreachable in practice. */
+        return MT_ATTR_ERR_VALUE;
+    }
+    return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }
 
 /* --------------------------------------------------------------------------- */

@@ -740,6 +740,67 @@ static int cmd_mtopstate(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/*
+ * AT+MTALARM=<ep>,<field>,<value> -> report an event-emitting SmokeCoAlarm
+ * state change on <ep> (design spec F4: one of the cluster's own eleven
+ * Set* methods, chosen so the events they fire, and the critical-alarm
+ * auto-unmute, actually happen; a raw AT+MTATTR write to the same attribute
+ * would skip both). Set-only, the AT+MTLOCK/AT+MTVALVE/AT+MTOPSTATE
+ * convention: bare/query forms answer a plain ERROR.
+ *
+ * <field>: 1 SmokeState, 2 COState, 3 BatteryAlert, 4 DeviceMuted,
+ * 5 TestInProgress, 6 HardwareFaultAlert, 7 EndOfServiceAlert,
+ * 8 InterconnectSmokeAlarm, 9 InterconnectCOAlarm, 10 ContaminationState,
+ * 11 SmokeSensitivityLevel (AT_MT_SPEC.md 3.22's table). 0 (ExpressedState)
+ * and anything outside 1..11 answer +MTERR:1 HERE, in the handler:
+ * ExpressedState is derived by the server from the other ten and is never
+ * settable directly, the same "wire-protocol-shape rejection belongs in the
+ * handler" reasoning AT+MTOPSTATE's kError check follows.
+ *
+ * <value> is the field's own enum or bool wire value; mt_matter_alarm_set()
+ * validates it against that field's own SDK enum bound, since each field's
+ * Set* takes a differently-typed enum and this C translation unit has no SDK
+ * access to read those bounds from.
+ *
+ * Field 5 (TestInProgress) value 0 is the self-test completion path: it
+ * fires SelfTestComplete on the SmokeCoAlarmServer singleton, the far end of
+ * the +MTCMD:0,... notify a controller's SelfTestRequest raises
+ * (mt_cmd_notify(), C1).
+ *
+ * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
+ * +MTERR:3 the endpoint has no SmokeCoAlarm cluster. A bare ERROR covers an
+ * unclassified runtime failure, routed through attr_err_to_mterr() like every
+ * other bridge call in this file.
+ */
+static int cmd_mtalarm(at_type_t type, char *args)
+{
+    char *f[3];
+    int n = at_split_args(args, f, 3);
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (n != 3) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long ep, field, value;
+    if (!parse_u(f[0], &ep) || ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!parse_u(f[1], &field) || field < 1 || field > 11) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!parse_u(f[2], &value) || value > 0xFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    int r = mt_matter_alarm_set((uint16_t)ep, (uint8_t)field, (uint8_t)value);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
 /* ---- event subscription (C3) ------------------------------------------ */
 
 static uint32_t s_evt_mask = MT_EVT_MASK_DEFAULT;
@@ -1320,6 +1381,7 @@ static const at_command_t s_cmds[] = {
     { "MTVALVE",      cmd_mtvalve     },
     { "MTMODES",      cmd_mtmodes     },
     { "MTOPSTATE",    cmd_mtopstate   },
+    { "MTALARM",      cmd_mtalarm     },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif
