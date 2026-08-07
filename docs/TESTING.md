@@ -68,6 +68,30 @@ requirement, but there **is** a network requirement: client isolation / AP
 isolation on the test SSID will break everything after commissioning. Note the
 SSID used in the baseline report.
 
+### Scripted power cuts (replaces the operator unplug)
+
+The bench hub (RSHTECH RSH-A10, cascaded RTS5411, all segments `ppps`)
+gives software-controlled VBUS per port through `uhubctl`, verified
+2026-08-07: cutting the Challenger's port makes the board vanish from
+`/dev/serial/by-id/` for exactly the commanded interval and
+re-enumerate in about 2.3 s, a true full-board power cycle (the board
+is bus-powered). Any test step that used to read "chime, operator
+unplugs, holds, replugs" is now:
+
+```sh
+# Challenger full power cycle, 5 s off (transport-mismatch tests,
+# power-cut recovery, the B103-class CDC-reconnect scenarios)
+uhubctl -l 3-1.3 -p 3 -a cycle -d 5
+```
+
+Port map as cabled today: Challenger at hub `3-1.3` port 3, Debug
+Probe at `3-1.3` port 4, ZBT-2 at `3-1` port 2. The USB2-face hub
+locations (`3-1*`) are the ones that control VBUS. A udev rule
+(`/etc/udev/rules.d/52-uhubctl.rules`, vendor 0bda) grants
+unprivileged access. Port numbers follow the cabling, not the device:
+re-run `uhubctl` and re-verify the map after any bench rewiring before
+trusting a scripted cut, per the known-start-state rule.
+
 ## 3. One-time setup
 
 ### 3.1 Device
