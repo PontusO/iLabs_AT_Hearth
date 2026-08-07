@@ -69,6 +69,19 @@
  * this file's mt_matter_alarm_set() validates AT+MTALARM's <value> against. */
 #include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
 
+/* C6 (seven-type batch, chime): ChimeDelegate (three pure virtuals this
+ * file's HearthChimeDelegate implements) and ChimeCluster (SetSelectedChime/
+ * SetEnabled, called through the data model provider's registry, see
+ * mt_matter_chime_set() below). chime_integration.h declares
+ * chip::app::Clusters::Chime::SetDelegate(), and app/ClusterCallbacks.h
+ * declares ESPMatterChimeClusterServerInitCallback(): together the two calls
+ * the F6 workaround needs (mt_chime_register_all() below). */
+#include <app/clusters/chime-server/ChimeCluster.h>
+#include <data_model_provider/clusters/chime_integration.h>
+#include <data_model_provider/esp_matter_data_model_provider.h>
+#include <app/ClusterCallbacks.h>
+#include <app/server-cluster/ServerClusterInterfaceRegistry.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -1975,6 +1988,347 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
     return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }
 
+/*
+ * ---- chime (seven-type batch, task C6) -------------------------------------
+ *
+ * F3: create() aborts on a null delegate (cluster::chime::create(),
+ * esp_matter_cluster.cpp: "VerifyOrReturnValue(config != NULL &&
+ * config->delegate != nullptr, NULL, ...)") - a trap by pointer, not a
+ * VALIDATE_FEATURES macro like the smoke/co alarm's or power source's. The
+ * thunk (mt_devtypes.cpp's mk_chime()) hands out a pool slot before create()
+ * and fixes its endpoint after, the same before/after shape mk_water_valve()/
+ * the OperationalState trio use above; see mt_matter_chime_delegate_alloc()'s
+ * doc comment in mt_matter.h.
+ *
+ * ChimeDelegate has three pure virtuals (ChimeCluster.h, connectedhomeip
+ * vendored under esp-matter release/v1.5.1):
+ *
+ *   virtual CHIP_ERROR GetChimeSoundByIndex(uint8_t chimeIndex, uint8_t &chimeID, MutableCharSpan &name) = 0;
+ *   virtual CHIP_ERROR GetChimeIDByIndex(uint8_t chimeIndex, uint8_t &chimeID) = 0;
+ *   virtual Protocols::InteractionModel::Status PlayChimeSound(uint8_t chimeID) = 0;
+ *
+ * The first two feed InstalledChimeSounds, the same "index until exhausted"
+ * shape as HearthTempLevelsDelegate above: CHIP_ERROR_PROVIDER_LIST_EXHAUSTED
+ * past the end of the per-endpoint store AT+MTCHIMESOUNDS fills
+ * (mt_matter_chime_sounds_set() below).
+ *
+ * PlayChimeSound is a REAL wire verdict, the one command on this firmware's
+ * whole +MTCMD surface where the host's answer reaches the controller exactly
+ * as given: ChimeCluster::HandlePlayChimeSound() takes whatever Status this
+ * returns and copies it straight into the command's InvokeResponse, with no
+ * SDK-side override or remapping (contrast the water valve, F1, whose verdict
+ * the SDK discards outright and always answers Success; and the
+ * OperationalState trio, F7, whose verdict is remapped through
+ * GenericOperationalError's own ErrorStateEnum rather than passed through
+ * raw). Forward the chimeID through the reserved fifth +MTCMD payload field
+ * (mt_cmd_forward_payload(), C1) so the host sees WHICH chime was requested,
+ * and return the verdict directly: Status::Success on allow, Status::Failure
+ * on deny.
+ */
+struct mt_chime_entry_t {
+    uint8_t id;
+    char    name[MT_CHIME_MAX_NAME_LEN + 1];
+};
+
+struct mt_chime_slot_t {
+    bool    used;
+    uint16_t ep;
+    uint8_t  count;
+    mt_chime_entry_t entries[MT_CHIME_MAX_SOUNDS];
+};
+static mt_chime_slot_t s_chime_slots[MT_COMP_MAX_ENDPOINTS];
+
+static mt_chime_slot_t *mt_chime_find_slot(uint16_t ep)
+{
+    for (auto &s : s_chime_slots) {
+        if (s.used && s.ep == ep) {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+class HearthChimeDelegate : public chip::app::Clusters::ChimeDelegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+
+    CHIP_ERROR GetChimeSoundByIndex(uint8_t chimeIndex, uint8_t &chimeID, chip::MutableCharSpan &name) override
+    {
+        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
+        if (slot == nullptr || chimeIndex >= slot->count) {
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        chimeID = slot->entries[chimeIndex].id;
+        chip::CharSpan src(slot->entries[chimeIndex].name, strlen(slot->entries[chimeIndex].name));
+        return chip::CopyCharSpanToMutableCharSpan(src, name);
+    }
+
+    CHIP_ERROR GetChimeIDByIndex(uint8_t chimeIndex, uint8_t &chimeID) override
+    {
+        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
+        if (slot == nullptr || chimeIndex >= slot->count) {
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        chimeID = slot->entries[chimeIndex].id;
+        return CHIP_NO_ERROR;
+    }
+
+    /* The one verdict on this firmware's +MTCMD surface passed straight
+     * through to the wire: see the class comment above. */
+    chip::Protocols::InteractionModel::Status PlayChimeSound(uint8_t chimeID) override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        bool allow = mt_cmd_forward_payload(m_ep, chip::app::Clusters::Chime::Id,
+                                            chip::app::Clusters::Chime::Commands::PlayChimeSound::Id, chimeID);
+        return allow ? Status::Success : Status::Failure;
+    }
+
+private:
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+};
+
+/*
+ * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, the same shape as
+ * s_valve_delegates/s_opstate_delegates above. Exposed to mt_devtypes.cpp
+ * through the same opaque void* pair pattern, so that file never has to name
+ * HearthChimeDelegate or any CHIP delegate type.
+ */
+static HearthChimeDelegate s_chime_delegates[MT_COMP_MAX_ENDPOINTS];
+static size_t              s_chime_delegate_next = 0;
+
+extern "C" void *mt_matter_chime_delegate_alloc(void)
+{
+    if (s_chime_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
+        return nullptr;
+    }
+    return &s_chime_delegates[s_chime_delegate_next++];
+}
+
+extern "C" void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    static_cast<HearthChimeDelegate *>(delegate)->set_endpoint(ep);
+}
+
+/*
+ * F6 workaround: ESPMatterChimeClusterServerInitCallback (the only function
+ * that actually constructs a ChimeCluster and registers it with esp_matter's
+ * data model provider) has no call site anywhere in the pinned esp-matter/
+ * connectedhomeip tree - grep evidence: the only two hits for its name in the
+ * whole SDK tree are its own definition
+ * (data_model_provider/clusters/chime_integration.cpp:36) and its declaration
+ * (zap_common/app/ClusterCallbacks.h:67). cluster::chime::create()
+ * (esp_matter_cluster.cpp) wires only the delegate stash (ChimeDelegateInitCB
+ * -> chip::app::Clusters::Chime::SetDelegate()) and a no-op legacy
+ * plugin-server stub (MatterChimePluginServerInitCallback, also defined as an
+ * empty body in chime_integration.cpp); without a manual call the Chime
+ * cluster's ember-managed attributes exist (cluster::chime::create() still
+ * creates them) but nothing in the data model actually serves a read, a
+ * write, or PlayChimeSound. Recorded for the I90 upstream ride-along (design
+ * spec section 8: "Chime upstream fix: the missing init call site rides the
+ * I90 list").
+ *
+ * Called from the same pre-start registration window as the
+ * SupportedTemperatureLevels delegate and the AirQuality Instances above
+ * (mt_air_quality_register_all()'s doc comment has the full "why pre-start is
+ * safe" reasoning: nothing here touches the CHIP event loop or arms a timer).
+ *
+ * This function calls chip::app::Clusters::Chime::SetDelegate() itself,
+ * rather than relying on esp_matter's own ChimeDelegateInitCB to have done
+ * it first, and the ordering is load-bearing, not stylistic:
+ * ESPMatterChimeClusterServerInitCallback() dereferences
+ * *gDelegates[endpointId] unconditionally (chime_integration.cpp:41), so the
+ * delegate must already be in Chime's internal map before this runs.
+ * ChimeDelegateInitCB is the callback esp_matter's OWN chime::create() wires
+ * automatically (set_delegate_and_init_callback(), esp_matter_cluster.cpp),
+ * but it does not fire until esp_matter::start() -> chip::Server::Init() ->
+ * esp_matter::data_model::provider::Startup()
+ * (data_model_provider/esp_matter_data_model_provider.cpp), which walks every
+ * endpoint that already exists and invokes each cluster's
+ * delegate_init_callback - strictly AFTER this pre-start window closes. A
+ * version of this function that skipped the explicit SetDelegate() call and
+ * trusted ChimeDelegateInitCB to have already run would dereference a
+ * default-constructed (null) map entry and crash on the very first boot with
+ * a chime endpoint. (ChimeDelegateInitCB does still fire later, during
+ * start(); it only re-sets the same pointer to the same delegate, which is
+ * harmless.)
+ *
+ * Registering the cluster before esp_matter::start() is separately safe, on
+ * its own terms: ServerClusterInterfaceRegistry::Register()
+ * (src/app/server-cluster/ServerClusterInterfaceRegistry.cpp) only calls
+ * Startup() on the newly-registered interface if a context is already set;
+ * with none yet (true here, since chip::Server::Init() has not run) it just
+ * links the registration into the registry's list and returns success.
+ * esp_matter::data_model::provider::Startup(), later inside
+ * esp_matter::start(), calls ServerClusterInterfaceRegistry::SetContext(),
+ * which walks every already-registered interface (including the ChimeCluster
+ * this function just registered) and calls Startup() on each - that is what
+ * actually wires it to the interaction model.
+ */
+static void mt_chime_register_all(void)
+{
+    for (uint16_t i = 0; i < s_live_count && i < MT_COMP_MAX_ENDPOINTS; i++) {
+        uint16_t ep = s_live_ep_id[i];
+        if (esp_matter::cluster::get(ep, chip::app::Clusters::Chime::Id) == nullptr) {
+            continue;
+        }
+        HearthChimeDelegate *delegate = nullptr;
+        for (auto &d : s_chime_delegates) {
+            if (d.endpoint() == ep) {
+                delegate = &d;
+                break;
+            }
+        }
+        if (delegate == nullptr) {
+            ESP_LOGE(TAG, "chime delegate missing for endpoint %u", ep);
+            continue;
+        }
+        chip::app::Clusters::Chime::SetDelegate(ep, delegate);
+        ESPMatterChimeClusterServerInitCallback(ep);
+    }
+}
+
+/*
+ * AT+MTCHIMESOUNDS bridge: grammar and content rules are enforced by
+ * cmd_mtchimesounds() in mt_at.c before this is ever called; the bounds
+ * re-checked here are defensive, not the primary gate (same split as
+ * mt_matter_modes_set() above).
+ */
+extern "C" int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const char *const *names, uint8_t count)
+{
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::Chime::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1 || count > MT_CHIME_MAX_SOUNDS) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_chime_slot_t *slot = mt_chime_find_slot(ep);
+    if (!slot) {
+        for (auto &s : s_chime_slots) {
+            if (!s.used) {
+                slot = &s;
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        /* Cannot happen in practice: one slot per MT_COMP_MAX_ENDPOINTS, the
+         * same cap the composition itself enforces, same reasoning as
+         * mt_matter_temp_levels_set()/mt_matter_modes_set() above. Kept as a
+         * defensive return rather than an assert. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(names[i]);
+        if (len < 1 || len > MT_CHIME_MAX_NAME_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        slot->entries[i].id = ids[i];
+        memcpy(slot->entries[i].name, names[i], len + 1);
+    }
+    slot->ep    = ep;
+    slot->count = count;
+    slot->used  = true;
+
+    /*
+     * Mark InstalledChimeSounds dirty so an active subscription sees the new
+     * list. ChimeDelegate's own doc comment on GetChimeSoundByIndex()/
+     * GetChimeIDByIndex() (ChimeCluster.h) says "If the contents of this list
+     * change, the device SHALL call the Instance's
+     * ReportInstalledChimeSoundsChange method to report that this attribute
+     * has changed" - but no such method exists anywhere on ChimeCluster or
+     * its base DefaultServerCluster (grep evidence against the whole
+     * chime-server directory finds zero definitions, only that doc comment,
+     * repeated twice). The header wins over the plan here (project
+     * convention): this cluster was rewritten onto the DefaultServerCluster/
+     * ServerClusterInterfaceRegistry architecture, and the doc comment is a
+     * leftover reference to a pre-rewrite Instance-based API that no longer
+     * exists on this SDK revision. The mechanism ChimeCluster::
+     * SetSelectedChime()/SetEnabled() actually use for the same purpose,
+     * NotifyAttributeChanged(), is `protected` on DefaultServerCluster and
+     * this translation unit is not a subclass, so it cannot be called from
+     * here either.
+     *
+     * MatterReportingAttributeChangeCallback() is the same substitute
+     * mt_matter_temp_levels_set()/mt_matter_modes_set() above already use for
+     * an identical problem (a delegate-served list attribute with no
+     * esp_matter::attribute::update() equivalent): it marks a path dirty
+     * through DataModel::Provider::Temporary_ReportAttributeChanged()
+     * directly (src/app/reporting/reporting.cpp), which is not ember-specific
+     * and works identically for a DefaultServerCluster-registered attribute
+     * (Chime) as it does for an ember-managed one (TemperatureControl,
+     * ModeSelect).
+     */
+    MatterReportingAttributeChangeCallback(
+        ep, chip::app::Clusters::Chime::Id,
+        chip::app::Clusters::Chime::Attributes::InstalledChimeSounds::Id);
+    return MT_ATTR_OK;
+}
+
+/*
+ * AT+MTCHIME bridge: mt_at.c's cmd_mtchime has already checked <what> is 0 or
+ * 1 and <value> fits a u8 before this is ever called.
+ *
+ * The Chime cluster is registered directly with esp_matter's data model
+ * provider (mt_chime_register_all() above), not through esp_matter's generic
+ * attribute store, so there is no esp_matter::attribute::get()/cluster::get()
+ * accessor for its instance the way every other bridge in this file uses;
+ * fetch it back from the same registry it was registered into.
+ * ServerClusterInterfaceRegistry::Get() (src/app/server-cluster/
+ * ServerClusterInterfaceRegistry.h) is public, and the ChimeCluster instance
+ * registered at (ep, Chime::Id) is always exactly a ChimeCluster (this file
+ * is the only thing that ever registers one there, via
+ * ESPMatterChimeClusterServerInitCallback()), so the static_cast back from
+ * ServerClusterInterface* is safe: ChimeCluster -> DefaultServerCluster ->
+ * ServerClusterInterface is a single, non-virtual inheritance chain
+ * (ChimeCluster.h, DefaultServerCluster.h).
+ */
+extern "C" int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value)
+{
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::Chime::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+
+    chip::app::ServerClusterInterface *iface = esp_matter::data_model::provider::get_instance().registry().Get(
+        chip::app::ConcreteClusterPath(ep, chip::app::Clusters::Chime::Id));
+    if (iface == nullptr) {
+        /* Cannot happen in practice once esp_matter::start() has run: every
+         * endpoint with a Chime cluster was registered by
+         * mt_chime_register_all() before start(). Kept as a defensive
+         * return rather than an assert, the same shape the OperationalState
+         * bridge above uses for its own "should not happen" instance lookup. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    auto *chime = static_cast<chip::app::Clusters::ChimeCluster *>(iface);
+
+    using chip::Protocols::InteractionModel::Status;
+    Status st;
+    switch (what) {
+    case 0: /* SelectedChime */
+        st = chime->SetSelectedChime(value);
+        break;
+    case 1: /* Enabled */
+        st = chime->SetEnabled(value != 0);
+        break;
+    default:
+        /* mt_at.c's cmd_mtchime already rejects <what> outside 0..1 with
+         * +MTERR:1; kept for defensiveness, unreachable in practice. */
+        return MT_ATTR_ERR_VALUE;
+    }
+    return (st == Status::Success) ? MT_ATTR_OK : MT_ATTR_ERR_VALUE;
+}
+
 /* --------------------------------------------------------------------------- */
 
 /*
@@ -2250,6 +2604,15 @@ extern "C" void app_main(void)
      * esp_matter::start() so nothing races the CHIP event loop.
      */
     mt_air_quality_register_all();
+
+    /*
+     * C6 (seven-type batch): the F6 SDK-gap workaround. Same window, same
+     * "must land before esp_matter::start()" reasoning as the AirQuality
+     * registration just above, plus its own ordering constraint against
+     * esp_matter's own delegate init callback; see mt_chime_register_all()'s
+     * doc comment for the full trail.
+     */
+    mt_chime_register_all();
 
     /* Bring up the Matter stack (BLE commissioning + WiFi or Thread transport). */
     esp_err_t err = esp_matter::start(app_event_cb);

@@ -119,7 +119,13 @@ CONFIG_SUPPORT_CAMERA_AV_SETTINGS_USER_LEVEL_MANAGEMENT_CLUSTER=n
 CONFIG_SUPPORT_CARBON_DIOXIDE_CONCENTRATION_MEASUREMENT_CLUSTER=n
 CONFIG_SUPPORT_CARBON_MONOXIDE_CONCENTRATION_MEASUREMENT_CLUSTER=n
 CONFIG_SUPPORT_CHANNEL_CLUSTER=n
-CONFIG_SUPPORT_CHIME_CLUSTER=n
+# CHIME_CLUSTER: re-enabled, task C6 (seven-type batch) creates a chime
+# endpoint (mt_devtypes.cpp's mk_chime()). Pulls src/app/clusters/chime-server
+# (ChimeCluster.cpp) into the esp_matter component's SRC_DIRS
+# (get_supported_cluster_dirs(), esp_matter's CMakeLists.txt); without it,
+# ESPMatterChimeClusterServerInitCallback (always compiled, since
+# data_model_provider/clusters is unconditional) would try to instantiate
+# ChimeCluster with no definition to link against.
 CONFIG_SUPPORT_CLOSURE_CONTROL_CLUSTER=n
 CONFIG_SUPPORT_CLOSURE_DIMENSION_CLUSTER=n
 CONFIG_SUPPORT_COMMISSIONER_CONTROL_CLUSTER=n

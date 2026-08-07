@@ -646,6 +646,34 @@ static endpoint_t *mk_power_source(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * F3/trap: cluster::chime::create() aborts (returns NULL) when
+ * config.delegate is null, a check by pointer rather than a
+ * VALIDATE_FEATURES macro like the smoke/co alarm's or power source's above.
+ * Same before/after delegate-pool shape as mk_water_valve()/the
+ * OperationalState trio: a slot is handed out before create() (the real
+ * endpoint id is not known until create() returns it), and fixed up after.
+ * On pool exhaustion, abort loudly by returning nullptr, same as every other
+ * failed create() in this file.
+ */
+static endpoint_t *mk_chime(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    void *delegate = mt_matter_chime_delegate_alloc();
+    if (delegate == nullptr) {
+        ESP_LOGE(TAG, "chime delegate pool exhausted");
+        return nullptr;
+    }
+    chime::config_t c;
+    c.chime.delegate = delegate;
+    endpoint_t *ep = chime::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    mt_matter_chime_delegate_set_endpoint(delegate, endpoint::get_id(ep));
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -687,6 +715,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { laundry_dryer::get_device_type_id(),            mk_laundry_dryer,           "laundry_dryer",           0 },
     { smoke_co_alarm::get_device_type_id(),           mk_smoke_co_alarm,          "smoke_co_alarm",          0 },
     { power_source::get_device_type_id(),             mk_power_source,            "power_source",            0 },
+    { chime::get_device_type_id(),                    mk_chime,                   "chime",                   0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

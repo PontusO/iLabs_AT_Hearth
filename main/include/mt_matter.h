@@ -411,6 +411,87 @@ uint32_t mt_air_quality_feature_mask(void);
  */
 int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value);
 
+/* ---- chime (seven-type batch, task C6) ------------------------------------ */
+
+/*
+ * The delegate-pool handout pattern (see mt_matter_valve_delegate_alloc()'s
+ * doc comment above, which this mirrors exactly): design spec F3, chime's own
+ * trap is a null-pointer check rather than a VALIDATE_FEATURES macro
+ * (esp_matter_cluster.cpp's cluster::chime::create() returns NULL outright
+ * when config.delegate is null), but the shape is identical to the valve/
+ * OperationalState pools: the real endpoint id is not known until
+ * esp_matter::endpoint::create() returns it, so the thunk (mt_devtypes.cpp,
+ * which stays free of CHIP/esp_matter delegate types per this header's file
+ * comment) hands out a slot first with mt_matter_chime_delegate_alloc(),
+ * passes it through config.chime.delegate, calls create(), then fixes the
+ * real endpoint with mt_matter_chime_delegate_set_endpoint() once it is
+ * known. Opaque void*, the same shape as every other pool pair in this
+ * header. mt_matter_chime_delegate_alloc() returns nullptr once
+ * MT_COMP_MAX_ENDPOINTS slots are handed out, so the caller aborts the boot
+ * rebuild the same way a failed create() itself would.
+ */
+void *mt_matter_chime_delegate_alloc(void);
+void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep);
+
+/*
+ * Bounds for AT+MTCHIMESOUNDS. Shared between the handler (mt_at.c, which
+ * enforces them before calling the bridge below) and the per-endpoint store
+ * the bridge writes into (main.cpp), so the two cannot drift apart. The name
+ * bound is well under the cluster's own kMaxChimeSoundNameSize (48,
+ * ChimeCluster.h), the same "firmware bound tighter than the SDK cap, line
+ * stays bounded" reasoning MT_MODES_MAX_LABEL_LEN follows for ModeSelect.
+ */
+#define MT_CHIME_MAX_SOUNDS   8   /* id/name pairs per endpoint, 1..this many */
+#define MT_CHIME_MAX_NAME_LEN 32  /* bytes per name, excluding the NUL       */
+
+/*
+ * AT+MTCHIMESOUNDS: replace ep's Chime InstalledChimeSounds list (host-fed,
+ * never persisted; the host re-sends it every boot, the same contract
+ * AT+MTMODES/AT+MTTEMPLEVELS follow). ids[0..count-1]/names[0..count-1] are
+ * parallel arrays; the handler has already checked count, id uniqueness
+ * within the list, and every name against MT_CHIME_MAX_SOUNDS/
+ * MT_CHIME_MAX_NAME_LEN, printable ASCII, and no double quote, so this
+ * bridge trusts them and only re-checks bounds defensively.
+ *
+ * Feeds the per-endpoint store HearthChimeDelegate::GetChimeSoundByIndex()/
+ * GetChimeIDByIndex() (main.cpp) read from, and marks InstalledChimeSounds
+ * dirty so an active subscription sees the new list; see the bridge's own
+ * comment for why that uses MatterReportingAttributeChangeCallback() rather
+ * than the SDK's documented (but, on this revision, nonexistent)
+ * ReportInstalledChimeSoundsChange().
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when ep has no Chime cluster, MT_ATTR_ERR_FAILED for a
+ * bad count or an internal failure (store exhaustion; cannot happen in
+ * practice, one slot per MT_COMP_MAX_ENDPOINTS, same reasoning as the
+ * temp-levels/modes stores).
+ */
+int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const char *const *names, uint8_t count);
+
+/*
+ * AT+MTCHIME: set one of the Chime cluster's two plain attributes on ep
+ * through the SDK's own ChimeCluster::SetSelectedChime()/SetEnabled()
+ * (design spec F3), not a raw attribute write: this cluster is registered
+ * directly with esp_matter's data model provider (see mt_matter.h's
+ * mt_matter_chime_delegate_alloc() comment and the F6 workaround this file's
+ * registration-window function documents in main.cpp), not through
+ * esp_matter's generic attribute store, so there is no esp_matter::
+ * attribute::update() path here the way there is for e.g. AT+MTATTR.
+ *
+ * <what>: 0 SelectedChime (value is a chimeID; SetSelectedChime() answers
+ * Status::NotFound, mapped to MT_ATTR_ERR_VALUE, when it is not one of the
+ * ids AT+MTCHIMESOUNDS installed), 1 Enabled (value is 0/1, mt_at.c has
+ * already checked the range). Anything else in <what> is rejected in mt_at.c
+ * with +MTERR:1 before this is ever called.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when ep has no Chime cluster, MT_ATTR_ERR_VALUE for an
+ * unsupported chimeID, MT_ATTR_ERR_FAILED when the cluster is not reachable
+ * through the data model provider's registry (should not happen once
+ * esp_matter::start() has run, see main.cpp).
+ */
+int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value);
+
 #ifdef __cplusplus
 }
 #endif

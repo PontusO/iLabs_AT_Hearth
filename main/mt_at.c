@@ -801,6 +801,183 @@ static int cmd_mtalarm(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/*
+ * AT+MTCHIMESOUNDS=<ep>,<id>,"<name>"[,<id>,"<name>",...] -> replace ep's
+ * Chime InstalledChimeSounds list, 1..MT_CHIME_MAX_SOUNDS id/name pairs. The
+ * AT+MTMODES grammar with ids: set-only, bare/query forms answer a plain
+ * ERROR. Not persisted: the host is expected to re-send it every boot, the
+ * same contract AT+MTMODES/AT+MTTEMPLEVELS follow.
+ *
+ * Parsed here directly off the raw argument string, the same reason
+ * AT+MTMODES is: a comma inside a quoted name is legal content, and
+ * at_split_args() would split on it. Grammar and content rules (violating any
+ * of these is +MTERR:1, decided here before mt_matter_chime_sounds_set() is
+ * ever called):
+ *   - <ep>: a bare unsigned token, hex or decimal, up to the first comma.
+ *   - 1..MT_CHIME_MAX_SOUNDS <id>,"<name>" pairs.
+ *   - <id>: a bare unsigned token, hex or decimal, 0..255 (u8); no two pairs
+ *     in the same command may carry the same id.
+ *   - each name 1..MT_CHIME_MAX_NAME_LEN bytes, printable ASCII (0x20..0x7E)
+ *     only.
+ *   - no double-quote character inside a name: a name is scanned up to its
+ *     next raw '"', so a quote inside the intended content always closes the
+ *     token early, leaving trailing bytes the "junk after the closing quote"
+ *     check below rejects.
+ *
+ * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
+ * +MTERR:3 the endpoint has no Chime cluster. A bare ERROR covers an
+ * unclassified runtime failure, routed through attr_err_to_mterr() like
+ * every other bridge call in this file.
+ */
+static int cmd_mtchimesounds(at_type_t type, char *args)
+{
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (!args || *args == '\0') {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    char *comma = strchr(args, ',');
+    if (!comma) {
+        return MT_ERR_BAD_PARAM;
+    }
+    *comma = '\0';
+    char *p = comma + 1;
+
+    unsigned long ep;
+    if (!parse_u(args, &ep) || ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    uint8_t ids[MT_CHIME_MAX_SOUNDS];
+    const char *names[MT_CHIME_MAX_SOUNDS];
+    char name_buf[MT_CHIME_MAX_SOUNDS][MT_CHIME_MAX_NAME_LEN + 1];
+    uint8_t count = 0;
+
+    while (*p != '\0') {
+        /* <id>: a bare token up to the comma before the opening quote. */
+        char *id_comma = strchr(p, ',');
+        if (!id_comma) {
+            return MT_ERR_BAD_PARAM;  /* id with no name to follow it */
+        }
+        *id_comma = '\0';
+        unsigned long id;
+        if (!parse_u(p, &id) || id > 0xFF) {
+            return MT_ERR_BAD_PARAM;
+        }
+        p = id_comma + 1;
+
+        if (*p != '"') {
+            return MT_ERR_BAD_PARAM;
+        }
+        p++;
+        char *start = p;
+        while (*p != '"') {
+            if (*p == '\0') {
+                return MT_ERR_BAD_PARAM;  /* unterminated quote */
+            }
+            p++;
+        }
+        size_t len = (size_t)(p - start);
+        p++;  /* past the closing quote */
+
+        if (len < 1 || len > MT_CHIME_MAX_NAME_LEN) {
+            return MT_ERR_BAD_PARAM;
+        }
+        if (count >= MT_CHIME_MAX_SOUNDS) {
+            return MT_ERR_BAD_PARAM;
+        }
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)start[i];
+            if (c < 0x20 || c > 0x7E) {
+                return MT_ERR_BAD_PARAM;
+            }
+        }
+        for (uint8_t i = 0; i < count; i++) {
+            if (ids[i] == (uint8_t)id) {
+                return MT_ERR_BAD_PARAM;  /* duplicate id in this list */
+            }
+        }
+        memcpy(name_buf[count], start, len);
+        name_buf[count][len] = '\0';
+        names[count] = name_buf[count];
+        ids[count] = (uint8_t)id;
+        count++;
+
+        if (*p == ',') {
+            p++;
+            if (*p == '\0') {
+                return MT_ERR_BAD_PARAM;  /* trailing comma, no next pair */
+            }
+            continue;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        return MT_ERR_BAD_PARAM;  /* junk after the closing quote */
+    }
+
+    if (count < 1) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    int r = mt_matter_chime_sounds_set((uint16_t)ep, ids, names, count);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
+/*
+ * AT+MTCHIME=<ep>,<what>,<value> -> set one of the Chime cluster's two plain
+ * attributes on <ep> through the SDK's own ChimeCluster::SetSelectedChime()/
+ * SetEnabled() (design spec F3), not a raw AT+MTATTR write: this cluster is
+ * registered directly with esp_matter's data model provider, not through
+ * esp_matter's generic attribute store (mt_matter.h). Set-only, the
+ * AT+MTOPSTATE/AT+MTALARM convention: bare/query forms answer a plain ERROR.
+ *
+ * <what>: 0 SelectedChime, 1 Enabled. Anything else +MTERR:1.
+ * <value>: for <what>=0, a chimeID; must already be one of the ids
+ * AT+MTCHIMESOUNDS installed on this endpoint, or the bridge answers
+ * +MTERR:1 (design spec F3: SetSelectedChime() itself answers
+ * Status::NotFound for an unknown chimeID). For <what>=1, 0 or 1 (bool);
+ * anything else +MTERR:1.
+ *
+ * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
+ * +MTERR:3 the endpoint has no Chime cluster. A bare ERROR covers an
+ * unclassified runtime failure, routed through attr_err_to_mterr() like
+ * every other bridge call in this file.
+ */
+static int cmd_mtchime(at_type_t type, char *args)
+{
+    char *f[3];
+    int n = at_split_args(args, f, 3);
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (n != 3) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long ep, what, value;
+    if (!parse_u(f[0], &ep) || ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!parse_u(f[1], &what) || what > 1) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!parse_u(f[2], &value) || value > 0xFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    int r = mt_matter_chime_set((uint16_t)ep, (uint8_t)what, (uint8_t)value);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
 /* ---- event subscription (C3) ------------------------------------------ */
 
 static uint32_t s_evt_mask = MT_EVT_MASK_DEFAULT;
@@ -1382,6 +1559,8 @@ static const at_command_t s_cmds[] = {
     { "MTMODES",      cmd_mtmodes     },
     { "MTOPSTATE",    cmd_mtopstate   },
     { "MTALARM",      cmd_mtalarm     },
+    { "MTCHIMESOUNDS", cmd_mtchimesounds },
+    { "MTCHIME",      cmd_mtchime     },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif
