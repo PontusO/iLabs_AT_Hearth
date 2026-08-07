@@ -251,6 +251,54 @@ void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep);
  */
 int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level);
 
+/* ---- mode select (seven-type batch, task C3) ----------------------------- */
+
+/*
+ * mk_mode_select() (mt_devtypes.cpp) points every mode_select endpoint's
+ * config.mode_select.delegate at this ONE global manager (design spec F2:
+ * SupportedModesManager dispatches on endpoint id internally, so a single
+ * instance covers every mode_select endpoint in the composition; there is no
+ * per-endpoint object for the SDK to ask for). Returns an opaque void*, the
+ * same shape mt_matter_valve_delegate_alloc() uses above, so mt_devtypes.cpp
+ * never has to name HearthSupportedModesManager or any CHIP delegate type.
+ */
+void *mt_matter_mode_select_manager(void);
+
+/*
+ * Bounds for AT+MTMODES. Shared between the handler (mt_at.c, which enforces
+ * them before calling the bridge below) and the per-endpoint store the
+ * bridge writes into (main.cpp), so the two cannot drift apart.
+ */
+#define MT_MODES_MAX_COUNT     8   /* mode/label pairs per endpoint, 1..this many */
+#define MT_MODES_MAX_LABEL_LEN 32  /* bytes per label, excluding the NUL          */
+
+/*
+ * AT+MTMODES: replace ep's ModeSelect SupportedModes list (host-fed, never
+ * persisted; the host re-sends it every boot, the same contract
+ * AT+MTTEMPLEVELS follows). modes[0..count-1]/labels[0..count-1] are
+ * parallel arrays; the handler has already checked count, mode-value
+ * uniqueness within the list, and every label against
+ * MT_MODES_MAX_COUNT/MT_MODES_MAX_LABEL_LEN, printable ASCII, and no double
+ * quote, so this bridge trusts them and only re-checks bounds defensively.
+ *
+ * Marks SupportedModes dirty (MatterReportingAttributeChangeCallback, the
+ * same call AT+MTTEMPLEVELS uses) so an active subscription sees the new
+ * list. CurrentMode is a plain, esp_matter-managed attribute (created by
+ * mode_select::create() from config.current_mode, esp_matter_cluster.cpp):
+ * it is readable and writable over AT+MTATTR like any other integer
+ * attribute, and it is NOT reported here. A controller's ChangeToMode
+ * command sets CurrentMode itself after validating membership against this
+ * same manager (design spec F2, mode-select-server.cpp's ChangeToMode()); the
+ * host observes that the ordinary way, a +MTATTR URC from the attribute
+ * callback in main.cpp, not through this bridge.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when ep has no ModeSelect cluster, MT_ATTR_ERR_FAILED
+ * for an internal failure (store exhaustion; cannot happen in practice, one
+ * slot per MT_COMP_MAX_ENDPOINTS, same reasoning as the temp-levels store).
+ */
+int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels, uint8_t count);
+
 /* ---- air quality (C1b, bug B139) ------------------------------------ */
 
 /*

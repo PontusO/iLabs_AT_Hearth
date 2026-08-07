@@ -563,6 +563,134 @@ static int cmd_mtvalve(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/*
+ * AT+MTMODES=<ep>,<mode>,"<label>"[,<mode>,"<label>",...] -> replace ep's
+ * ModeSelect SupportedModes list, 1..MT_MODES_MAX_COUNT mode/label pairs.
+ * Set-only, the AT+MTTEMPLEVELS convention: bare/query forms answer a plain
+ * ERROR. Not persisted: the host is expected to re-send it every boot, same
+ * contract as AT+MTTEMPLEVELS.
+ *
+ * Parsed here directly off the raw argument string, the same reason
+ * AT+MTTEMPLEVELS is: a comma inside a quoted label is legal content, and
+ * at_split_args() would split on it. Grammar and content rules (violating
+ * any of these is +MTERR:1, decided here before mt_matter_modes_set() is
+ * ever called):
+ *   - <ep>: a bare unsigned token, hex or decimal, up to the first comma.
+ *   - 1..MT_MODES_MAX_COUNT <mode>,"<label>" pairs.
+ *   - <mode>: a bare unsigned token, hex or decimal, 0..255 (u8); no two
+ *     pairs in the same command may carry the same mode value.
+ *   - each label 1..MT_MODES_MAX_LABEL_LEN bytes, printable ASCII
+ *     (0x20..0x7E) only.
+ *   - no double-quote character inside a label: a label is scanned up to
+ *     its next raw '"', so a quote inside the intended content always closes
+ *     the token early, leaving trailing bytes the "junk after the closing
+ *     quote" check below rejects.
+ *
+ * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
+ * +MTERR:3 the endpoint has no ModeSelect cluster. A bare ERROR covers an
+ * unclassified runtime failure, routed through attr_err_to_mterr() like
+ * every other bridge call in this file.
+ */
+static int cmd_mtmodes(at_type_t type, char *args)
+{
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (!args || *args == '\0') {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    char *comma = strchr(args, ',');
+    if (!comma) {
+        return MT_ERR_BAD_PARAM;
+    }
+    *comma = '\0';
+    char *p = comma + 1;
+
+    unsigned long ep;
+    if (!parse_u(args, &ep) || ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    uint8_t modes[MT_MODES_MAX_COUNT];
+    const char *labels[MT_MODES_MAX_COUNT];
+    char label_buf[MT_MODES_MAX_COUNT][MT_MODES_MAX_LABEL_LEN + 1];
+    uint8_t count = 0;
+
+    while (*p != '\0') {
+        /* <mode>: a bare token up to the comma before the opening quote. */
+        char *mode_comma = strchr(p, ',');
+        if (!mode_comma) {
+            return MT_ERR_BAD_PARAM;  /* mode with no label to follow it */
+        }
+        *mode_comma = '\0';
+        unsigned long mode;
+        if (!parse_u(p, &mode) || mode > 0xFF) {
+            return MT_ERR_BAD_PARAM;
+        }
+        p = mode_comma + 1;
+
+        if (*p != '"') {
+            return MT_ERR_BAD_PARAM;
+        }
+        p++;
+        char *start = p;
+        while (*p != '"') {
+            if (*p == '\0') {
+                return MT_ERR_BAD_PARAM;  /* unterminated quote */
+            }
+            p++;
+        }
+        size_t len = (size_t)(p - start);
+        p++;  /* past the closing quote */
+
+        if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
+            return MT_ERR_BAD_PARAM;
+        }
+        if (count >= MT_MODES_MAX_COUNT) {
+            return MT_ERR_BAD_PARAM;
+        }
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)start[i];
+            if (c < 0x20 || c > 0x7E) {
+                return MT_ERR_BAD_PARAM;
+            }
+        }
+        for (uint8_t i = 0; i < count; i++) {
+            if (modes[i] == (uint8_t)mode) {
+                return MT_ERR_BAD_PARAM;  /* duplicate mode value in this list */
+            }
+        }
+        memcpy(label_buf[count], start, len);
+        label_buf[count][len] = '\0';
+        labels[count] = label_buf[count];
+        modes[count] = (uint8_t)mode;
+        count++;
+
+        if (*p == ',') {
+            p++;
+            if (*p == '\0') {
+                return MT_ERR_BAD_PARAM;  /* trailing comma, no next pair */
+            }
+            continue;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        return MT_ERR_BAD_PARAM;  /* junk after the closing quote */
+    }
+
+    if (count < 1) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    int r = mt_matter_modes_set((uint16_t)ep, modes, labels, count);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
 /* ---- event subscription (C3) ------------------------------------------ */
 
 static uint32_t s_evt_mask = MT_EVT_MASK_DEFAULT;
@@ -1141,6 +1269,7 @@ static const at_command_t s_cmds[] = {
     { "MTCMDRESP",    cmd_mtcmdresp   },
     { "MTLOCK",       cmd_mtlock      },
     { "MTVALVE",      cmd_mtvalve     },
+    { "MTMODES",      cmd_mtmodes     },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif
