@@ -32,6 +32,47 @@ static void test_open_monotonic(void)
     check("seqs increase monotonically across opens", s2 == s1 + 1 && s3 == s2 + 1);
 }
 
+/*
+ * C1 (notify-only form): +MTCMD:0,... is the reserved notify wire form, so
+ * seq 0 must never be a real, answerable command. mt_cmdbox_open() never
+ * hands one out (test_open_monotonic above pins the first seq is 1; this
+ * pins it holds over a run of opens, not just the first) and
+ * mt_cmdbox_answer(0, ...) must be rejected in every slot state, including
+ * IDLE where there is no seq to compare against at all.
+ */
+static void test_open_never_returns_zero(void)
+{
+    mt_cmdbox_init();
+    bool saw_zero = false;
+    for (int i = 0; i < 8; i++) {
+        uint32_t seq = mt_cmdbox_open((uint16_t)i, 0x0006, 0x02);
+        if (seq == 0) {
+            saw_zero = true;
+        }
+    }
+    check("open() never returns seq 0 across repeated opens", !saw_zero);
+}
+
+static void test_answer_seq_zero_rejected_idle(void)
+{
+    mt_cmdbox_init();
+    check("answer(0, allow) in IDLE (nothing ever opened) is rejected",
+          mt_cmdbox_answer(0, 1) == -1);
+    check("answer(0, deny) in IDLE (nothing ever opened) is rejected",
+          mt_cmdbox_answer(0, 0) == -1);
+}
+
+static void test_answer_seq_zero_rejected_pending(void)
+{
+    mt_cmdbox_init();
+    uint32_t seq = mt_cmdbox_open(1, 0x0006, 0x02);
+    check("a real command is pending under a nonzero seq", seq != 0);
+    check("answer(0, allow) while another seq is PENDING is rejected",
+          mt_cmdbox_answer(0, 1) == -1);
+    check("the PENDING slot is untouched: it still answers to its own seq",
+          mt_cmdbox_answer(seq, 1) == 0);
+}
+
 static void test_answer_then_take_once(void)
 {
     mt_cmdbox_init();
@@ -126,6 +167,9 @@ int main(void)
 {
     printf("\n===== mt_cmdbox tests =====\n");
     test_open_monotonic();
+    test_open_never_returns_zero();
+    test_answer_seq_zero_rejected_idle();
+    test_answer_seq_zero_rejected_pending();
     test_answer_then_take_once();
     test_answer_wrong_seq_rejected();
     test_answer_in_idle_rejected();

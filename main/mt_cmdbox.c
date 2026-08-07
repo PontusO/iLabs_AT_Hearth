@@ -58,6 +58,20 @@ int mt_cmdbox_answer(uint32_t seq, int verdict)
     if (verdict != 0 && verdict != 1) {
         return -1;
     }
+    /*
+     * seq 0 is rejected structurally, not just because mt_cmdbox_open()
+     * never hands one out. It is reserved for the +MTCMD notify-only wire
+     * form (C1), which raises no mailbox slot at all, so an
+     * AT+MTCMDRESP=0,... must answer +MTERR:1 even in a state this function
+     * cannot otherwise reach today: the seq mismatch below already denies
+     * it via the invariant that s_slot.seq is never 0, but that invariant
+     * living only in mt_cmdbox_open() is exactly the kind of fact a future
+     * change could quietly break. This line makes the rejection true on its
+     * own, independent of that invariant holding elsewhere.
+     */
+    if (seq == 0) {
+        return -1;
+    }
     if (s_slot.state != MT_CMDBOX_PENDING || s_slot.seq != seq) {
         return -1;
     }

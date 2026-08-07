@@ -132,6 +132,28 @@ bool mt_at_event(int bit, const char *detail);
  */
 bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command);
 
+/*
+ * Identical to mt_cmd_forward(), plus one reserved fifth payload field on
+ * the wire: raises "+MTCMD:<seq>,<ep>,<cluster>,<command>,<payload>" and
+ * blocks the same way for the same verdict. The forwarding spec reserved
+ * this exact extension so existing parsers, which read four fields and
+ * ignore anything past the fourth comma, keep working unchanged. First
+ * consumer: chime's PlayChimeSound chimeID (C6/C7).
+ */
+bool mt_cmd_forward_payload(uint16_t ep, uint32_t cluster, uint32_t command, uint32_t payload);
+
+/*
+ * Raise a notify-only "+MTCMD:0,<ep>,<cluster>,<command>" URC and return
+ * immediately: no mailbox slot, no semaphore, no blocking. seq 0 is
+ * reserved for this form (mt_cmdbox_open() never issues it, and
+ * mt_cmdbox_answer(0, ...) is rejected structurally), so
+ * AT+MTCMDRESP=0,... always answers +MTERR:1: there is nothing pending to
+ * answer. Safe to call from the CHIP task for a command whose ember
+ * callback is void, with no result to report back up the stack. First
+ * consumer: SelfTestRequest.
+ */
+void mt_cmd_notify(uint16_t ep, uint32_t cluster, uint32_t command);
+
 #ifdef __cplusplus
 }
 #endif
