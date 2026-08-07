@@ -891,6 +891,17 @@ None of the three is a bug; each is what its own cluster's SDK code does, and
 `AT_MT_SPEC.md` documents each explicitly rather than implying they are
 interchangeable.
 
+That raw passthrough only applies once the delegate is actually called,
+which `ChimeCluster::HandlePlayChimeSound()` (`ChimeCluster.cpp:273-282`)
+does not always do: it answers the controller directly, with no delegate
+call and therefore no `+MTCMD` at all, when `Enabled` is `false`
+(`Status::Success`) or the command names a `chimeID` that is not one
+`AT+MTCHIMESOUNDS` installed (`Status::NotFound`). A host that disables a
+chime (`AT+MTCHIME=<ep>,1,0`) will see its `PlayChimeSound` `+MTCMD` URCs
+simply stop arriving for that endpoint, not arrive and get denied; this is
+the SDK's own short-circuit ahead of the delegate, not a firmware choice,
+and `AT_MT_SPEC.md` §3.24 documents it at the command that controls it.
+
 **The Chime SDK gap (F6), and why the workaround has to call one more
 function than the design record originally named.** `cluster::chime::create()`
 wires the delegate stash (`ChimeDelegateInitCB` ->

@@ -970,6 +970,15 @@ static int cmd_mtchime(at_type_t type, char *args)
     if (!parse_u(f[2], &value) || value > 0xFF) {
         return MT_ERR_BAD_PARAM;
     }
+    /* <what>=1 (Enabled) is a bool: reject here, the same "wire-protocol-
+     * shape rejection belongs in the handler" reasoning AT+MTOPSTATE's kError
+     * check and AT+MTALARM's two boolean fields follow. Without this,
+     * SetEnabled(value != 0) (mt_matter.h) would silently coerce any value
+     * 2..255 to true instead of answering +MTERR:1, since the SDK's setter
+     * itself has no bool-range concept to reject on the bridge's behalf. */
+    if (what == 1 && value > 1) {
+        return MT_ERR_BAD_PARAM;
+    }
 
     int r = mt_matter_chime_set((uint16_t)ep, (uint8_t)what, (uint8_t)value);
     if (r != MT_ATTR_OK) {

@@ -414,7 +414,10 @@ either attribute. `PlayChimeSound` forwards to the host over `+MTCMD` with
 the reserved fifth payload field carrying the requested `chimeID` (§3.17);
 unlike the water valve (§3.19) or the OperationalState trio (§3.21), the
 host's verdict reaches the controller exactly as given, `Status::Success` on
-allow or `Status::Failure` on deny, with no SDK-side remapping.
+allow or `Status::Failure` on deny, with no SDK-side remapping, whenever the
+command actually reaches the host at all: the cluster answers `Enabled`
+`false` or an unknown `chimeID` itself, before ever forwarding, see
+`AT+MTCHIME` (§3.24).
 
 Example:
 ```
@@ -1410,6 +1413,15 @@ CHIP's attribute persistence provider (unlike `AT+MTCHIMESOUNDS`'s list,
 which is not persisted): a chosen chime and the enabled flag both survive
 `AT+MTRESET` the same way any other `SafeAttributePersistenceProvider`-backed
 attribute does.
+
+**`Enabled` gates `PlayChimeSound` before the command ever reaches
+`+MTCMD` (§3.17).** The cluster answers the controller itself, with no
+delegate call and therefore no `+MTCMD` URC, in two cases: `Enabled` is
+`false` (answers `Status::Success`), or the command names a `chimeID` that
+is not one `AT+MTCHIMESOUNDS` (§3.23) installed (answers `Status::NotFound`).
+A host that has set `AT+MTCHIME=<ep>,1,0` will see `PlayChimeSound` invokes
+against that endpoint simply stop arriving as `+MTCMD` URCs, not arrive and
+fail; this is the SDK's own short-circuit, not a firmware choice.
 
 Example, a chime endpoint on endpoint 10 with sounds `1`/`2` installed
 (§3.23):
