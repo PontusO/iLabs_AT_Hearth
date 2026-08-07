@@ -691,6 +691,55 @@ static int cmd_mtmodes(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/*
+ * AT+MTOPSTATE=<ep>,<state> -> report the host's own OperationalState
+ * transition on <ep> (design spec F7: the washer/dishwasher/dryer trio),
+ * typically once the host has actually finished executing an allowed
+ * Pause/Resume/Start/Stop +MTCMD verdict (cluster 0x0060, commands 0..3;
+ * unlike the water valve's F1, that verdict already fails the command on the
+ * wire when denied, so this command is purely the "it actually happened"
+ * report, the same split AT+MTLOCK/AT+MTVALVE use). Set-only, the
+ * AT+MTLOCK/AT+MTVALVE convention: bare/query forms answer a plain ERROR.
+ *
+ * <state>: 0 Stopped, 1 Running, 2 Paused (OperationalStateEnum wire
+ * values, spec F7). 3 (Error) is rejected HERE, in the handler, with
+ * +MTERR:1: kError is reserved for the error-detection path, never a state
+ * this command may set directly, so the bridge (mt_matter_opstate_set())
+ * never has to reason about it. This is the same "wire protocol value fixed
+ * by the Matter spec, checked directly" reasoning AT+MTLOCK/AT+MTVALVE's
+ * <state> follow.
+ *
+ * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
+ * +MTERR:3 the endpoint has no OperationalState cluster. A bare ERROR covers
+ * an unclassified runtime failure, routed through attr_err_to_mterr() like
+ * every other bridge call in this file.
+ */
+static int cmd_mtopstate(at_type_t type, char *args)
+{
+    char *f[2];
+    int n = at_split_args(args, f, 2);
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (n != 2) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long ep, state;
+    if (!parse_u(f[0], &ep) || ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!parse_u(f[1], &state) || state > 2) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    int r = mt_matter_opstate_set((uint16_t)ep, (uint8_t)state);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
 /* ---- event subscription (C3) ------------------------------------------ */
 
 static uint32_t s_evt_mask = MT_EVT_MASK_DEFAULT;
@@ -1270,6 +1319,7 @@ static const at_command_t s_cmds[] = {
     { "MTLOCK",       cmd_mtlock      },
     { "MTVALVE",      cmd_mtvalve     },
     { "MTMODES",      cmd_mtmodes     },
+    { "MTOPSTATE",    cmd_mtopstate   },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif
