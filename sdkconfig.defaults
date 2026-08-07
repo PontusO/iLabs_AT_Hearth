@@ -178,12 +178,24 @@ CONFIG_SUPPORT_THERMOSTAT_USER_INTERFACE_CONFIGURATION_CLUSTER=n
 CONFIG_SUPPORT_THREAD_BORDER_ROUTER_MANAGEMENT_CLUSTER=n
 CONFIG_SUPPORT_THREAD_NETWORK_DIRECTORY_CLUSTER=n
 CONFIG_SUPPORT_TIME_FORMAT_LOCALIZATION_CLUSTER=n
-CONFIG_SUPPORT_TIME_SYNCHRONIZATION_CLUSTER=n
+# TIME_SYNCHRONIZATION_CLUSTER: not re-enabled for its own sake. Water valve
+# (mt_devtypes.cpp's mk_water_valve(), seven-type batch task C2) pulled it in
+# as a link-time dependency of a cluster we DO create:
+# valve-configuration-and-control-cluster.cpp's SetValveLevel() references
+# chip::app::Clusters::TimeSynchronization::TimeSynchronizationServer::
+# Instance() inside a #ifdef ZCL_USING_TIME_SYNCHRONIZATION_CLUSTER_SERVER
+# block, and that macro is defined unconditionally by esp_matter's own
+# bundled zap_common/zap-generated/gen_config.h (not gated on this repo's
+# Kconfig at all), so enabling VALVE_CONFIGURATION_AND_CONTROL alone leaves
+# the reference with nothing to link against: "undefined reference to
+# TimeSynchronizationServer::Instance()". The TimeSync feature bit is never
+# set on the valve endpoint (no config_t field exists to opt in, see
+# AT_MT_SPEC.md 3.19), so the branch that calls it never actually runs; this
+# lift exists purely to satisfy the linker.
 CONFIG_SUPPORT_TIMER_CLUSTER=n
 CONFIG_SUPPORT_TVOC_CONCENTRATION_MEASUREMENT_CLUSTER=n
 CONFIG_SUPPORT_UNIT_TESTING_CLUSTER=n
 CONFIG_SUPPORT_USER_LABEL_CLUSTER=n
-CONFIG_SUPPORT_VALVE_CONFIGURATION_AND_CONTROL_CLUSTER=n
 CONFIG_SUPPORT_WAKE_ON_LAN_CLUSTER=n
 CONFIG_SUPPORT_LAUNDRY_WASHER_CONTROLS_CLUSTER=n
 CONFIG_SUPPORT_LAUNDRY_DRYER_CONTROLS_CLUSTER=n

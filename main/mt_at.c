@@ -509,6 +509,60 @@ static int cmd_mtlock(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/*
+ * AT+MTVALVE=<ep>,<state>[,<level>] -> report the host's own valve
+ * actuation on <ep> (design spec F1: the ValveConfigurationAndControl
+ * server answers the controller Success regardless of the +MTCMD verdict
+ * this firmware forwarded for Open/Close, so this is the only place the
+ * real outcome reaches the fabric). Set-only, the AT+MTLOCK convention:
+ * bare/query forms answer a plain ERROR.
+ *
+ * <state>: 0 Closed, 1 Open, 2 Transitioning (ValveStateEnum wire values,
+ * spec 3.9/3.19). A wire protocol value fixed by the Matter spec, checked
+ * here directly for the same reason AT+MTLOCK's <state> is.
+ *
+ * <level>: optional, 0..100. Absent is passed to the bridge as -1.
+ *
+ * Lookup errors follow the established division: +MTERR:2 unknown
+ * endpoint, +MTERR:3 the endpoint has no ValveConfigurationAndControl
+ * cluster. A bare ERROR covers an unclassified runtime failure, routed
+ * through attr_err_to_mterr() like every other bridge call in this file.
+ */
+static int cmd_mtvalve(at_type_t type, char *args)
+{
+    char *f[3];
+    int n = at_split_args(args, f, 3);
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (n < 2) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long ep, state;
+    if (!parse_u(f[0], &ep) || ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!parse_u(f[1], &state) || state > 2) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    long level = -1;
+    if (n == 3) {
+        unsigned long lv;
+        if (!parse_u(f[2], &lv) || lv > 100) {
+            return MT_ERR_BAD_PARAM;
+        }
+        level = (long)lv;
+    }
+
+    int r = mt_matter_valve_state_set((uint16_t)ep, (uint8_t)state, (int)level);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
 /* ---- event subscription (C3) ------------------------------------------ */
 
 static uint32_t s_evt_mask = MT_EVT_MASK_DEFAULT;
@@ -1086,6 +1140,7 @@ static const at_command_t s_cmds[] = {
     { "MTFLOW",       cmd_mtflow      },
     { "MTCMDRESP",    cmd_mtcmdresp   },
     { "MTLOCK",       cmd_mtlock      },
+    { "MTVALVE",      cmd_mtvalve     },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif

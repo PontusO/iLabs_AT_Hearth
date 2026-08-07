@@ -126,9 +126,15 @@ bool mt_at_event(int bit, const char *detail);
  * returns the verdict: true only for an explicit allow (verdict 1) that
  * arrives inside the window. Every other outcome, a timeout, the AT link
  * not being up yet, or an unregistered host callback, returns false. A lock
- * fails closed. Task C2 calls this from the ember cluster callbacks, which
- * run on the CHIP event loop task; see mt_at.c's cmd_mtcmdresp handler for
- * why the reply path must never take the CHIP stack lock.
+ * fails closed. Callers run on the CHIP event loop task, either directly
+ * from an ember cluster callback (the door lock's LockDoor/UnlockDoor) or
+ * from a Delegate method the SDK calls synchronously from that same task
+ * (the water valve's HandleOpenValve/HandleCloseValve, seven-type batch
+ * task C2, cluster 0x0081 commands 0/1: unlike the door lock, its verdict
+ * cannot fail the command on the wire, since the SDK discards what the
+ * delegate returns and answers Success regardless, see AT_MT_SPEC.md 3.19);
+ * see mt_at.c's cmd_mtcmdresp handler for why the reply path must never
+ * take the CHIP stack lock.
  */
 bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command);
 

@@ -364,6 +364,24 @@ command once Task C2 wires a caller in, not by an automated regression here.
 | `AT+MTLOCK=<non-door-lock ep>,1` | `+MTERR:3` (endpoint has no `DoorLock` cluster) |
 | `AT+MTLOCK=<door-lock ep>,1` | `OK` (state accepted; follow with `AT+MTATTR` read of `LockState` to confirm) |
 
+**`AT+MTVALVE` argument validation:**
+
+| Command | Expected |
+|---|---|
+| `AT+MTVALVE?` | bare `ERROR` (query form not accepted, `AT+MTLOCK` pattern) |
+| `AT+MTVALVE` | bare `ERROR` (exec form without arguments) |
+| `AT+MTVALVE=1` | `+MTERR:1` (fewer than 2 parameters) |
+| `AT+MTVALVE=1,1,1,1` | `+MTERR:1` (more than 3 parameters) |
+| `AT+MTVALVE=zz,1` | `+MTERR:1` (endpoint not numeric) |
+| `AT+MTVALVE=1,zz` | `+MTERR:1` (state not numeric) |
+| `AT+MTVALVE=1,3` | `+MTERR:1` (state outside `0..2`) |
+| `AT+MTVALVE=1,1,zz` | `+MTERR:1` (level not numeric) |
+| `AT+MTVALVE=1,1,101` | `+MTERR:1` (level above `100`) |
+| `AT+MTVALVE=99,1` | `+MTERR:2` (unknown endpoint) |
+| `AT+MTVALVE=<non-valve ep>,1` | `+MTERR:3` (endpoint has no `ValveConfigurationAndControl` cluster) |
+| `AT+MTVALVE=<valve ep>,1` | `OK` (state accepted; follow with `AT+MTATTR` read of `CurrentState` to confirm) |
+| `AT+MTVALVE=<valve ep>,1,50` | `OK` (state and level both accepted; per `AT_MT_SPEC.md` §3.19 the level does not publish as an attribute on this SDK revision, so there is nothing to read back for it) |
+
 **Chatty-host bench case: a bridge command already in flight when a forward
 opens.** Exercises `AT_MT_SPEC.md` §3.17's own by-construction limitation and
 the `iLabs_Hearth` library README's "Hearth originals" section from the other

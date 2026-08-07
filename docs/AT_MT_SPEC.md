@@ -70,6 +70,7 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTBAUD=<baud>` | set | `OK` at the old rate, then the link switches |
 | `AT+MTFLOW?` | query | `+MTFLOW:<mode>` → `OK` |
 | `AT+MTFLOW=<mode>` | set | `OK` at the old setting, then the link switches |
+| `AT+MTVALVE=<ep>,<state>[,<level>]` | set | `OK` (valve state/level reported) |
 
 ## 3. Command reference
 
@@ -309,6 +310,7 @@ device types are added.
 | `0x0072` | Room Air Conditioner |
 | `0x0078` | Cooktop |
 | `0x0303` | Pump |
+| `0x0042` | Water Valve |
 
 `0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
 bolts the HueSaturation feature onto the standard ColorControl configuration,
@@ -815,7 +817,10 @@ AT+MTCMDRESP=<seq>,<verdict>  ->  OK
   `<ep>` the endpoint; `<cluster>` and `<command>` the Matter cluster and
   command IDs, decimal, the same convention `AT+MTATTR` (§3.8) uses for its
   own `<cluster>`/`<attr>` fields. The door lock registers cluster `257`
-  (`0x0101`) commands `0` (`LockDoor`) and `1` (`UnlockDoor`).
+  (`0x0101`) commands `0` (`LockDoor`) and `1` (`UnlockDoor`); the water
+  valve (§3.19) registers cluster `129` (`0x0081`) commands `0` (`Open`) and
+  `1` (`Close`) the same way, though per §3.19 its verdict never changes the
+  wire response, only whether the host actually actuates.
 - `+MTCMD:<seq>,<ep>,<cluster>,<command>,<payload>`: the same adjudicated
   form, plus one reserved fifth field for a command that carries a single
   value the host needs to see. `<payload>` is decimal, the same convention as
@@ -952,6 +957,79 @@ AT+MTLOCK=5,3        -> +MTERR:1   (3 is not a valid DlLockState for this comman
 AT+MTLOCK=5,1,99     -> +MTERR:1   (99 exceeds the highest valid OperationSourceEnum value)
 AT+MTLOCK=9,1        -> +MTERR:2   (no endpoint 9)
 AT+MTLOCK=1,1        -> +MTERR:3   (ep 1 has no DoorLock cluster)
+```
+
+### 3.19 `AT+MTVALVE`: water valve state reporting
+
+Reports the `ValveConfigurationAndControl` cluster's `CurrentState` (and,
+optionally, `CurrentLevel`) on `<ep>`, typically once the host has actually
+moved the physical valve following an allowed `+MTCMD` verdict for `Open` or
+`Close` (cluster `0x0081`, commands `0`/`1`; §3.17). This is the other half
+of the valve's split ownership, the same shape as the door lock (§3.18): the
+firmware forwards the command for adjudication but never decides that the
+valve has moved, or reports it moving, on its own.
+
+**The verdict cannot fail the command on the wire.** Unlike the door lock,
+where a deny surfaces as `Status::Failure` to the controller,
+`ValveConfigurationAndControl`'s own server calls the delegate's
+`HandleOpenValve`/`HandleCloseValve` synchronously and discards what they
+return: the controller sees `Status::Success` whether the `+MTCMD` verdict
+was an allow or a deny. The verdict gates only whether the host actually
+opens or closes the valve; the wire response is fixed before the delegate is
+ever consulted, unconditionally. This is an SDK property
+(`TEMPORARY_RETURN_IGNORED` at both delegate call sites,
+`valve-configuration-and-control-cluster.cpp`), not a firmware choice, and
+there is no return path on this side of the bridge that could change it.
+
+```
+AT+MTVALVE=<ep>,<state>[,<level>]  ->  OK
+```
+
+- `<ep>`: the endpoint id.
+- `<state>`: `0` Closed, `1` Open, `2` Transitioning (`ValveStateEnum` wire
+  values). Anything else `+MTERR:1`.
+- `<level>`: optional, `0`..`100`. Outside that range `+MTERR:1`.
+
+Reported through the cluster's own `UpdateCurrentState()`/
+`UpdateCurrentLevel()` calls (not a raw attribute write), so the
+`ValveStateChanged` event a subscribed controller expects is actually
+emitted, the same reason `AT+MTLOCK` drives `SetLockState()` rather than
+writing `LockState` directly.
+
+**`<level>` publishes nowhere on this SDK revision.** esp-matter
+release/v1.5.1's `water_valve` endpoint fixes `ValveConfigurationAndControl`'s
+`FeatureMap` at `0` (`valve_configuration_and_control::create()` always calls
+`global::attribute::create_feature_map(cluster, 0)`, and its `config_t` has
+no field to opt the Level feature in), so `CurrentLevel`/`TargetLevel` are
+never created as attributes at all. `UpdateCurrentLevel()` is safe to call
+regardless (it checks the feature before touching `CurrentLevel` and returns
+success either way), so a `<level>` argument neither errors nor does
+anything a controller can observe. Documented rather than silently accepted:
+a host expecting `AT+MTATTR` to read back a level it just reported over
+`AT+MTVALVE` gets `+MTERR:4` (unknown attribute), not the value.
+
+**Set-only.** `AT+MTVALVE?` or a bare `AT+MTVALVE` is the wrong command form
+and answers a plain `ERROR` (§5), the `AT+MTLOCK`/`AT+MTSWITCH` convention.
+
+**Lookup errors follow the established division.** `+MTERR:2` unknown
+endpoint; `+MTERR:3` the endpoint has no `ValveConfigurationAndControl`
+cluster. A bare `ERROR` covers an unclassified runtime failure, the same as
+`AT+MTATTR` and `AT+MTLOCK`.
+
+**The firmware never calls this on its own.** Same split as `AT+MTLOCK`
+(§3.18): actuation timing belongs entirely to the host, which is expected to
+call `AT+MTVALVE` itself once its own valve mechanism confirms the new
+state.
+
+Example, a water valve on endpoint 6:
+```
+AT+MTVALVE=6,1        -> OK         (Open, no level reported)
+AT+MTVALVE=6,1,75     -> OK         (Open, level 75; not readable back, see above)
+AT+MTVALVE=6,0        -> OK         (Closed)
+AT+MTVALVE=6,3        -> +MTERR:1   (3 is not a valid ValveStateEnum for this command)
+AT+MTVALVE=6,1,101    -> +MTERR:1   (101 is out of range for <level>)
+AT+MTVALVE=9,1        -> +MTERR:2   (no endpoint 9)
+AT+MTVALVE=1,1        -> +MTERR:3   (ep 1 has no ValveConfigurationAndControl cluster)
 ```
 
 ## 4. Unsolicited result codes (URCs)
