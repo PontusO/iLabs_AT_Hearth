@@ -1385,16 +1385,30 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
  * (s_mode_slots below), never heap or stack, so neither is freed while the
  * program runs. The struct array is rebuilt IN PLACE on every AT+MTMODES
  * write to the same slot (mt_matter_modes_set() below), never reallocated or
- * moved, so a ModeOptionsProvider handed out by getModeOptionsProvider()
- * stays valid for as long as anything could hold it: the SDK re-reads
- * through the manager on every access rather than caching a provider across
- * calls (ModeSelectAttrAccess::Read(), mode-select-server.cpp, calls
+ * moved, so no CharSpan is ever left pointing at freed memory. The
+ * two-phase rebuild (copy every entry's bytes first, THEN overwrite the
+ * struct array) is still not enough on its own to rule out a reader
+ * observing a struct mid-rewrite, pointing at a label only half copied: what
+ * actually rules that out is mutual exclusion. mt_matter_modes_set() holds
+ * ChipStackLock for the whole rebuild, and the CHIP task's own event loop
+ * holds the identical lock (StackLock, PlatformMgr().LockChipStack()) for
+ * its entire DispatchEvent() call (GenericPlatformManagerImpl_FreeRTOS.ipp:
+ * 181,238: the lock is taken once at the top of _RunEventLoop() and only
+ * dropped around the blocking dequeue, never around DispatchEvent() itself),
+ * which is where ModeSelectAttrAccess::Read() and ChangeToMode() run. So a
+ * fresh read can never interleave with a rebuild: it either sees the
+ * pre-write state complete or the post-write state complete, never
+ * something in between. The SDK also re-reads through the manager on every
+ * access rather than caching a provider across calls
+ * (ModeSelectAttrAccess::Read(), mode-select-server.cpp, calls
  * getModeOptionsProvider() fresh for each SupportedModes read; ChangeToMode()
- * calls getModeOptionByMode() fresh for each command). Spans therefore never
- * dangle. SemanticTags is mandatory-but-empty-legal (F2): every entry
- * publishes a default-constructed List (Span's default ctor is
- * mDataBuf=nullptr, mDataLen=0, Span.h:46), i.e. List<const
- * SemanticTagStruct::Type>(nullptr, 0).
+ * calls getModeOptionByMode() fresh for each command), which rules out a
+ * STALE provider outliving a later rebuild, but that is a secondary point:
+ * the lock is what rules out a read landing mid-rebuild in the first place.
+ * SemanticTags is mandatory-but-empty-legal (F2): every entry publishes a
+ * default-constructed List (Span's default ctor is mDataBuf=nullptr,
+ * mDataLen=0, Span.h:46), i.e. List<const SemanticTagStruct::Type>(nullptr,
+ * 0).
  */
 struct mt_mode_entry_t {
     uint8_t mode;
