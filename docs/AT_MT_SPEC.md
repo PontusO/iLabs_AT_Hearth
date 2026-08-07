@@ -74,6 +74,8 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTMODES=<ep>,<mode>,"<label>"[,...]` | set | `OK` (ModeSelect SupportedModes list stored) |
 | `AT+MTOPSTATE=<ep>,<state>` | set | `OK` (OperationalState transition reported) |
 | `AT+MTALARM=<ep>,<field>,<value>` | set | `OK` (SmokeCoAlarm state field reported) |
+| `AT+MTCHIMESOUNDS=<ep>,<id>,"<name>"[,...]` | set | `OK` (Chime InstalledChimeSounds list stored) |
+| `AT+MTCHIME=<ep>,<what>,<value>` | set | `OK` (SelectedChime/Enabled set) |
 
 ## 3. Command reference
 
@@ -320,6 +322,7 @@ device types are added.
 | `0x007C` | Laundry Dryer |
 | `0x0076` | Smoke/CO Alarm |
 | `0x0011` | Power Source |
+| `0x0146` | Chime |
 
 `0x010D` Extended Colour Light diverges from stock esp-matter: the firmware
 bolts the HueSaturation feature onto the standard ColorControl configuration,
@@ -393,6 +396,25 @@ alongside the base `Status`/`Order`/`Description`, all ordinary
 thunk (`0`-`200` in half-percent steps per the Matter spec, nullable,
 defaulting to null) since no endpoint-creation path in this SDK revision
 wires it on its own; it too is a plain `AT+MTATTR` attribute once added.
+
+`0x0146` Chime carries an SDK-gap workaround, not a firmware design choice:
+`ESPMatterChimeClusterServerInitCallback`, the one function that actually
+constructs and registers this cluster's server object with esp-matter's data
+model provider, has no call site anywhere in the pinned esp-matter/
+connectedhomeip tree (`cluster::chime::create()` wires only the delegate
+stash). The firmware calls it itself, in the same pre-start registration
+window the `AT+MTTEMPLEVELS` delegate and the Air Quality Sensor's server
+instances use (`main.cpp`); see the round's decision record in
+`ARCHITECTURE.md` for the full trail. `InstalledChimeSounds` and
+`SelectedChime`/`Enabled` are set with the dedicated `AT+MTCHIMESOUNDS`
+(§3.23) and `AT+MTCHIME` (§3.24) commands, not `AT+MTATTR`: this cluster is
+registered directly with the data model provider rather than through
+esp-matter's generic attribute store, so there is no `AT+MTATTR` path to
+either attribute. `PlayChimeSound` forwards to the host over `+MTCMD` with
+the reserved fifth payload field carrying the requested `chimeID` (§3.17);
+unlike the water valve (§3.19) or the OperationalState trio (§3.21), the
+host's verdict reaches the controller exactly as given, `Status::Success` on
+allow or `Status::Failure` on deny, with no SDK-side remapping.
 
 Example:
 ```
@@ -1297,6 +1319,108 @@ AT+MTALARM=9,0,0        -> +MTERR:1    (field 0/ExpressedState is derived, not s
 AT+MTALARM=9,12,0       -> +MTERR:1    (field outside 1..11)
 AT+MTALARM=99,1,1       -> +MTERR:2    (no endpoint 99)
 AT+MTALARM=1,1,1        -> +MTERR:3    (ep 1 has no SmokeCoAlarm cluster)
+```
+
+### 3.23 `AT+MTCHIMESOUNDS`: Chime installed-sound list
+
+Stores the `Chime` cluster's `InstalledChimeSounds` list on `<ep>`: up to 8
+`<id>,"<name>"` pairs, each pair a `uint8` chime ID and the display name a
+controller shows for it. The `AT+MTMODES` grammar (§3.20) with IDs in place
+of mode values: like `AT+MTMODES`/`AT+MTTEMPLEVELS`, this list is served by
+the cluster's own `ChimeDelegate` mechanism rather than esp-matter's generic
+attribute store, so it has no `AT+MTATTR` path - this is the only way a host
+can set it.
+
+```
+AT+MTCHIMESOUNDS=<ep>,<id>,"<name>"[,<id>,"<name>",...]  ->  OK
+```
+
+- `<ep>`: the endpoint id, a bare unsigned token (hex or decimal) ending at
+  the first comma.
+- `<id>,"<name>"`: `1..8` pairs. `<id>` is a bare unsigned token (hex or
+  decimal), `0..255`; no two pairs in the same command may repeat an id.
+  `<name>` is `1..32` bytes of double-quoted printable ASCII (`0x20`..`0x7E`)
+  and may not contain a `"` character. A comma **inside** a quoted name is
+  legal and is part of the name's text; a comma **between** pairs separates
+  them. Violating any of these (wrong count, a repeated id, an empty or
+  oversized name, a non-printable byte, a bare name with no quotes, an
+  unterminated quote, or anything trailing after a name's closing quote other
+  than a comma or end of line) answers `+MTERR:1`.
+
+**Set-only.** `AT+MTCHIMESOUNDS?` or a bare `AT+MTCHIMESOUNDS` is the wrong
+command form and answers a plain `ERROR` (§5), the `AT+MTMODES` convention.
+
+**Lookup errors follow the established division.** `+MTERR:2` unknown
+endpoint; `+MTERR:3` the endpoint has no `Chime` cluster. A bare `ERROR`
+covers an unclassified runtime failure, the same as `AT+MTATTR` and
+`AT+MTMODES`.
+
+**On success the stored list replaces whatever was there before**, and
+`InstalledChimeSounds` is reported dirty so an active subscription sees the
+new list on its next report. There is no append or partial-update form: each
+`AT+MTCHIMESOUNDS` call is a full replacement of the sound list.
+
+**Not persisted.** The store lives in RAM and starts empty every boot, the
+same policy `AT+MTMODES`/`AT+MTTEMPLEVELS` follow. `AT+MTCHIME=<ep>,0,<id>`
+(§3.24) against an id not currently in this list is rejected
+(`ChimeCluster::SetSelectedChime()` answers `Status::NotFound`, mapped to
+`+MTERR:1`).
+
+Example, a chime endpoint on endpoint 10:
+```
+AT+MTCHIMESOUNDS=10,1,"Doorbell"                    -> OK   (one sound)
+AT+MTCHIMESOUNDS=10,1,"Doorbell",2,"Alert, urgent"   -> OK   (replaces the list above; comma inside a name)
+AT+MTCHIMESOUNDS=10                                  -> +MTERR:1 (no pairs)
+AT+MTCHIMESOUNDS=10,1,Doorbell                       -> +MTERR:1 (missing quotes)
+AT+MTCHIMESOUNDS=10,1,"Doorbell",1,"Chime"           -> +MTERR:1 (id 1 repeated)
+AT+MTCHIMESOUNDS=99,1,"Doorbell"                     -> +MTERR:2 (no endpoint 99)
+AT+MTCHIMESOUNDS=1,1,"Doorbell"                      -> +MTERR:3 (ep 1 has no Chime cluster)
+```
+
+### 3.24 `AT+MTCHIME`: Chime SelectedChime / Enabled
+
+Sets one of the `Chime` cluster's two plain attributes on `<ep>` through the
+cluster's own `SetSelectedChime()`/`SetEnabled()` (design spec F3), not a raw
+attribute write: like `InstalledChimeSounds` (§3.23), this cluster is
+registered directly with esp-matter's data model provider rather than through
+its generic attribute store, so `AT+MTATTR` has no path to either attribute
+either.
+
+```
+AT+MTCHIME=<ep>,<what>,<value>  ->  OK
+```
+
+- `<ep>`: the endpoint id.
+- `<what>`: `0` `SelectedChime`, `1` `Enabled`. Anything else `+MTERR:1`.
+- `<value>`: for `<what>` `0`, a chime ID; it must already be one of the ids
+  `AT+MTCHIMESOUNDS` (§3.23) installed on this endpoint, or `+MTERR:1`
+  (`SetSelectedChime()` itself answers `Status::NotFound` for an unknown id).
+  For `<what>` `1`, `0` or `1` (bool); anything else `+MTERR:1`.
+
+**Set-only.** `AT+MTCHIME?` or a bare `AT+MTCHIME` is the wrong command form
+and answers a plain `ERROR` (§5), the `AT+MTOPSTATE`/`AT+MTALARM` convention.
+
+**Lookup errors follow the established division.** `+MTERR:2` unknown
+endpoint; `+MTERR:3` the endpoint has no `Chime` cluster. A bare `ERROR`
+covers an unclassified runtime failure, the same as `AT+MTATTR` and the rest
+of this family.
+
+**`SetSelectedChime()`/`SetEnabled()` persist their own value** through
+CHIP's attribute persistence provider (unlike `AT+MTCHIMESOUNDS`'s list,
+which is not persisted): a chosen chime and the enabled flag both survive
+`AT+MTRESET` the same way any other `SafeAttributePersistenceProvider`-backed
+attribute does.
+
+Example, a chime endpoint on endpoint 10 with sounds `1`/`2` installed
+(§3.23):
+```
+AT+MTCHIME=10,0,1        -> OK          (SelectedChime = 1)
+AT+MTCHIME=10,1,1        -> OK          (Enabled = true)
+AT+MTCHIME=10,0,9        -> +MTERR:1    (9 is not an installed chime id)
+AT+MTCHIME=10,1,2        -> +MTERR:1    (2 is not a valid bool for Enabled)
+AT+MTCHIME=10,2,1        -> +MTERR:1    (2 is not a valid <what>)
+AT+MTCHIME=99,0,1        -> +MTERR:2    (no endpoint 99)
+AT+MTCHIME=1,0,1         -> +MTERR:3    (ep 1 has no Chime cluster)
 ```
 
 ## 4. Unsolicited result codes (URCs)

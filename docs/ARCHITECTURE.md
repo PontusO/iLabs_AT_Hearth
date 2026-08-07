@@ -819,6 +819,177 @@ server behind it: CHIP's air-quality-server is Instance/
 delegate (§8.3), and needed one before `AT+MTATTR=<ep>,91,0` answered
 anything but bare `ERROR`.
 
+## 8.6 Seven-type batch: delegate pools, the valve return-ignored fact, and the Chime SDK gap (2026-08-07)
+
+Design record: `docs/superpowers/specs/2026-08-07-seven-type-batch-design.md`,
+survey graph node D149. Adds Water Valve (`0x0042`, task C2), Mode Select
+(`0x0027`, task C3), the OperationalState trio - Laundry Washer `0x0073`,
+Dishwasher `0x0075`, Laundry Dryer `0x007C` (task C4), Smoke/CO Alarm
+(`0x0076`, task C5), Power Source (`0x0011`, riding along as a flat sibling
+row, task C5), and Chime (`0x0146`, task C6): firmware rows 31-38, firmware
+0.5.0. `AT_MT_SPEC.md` §§3.19-3.24 are the host-facing contract; this section
+is why they are shaped the way they are.
+
+**The delegate-pool pattern, generalized across four device types.** Four of
+this round's six clusters (valve, the OperationalState trio, chime) need a
+CHIP delegate object that exists before `esp_matter::endpoint::create()` is
+called (the config struct consumes the pointer synchronously) but whose real
+endpoint id is not known until `create()` returns it (the id-reproducibility
+rule in `CLAUDE.md`: an endpoint's id is assigned inside `create()` itself).
+Every one of the four solves this the same way: a static
+`MT_COMP_MAX_ENDPOINTS`-sized array of delegate objects in `main.cpp`, handed
+out one at a time by an `_alloc()` function the thunk (`mt_devtypes.cpp`)
+calls before `create()`, with the real endpoint fixed up by a
+`_set_endpoint()` call once `create()` returns. Both accessors trade in an
+opaque `void*` (`mt_matter.h`), so `mt_devtypes.cpp` - which must stay free of
+CHIP/esp_matter delegate types, per its own file comment - never has to name
+`HearthValveDelegate`, `HearthOpStateDelegate`, or `HearthChimeDelegate`.
+Mode Select is the one exception: F2 established that a *single* global
+`SupportedModesManager` dispatches on endpoint id internally, so it needs no
+per-endpoint pool at all, just one static instance every `mode_select`
+endpoint's thunk points at. On pool exhaustion, every one of the four aborts
+the whole composition rebuild the same way any other failed `create()` does
+(`CLAUDE.md`, "A failed `endpoint::create()` consumes no endpoint ID"),
+rather than skip the one entry: skipping would hand a commissioned device a
+silently wrong data model, the same reasoning that governs every other
+composition-rebuild failure in this firmware.
+
+**The water valve's verdict cannot fail the command on the wire (F1).**
+`ValveConfigurationAndControl`'s server calls the delegate's
+`HandleOpenValve`/`HandleCloseValve` synchronously and discards what they
+return (`TEMPORARY_RETURN_IGNORED` at both call sites,
+`valve-configuration-and-control-cluster.cpp:303,361`): the controller always
+sees `Status::Success`, whether the `+MTCMD` verdict this firmware forwarded
+was an allow or a deny. This is the opposite of the door lock (§8.4, a deny
+genuinely fails the command) and the opposite of the OperationalState trio
+below (F7, a deny also genuinely fails the command, through a different
+mechanism). Documented rather than fought: there is no return path on this
+side of the delegate that could change it, so `AT+MTVALVE` (§3.19) is the
+*only* place the real outcome reaches the fabric, entirely decoupled from
+whatever verdict the host gave.
+
+**The OperationalState trio's verdict, by contrast, IS the wire response
+(F7).** `Instance::SetOperationalState()`'s caller copies the delegate's
+filled `GenericOperationalError` straight into the command's
+`OperationalCommandResponse`; a deny answers `ErrorStateID` `0x02`
+(`UnableToCompleteOperation`), an allow `0x00` (`NoError`). One delegate
+OBJECT per endpoint is mandatory here (`Delegate::SetInstance()`
+`VerifyOrDie`s if a second `Instance` tries to share one), which is why this
+is the one pool of the four that is *shared* across three different device
+types (`dish_washer`/`laundry_washer`/`laundry_dryer` all wire the identical
+base `OperationalState` cluster `0x0060`) rather than one pool per type.
+
+**Chime's verdict is the third shape again: passed straight through, raw.**
+`ChimeCluster::HandlePlayChimeSound()` takes whatever `Status` the delegate's
+`PlayChimeSound()` returns and copies it directly into the command's
+`InvokeResponse`, with no SDK-side remapping through an intermediate enum the
+way the OperationalState trio's `GenericOperationalError` is. Three device
+types in one round, three different relationships between a `+MTCMD` verdict
+and what the controller actually sees on the wire: discarded (valve),
+remapped through an SDK enum (OperationalState), passed through raw (chime).
+None of the three is a bug; each is what its own cluster's SDK code does, and
+`AT_MT_SPEC.md` documents each explicitly rather than implying they are
+interchangeable.
+
+**The Chime SDK gap (F6), and why the workaround has to call one more
+function than the design record originally named.** `cluster::chime::create()`
+wires the delegate stash (`ChimeDelegateInitCB` ->
+`chip::app::Clusters::Chime::SetDelegate()`) and a no-op legacy
+plugin-server stub, but never calls
+`ESPMatterChimeClusterServerInitCallback()` - the one function that actually
+constructs a `ChimeCluster` and registers it with esp-matter's data model
+provider. Grep evidence against the whole pinned esp-matter/connectedhomeip
+tree: the only two occurrences of that symbol's name are its own definition
+(`data_model_provider/clusters/chime_integration.cpp:36`) and its declaration
+(`zap_common/app/ClusterCallbacks.h:67`). Left uncalled, `cluster::
+chime::create()` still creates the cluster's ember-managed attributes, but
+nothing in the data model actually serves a read, a write, or
+`PlayChimeSound`. Recorded for the I90 upstream ride-along (design spec
+section 8: "Chime upstream fix: the missing init call site rides the I90
+list").
+
+The firmware calls `ESPMatterChimeClusterServerInitCallback()` itself, in the
+same pre-start registration window `mt_air_quality_register_all()` (§8.5's
+correction) and the `AT+MTTEMPLEVELS` delegate already use - safe there for
+the same reason those two are: nothing in that window touches the CHIP event
+loop or arms a timer. What the design record's F6 entry did not anticipate,
+found while verifying the callback's exact behaviour against the header
+rather than assuming a one-line fix: `ESPMatterChimeClusterServerInitCallback()`
+unconditionally dereferences `*gDelegates[endpointId]`
+(`chime_integration.cpp:41`), and the only thing that populates that map is
+`ChimeDelegateInitCB` - which does not run in this pre-start window at all.
+It fires from `esp_matter::data_model::provider::Startup()`
+(`data_model_provider/esp_matter_data_model_provider.cpp`), itself called
+from `chip::Server::Init()`, itself called from `esp_matter::start()` -
+strictly *after* the pre-start window closes. A version of the workaround
+that called only `ESPMatterChimeClusterServerInitCallback()`, trusting
+`ChimeDelegateInitCB` to have already run, would dereference a
+default-constructed (null) map entry and crash on the very first boot with a
+chime endpoint. The firmware's `mt_chime_register_all()` (`main.cpp`)
+therefore calls `chip::app::Clusters::Chime::SetDelegate()` itself first,
+ahead of `ESPMatterChimeClusterServerInitCallback()`; `ChimeDelegateInitCB`
+still fires later, during `start()`, but only re-sets the same pointer to the
+same delegate, which is harmless. Registering the cluster before
+`esp_matter::start()` is separately safe on its own terms:
+`ServerClusterInterfaceRegistry::Register()` only calls `Startup()` on a
+newly-registered interface if a context is already set, and with none yet
+(true here) it just links the registration into its list; `SetContext()`,
+called later from inside `esp_matter::start()`, walks every already-
+registered interface and starts each one then, which is what actually wires
+the cluster to the interaction model.
+
+**`ReportInstalledChimeSoundsChange()` does not exist on this SDK revision;
+the header wins over its own doc comment.** `ChimeDelegate`'s doc comment on
+`GetChimeSoundByIndex()`/`GetChimeIDByIndex()` (`ChimeCluster.h`) instructs
+callers to "call the Instance's `ReportInstalledChimeSoundsChange` method" 
+when the sound list changes - but no such method is defined anywhere on
+`ChimeCluster` or its base `DefaultServerCluster` (grep evidence against the
+whole `chime-server` directory: the string appears only in that doc comment,
+twice, never in a declaration). This cluster was rewritten onto the
+`DefaultServerCluster`/`ServerClusterInterfaceRegistry` architecture at some
+point in this SDK's history, and the doc comment is a leftover reference to
+whatever pre-rewrite, `Instance`-based API it used to describe.
+`NotifyAttributeChanged()`, the mechanism `SetSelectedChime()`/`SetEnabled()`
+use internally for the identical purpose, is `protected` on
+`DefaultServerCluster`, and this firmware's bridge code is not a subclass, so
+it is not reachable either. `mt_matter_chime_sounds_set()` (`main.cpp`) uses
+the same substitute `mt_matter_temp_levels_set()`/`mt_matter_modes_set()`
+already established for an identical problem two device types earlier:
+`MatterReportingAttributeChangeCallback()`, which marks a path dirty through
+`DataModel::Provider::Temporary_ReportAttributeChanged()` directly and is not
+ember-specific, so it works the same for a provider-registered attribute
+(Chime) as it does for an ember-managed one (TemperatureControl, ModeSelect).
+
+**Reading `SelectedChime`/`Enabled` back needs the registry, not
+`esp_matter::attribute::get()`.** Because Chime is registered directly with
+the data model provider rather than through esp-matter's generic attribute
+store, none of this file's other bridges' lookup pattern
+(`esp_matter::cluster::get()` +  `esp_matter::attribute::get()`) reaches the
+live `ChimeCluster` instance. `mt_matter_chime_set()` instead calls back into
+`esp_matter::data_model::provider::get_instance().registry().Get()` - the
+same public registry `mt_chime_register_all()` registered the instance into -
+and `static_cast`s the returned `ServerClusterInterface*` to `ChimeCluster*`,
+safe because this file is the only thing that ever registers one at that
+path and the inheritance chain (`ChimeCluster` -> `DefaultServerCluster` ->
+`ServerClusterInterface`) is single and non-virtual.
+
+**Kconfig: six lifts, one linker-evidence-only.** `CHIME`, `MODE_SELECT`,
+`OPERATIONAL_STATE`, `POWER_SOURCE`, `SMOKE_CO_ALARM`, and
+`VALVE_CONFIGURATION_AND_CONTROL_CLUSTER`* joined the door-lock-era
+`CONFIG_SUPPORT_*_CLUSTER=n` removals (§8.4/§8.5): the esp_matter config
+struct for each exists regardless of the flag, but its actual cluster server
+implementation - and, for Chime specifically, the object `chime_integration.cpp`
+needs to link against at all - only compiles into the chip component archive
+when the flag is lifted. Each was found and confirmed the same way: build,
+read the exact undefined-reference symbol at the final link, lift the one
+flag that supplies it, rebuild. (*`VALVE_CONFIGURATION_AND_CONTROL_CLUSTER`
+was never in the disabled list to begin with, so task C2 needed no Kconfig
+line removed for the cluster itself - only the knock-on `TIME_SYNCHRONIZATION_CLUSTER`
+lift `sdkconfig.defaults`'s own comment documents, a link-time dependency of
+`SetValveLevel()`'s `#ifdef ZCL_USING_TIME_SYNCHRONIZATION_CLUSTER_SERVER`
+block, a macro esp_matter's bundled `gen_config.h` defines unconditionally
+regardless of this repository's own Kconfig.)
+
 ## 9. Decision log (summary)
 
 | Decision | Choice | Why |

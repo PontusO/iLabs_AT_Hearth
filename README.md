@@ -19,9 +19,12 @@ composition persisted across power cuts, and a subscribable platform event
 stream.
 
 Phases A and B are complete. Phase C, the protocol work needed to support an
-arduino-esp32-parity host library, is C1 to C3 done and C4 (the host library
-itself) next. See `CLAUDE.md` for current state and open questions, and the
-[integration plan](docs/hearth-integration-plan.md) for the original roadmap.
+arduino-esp32-parity host library, has landed an unmodified upstream
+`MatterOnOffLight` sketch commissioned end to end (task C4) and is now
+through the seven-type device batch (tasks C1-C6) that brings the firmware's
+device-type table to 38 rows. See `CLAUDE.md` for current state and open
+questions, and the [integration plan](docs/hearth-integration-plan.md) for
+the original roadmap.
 
 ## Architecture
 
@@ -103,7 +106,7 @@ subscription (`AT+MTEVT`), and the transport query (`AT+MTNET?`).
 
 ## Supported device types
 
-`AT+MTEP=<id>` accepts these 30 device type IDs (firmware 0.4.0); anything
+`AT+MTEP=<id>` accepts these 38 device type IDs (firmware 0.5.0); anything
 else answers `+MTERR:6`. The table is `main/mt_devtypes.cpp`'s and grows by
 rows; IDs are read from esp-matter, never transcribed.
 
@@ -124,6 +127,10 @@ rows; IDs are read from esp-matter, never transcribed.
 | 0x002C | Air Quality Sensor | | 0x0072 | Room Air Conditioner |
 | 0x010F | Mounted On/Off Control | | 0x0078 | Cooktop |
 | 0x0110 | Mounted Dimmable Load Control | | 0x0303 | Pump |
+| 0x0042 | Water Valve | | 0x0027 | Mode Select |
+| 0x0073 | Laundry Washer | | 0x0075 | Dishwasher |
+| 0x007C | Laundry Dryer | | 0x0076 | Smoke/CO Alarm |
+| 0x0011 | Power Source | | 0x0146 | Chime |
 
 The extended color light carries a hue/saturation addition beyond stock
 esp-matter, so hosts see `CurrentHue`/`CurrentSaturation` alongside XY and
@@ -152,6 +159,18 @@ so a subscribed controller sees the `LockOperation` event Matter expects.
 `+MTCMD`/`AT+MTCMDRESP` are a generic frame, not specific to locks: a future
 command needing the same kind of app-level verdict reuses it. See
 `docs/AT_MT_SPEC.md` sections 3.17 and 3.18.
+
+Rows 31-38 (Water Valve, Mode Select, the OperationalState trio, Smoke/CO
+Alarm, Power Source, Chime) reuse that same `+MTCMD` frame for their own
+app-adjudicated commands (`Open`/`Close`, `Pause`/`Resume`/`Start`/`Stop`,
+`PlayChimeSound`), each with its own dedicated state-reporting command -
+`AT+MTVALVE`, `AT+MTMODES`, `AT+MTOPSTATE`, `AT+MTALARM`, `AT+MTCHIMESOUNDS`/
+`AT+MTCHIME` - since none of their state lives behind a plain `AT+MTATTR`-
+reachable attribute. Chime (`0x0146`) additionally papers over an esp-matter
+SDK gap: the one function that registers its cluster with the data model
+provider has no call site anywhere upstream, so the firmware calls it
+manually. See `docs/AT_MT_SPEC.md` sections 3.19-3.24 and `docs/ARCHITECTURE.md`
+section 8.6 for the full detail.
 
 ## Design
 
