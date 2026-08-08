@@ -208,7 +208,7 @@ can therefore run on a commissioned device without disturbing it.
 | `AT+MTATTR=1,0x0006,0x0000` | same value as the decimal form (hex parsing) |
 | `AT+MTATTR=0,0x0028,0x0002` | `OK` with an integer value (root-endpoint read works: VendorID) |
 | `AT+MTEVT?` | `+MTEVTMASK:0x0800003F` at boot (commissioning group plus bit 27) |
-| `AT+MTNET?` | matches `+MTNET:(WIFI\|THREAD),[01],[01]` |
+| `AT+MTNET?` | matches `+MTNET:(WIFI\|THREAD),[01],[01],[01]` |
 | `AT+MTBAUD?` | `+MTBAUD:115200` at boot |
 | `AT+MTFLOW?` | `+MTFLOW:0` (no board routes RTS/CTS) |
 | `AT+MTFLOW=0` | `OK` (the only mode this hardware accepts) |
@@ -227,10 +227,13 @@ AT+MTEVT=0x0800003F   -> OK        (restore before Phase 2)
 assertion race against connectivity and BLE chatter that the tests do not expect,
 which presents as intermittent Phase 2 failures with no obvious cause.
 
-`AT+MTNET?` on a WiFi image should report `WIFI,1,1` once associated. A
-`<connected>` of `0` late in a run is worth noticing: it means the C6 dropped its
-AP association, and the Phase 2 mDNS-dependent tests are about to fail for
-reasons that have nothing to do with the firmware.
+`AT+MTNET?` on a WiFi image should report `WIFI,1,1,0` once associated: the
+fourth field is `<mismatch>`, emitted unconditionally per `AT_MT_SPEC.md`
+§3.12, and `0` here because a normal single-image run never puts a fabric on
+the wrong transport. A `<connected>` of `0` late in a run is worth noticing:
+it means the C6 dropped its AP association, and the Phase 2 mDNS-dependent
+tests are about to fail for reasons that have nothing to do with the
+firmware.
 
 Cross-checks worth scoring as their own tests:
 
@@ -473,6 +476,40 @@ back `Normal` after the first test's `AT+MTALARM=<ep>,5,0`, not stuck at
 `Testing`. This is the direct regression case for the `SetExpressedStateByPriority`
 recompute task C12 added to `mt_matter_alarm_set`; see `AT_MT_SPEC.md`
 §3.22's DEFECT note for the root cause.
+
+**`AT+MTCHIMESOUNDS` and `AT+MTCHIME` argument validation:** captured on the
+bench's seven-endpoint risk composition, chime endpoint `3` and non-chime
+endpoint `7` (`task-C10-report.md`, `task-C10-evidence/grammar-matrix.out`).
+Unlike the tables above, these two are transcribed with the literal endpoint
+numbers the bench used rather than `<chime ep>`-style placeholders, since
+that is what was actually run and verified.
+
+| Command | Expected |
+|---|---|
+| `AT+MTCHIMESOUNDS?` | bare `ERROR` (query form not accepted) |
+| `AT+MTCHIMESOUNDS` | bare `ERROR` (exec form without arguments) |
+| `AT+MTCHIMESOUNDS=3` | `+MTERR:1` (no pairs) |
+| `AT+MTCHIMESOUNDS=3,1,Doorbell` | `+MTERR:1` (missing quotes) |
+| `AT+MTCHIMESOUNDS=3,1,"Doorbell",1,"Chime"` | `+MTERR:1` (id `1` repeated) |
+| `AT+MTCHIMESOUNDS=3,1,""` | `+MTERR:1` (empty name) |
+| `AT+MTCHIMESOUNDS=99,1,"Doorbell"` | `+MTERR:2` (unknown endpoint) |
+| `AT+MTCHIMESOUNDS=7,1,"Doorbell"` | `+MTERR:3` (endpoint has no `Chime` cluster) |
+| `AT+MTCHIMESOUNDS=3,1,"Doorbell"` | `OK` (one sound stored) |
+| `AT+MTCHIMESOUNDS=3,1,"Doorbell",2,"Alert, urgent"` | `OK` (comma inside a name) |
+
+| Command | Expected |
+|---|---|
+| `AT+MTCHIME?` | bare `ERROR` (query form not accepted) |
+| `AT+MTCHIME` | bare `ERROR` (exec form without arguments) |
+| `AT+MTCHIME=3,0` | `+MTERR:1` (fewer than 3 parameters) |
+| `AT+MTCHIME=3,0,1,1` | `+MTERR:1` (more than 3 parameters) |
+| `AT+MTCHIME=3,2,1` | `+MTERR:1` (`2` is not a valid `<what>`) |
+| `AT+MTCHIME=3,0,9` | `+MTERR:1` (`9` is not an installed chime id; only `1` and `2` were installed by the `AT+MTCHIMESOUNDS` rows above) |
+| `AT+MTCHIME=3,1,2` | `+MTERR:1` (`2` is not a valid bool for `Enabled`) |
+| `AT+MTCHIME=99,0,1` | `+MTERR:2` (unknown endpoint) |
+| `AT+MTCHIME=7,0,1` | `+MTERR:3` (endpoint has no `Chime` cluster) |
+| `AT+MTCHIME=3,0,1` | `OK` (`SelectedChime` = `1`) |
+| `AT+MTCHIME=3,1,1` | `OK` (`Enabled` = `true`) |
 
 **Chatty-host bench case: a bridge command already in flight when a forward
 opens.** Exercises `AT_MT_SPEC.md` §3.17's own by-construction limitation and

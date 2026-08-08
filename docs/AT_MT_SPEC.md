@@ -63,7 +63,7 @@ flashed at a time (mode-switch by host reflash).
 | `AT+MTEPAPPLY` | exec | `OK` → persist + reboot |
 | `AT+MTEVT?` | query | `+MTEVTMASK:<hex32>` → `OK` |
 | `AT+MTEVT=<hexmask>` | set | `OK` (subscribe to platform events) |
-| `AT+MTNET?` | query | `+MTNET:<transport>,<enabled>,<connected>` → `OK` |
+| `AT+MTNET?` | query | `+MTNET:<transport>,<enabled>,<connected>[,<mismatch>]` → `OK` |
 | `AT+MTTRANSPORT?` | query | `+MTTRANSPORT:<active>,<stored>` → `OK` (combined image only) |
 | `AT+MTTRANSPORT=<WIFI\|THREAD>` | set | `OK` (persisted, no reboot; combined image only) |
 | `AT+MTBAUD?` | query | `+MTBAUD:<baud>` → `OK` |
