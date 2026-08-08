@@ -1727,8 +1727,10 @@ def register_phase1_t5_negative():
     n("MTTEMPLEVELS quote character inside a label -> +MTERR:1",
       expect_err(r'AT+MTTEMPLEVELS=4,"Low","Lo\"w"', 1))
     # MTTEMPLEVELS=9,"Low" (+MTERR:2, no endpoint 9), MTTEMPLEVELS=1,"Low"
-    # (+MTERR:3, ep 1 has no TemperatureControl cluster), and
-    # MTTEMPLEVELS=4,"Low" (+MTERR:4, ep 4 built as the wrong variant) all
+    # (+MTERR:3, ep 1 has no TemperatureControl cluster),
+    # MTTEMPLEVELS=4,"Low" (+MTERR:4, ep 4 built as the wrong variant), and
+    # the two OK storage rows (MTTEMPLEVELS=4,"Low","Medium","High" and
+    # MTTEMPLEVELS=4,"Wine, red","Wine, white", comma inside a label) all
     # need a known composition: Phase 3.
 
 
