@@ -1,0 +1,4 @@
+$ /home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool valveconfigurationandcontrol read current-state 0x4845 2 --storage-directory /tmp/mt-regression-p3
+rc=0
+[0;32m[1786180200.371] [431662:431664] [TOO] Endpoint: 2 Cluster: 0x0000_0081 Attribute 0x0000_0004 DataVersion: 3987049202[0m
+[0;32m[1786180200.372] [431662:431664] [TOO]   CurrentState: 1[0m

@@ -1,0 +1,14 @@
+$ /home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool modeselect read supported-modes 0x4845 3 --storage-directory /tmp/mt-regression-p3
+rc=0
+[0;32m[1786180201.790] [431712:431715] [TOO] Endpoint: 3 Cluster: 0x0000_0050 Attribute 0x0000_0002 DataVersion: 1260478425[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]   SupportedModes: 2 entries[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]     [1]: {[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]       Label: Quiet[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]       Mode: 0[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]       SemanticTags: 0 entries[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]      }[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]     [2]: {[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]       Label: Eco, low[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]       Mode: 1[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]       SemanticTags: 0 entries[0m
+[0;32m[1786180201.790] [431712:431715] [TOO]      }[0m

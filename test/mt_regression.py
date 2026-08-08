@@ -1483,7 +1483,13 @@ def step_3_8_chime(ctx):
     s.check("3.8 deny: +MTCMD forward answered, chimeID 7 in payload",
             fwd is not None, tag="P3")
     rc, out = handle.join(30)
-    s.check("3.8 deny: chip-tool exits 0", rc == 0, tag="P3")
+    # Task-7 fix F2: a denied PlayChimeSound is a bare StatusIB Failure
+    # (0x1), and chip-tool maps any non-success StatusIB to a non-zero
+    # exit (task-7-report.md section 5, H2). rc == 0 on a deny can never
+    # happen; the companion wire-status check below is what proves the
+    # deny landed, since a non-zero exit alone does not say which error.
+    s.check("3.8 deny: chip-tool reports Failure (rc != 0)", rc != 0,
+            tag="P3")
     s.check("3.8 deny: wire status 0x1 (Failure)",
             parse_status(out) == 0x1, tag="P3")
 
@@ -1684,6 +1690,24 @@ def step_3_11_power(ctx):
             rc == 0 and parse_int_attr(out) == 164, tag="P3")
 
 
+# Task-7 fix F3: LockDoor/UnlockDoor are timed-invoke commands per the
+# Matter spec. Without --timedInteractionTimeoutMs, chip-tool's
+# TimedRequest carries no timeout and the SDK answers 0xc6
+# NEEDS_TIMED_INTERACTION before the delegate is ever called, so no
+# +MTCMD is raised (task-7-report.md section 5, H3). The value here
+# bounds only the window between chip-tool's TimedRequest action and
+# the InvokeRequest that follows it on the SAME already-open CASE
+# session: chip-tool sends the two back to back with no user-observable
+# gap (tens of milliseconds on a LAN at most), and the timed-interaction
+# timer's job is done the instant the InvokeRequest arrives, BEFORE
+# mt_door_lock_adjudicate() and the harness's own CmdResponder round
+# trip (its own 5 s window, plus the firmware's 1000 ms AT+MTCMDRESP
+# deadline) ever run. 5000 ms is two orders of magnitude more than the
+# pre-invoke gap needs and cannot race the adjudication delay, because
+# the two happen in strictly separate phases of the same call.
+DOORLOCK_TIMED_INVOKE_MS = "5000"
+
+
 def step_3_12_lock_switch_levels(ctx):
     """T5 design spec 4.3 bullets 7-9 (door lock, switch, temp levels).
 
@@ -1691,14 +1715,20 @@ def step_3_12_lock_switch_levels(ctx):
     OperationalState's OperationalCommandResponse does (spec 3.17: the
     door lock is the example given for "a deny surfaces as
     Status::Failure to the controller"), so a deny is a plain StatusIB
-    failure, not a Success wrapper with an embedded verdict field. No
-    door-lock forward transcript exists in the C10 evidence (that risk
-    set was the seven NEW types; the door-lock round predates it and
-    Phase 3's own doorlock-round coverage is new ground), so "chip-tool
-    reports non-zero on deny" is inferred from the spec text plus the
-    F-C10-1 UNSUPPORTED_COMMAND precedent (also a bare-StatusIB failure,
-    also non-zero exit) rather than lifted from a bench transcript --
-    flagged for Task 7's bench pass to confirm.
+    failure, not a Success wrapper with an embedded verdict field.
+
+    Task-7 fix F4: the deny path was never reached live before the F3
+    fix above (every doorlock invoke hit H3's 0xc6 first), so "3.12
+    deny: wire status 0x1 (Failure)" below is AWAITING RE-RUN: it is
+    derived, not observed. Derivation: door-lock-server.cpp's
+    HandleRemoteLockOperation() ends with `commandObj->AddStatus(
+    commandPath, success ? Status::Success : Status::Failure)`, and
+    main.cpp's mt_door_lock_adjudicate() (the emberAfPluginDoorLockOn*
+    callback) returns exactly the mt_cmd_forward() boolean with no
+    cluster-specific response wrapper, the same bare-StatusIB shape
+    step_3_8's chime deny used -- and that one WAS observed live in run
+    5, at wire status 0x1. Confirm this one against a real capture on
+    the next bench pass rather than trusting the derivation twice.
 
     Switch events are fire-and-forget (spec 3.15): AT+MTSWITCH never
     echoes on the AT link, so the only way to observe it is a
@@ -1721,22 +1751,40 @@ def step_3_12_lock_switch_levels(ctx):
     s.check("3.12 controller reads LockState (Locked)",
             rc == 0 and parse_int_attr(out) == 1, tag="P3")
 
-    handle = invoke_chip(ctx, ["doorlock", "lock-door", node, "8"],
-                         timeout=30)
+    handle = invoke_chip(ctx, ["doorlock", "lock-door", node, "8",
+                              "--timedInteractionTimeoutMs",
+                              DOORLOCK_TIMED_INVOKE_MS], timeout=30)
     fwd = responder.expect(cluster=257, command=0, verdict=1, timeout=5.0)
     s.check("3.12 LockDoor +MTCMD forward answered allow", fwd is not None,
             tag="P3")
-    rc, _ = handle.join(30)
+    rc, out = handle.join(30)
     s.check("3.12 chip-tool lock-door exits 0 (allow)", rc == 0, tag="P3")
+    # Vacuousness check (task-7-report.md section 10, concern 2): rc == 0
+    # is unambiguous for LockDoor (chip-tool exits 0 iff the StatusIB is
+    # Success), but the explicit wire-status assertion is kept alongside
+    # it anyway, matching step_3_8's allow/deny symmetry, so a future
+    # reader never has to re-derive that rc == 0 already implies 0x0.
+    s.check("3.12 allow: wire status 0x0 (Success)",
+            parse_status(out) == 0x0, tag="P3")
 
-    handle = invoke_chip(ctx, ["doorlock", "lock-door", node, "8"],
-                         timeout=30)
+    handle = invoke_chip(ctx, ["doorlock", "lock-door", node, "8",
+                              "--timedInteractionTimeoutMs",
+                              DOORLOCK_TIMED_INVOKE_MS], timeout=30)
     fwd = responder.expect(cluster=257, command=0, verdict=0, timeout=5.0)
     s.check("3.12 LockDoor +MTCMD forward answered deny", fwd is not None,
             tag="P3")
-    rc, _ = handle.join(30)
+    rc, out = handle.join(30)
     s.check("3.12 chip-tool lock-door reports Failure on deny (rc != 0)",
             rc != 0, tag="P3")
+    # De-vacuous (task-7-report.md section 6, INFERENCE-WRONG): this
+    # exact check went green for three runs on 0xc6
+    # NEEDS_TIMED_INTERACTION, an error it was never testing for (H3).
+    # "some non-zero exit" is not enough on its own; pin WHICH failure
+    # the way step_3_8 does with parse_status. AWAITING RE-RUN: see the
+    # docstring above for the derivation, since the deny path has never
+    # actually reached the wire yet.
+    s.check("3.12 deny: wire status 0x1 (Failure)",
+            parse_status(out) == 0x1, tag="P3")
 
     link.drain(0.3)
     res, _ = link.command("AT+MTSWITCH=9")
@@ -2200,6 +2248,29 @@ class Subscriber:
             self._out = None
 
 
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text):
+    """Remove ANSI SGR (colour) escape sequences from chip-tool output.
+
+    Task 7's first live bench run (task-7-report.md section 5, defect H1)
+    found the pinned chip-tool writes SGR sequences around every log line
+    even when stdout is a pipe, not a TTY, so a raw line ends
+    '...value\\x1b[0m' rather than '...value'. Three T5 parsers
+    (parse_int_attr, parse_string_list, parse_indexed_list) are anchored
+    to end of line and either fail to match or capture the trailing
+    escape into the value. Stripped once here, centrally, in the
+    subprocess runner, so every parser present and future sees clean
+    text rather than patching each regex individually.
+
+    \\x1b\\[[0-9;]*m covers every escape sequence found in the raw bench
+    capture (chiptool-capture-run5.txt): the pattern was checked against
+    that whole file and every escape in it is a plain SGR sequence ending
+    'm', no cursor-movement or OSC codes among them."""
+    return _ANSI_SGR_RE.sub("", text)
+
+
 def _subprocess_runner(argv, timeout, label="process"):
     """Shared subprocess runner for ChipTool and otctl_run. Runs argv with
     the given timeout, converting TimeoutExpired to rc=124 (timeout code).
@@ -2207,7 +2278,11 @@ def _subprocess_runner(argv, timeout, label="process"):
     raw traceback: TimeoutExpired is a SubprocessError, which neither
     run_phase2 (StepAbort only) nor main (serial/OSError only) catches.
     subprocess.run has already killed the child. Partial output arrives as
-    bytes despite text=True (CPython quirk)."""
+    bytes despite text=True (CPython quirk).
+
+    Output is stripped of ANSI SGR sequences (_strip_ansi) before it is
+    returned, on both the timeout and the normal exit path, so every
+    caller -- ChipTool.run() and otctl_run() alike -- sees clean text."""
     try:
         proc = subprocess.run(argv, capture_output=True, text=True,
                               timeout=timeout)
@@ -2216,9 +2291,9 @@ def _subprocess_runner(argv, timeout, label="process"):
             if isinstance(s, bytes):
                 return s.decode(errors="replace")
             return s or ""
-        return 124, (_txt(exc.stdout) + _txt(exc.stderr)
+        return 124, _strip_ansi(_txt(exc.stdout) + _txt(exc.stderr)
                      + "\n(%s timed out after %s s)" % (label, timeout))
-    return proc.returncode, proc.stdout + proc.stderr
+    return proc.returncode, _strip_ansi(proc.stdout + proc.stderr)
 
 
 def otctl_run(args, binary, runner=None, timeout=10):

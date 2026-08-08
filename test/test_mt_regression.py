@@ -598,6 +598,32 @@ class TestChipTool(unittest.TestCase):
             self.assertTrue(os.path.isdir(d))
             self.assertEqual(os.listdir(d), [])
 
+    def test_default_runner_strips_ansi_sgr_from_real_output(self):
+        """Task-7 fix F1: the pinned chip-tool colours every line even
+        when stdout is a pipe, not a TTY, so a raw capture line ends
+        '...value\\x1b[0m' (task-7-report.md section 5, defect H1: nine
+        of the thirteen live-bench failures). The strip belongs in the
+        runner every ChipTool.run() call goes through by default, not in
+        each parser, so this spawns a REAL subprocess (python, not
+        chip-tool -- no bench, no serial port, no chip-tool execution)
+        that writes a byte-exact excerpt of chiptool-capture-run5.txt's
+        valve CurrentState read (test/fixtures/t5/
+        valve-current-state-raw.txt, task-7-evidence, escapes included)
+        to stdout, then checks the escapes are gone by the time
+        ChipTool.run() returns -- through the production
+        _subprocess_runner path, no mock involved. Removing the strip's
+        call site fails this test the same way it failed nine checks on
+        the bench."""
+        raw = fixture(os.path.join("t5", "valve-current-state-raw.txt"))
+        self.assertIn("\x1b[", raw)  # sanity: the fixture really is raw
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool(sys.executable, d)
+            rc, out = chip.run(["-c",
+                                "import sys; sys.stdout.write(%r)" % raw])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("\x1b[", out)
+        self.assertEqual(parse_int_attr(out), 1)
+
 
 class TestChipToolParsers(unittest.TestCase):
     def test_parse_setup_payload_fixture(self):
@@ -2548,7 +2574,7 @@ class TestCmdResponder(unittest.TestCase):
 
 from mt_regression import (parse_int_attr, parse_status,
                            parse_accepted_command_list, parse_event_count,
-                           parse_string_list)
+                           parse_string_list, _strip_ansi)
 
 
 class TestT5Parsers(unittest.TestCase):
@@ -2612,6 +2638,22 @@ class TestT5Parsers(unittest.TestCase):
 
     def test_parse_string_list_no_match_is_empty(self):
         self.assertEqual(parse_string_list("no such content"), [])
+
+    def test_parse_string_list_real_ansi_capture_needs_the_strip(self):
+        """Task-7 fix F5 (fixture provenance): this fixture is a
+        byte-exact excerpt of chiptool-capture-run5.txt's SupportedModes
+        read (lines around the 3.7 check in task-7-evidence/), escapes
+        included, unlike every other T5 fixture, which was hand-cleaned
+        and so never exercised the ANSI defect (task-7-report.md section
+        10, concern 1). RED first: parse_string_list on the raw text
+        leaks the trailing '\\x1b[0m' into the last label, the exact H1
+        shape. GREEN after _strip_ansi, the same function
+        _subprocess_runner calls centrally (F1)."""
+        raw = fixture(os.path.join("t5", "modes-supported-modes-raw.txt"))
+        self.assertIn("\x1b[", raw)
+        self.assertNotEqual(parse_string_list(raw), ["Quiet", "Eco, low"])
+        self.assertEqual(parse_string_list(_strip_ansi(raw)),
+                         ["Quiet", "Eco, low"])
 
 
 from mt_regression import (
@@ -3253,7 +3295,11 @@ class TestStep38Chime(unittest.TestCase):
                 "[TOO]     [3]: {  Name: Westminster",
             ])),
             (0, "[TOO]     status = 0x00 (SUCCESS),"),
-            (0, "[TOO]     status = %s (FAILURE)," % deny_status),
+            # Task-7 fix F2: a denied PlayChimeSound is a bare StatusIB
+            # Failure, and chip-tool exits non-zero on any non-success
+            # StatusIB (task-7-report.md section 5, H2). rc=1 here
+            # matches what run 5 actually captured.
+            (1, "[TOO]     status = %s (FAILURE)," % deny_status),
             (0, "[TOO]     status = 0x00 (SUCCESS),"),
         ]
         calls = {"play": 0}
@@ -3465,8 +3511,14 @@ class TestStep312LockSwitchLevels(unittest.TestCase):
         })
         script = [
             (0, "[TOO]   LockState: 1"),
-            (0, ""),                                    # lock-door allow
-            (deny_rc, "[TOO] Run command failure"),      # lock-door deny
+            (0, "[TOO]     status = 0x00 (SUCCESS),"),   # lock-door allow
+            # Task-7 fix F4: pin WHICH failure, not just "some non-zero
+            # exit" (task-7-report.md section 6, INFERENCE-WRONG). The
+            # 0x1 body here is the harness self-test's fixture for the
+            # derived expectation; task-7-fix-report.md marks the
+            # production check itself awaiting bench re-confirmation.
+            (deny_rc, "[TOO]     status = 0x01 (FAILURE),\n"
+                      "[TOO] Run command failure"),      # lock-door deny
             (0, "[TOO]   InitialPress: {"),
             (0, "\n".join([
                 "[TOO]   SupportedTemperatureLevels: 2 entries",
@@ -3585,6 +3637,19 @@ class TestParseIndexedList(unittest.TestCase):
 
     def test_no_match_is_empty(self):
         self.assertEqual(parse_indexed_list("no such content"), [])
+
+    def test_real_ansi_capture_needs_the_strip(self):
+        """Task-7 fix F5: byte-exact excerpt of chiptool-capture-run5.txt's
+        SupportedTemperatureLevels read (the 3.12 check, task-7-evidence/),
+        escapes included -- this attribute now HAS bench evidence (the
+        report's HELD verdict, section 6), unlike when this parser was
+        first written against the SDK source alone. RED on the raw text
+        (H1's trailing-escape leak), GREEN after _strip_ansi."""
+        raw = fixture(os.path.join("t5", "templevels-raw.txt"))
+        self.assertIn("\x1b[", raw)
+        self.assertNotEqual(parse_indexed_list(raw), ["Low", "Medium, high"])
+        self.assertEqual(parse_indexed_list(_strip_ansi(raw)),
+                         ["Low", "Medium, high"])
 
 
 class TestMainPhase3Wiring(unittest.TestCase):

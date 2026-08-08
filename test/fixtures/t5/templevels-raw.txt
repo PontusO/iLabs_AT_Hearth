@@ -1,0 +1,6 @@
+$ /home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool temperaturecontrol read supported-temperature-levels 0x4845 10 --storage-directory /tmp/mt-regression-p3
+rc=0
+[0;32m[1786180236.515] [434905:434907] [TOO] Endpoint: 10 Cluster: 0x0000_0056 Attribute 0x0000_0005 DataVersion: 2665455207[0m
+[0;32m[1786180236.515] [434905:434907] [TOO]   SupportedTemperatureLevels: 2 entries[0m
+[0;32m[1786180236.515] [434905:434907] [TOO]     [1]: Low[0m
+[0;32m[1786180236.515] [434905:434907] [TOO]     [2]: Medium, high[0m
