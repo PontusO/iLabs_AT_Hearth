@@ -12,6 +12,8 @@ import os
 import re
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -2616,6 +2618,10 @@ from mt_regression import (
     PHASE3_COMPOSITION, Phase3Context, stage_composition,
     restore_standard_state, step_3_1_compose, step_3_2_grammar,
     step_3_3_selftest_wedge, step_3_4_stores, run_phase3, PHASE3_STEPS,
+    step_3_5_commission, step_3_6_valve, step_3_7_modes, step_3_8_chime,
+    step_3_9_opstate, step_3_10_smoke, step_3_11_power,
+    step_3_12_lock_switch_levels, step_3_13_restore, invoke_chip,
+    parse_indexed_list, CmdResponder,
 )
 
 
@@ -2979,14 +2985,578 @@ class TestRunPhase3(unittest.TestCase):
         # recover_after_abort's own AT+MTRESET)
         self.assertIn("AT+MTFRESET", link.sent)
 
-    def test_registered_host_only_steps_are_exactly_three_one_through_four(self):
+    def test_registered_steps_are_the_full_1_through_12_chain(self):
         names = [s["name"] for s in PHASE3_STEPS]
         self.assertEqual(names, [
             "3.1 compose + boot-rebuild pin",
             "3.2 endpoint-dependent grammar",
             "3.3 self-test wedge reproduction",
             "3.4 store grammar edges",
+            "3.5 commission",
+            "3.6 valve",
+            "3.7 mode select",
+            "3.8 chime",
+            "3.9 operational state",
+            "3.10 smoke/CO alarm",
+            "3.11 power source",
+            "3.12 lock, switch, temp levels",
         ])
+
+
+def sync_chip_call(chip, argv, timeout=60):
+    """Test double for ctx.chip_call (T5 task 5): calls chip.run()
+    synchronously, on the calling thread, and returns a handle whose
+    join() just returns the already-known result. Combined with a
+    FakeChipRunner on_call hook that pushes a scripted +MTCMD forward
+    onto the FakeLink BEFORE chip.run() returns (the same on_call timing
+    TestStep23/TestStep27 already use for commissioning URCs), the
+    forward is queued deterministically by the time the step calls
+    CmdResponder.expect()/expect_notify() -- removing any dependency on
+    real thread scheduling against FakeLink's single-pass, non-blocking
+    await_urc_ts (see invoke_chip's docstring in mt_regression.py)."""
+    rc, out = chip.run(argv, timeout)
+
+    class _SyncHandle:
+        def join(self, timeout=None):
+            return rc, out
+
+    return _SyncHandle()
+
+
+class TestInvokeChip(unittest.TestCase):
+    """T5 task 5: invoke_chip's two code paths -- the real background
+    thread (production default) and the ctx.chip_call test seam."""
+
+    def test_default_runs_on_a_real_background_thread(self):
+        started = threading.Event()
+        finished = threading.Event()
+
+        def slow_runner(argv, timeout):
+            started.set()
+            time.sleep(0.2)
+            finished.set()
+            return 0, "done"
+
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=slow_runner)
+        ctx = fresh_phase3_ctx(FakeLink(), chip=chip)
+        handle = invoke_chip(ctx, ["onoff", "read", "on-off", "0x1", "1"])
+        self.assertTrue(started.wait(2.0))
+        # invoke_chip must have returned already, before the slow call
+        # finishes: that is the entire point of the background thread.
+        self.assertFalse(finished.is_set())
+        rc, out = handle.join(2.0)
+        self.assertEqual((rc, out), (0, "done"))
+        self.assertTrue(finished.is_set())
+
+    def test_chip_call_seam_replaces_real_threading(self):
+        calls = []
+
+        def fake(chip, argv, timeout=60):
+            calls.append(argv)
+
+            class H:
+                def join(self, timeout=None):
+                    return 0, "fake"
+            return H()
+
+        ctx = fresh_phase3_ctx(FakeLink())
+        ctx.chip_call = fake
+        handle = invoke_chip(ctx, ["x", "y"], timeout=5)
+        self.assertEqual(handle.join(), (0, "fake"))
+        self.assertEqual(calls, [["x", "y"]])
+
+
+class TestStep35Commission(unittest.TestCase):
+    """T5 task 5: same shape as TestStep23 (Phase 2's commissioning
+    proof), scoped to Phase 3's simpler ask (exit 0, +MTEVT:3, fabrics
+    1)."""
+
+    AT_OK = {
+        "AT+MTCODES?": (0, list(CODES)),
+        "AT+MTFABRICS?": (0, ["+MTFABRICS:1"]),
+    }
+
+    @staticmethod
+    def _release_on_pairing(link, urcs):
+        def on_call(argv):
+            if "pairing" in argv:
+                link.push_urcs(urcs)
+        return on_call
+
+    def _ctx(self, runner, urcs):
+        link = FakeLink(dict(self.AT_OK))
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        runner.on_call = self._release_on_pairing(link, urcs)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        return ctx, runner
+
+    def test_happy_path(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(runner, ["+MTEVT:1", "+MTEVT:3"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_5_commission(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertEqual(ctx.qr, "MT:Y.K9042C00KA0648G00")
+        self.assertEqual(ctx.passcode, 20202021)
+
+    def test_no_codes_captured_aborts(self):
+        link = FakeLink({"AT+MTCODES?": (0, [])})
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_3_5_commission(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_pairing_failure_aborts(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (1, "CHIP:TOO: Run command failure"),
+        ])
+        ctx, _ = self._ctx(runner, [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_3_5_commission(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_fabric_count_wrong_aborts(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(runner, ["+MTEVT:1", "+MTEVT:3"])
+        ctx.link.commands["AT+MTFABRICS?"] = (0, ["+MTFABRICS:2"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_3_5_commission(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep36Valve(unittest.TestCase):
+    """T5 task 5: valve open allow, actuation, event, plus the MTCMDRESP
+    stale-seq deferred row (C10 evidence's "3d" bullet)."""
+
+    def _ctx(self, push_urc=True, both_cmdresp_ok=False):
+        link = FakeLink({
+            "AT+MTVALVE=2,0": (0, ["+MTATTR:2,129,4,0"]),
+            "AT+MTVALVE=2,1": (0, []),
+            "AT+MTCMDRESP=2,1": (0, []) if both_cmdresp_ok
+                                else [(0, []), (1, [])],
+        })
+        script = [
+            (0, "[TOO] Endpoint: 2 Cluster: 0x0000_0081 Command 0x0"),
+            (0, "[TOO]   CurrentState: 1"),
+            (0, "[TOO]   ValveStateChanged: {"),
+        ]
+
+        def on_call(argv):
+            if push_urc and "open" in argv:
+                link.push_urcs(["+MTCMD:2,2,129,0"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_6_valve(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_forward_never_answered_aborts(self):
+        ctx = self._ctx(push_urc=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_3_6_valve(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_stale_seq_reanswer_not_rejected_fails_the_pin(self):
+        # Regression shape: if the firmware ever answered OK to a second
+        # AT+MTCMDRESP for the same seq, this must fail, not pass.
+        ctx = self._ctx(both_cmdresp_ok=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_6_valve(ctx)
+        self.assertEqual(ctx.suite.failed, 1)
+
+
+class TestStep37Modes(unittest.TestCase):
+    """T5 task 5: SupportedModes verbatim (comma label) plus the
+    ChangeToMode/CurrentMode URC round trip (spec 3.20)."""
+
+    def _ctx(self, urc=True):
+        link = FakeLink({
+            'AT+MTMODES=3,0,"Quiet",1,"Eco, low"': (0, []),
+            "AT+MTATTR=3,80,3,0": (0, []),
+            "AT+MTATTR=3,80,3": (0, ["+MTATTR:3,80,3,1"]),
+        })
+        script = [
+            (0, "\n".join([
+                "[TOO]   SupportedModes: 2 entries",
+                "[TOO]     [1]: {  Label: Quiet",
+                "[TOO]     [2]: {  Label: Eco, low",
+            ])),
+            (0, ""),
+        ]
+
+        def on_call(argv):
+            if urc and "change-to-mode" in argv:
+                link.push_urcs(["+MTATTR:3,80,3,1"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_phase3_ctx(link, chip=chip)
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_7_modes(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_missing_current_mode_urc_fails(self):
+        ctx = self._ctx(urc=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_7_modes(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep38Chime(unittest.TestCase):
+    """T5 task 5: InstalledChimeSounds verbatim, PlayChimeSound allow AND
+    deny (wire statuses differ), the Enabled=false short-circuit, the
+    chimeID payload pin."""
+
+    def _ctx(self, deny_status="0x01", disabled_pushes_urc=False):
+        link = FakeLink({
+            'AT+MTCHIMESOUNDS=4,1,"Doorbell",2,"Alert, urgent",7,'
+            '"Westminster"': (0, []),
+            "AT+MTCHIME=4,1,1": (0, []),
+            "AT+MTCHIME=4,1,0": (0, []),
+            "AT+MTCMDRESP=5,1": (0, []),
+            "AT+MTCMDRESP=5,0": (0, []),
+        })
+        script = [
+            (0, "\n".join([
+                "[TOO]   InstalledChimeSounds: 3 entries",
+                "[TOO]     [1]: {  Name: Doorbell",
+                "[TOO]     [2]: {  Name: Alert, urgent",
+                "[TOO]     [3]: {  Name: Westminster",
+            ])),
+            (0, "[TOO]     status = 0x00 (SUCCESS),"),
+            (0, "[TOO]     status = %s (FAILURE)," % deny_status),
+            (0, "[TOO]     status = 0x00 (SUCCESS),"),
+        ]
+        calls = {"play": 0}
+
+        def on_call(argv):
+            if "play-chime-sound" not in argv:
+                return
+            calls["play"] += 1
+            if calls["play"] <= 2 or disabled_pushes_urc:
+                link.push_urcs(["+MTCMD:5,4,1366,0,7"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_8_chime(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_deny_status_not_failure_fails_the_check(self):
+        ctx = self._ctx(deny_status="0x00")  # wrong: should be 0x01
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_8_chime(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_disabled_short_circuit_still_forwards_fails_the_check(self):
+        # Regression shape: if Enabled=false ever failed to short-circuit
+        # and a +MTCMD arrived anyway, assert_no_urc must catch it.
+        ctx = self._ctx(disabled_pushes_urc=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_8_chime(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep39Opstate(unittest.TestCase):
+    """T5 task 5: Pause/Start/Stop/Resume allow + deny (spec 3.21: the
+    verdict IS the wire response here, unlike the valve), plus the
+    in-state guard pin (a pause from Stopped never reaches +MTCMD)."""
+
+    def _ctx(self, resume_ok=True, guard_leaks_forward=False):
+        link = FakeLink({
+            "AT+MTOPSTATE=7,0": (0, []),
+            "AT+MTOPSTATE=7,1": (0, []),
+            "AT+MTOPSTATE=7,2": (0, []),
+            "AT+MTCMDRESP=1,1": (0, []),
+            "AT+MTCMDRESP=2,1": (0, []),
+            "AT+MTCMDRESP=3,1": (0, []),
+            "AT+MTCMDRESP=4,1": (0, []),
+            "AT+MTCMDRESP=5,0": (0, []),
+        })
+        resume_es = "0" if resume_ok else "1"
+        script = [
+            (0, "[TOO]       ErrorStateID: 0"),           # start
+            (0, "[TOO]       ErrorStateID: 0"),           # pause allow
+            (0, "[TOO]       ErrorStateID: %s" % resume_es),  # resume
+            (0, "[TOO]       ErrorStateID: 0"),           # stop
+            (0, "[TOO]       ErrorStateID: 2"),           # pause deny
+            (0, "[TOO]   OperationalState: 1"),           # read after deny
+            (0, "[TOO]       ErrorStateID: 3"),           # in-state guard
+        ]
+        counts = {"pause": 0}
+
+        def on_call(argv):
+            # argv here is chip.run's fully-built subprocess argv (the
+            # binary prepended, --storage-directory appended), NOT the
+            # ["operationalstate", verb, node, ep] list callers pass in
+            # -- membership checks (matching every other step's on_call
+            # in this file), not positional indexing.
+            if "operationalstate" not in argv:
+                return
+            if "start" in argv:
+                link.push_urcs(["+MTCMD:1,7,96,2"])
+            elif "pause" in argv:
+                counts["pause"] += 1
+                if counts["pause"] == 1:
+                    link.push_urcs(["+MTCMD:2,7,96,0"])
+                elif counts["pause"] == 2:
+                    link.push_urcs(["+MTCMD:5,7,96,0"])
+                elif guard_leaks_forward:
+                    link.push_urcs(["+MTCMD:6,7,96,0"])
+            elif "resume" in argv:
+                link.push_urcs(["+MTCMD:3,7,96,3"])
+            elif "stop" in argv:
+                link.push_urcs(["+MTCMD:4,7,96,1"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_9_opstate(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_wrong_error_state_id_on_allow_fails(self):
+        ctx = self._ctx(resume_ok=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_9_opstate(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_guard_leaking_a_forward_fails(self):
+        # If the in-state guard ever regressed and forwarded anyway,
+        # assert_no_urc must catch it, not silently pass.
+        ctx = self._ctx(guard_leaks_forward=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_9_opstate(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep310Smoke(unittest.TestCase):
+    """T5 task 5: the self-test lifecycle twice in a row from a real
+    controller (the B165/F-C10-2 regression pin), plus SmokeState
+    Warning tracked both directions."""
+
+    def _ctx(self, second_cycle_busy=False):
+        link = FakeLink({
+            "AT+MTATTR=5,92,0": (0, ["+MTATTR:5,92,0,0"]),
+            "AT+MTALARM=5,5,0": (0, ["+MTATTR:5,92,5,0", "+MTATTR:5,92,0,0"]),
+            "AT+MTALARM=5,1,1": (0, ["+MTATTR:5,92,1,1", "+MTATTR:5,92,0,1"]),
+            "AT+MTALARM=5,1,0": (0, ["+MTATTR:5,92,1,0", "+MTATTR:5,92,0,0"]),
+        })
+        cycle2_text = ("[TOO]     status = 0x9c (BUSY)," if second_cycle_busy
+                      else "")
+        script = [
+            (0, ""),                                              # baseline
+            (0, ""),                                              # cycle1 request
+            (0, "[TOO]   SelfTestComplete: {"),                   # cycle1 count
+            (0, cycle2_text),                                     # cycle2 request
+            (0, "\n".join(["[TOO]   SelfTestComplete: {"] * 2)),  # cycle2 count
+            (0, "[TOO]   SmokeAlarm: {"),
+            (0, "[TOO]   ExpressedState: 1"),
+            (0, "[TOO]   ExpressedState: 0"),
+        ]
+
+        def on_call(argv):
+            if "self-test-request" in argv:
+                link.push_urcs(["+MTCMD:0,5,92,0"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_phase3_ctx(link, chip=chip)
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_10_smoke(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_second_cycle_busy_fails_the_b165_pin(self):
+        ctx = self._ctx(second_cycle_busy=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_10_smoke(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep311Power(unittest.TestCase):
+    """T5 task 5: BatPercentRemaining written over AT+MTATTR in wire
+    half-percent units, read back from the controller."""
+
+    def _ctx(self, read_value="164"):
+        link = FakeLink({
+            "AT+MTATTR=6,47,12,164": (0, ["+MTATTR:6,47,12,164"]),
+        })
+        script = [(0, "[TOO]   BatPercentRemaining: %s" % read_value)]
+        runner = FakeChipRunner(script)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_phase3_ctx(link, chip=chip)
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_11_power(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_wrong_readback_fails(self):
+        ctx = self._ctx(read_value="99")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_11_power(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep312LockSwitchLevels(unittest.TestCase):
+    """T5 task 5: door lock state + forwarded lock command (both
+    verdicts), the switch event, and the temp-levels verbatim
+    read-back."""
+
+    def _ctx(self, deny_rc=1, push_deny_urc=True):
+        link = FakeLink({
+            "AT+MTLOCK=8,1": (0, []),
+            "AT+MTSWITCH=9": (0, []),
+            'AT+MTTEMPLEVELS=10,"Low","Medium, high"': (0, []),
+            "AT+MTCMDRESP=1,1": (0, []),
+            "AT+MTCMDRESP=2,0": (0, []),
+        })
+        script = [
+            (0, "[TOO]   LockState: 1"),
+            (0, ""),                                    # lock-door allow
+            (deny_rc, "[TOO] Run command failure"),      # lock-door deny
+            (0, "[TOO]   InitialPress: {"),
+            (0, "\n".join([
+                "[TOO]   SupportedTemperatureLevels: 2 entries",
+                "[TOO]     [1]: Low",
+                "[TOO]     [2]: Medium, high",
+            ])),
+        ]
+        calls = {"lock": 0}
+
+        def on_call(argv):
+            if "lock-door" not in argv:
+                return
+            calls["lock"] += 1
+            if calls["lock"] == 1:
+                link.push_urcs(["+MTCMD:1,8,257,0"])
+            elif calls["lock"] == 2 and push_deny_urc:
+                link.push_urcs(["+MTCMD:2,8,257,0"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_12_lock_switch_levels(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_deny_reported_as_success_fails(self):
+        # Regression shape: if a denied LockDoor ever exited 0 (Success)
+        # instead of failing, this must fail, not silently pass.
+        ctx = self._ctx(deny_rc=0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_12_lock_switch_levels(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_deny_forward_never_answered_fails(self):
+        ctx = self._ctx(push_deny_urc=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_12_lock_switch_levels(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep313Restore(unittest.TestCase):
+    """T5 task 5: step_3_13_restore is the named wrapper the brief and
+    Task 4's report anticipated, delegating to the one shared restore
+    path; deliberately NOT registered in PHASE3_STEPS (see its
+    docstring) so run_phase3's finally stays the single place restore
+    actually runs."""
+
+    def test_delegates_to_restore_standard_state(self):
+        commands = {
+            "AT+MTFRESET": (0, []), "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []), "AT+MTEPAPPLY": (0, []),
+            "AT+MTEP?": (0, ["+MTEP:0,1,0x0100"]),
+            "AT+MTFABRICS?": (0, ["+MTFABRICS:0"]),
+        }
+        link = FakeLink(commands, urcs_on_command={
+            "AT+MTFRESET": ["+MTREADY"], "AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok = step_3_13_restore(ctx)
+        self.assertTrue(ok)
+        self.assertGreater(len(ctx.suite.results), 0)
+
+    def test_not_registered_in_phase3_steps(self):
+        fn_objs = [s["fn"] for s in PHASE3_STEPS]
+        self.assertNotIn(step_3_13_restore, fn_objs)
+
+
+class TestParseIndexedList(unittest.TestCase):
+    """T5 task 5: added beyond Task 3's original five parsers to cover a
+    plain list[string] read (SupportedTemperatureLevels), which has no
+    Label:/Name: struct field for parse_string_list to match. See
+    parse_indexed_list's docstring for the DataModelLogger.h
+    verification (no bench evidence exists for this attribute)."""
+
+    def test_reads_plain_string_list_entries(self):
+        text = "\n".join([
+            "[TOO]   SupportedTemperatureLevels: 2 entries",
+            "[TOO]     [1]: Low",
+            "[TOO]     [2]: Medium, high",
+        ])
+        self.assertEqual(parse_indexed_list(text), ["Low", "Medium, high"])
+
+    def test_no_match_is_empty(self):
+        self.assertEqual(parse_indexed_list("no such content"), [])
 
 
 class TestMainPhase3Wiring(unittest.TestCase):

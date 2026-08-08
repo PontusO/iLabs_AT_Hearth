@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -398,6 +399,13 @@ class Phase3Context:
         self.composition = list(PHASE3_COMPOSITION)
         self.transport = "WIFI"    # set from phase3_gate's detection
         self.dataset = None        # Thread active dataset hex, if any
+        self.qr = None             # captured by step_3_5_commission
+        self.manual = None
+        self.passcode = None
+        self.discriminator = None
+        self.chip_call = None      # test seam; None means the real
+                                    # threaded chip.run() (see
+                                    # invoke_chip/_threaded_chip_call)
 
 
 def step_2_1_factory_fresh(ctx):
@@ -1209,6 +1217,568 @@ def step_3_4_stores(ctx):
       err("AT+MTCHIMESOUNDS=4", 1))
 
 
+class _ChipCallHandle:
+    """Returned by invoke_chip(): join() blocks for the background
+    chip-tool call to finish and returns (rc, out), the same shape
+    ChipTool.run() itself returns."""
+
+    def __init__(self, thread, result):
+        self._thread = thread
+        self._result = result
+
+    def join(self, timeout=None):
+        self._thread.join(timeout)
+        return self._result.get("rc"), self._result.get("out")
+
+
+def _threaded_chip_call(chip, argv, timeout=60):
+    """Production chip_call: run chip.run(argv, timeout) on a background
+    thread and return immediately with a handle to join later.
+
+    Why this exists (spec 3.17, the concurrency requirement the T5
+    design spec's section 4.3 prose does not spell out; see the task-5
+    report): an adjudicated +MTCMD forward (valve open/close, chime
+    PlayChimeSound, the OperationalState quartet, the door lock) blocks
+    the CHIP event-loop task, and therefore chip-tool's own wait for the
+    InvokeCommandResponse, for up to 1000 ms while the firmware waits on
+    AT+MTCMDRESP. ChipTool.run() is synchronous (subprocess.run());
+    calling it directly would leave nothing pumping the AT link for that
+    whole window, so the harness could never answer in time. Running it
+    on a background thread lets the same Python process do both at once:
+    this thread blocks in the subprocess call while the thread that
+    started it is free to call CmdResponder.expect()/expect_notify() on
+    ctx.link. Only one thread ever touches ctx.link (the caller's); this
+    thread touches only `chip` and its own local result dict, so there
+    is no data race on ATLink's internals.
+
+    Not needed for every forward: the smoke self-test (spec 3.22) is
+    notify-only and the SDK answers the controller before the ember
+    callback that raises +MTCMD ever runs, so step_3_10_smoke calls
+    chip.run() directly instead of going through this. Same for the
+    OperationalState in-state guard (runs inside the SDK before the
+    delegate, and therefore mt_cmd_forward, is ever reached): nothing
+    blocks waiting on a verdict that is never asked for."""
+    result = {}
+
+    def _run():
+        result["rc"], result["out"] = chip.run(argv, timeout)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return _ChipCallHandle(t, result)
+
+
+def invoke_chip(ctx, argv, timeout=60):
+    """Start a chip-tool invocation the way every controller-adjudicated
+    Phase 3 step needs it (see _threaded_chip_call's docstring): through
+    ctx.chip_call when the test seam is set (a synchronous double, so
+    self-tests can assert exact ordering without racing a real thread
+    against FakeLink's non-blocking, single-pass await_urc_ts), else the
+    real threaded call. Returns a handle; call .join(timeout) after
+    adjudicating the forward on ctx.link to get (rc, out)."""
+    call = ctx.chip_call or _threaded_chip_call
+    return call(ctx.chip, argv, timeout)
+
+
+def step_3_5_commission(ctx):
+    """T5 design spec section 4.3: commission the Phase 3 composition.
+    Same shape as step_2_3_commission (Phase 2's commissioning proof),
+    scoped to what this segment actually needs before the matrix runs:
+    chip-tool exits 0, +MTEVT:3 lands, and exactly one fabric exists
+    afterward. The DE24 window-close ordering pair (+MTEVT:4 following
+    +MTEVT:3, timestamps compared) is Phase 2's own regression pin
+    already (step_2_3_commission); Phase 3 does not re-prove it, since
+    nothing about DE24 is composition-specific."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    res, lines = link.command("AT+MTCODES?")
+    if res == 0 and lines:
+        m = re.fullmatch(r"\+MTCODES:(.+),(\d{11})", lines[0])
+        if m:
+            ctx.qr, ctx.manual = m.group(1), m.group(2)
+    if not s.check("3.5 codes captured", ctx.qr is not None, tag="P3"):
+        raise StepAbort("cannot capture onboarding codes")
+    rc, out = chip.run(["payload", "parse-setup-payload", ctx.qr], timeout=15)
+    parsed = parse_setup_payload(out) if rc == 0 else None
+    if not s.check("3.5 QR payload parses", parsed is not None, tag="P3"):
+        raise StepAbort("onboarding QR not machine-usable")
+    ctx.passcode, ctx.discriminator = parsed
+    rc, out = chip.run(pairing_argv(ctx), timeout=120)
+    paired = s.check("3.5 chip-tool pairing exits 0", rc == 0, tag="P3")
+    if not paired:
+        print("    (chip-tool tail: %s)"
+              % _pairing_tail(out, getattr(ctx.opts, "psk", None)))
+    s.check("3.5 +MTEVT:1 session started",
+            link.await_urc(r"\+MTEVT:1$", timeout=90.0) is not None,
+            tag="P3")
+    got3 = link.await_urc_ts(r"\+MTEVT:3$", timeout=90.0)
+    s.check("3.5 +MTEVT:3 commissioning complete", got3 is not None,
+            tag="P3")
+    if not (paired and got3 is not None):
+        raise StepAbort("commissioning failed")
+    res, lines = link.command("AT+MTFABRICS?")
+    if not s.check("3.5 fabrics 1", res == 0 and lines == ["+MTFABRICS:1"],
+                   tag="P3"):
+        raise StepAbort("fabric count did not settle at 1")
+
+
+def step_3_6_valve(ctx):
+    """T5 design spec 4.3 bullet 1 (valve): open from the controller,
+    the +MTCMD actuation forward answered allow, the host's own
+    AT+MTVALVE actuation report, and the ValveStateChanged event read
+    back. Sequence lifted verbatim from the C10 evidence's "3d" bullet
+    (task-C10-report.md), endpoint substituted 1 -> 2 for
+    PHASE3_COMPOSITION's valve slot: cluster 129/0x0081 (verified
+    against connectedhomeip's generated ClusterId.h), Open command 0,
+    CurrentState attribute 4, TargetState attribute 5.
+
+    Deny semantics (spec 3.19): the verdict gates ACTUATION only, never
+    the wire response. ValveConfigurationAndControl's server calls the
+    delegate synchronously and discards what it returns
+    (TEMPORARY_RETURN_IGNORED at both call sites), so the controller
+    sees Status::Success whichever verdict the harness gives; a deny run
+    would prove nothing different on the wire, so this step only
+    exercises allow (contrast step_3_9_opstate and step_3_12's lock
+    forward, where a deny genuinely changes what the controller sees).
+
+    This is also where the MTCMDRESP deferred row lands (Task 1's
+    register_phase1_t5_negative, "seq already answered/expired ->
+    +MTERR:1"; needs a real forward, out of the host-only segment's
+    scope per Task 4's report): the C10 evidence's own "3d" bullet ties
+    "the answered non-zero-seq +MTCMD regression pin" to this exact
+    forward, so the re-answer-a-stale-seq pin is proven against the same
+    seq right after CmdResponder answers it once."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    res, lines = link.command("AT+MTVALVE=2,0", expect="+MTATTR:")
+    s.check("3.6 known start state: valve closed",
+            res == 0 and lines == ["+MTATTR:2,129,4,0"], tag="P3")
+
+    handle = invoke_chip(ctx, ["valveconfigurationandcontrol", "open", node,
+                              "2"], timeout=30)
+    fwd = responder.expect(cluster=129, command=0, verdict=1, timeout=5.0)
+    if not s.check("3.6 +MTCMD forward answered allow", fwd is not None,
+                   tag="P3"):
+        handle.join(30)
+        raise StepAbort("valve open forward was never answered")
+    rc, _ = handle.join(30)
+    s.check("3.6 chip-tool open exits 0", rc == 0, tag="P3")
+
+    res, _ = link.command("AT+MTCMDRESP=%d,1" % fwd["seq"])
+    s.check("3.6 stale-seq re-answer -> +MTERR:1 (MTCMDRESP deferred row)",
+            res == 1, tag="P3")
+
+    res, _ = link.command("AT+MTVALVE=2,1")
+    s.check("3.6 host reports actuation -> OK", res == 0, tag="P3")
+
+    rc, out = chip.run(["valveconfigurationandcontrol", "read",
+                        "current-state", node, "2"], timeout=30)
+    s.check("3.6 controller reads CurrentState Open",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+
+    rc, out = chip.run(["valveconfigurationandcontrol", "read-event",
+                        "valve-state-changed", node, "2"], timeout=30)
+    # >= 1, not == 1: step_3_2_grammar already wrote AT+MTVALVE=2,1 twice
+    # host-only (spec 3.19: UpdateCurrentState() fires the event on every
+    # call, not just on a real change), before any controller existed to
+    # read the event log, so entries from that earlier segment are still
+    # in the buffer.
+    s.check("3.6 ValveStateChanged event observed",
+            rc == 0 and parse_event_count(out, "ValveStateChanged") >= 1,
+            tag="P3")
+
+
+def step_3_7_modes(ctx):
+    """T5 design spec 4.3 bullet 2 (mode select): SupportedModes reads
+    back verbatim including a comma-containing label (spec 3.20), then a
+    ChangeToMode round trip with the unsolicited CurrentMode +MTATTR URC
+    (cluster 80/0x0050, attribute 3) spec 3.20 documents -- "the host
+    sees that the ordinary way, a +MTATTR URC ... not a URC specific to
+    this command." No CmdResponder needed: ChangeToMode is not a
+    forwarded command, the SDK sets CurrentMode itself after validating
+    against SupportedModes.
+
+    Modes are re-established here rather than relying on step_3_4's
+    trailing state, so this step is self-contained and its "comma label
+    pinned" assertion is not coupled to an earlier step's exact last
+    call."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+
+    res, _ = link.command('AT+MTMODES=3,0,"Quiet",1,"Eco, low"')
+    s.check("3.7 modes established (comma label) -> OK", res == 0, tag="P3")
+
+    rc, out = chip.run(["modeselect", "read", "supported-modes", node, "3"],
+                       timeout=30)
+    s.check("3.7 SupportedModes verbatim (comma label survives)",
+            rc == 0 and parse_string_list(out) == ["Quiet", "Eco, low"],
+            tag="P3")
+
+    res, _ = link.command("AT+MTATTR=3,80,3,0")
+    s.check("3.7 CurrentMode reset to 0 -> OK", res == 0, tag="P3")
+    link.drain(0.3)
+
+    rc, _ = chip.run(["modeselect", "change-to-mode", "1", node, "3"],
+                     timeout=30)
+    s.check("3.7 chip-tool change-to-mode exits 0", rc == 0, tag="P3")
+    got = link.await_urc(r"\+MTATTR:3,80,3,1$", timeout=5.0)
+    s.check("3.7 CurrentMode URC on the AT link", got is not None, tag="P3")
+
+    res, lines = link.command("AT+MTATTR=3,80,3")
+    s.check("3.7 AT read agrees (CurrentMode 1)",
+            res == 0 and lines == ["+MTATTR:3,80,3,1"], tag="P3")
+
+
+def step_3_8_chime(ctx):
+    """T5 design spec 4.3 bullet 3 (chime): InstalledChimeSounds
+    verbatim (comma label), PlayChimeSound allow AND deny with the
+    chimeID visible in the fifth +MTCMD payload field, and the
+    Enabled=false short-circuit. Cluster 1366/0x0556, command 0
+    (PlayChimeSound), chimeID 7 -- lifted verbatim from the C10
+    evidence's "3e" bullet, which used the identical chimeID.
+
+    Deny semantics differ from the valve (spec 3.24): "the host's
+    verdict reaches the controller exactly as given, Status::Success on
+    allow or Status::Failure on deny, with no SDK-side remapping" -- the
+    chime deny IS the wire status (0x1), unlike the valve, where the
+    verdict never reaches the wire at all.
+
+    Enabled=false short-circuit (spec 3.24): the cluster answers
+    Status::Success itself, with no delegate call, so no +MTCMD ever
+    arrives; this is the SDK's own short-circuit, not a forwarding
+    failure, hence assert_no_urc rather than a responder timeout."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    res, _ = link.command(
+        'AT+MTCHIMESOUNDS=4,1,"Doorbell",2,"Alert, urgent",7,"Westminster"')
+    s.check("3.8 InstalledChimeSounds established (comma label) -> OK",
+            res == 0, tag="P3")
+    rc, out = chip.run(["chime", "read", "installed-chime-sounds", node,
+                        "4"], timeout=30)
+    s.check("3.8 InstalledChimeSounds verbatim",
+            rc == 0 and parse_string_list(out)
+            == ["Doorbell", "Alert, urgent", "Westminster"], tag="P3")
+
+    res, _ = link.command("AT+MTCHIME=4,1,1")
+    s.check("3.8 Enabled = true -> OK", res == 0, tag="P3")
+
+    handle = invoke_chip(ctx, ["chime", "play-chime-sound", node, "4",
+                              "--ChimeID", "7"], timeout=30)
+    fwd = responder.expect(cluster=1366, command=0, verdict=1, payload=7,
+                           timeout=5.0)
+    s.check("3.8 allow: +MTCMD forward answered, chimeID 7 in payload",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.8 allow: chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.8 allow: wire status 0x0 (Success)",
+            parse_status(out) == 0x0, tag="P3")
+
+    handle = invoke_chip(ctx, ["chime", "play-chime-sound", node, "4",
+                              "--ChimeID", "7"], timeout=30)
+    fwd = responder.expect(cluster=1366, command=0, verdict=0, payload=7,
+                           timeout=5.0)
+    s.check("3.8 deny: +MTCMD forward answered, chimeID 7 in payload",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.8 deny: chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.8 deny: wire status 0x1 (Failure)",
+            parse_status(out) == 0x1, tag="P3")
+
+    res, _ = link.command("AT+MTCHIME=4,1,0")
+    s.check("3.8 Enabled = false -> OK", res == 0, tag="P3")
+    link.drain(0.3)
+    rc, out = chip.run(["chime", "play-chime-sound", node, "4", "--ChimeID",
+                        "7"], timeout=30)
+    s.check("3.8 disabled: chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.8 disabled: no +MTCMD raised (SDK short-circuit)",
+            link.assert_no_urc(r"\+MTCMD:", 2.0), tag="P3")
+    s.check("3.8 disabled: controller still sees Success",
+            parse_status(out) == 0x0, tag="P3")
+
+
+def step_3_9_opstate(ctx):
+    """T5 design spec 4.3 bullet 4 (OperationalState/washer): Pause id
+    0, Stop id 1, Start id 2, Resume id 3, cluster 96/0x0060 -- lifted
+    verbatim from the C10 "Re-run 3f" evidence that proved defect
+    F-C10-1's fix, endpoint substituted 6 -> 7 for PHASE3_COMPOSITION's
+    washer slot.
+
+    Deny semantics (spec 3.21; verified against main.cpp's
+    HearthOpStateDelegate::forward(), which calls err.Set() with the
+    verdict directly): unlike the valve, the verdict IS the wire
+    response. Instance::HandlePauseState() and its Stop/Start/Resume
+    siblings copy err straight into the OperationalCommandResponse, so
+    ErrorStateID 0 (kNoError) means allow and 2
+    (kUnableToCompleteOperation) means deny, both read via parse_status's
+    ErrorStateID fallback.
+
+    The in-state guard (verified in main.cpp: HearthOpStateDelegate::
+    forward() has no state check of its own -- the guard lives in the
+    SDK's own Instance, before the delegate, and therefore
+    mt_cmd_forward, is ever reached) is proven last: a pause sent from
+    Stopped answers ErrorStateID 3 (kCommandInvalidInState) with NO
+    +MTCMD raised, via a synchronous chip.run() (no responder thread
+    needed, since nothing blocks waiting on a verdict that is never
+    asked for)."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    def allow(name, verb, command, next_state):
+        handle = invoke_chip(ctx, ["operationalstate", verb, node, "7"],
+                             timeout=30)
+        fwd = responder.expect(cluster=96, command=command, verdict=1,
+                               timeout=5.0)
+        s.check("3.9 %s +MTCMD forward answered allow" % name,
+                fwd is not None, tag="P3")
+        rc, out = handle.join(30)
+        s.check("3.9 %s chip-tool exits 0 (allow)" % name, rc == 0,
+                tag="P3")
+        s.check("3.9 %s ErrorStateID 0 (kNoError) on allow" % name,
+                parse_status(out) == 0, tag="P3")
+        res, _ = link.command("AT+MTOPSTATE=7,%d" % next_state)
+        s.check("3.9 host reports %s transition -> OK" % name, res == 0,
+                tag="P3")
+
+    res, _ = link.command("AT+MTOPSTATE=7,0")
+    s.check("3.9 known start state: Stopped -> OK", res == 0, tag="P3")
+
+    allow("start", "start", 2, 1)    # Stopped -> Running
+    allow("pause", "pause", 0, 2)    # Running -> Paused
+    allow("resume", "resume", 3, 1)  # Paused -> Running
+    allow("stop", "stop", 1, 0)      # Running -> Stopped
+
+    res, _ = link.command("AT+MTOPSTATE=7,1")
+    s.check("3.9 deny precondition: Running -> OK", res == 0, tag="P3")
+    handle = invoke_chip(ctx, ["operationalstate", "pause", node, "7"],
+                         timeout=30)
+    fwd = responder.expect(cluster=96, command=0, verdict=0, timeout=5.0)
+    s.check("3.9 pause +MTCMD forward answered deny", fwd is not None,
+            tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.9 pause chip-tool exits 0 (deny)", rc == 0, tag="P3")
+    s.check("3.9 ErrorStateID 2 (kUnableToCompleteOperation) on deny",
+            parse_status(out) == 2, tag="P3")
+    rc, out = chip.run(["operationalstate", "read", "operational-state",
+                        node, "7"], timeout=30)
+    s.check("3.9 state unchanged by deny (still Running)",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+
+    res, _ = link.command("AT+MTOPSTATE=7,0")
+    s.check("3.9 in-state guard precondition: Stopped -> OK", res == 0,
+            tag="P3")
+    link.drain(0.3)
+    rc, out = chip.run(["operationalstate", "pause", node, "7"], timeout=30)
+    s.check("3.9 in-state guard: chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.9 in-state guard: ErrorStateID 3 (kCommandInvalidInState)",
+            parse_status(out) == 3, tag="P3")
+    s.check("3.9 in-state guard: no +MTCMD raised",
+            link.assert_no_urc(r"\+MTCMD:", 2.0), tag="P3")
+
+
+def step_3_10_smoke(ctx):
+    """T5 design spec 4.3 bullet 5 (smoke/CO alarm): the self-test
+    lifecycle end to end, from a real controller, TWICE in a row (the
+    B165/F-C10-2 regression pin, spec 3.22's DEFECT note), plus
+    AT+MTALARM SmokeState Warning with the SmokeAlarm event and
+    ExpressedState tracking both directions (host-only proved this in
+    step_3_3; this repeats the SmokeState half through a controller
+    read, per the design spec 4.3 bullet).
+
+    SelfTestRequest is notify-only (spec 3.22: "the SDK has already
+    answered the controller before the ember callback ... ever runs"),
+    so chip.run() is called directly, no invoke_chip/responder thread
+    needed: nothing blocks the controller's own reply on an
+    AT+MTCMDRESP the host never has to send for seq 0."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    res, lines = link.command("AT+MTATTR=5,92,0")
+    s.check("3.10 clean start: ExpressedState 0",
+            res == 0 and lines == ["+MTATTR:5,92,0,0"], tag="P3")
+
+    rc, out = chip.run(["smokecoalarm", "read-event", "self-test-complete",
+                        node, "5"], timeout=30)
+    before = parse_event_count(out, "SelfTestComplete") if rc == 0 else None
+    s.check("3.10 SelfTestComplete baseline read", before is not None,
+            tag="P3")
+
+    for cycle, want_count in ((1, (before or 0) + 1), (2, (before or 0) + 2)):
+        rc, out = chip.run(["smokecoalarm", "self-test-request", node, "5"],
+                           timeout=30)
+        s.check("3.10 cycle %d: chip-tool self-test-request exits 0"
+                % cycle, rc == 0, tag="P3")
+        # The B165/F-C10-1 wedge symptom on a re-broken build: the second
+        # request answered Status::Busy (0x9c) with no +MTCMD at all.
+        s.check("3.10 cycle %d: not answered Busy (0x9c)" % cycle,
+                "0x9c" not in out.lower() and "busy" not in out.lower(),
+                tag="P3")
+        fwd = responder.expect_notify(cluster=92, command=0, timeout=5.0)
+        s.check("3.10 cycle %d: +MTCMD:0,... notify received" % cycle,
+                fwd is not None, tag="P3")
+        res, lines = link.command("AT+MTALARM=5,5,0", expect="+MTATTR:")
+        s.check("3.10 cycle %d: completion -> OK" % cycle,
+                res == 0 and lines == ["+MTATTR:5,92,5,0", "+MTATTR:5,92,0,0"],
+                tag="P3")
+        rc, out = chip.run(["smokecoalarm", "read-event",
+                            "self-test-complete", node, "5"], timeout=30)
+        s.check("3.10 cycle %d: SelfTestComplete count is %d" % (cycle,
+                want_count),
+                rc == 0 and parse_event_count(out, "SelfTestComplete")
+                == want_count, tag="P3")
+
+    res, lines = link.command("AT+MTALARM=5,1,1", expect="+MTATTR:")
+    s.check("3.10 SmokeState Warning -> OK",
+            res == 0 and lines == ["+MTATTR:5,92,1,1", "+MTATTR:5,92,0,1"],
+            tag="P3")
+    rc, out = chip.run(["smokecoalarm", "read-event", "smoke-alarm", node,
+                        "5"], timeout=30)
+    s.check("3.10 SmokeAlarm event observed controller-side",
+            rc == 0 and parse_event_count(out, "SmokeAlarm") >= 1, tag="P3")
+    rc, out = chip.run(["smokecoalarm", "read", "expressed-state", node,
+                        "5"], timeout=30)
+    s.check("3.10 ExpressedState 1 (SmokeAlarm) controller-side",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+
+    res, lines = link.command("AT+MTALARM=5,1,0", expect="+MTATTR:")
+    s.check("3.10 SmokeState cleared -> OK",
+            res == 0 and lines == ["+MTATTR:5,92,1,0", "+MTATTR:5,92,0,0"],
+            tag="P3")
+    rc, out = chip.run(["smokecoalarm", "read", "expressed-state", node,
+                        "5"], timeout=30)
+    s.check("3.10 ExpressedState back to 0 controller-side",
+            rc == 0 and parse_int_attr(out) == 0, tag="P3")
+
+
+def step_3_11_power(ctx):
+    """T5 design spec 4.3 bullet 6 (power source): BatPercentRemaining
+    written over AT+MTATTR in wire half-percent units (0..200, spec
+    3.9's "hand-added by the thunk" note) and read back from the
+    controller. Cluster 47/0x002F, attribute 12/0x0C, both verified
+    against connectedhomeip's generated PowerSource ClusterId.h/
+    AttributeIds.h, not transcribed from memory.
+
+    Task 3's report flagged the read argv as unverified ("no chip-tool
+    cluster-verb capture exists in the C10 evidence... likely
+    ["powersource", "read", "feature-map", ...] by analogy"). Verified
+    this round, NOT by inference: `chip-tool powersource read --help`
+    against the pinned binary
+    (~/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool)
+    lists "bat-percent-remaining" as a real attribute verb, so the read
+    below uses that directly rather than feature-map (which would read
+    the wrong attribute)."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+
+    res, lines = link.command("AT+MTATTR=6,47,12,164")
+    s.check("3.11 AT+MTATTR write BatPercentRemaining=164 -> OK",
+            res == 0 and lines == ["+MTATTR:6,47,12,164"], tag="P3")
+
+    rc, out = chip.run(["powersource", "read", "bat-percent-remaining",
+                        node, "6"], timeout=30)
+    s.check("3.11 controller reads BatPercentRemaining 164 (wire units)",
+            rc == 0 and parse_int_attr(out) == 164, tag="P3")
+
+
+def step_3_12_lock_switch_levels(ctx):
+    """T5 design spec 4.3 bullets 7-9 (door lock, switch, temp levels).
+
+    Door lock deny: LockDoor has no cluster-specific response the way
+    OperationalState's OperationalCommandResponse does (spec 3.17: the
+    door lock is the example given for "a deny surfaces as
+    Status::Failure to the controller"), so a deny is a plain StatusIB
+    failure, not a Success wrapper with an embedded verdict field. No
+    door-lock forward transcript exists in the C10 evidence (that risk
+    set was the seven NEW types; the door-lock round predates it and
+    Phase 3's own doorlock-round coverage is new ground), so "chip-tool
+    reports non-zero on deny" is inferred from the spec text plus the
+    F-C10-1 UNSUPPORTED_COMMAND precedent (also a bare-StatusIB failure,
+    also non-zero exit) rather than lifted from a bench transcript --
+    flagged for Task 7's bench pass to confirm.
+
+    Switch events are fire-and-forget (spec 3.15): AT+MTSWITCH never
+    echoes on the AT link, so the only way to observe it is a
+    controller-side event read.
+
+    Temp levels: no C10 evidence transcript touches TemperatureControl
+    either (the temp-levels cabinet is Task 4's slot 10/11 addition, new
+    ground). SupportedTemperatureLevels is list[string], not
+    list[struct{Label}] like SupportedModes/InstalledChimeSounds, so
+    parse_string_list's Label:/Name: pattern does not apply; see
+    parse_indexed_list's docstring for the print-path verification."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    res, _ = link.command("AT+MTLOCK=8,1")
+    s.check("3.12 AT+MTLOCK=8,1 -> OK (Locked)", res == 0, tag="P3")
+    rc, out = chip.run(["doorlock", "read", "lock-state", node, "8"],
+                       timeout=30)
+    s.check("3.12 controller reads LockState (Locked)",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+
+    handle = invoke_chip(ctx, ["doorlock", "lock-door", node, "8"],
+                         timeout=30)
+    fwd = responder.expect(cluster=257, command=0, verdict=1, timeout=5.0)
+    s.check("3.12 LockDoor +MTCMD forward answered allow", fwd is not None,
+            tag="P3")
+    rc, _ = handle.join(30)
+    s.check("3.12 chip-tool lock-door exits 0 (allow)", rc == 0, tag="P3")
+
+    handle = invoke_chip(ctx, ["doorlock", "lock-door", node, "8"],
+                         timeout=30)
+    fwd = responder.expect(cluster=257, command=0, verdict=0, timeout=5.0)
+    s.check("3.12 LockDoor +MTCMD forward answered deny", fwd is not None,
+            tag="P3")
+    rc, _ = handle.join(30)
+    s.check("3.12 chip-tool lock-door reports Failure on deny (rc != 0)",
+            rc != 0, tag="P3")
+
+    link.drain(0.3)
+    res, _ = link.command("AT+MTSWITCH=9")
+    s.check("3.12 AT+MTSWITCH=9 -> OK", res == 0, tag="P3")
+    rc, out = chip.run(["switch", "read-event", "initial-press", node, "9"],
+                       timeout=30)
+    s.check("3.12 InitialPress event observed controller-side",
+            rc == 0 and parse_event_count(out, "InitialPress") >= 1,
+            tag="P3")
+
+    res, _ = link.command('AT+MTTEMPLEVELS=10,"Low","Medium, high"')
+    s.check("3.12 AT+MTTEMPLEVELS=10 (comma label) -> OK", res == 0,
+            tag="P3")
+    rc, out = chip.run(["temperaturecontrol", "read",
+                        "supported-temperature-levels", node, "10"],
+                       timeout=30)
+    s.check("3.12 SupportedTemperatureLevels verbatim (comma label survives)",
+            rc == 0 and parse_indexed_list(out) == ["Low", "Medium, high"],
+            tag="P3")
+
+
+def step_3_13_restore(ctx):
+    """T5 design spec 4.4's restore, as its own named step: AT+MTFRESET,
+    the standard single-0x0100 composition, AT+MTEPAPPLY (which per spec
+    3.9 persists and reboots -- restore_standard_state's actual
+    +MTREADY wait target), +MTEP:0,1,0x0100 and zero fabrics.
+
+    Deliberately NOT added to PHASE3_STEPS. run_phase3's finally already
+    calls restore_standard_state(ctx.link, ctx.suite) unconditionally on
+    every exit path, clean finish or any abort (design spec 4.4), which
+    is this function's entire body; registering a second, identical step
+    in the normal chain would double every reset/apply cycle at the end
+    of a clean run for no additional coverage, and print two sets of
+    identically-named "restore ..." checks in the same report. This
+    function exists so "the restore step" has the name the brief and
+    Task 4's report anticipated, and can be called or tested on its own,
+    while there remains exactly one restore code path -- Task 4's
+    report: 'the two restore paths cannot drift', because there is only
+    one."""
+    return restore_standard_state(ctx.link, ctx.suite)
+
+
 def restore_standard_state(link, suite=None):
     """Factory-reset and redeclare the bench's standard single-0x0100
     composition (design spec section 4.4). Shared by run_phase3's
@@ -1306,6 +1876,22 @@ PHASE3_STEPS[:] = [
      "requires": ["3.1 compose + boot-rebuild pin"]},
     {"name": "3.4 store grammar edges", "fn": step_3_4_stores,
      "requires": ["3.1 compose + boot-rebuild pin"]},
+    {"name": "3.5 commission", "fn": step_3_5_commission,
+     "requires": ["3.4 store grammar edges"]},
+    {"name": "3.6 valve", "fn": step_3_6_valve,
+     "requires": ["3.5 commission"]},
+    {"name": "3.7 mode select", "fn": step_3_7_modes,
+     "requires": ["3.5 commission"]},
+    {"name": "3.8 chime", "fn": step_3_8_chime,
+     "requires": ["3.5 commission"]},
+    {"name": "3.9 operational state", "fn": step_3_9_opstate,
+     "requires": ["3.5 commission"]},
+    {"name": "3.10 smoke/CO alarm", "fn": step_3_10_smoke,
+     "requires": ["3.5 commission"]},
+    {"name": "3.11 power source", "fn": step_3_11_power,
+     "requires": ["3.5 commission"]},
+    {"name": "3.12 lock, switch, temp levels",
+     "fn": step_3_12_lock_switch_levels, "requires": ["3.5 commission"]},
 ]
 
 
@@ -1465,6 +2051,29 @@ def parse_string_list(text):
     standard", "Boost"]). Empty list on no match, never raises."""
     return [m.rstrip() for m in
             re.findall(r"(?:Label|Name):\s*(.+)$", text, re.MULTILINE)]
+
+
+def parse_indexed_list(text):
+    """Every value in a chip-tool `[n]: <value>` list read where the
+    list holds a plain scalar or string, not a struct with a `Label:`/
+    `Name:` field the way parse_string_list's targets do: the shape
+    `SupportedTemperatureLevels` (`list[string]`, not `list[struct]`)
+    uses. Added in T5 task 5, one parser beyond Task 3's original five,
+    because none of those five cover a bare list[string] read: no C10
+    evidence transcript touches TemperatureControl at all (the
+    temp-levels cabinet is Task 4's slot 10/11 addition, new ground the
+    seven-type batch never exercised), so this is verified against the
+    pinned SDK's own print path instead of a bench capture --
+    connectedhomeip/examples/chip-tool/commands/clusters/DataModelLogger.h:
+    the `DecodableList<T>` template labels each entry `"[i]"` (around
+    line 116-136) and, for a `CharSpan` element (around line 47-50),
+    prints it through `LogString(label, indent, value)` with no
+    wrapping struct -- exactly the `[n]: <value>` shape this regex
+    targets, one level of indentation deeper than the "N entries"
+    summary line `parse_string_list`'s target also carries. Empty list
+    on no match, never raises."""
+    return [m.rstrip() for m in
+            re.findall(r"\[\d+\]:\s*(.+)$", text, re.MULTILINE)]
 
 
 class Subscriber:
