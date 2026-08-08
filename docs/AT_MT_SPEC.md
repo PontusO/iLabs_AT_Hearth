@@ -1310,11 +1310,23 @@ AT+MTALARM=<ep>,<field>,<value>  ->  OK
 | `11` | SmokeSensitivityLevel | `SetSmokeSensitivityLevel` | `SensitivityEnum`: `0` High, `1` Standard, `2` Low |
 
 `<field>` `0` (`ExpressedState`) is not in this table because it is derived
-by the server from the ten states above and is never settable directly: `0`
-and anything outside `1`-`11` answer `+MTERR:1`. `<value>` outside the range
-its own field's enum defines (or, for the two boolean fields, outside
-`0`/`1`) also answers `+MTERR:1`; the range comes from the SDK's own enum
-(its `kUnknownEnumValue` bound), never a literal copied into this firmware.
+and never settable directly: `0` and anything outside `1`-`11` answer
+`+MTERR:1`. `<value>` outside the range its own field's enum defines (or, for
+the two boolean fields, outside `0`/`1`) also answers `+MTERR:1`; the range
+comes from the SDK's own enum (its `kUnknownEnumValue` bound), never a
+literal copied into this firmware.
+
+The derivation is a recompute, not a passive read: after every field that
+feeds it (`1`-`3`, `5`-`9`; `4`, `10` and `11` do not, none of them
+correspond to an `ExpressedStateEnum` value) the bridge calls the server's
+own `SetExpressedStateByPriority`, walking a fixed priority order (smoke
+alarm and its interconnect echo, then CO alarm and its echo, then hardware
+fault, then an in-progress self test, then end-of-service, then low battery
+last) and landing `ExpressedState` on the highest-priority state that is
+currently non-normal, or `Normal` if none is. This is what lets a self test
+end cleanly: without it, `ExpressedState` reached `Testing` once and stayed
+there for the endpoint's commissioned life (bug B165, fixed in task C12; see
+the DEFECT note below).
 
 **The self-test lifecycle.** A controller's `SelfTestRequest` command
 (cluster `0x005C`, command `0`) is not adjudicated the way `AT+MTLOCK`'s or
@@ -1326,8 +1338,11 @@ firmware wires to the notify-only `+MTCMD` form (§3.17):
 is already sent. The host runs whatever self-test it actually performs, then
 reports completion with `AT+MTALARM=<ep>,5,0` (`TestInProgress` false), which
 the SDK's own `SetTestInProgress` recognises as the field's true-to-false
-edge and fires `SelfTestComplete` on the fabric. `AT+MTCMDRESP=0,...` always
-answers `+MTERR:1`: there is nothing pending seq `0` could ever answer.
+edge and fires `SelfTestComplete` on the fabric, and the bridge then
+recomputes `ExpressedState` by priority (above), which normally lands it
+back on `Normal` and lets the next `SelfTestRequest` proceed instead of
+answering `Busy` forever. `AT+MTCMDRESP=0,...` always answers `+MTERR:1`:
+there is nothing pending seq `0` could ever answer.
 
 **Set-only.** `AT+MTALARM?` or a bare `AT+MTALARM` is the wrong command form
 and answers a plain `ERROR` (§5), the `AT+MTLOCK`/`AT+MTVALVE`/`AT+MTOPSTATE`
@@ -1359,6 +1374,26 @@ AT+MTALARM=1,1,1        -> +MTERR:3    (ep 1 has no SmokeCoAlarm cluster)
 > notify above never arrived. See §3.21's DEFECT note for the full account;
 > the fix hand-adds `smoke_co_alarm::command::create_self_test_request`
 > (`esp_matter_command.h:305`) after `create()` the same way.
+
+> **DEFECT B165, bench F-C10-2: `ExpressedState` never recomputed, one
+> self test wedged the endpoint permanently.** Masked by F-C10-1 until task
+> C11 made `SelfTestRequest` reachable at all. Nothing in this firmware
+> called `SetExpressedStateByPriority` (`smoke-co-alarm-server.h:49-55`), so
+> `ExpressedState` was only ever set once, to `Testing`, by
+> `HandleRemoteSelfTestRequest`, and never cleared: `SetTestInProgress`
+> (`smoke-co-alarm-server.cpp:223-237`) fires `SelfTestComplete` but does not
+> touch `ExpressedState`. `AT+MTALARM=<ep>,5,0` therefore completed the test
+> on the wire while leaving `ExpressedState` stuck at `Testing`; every later
+> `SelfTestRequest` matched `HandleRemoteSelfTestRequest`'s busy guard
+> (`smoke-co-alarm-server.cpp:438-445`) and answered `Status::Busy` with no
+> `+MTCMD` raised, for the endpoint's entire commissioned life (only
+> `AT+MTFRESET` cleared it). The same gap explained a first-run anomaly:
+> `ExpressedState` never tracked `SmokeState` either. Fixed in task C12 by
+> calling `SetExpressedStateByPriority` after every setter above that feeds
+> it, using the priority order the SDK's own `smoke-co-alarm-app` example
+> uses (`examples/smoke-co-alarm-app/silabs/src/SmokeCoAlarmManager.cpp:
+> 32-36`, connectedhomeip vendored under esp-matter release/v1.5.1), which
+> the header leaves for the application to choose.
 
 ### 3.23 `AT+MTCHIMESOUNDS`: Chime installed-sound list
 

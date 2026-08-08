@@ -458,6 +458,22 @@ closest this command family has to Phase 2's controller round-trip cases
 own note, the URC/mailbox mechanics it exercises are the same
 non-host-testable FreeRTOS glue, not new grammar.
 
+**`AT+MTALARM` self-test twice in a row (regression pin for bug B165, bench
+F-C10-2).** A single self test used to wedge the endpoint permanently:
+`ExpressedState` reached `Testing` and nothing ever moved it back, so every
+`SelfTestRequest` after the first answered `Status::Busy` with no
+`+MTCMD` raised, for the endpoint's entire commissioned life, only
+`AT+MTFRESET` cleared it. Run the self-test bench case above twice in
+immediate succession on the same endpoint with no reset in between: the
+second `chip-tool smokecoalarm self-test-request` must raise `+MTCMD:0,<ep>,
+92,0` exactly as the first did, not answer `Status::Busy`. Also confirm the
+endpoint's `ExpressedState` (readable via a commissioned controller; there
+is no `AT+MTATTR` path to it, same caveat as `AT+MTOPSTATE`'s state) reads
+back `Normal` after the first test's `AT+MTALARM=<ep>,5,0`, not stuck at
+`Testing`. This is the direct regression case for the `SetExpressedStateByPriority`
+recompute task C12 added to `mt_matter_alarm_set`; see `AT_MT_SPEC.md`
+§3.22's DEFECT note for the root cause.
+
 **Chatty-host bench case: a bridge command already in flight when a forward
 opens.** Exercises `AT_MT_SPEC.md` §3.17's own by-construction limitation and
 the `iLabs_Hearth` library README's "Hearth originals" section from the other

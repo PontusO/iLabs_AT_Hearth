@@ -10,6 +10,7 @@
  * Built on IDF v5.4.1 + esp-matter release/v1.5, WiFi transport, ESP32-C6.
  */
 
+#include <array>
 #include <inttypes.h>
 #include <cstring>
 #include <new>
@@ -66,7 +67,14 @@
 /* C5 (seven-type batch, smoke/co alarm): SmokeCoAlarmServer::Instance() and
  * its eleven event-emitting Set* methods, and the enum types (AlarmStateEnum,
  * MuteStateEnum, EndOfServiceEnum, ContaminationStateEnum, SensitivityEnum)
- * this file's mt_matter_alarm_set() validates AT+MTALARM's <value> against. */
+ * this file's mt_matter_alarm_set() validates AT+MTALARM's <value> against.
+ *
+ * C12 (bug B165, bench F-C10-2): also SetExpressedStateByPriority(), which
+ * mt_matter_alarm_set() now calls after every setter that can move
+ * ExpressedState, per the app-side recompute contract the header documents
+ * at smoke-co-alarm-server.h:49-55 ("Set the highest level of Expressed
+ * State according to priorityOrder") and no caller in this codebase used
+ * until now. */
 #include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
 
 /* C6 (seven-type batch, chime): ChimeDelegate (three pure virtuals this
@@ -1878,13 +1886,43 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
  *
  * The host is expected to run its own test and report completion with
  * AT+MTALARM=<ep>,5,0 (TestInProgress false), which fires SelfTestComplete
- * on the SmokeCoAlarmServer singleton; see mt_matter_alarm_set() below.
+ * on the SmokeCoAlarmServer singleton; see mt_matter_alarm_set() below, which
+ * also recomputes ExpressedState so the endpoint is not left wedged at
+ * Testing (bug B165, bench F-C10-2).
  */
 void emberAfPluginSmokeCoAlarmSelfTestRequestCommand(chip::EndpointId endpointId)
 {
     mt_cmd_notify(endpointId, chip::app::Clusters::SmokeCoAlarm::Id,
                   chip::app::Clusters::SmokeCoAlarm::Commands::SelfTestRequest::Id);
 }
+
+/*
+ * ExpressedState priority order (bug B165, bench F-C10-2): the SDK's own
+ * app-side recompute contract (smoke-co-alarm-server.h:49-55,
+ * SetExpressedStateByPriority) leaves the order up to the application and
+ * has no default. Nothing in this codebase called it before C12, which is
+ * why ExpressedState only ever reached kTesting and never came back down:
+ * SetTestInProgress() (smoke-co-alarm-server.cpp:223-237) fires
+ * SelfTestComplete but never touches ExpressedState, and every reference
+ * app in the vendored tree pairs its state-changing setters with a
+ * recompute call. Order copied verbatim from the SDK's own dedicated
+ * example (examples/smoke-co-alarm-app/silabs/src/SmokeCoAlarmManager.cpp:
+ * 32-36, and identically at examples/all-clusters-app/all-clusters-common/
+ * src/smco-stub.cpp:33-36): smoke alarm and its interconnect echo outrank
+ * CO alarm and its echo, then hardware fault, then an in-progress self
+ * test, then end-of-service, then low battery last.
+ */
+static const std::array<SmokeCoAlarmServer::ExpressedStateEnum, SmokeCoAlarmServer::kPriorityOrderLength>
+    s_alarm_expressed_state_priority = {
+        SmokeCoAlarmServer::ExpressedStateEnum::kSmokeAlarm,
+        SmokeCoAlarmServer::ExpressedStateEnum::kInterconnectSmoke,
+        SmokeCoAlarmServer::ExpressedStateEnum::kCOAlarm,
+        SmokeCoAlarmServer::ExpressedStateEnum::kInterconnectCO,
+        SmokeCoAlarmServer::ExpressedStateEnum::kHardwareFault,
+        SmokeCoAlarmServer::ExpressedStateEnum::kTesting,
+        SmokeCoAlarmServer::ExpressedStateEnum::kEndOfService,
+        SmokeCoAlarmServer::ExpressedStateEnum::kBatteryAlert,
+    };
 
 /*
  * AT+MTALARM bridge: dispatch <field> (already checked 1..11 by
@@ -1900,6 +1938,19 @@ void emberAfPluginSmokeCoAlarmSelfTestRequestCommand(chip::EndpointId endpointId
  * against 0/1 directly, since bool has no kUnknownEnumValue to read. The
  * cast to each field's enum type happens only AFTER its own bound check
  * passes, never before.
+ *
+ * needs_recompute (bug B165): set for every field that feeds
+ * s_alarm_expressed_state_priority, matching the SDK reference apps'
+ * pairing of setter + SetExpressedStateByPriority() exactly (cited above).
+ * DeviceMuted, ContaminationState and SmokeSensitivityLevel are left out on
+ * the same evidence: no ExpressedStateEnum value corresponds to any of the
+ * three, and the reference apps never recompute after touching them
+ * (smco-stub.cpp:127-130, :161-163, :91-105, :170-176). No double emit:
+ * SetExpressedState() (smoke-co-alarm-server.cpp:417-429) is idempotent
+ * against the current value, so field 5's SetTestInProgress(ep, false) has
+ * already raised SelfTestComplete by the time the recompute below runs, and
+ * the recompute raises AllClear only if the new priority verdict actually
+ * differs from the wedged kTesting, a distinct fact, not a duplicate of it.
  */
 extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
 {
@@ -1913,26 +1964,30 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
 
     SmokeCoAlarmServer &srv = SmokeCoAlarmServer::Instance();
     bool ok;
+    bool needs_recompute = false;
     switch (field) {
     case 1: /* SmokeState */
         if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
             return MT_ATTR_ERR_VALUE;
         }
         ok = srv.SetSmokeState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        needs_recompute = true;
         break;
     case 2: /* COState */
         if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
             return MT_ATTR_ERR_VALUE;
         }
         ok = srv.SetCOState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        needs_recompute = true;
         break;
     case 3: /* BatteryAlert */
         if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
             return MT_ATTR_ERR_VALUE;
         }
         ok = srv.SetBatteryAlert(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        needs_recompute = true;
         break;
-    case 4: /* DeviceMuted */
+    case 4: /* DeviceMuted: not an ExpressedState priority, no recompute */
         if (value >= (uint8_t)SmokeCoAlarmServer::MuteStateEnum::kUnknownEnumValue) {
             return MT_ATTR_ERR_VALUE;
         }
@@ -1943,38 +1998,43 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
             return MT_ATTR_ERR_VALUE;
         }
         ok = srv.SetTestInProgress(ep, value != 0);
+        needs_recompute = true;
         break;
     case 6: /* HardwareFaultAlert: bool */
         if (value > 1) {
             return MT_ATTR_ERR_VALUE;
         }
         ok = srv.SetHardwareFaultAlert(ep, value != 0);
+        needs_recompute = true;
         break;
     case 7: /* EndOfServiceAlert */
         if (value >= (uint8_t)SmokeCoAlarmServer::EndOfServiceEnum::kUnknownEnumValue) {
             return MT_ATTR_ERR_VALUE;
         }
         ok = srv.SetEndOfServiceAlert(ep, (SmokeCoAlarmServer::EndOfServiceEnum)value);
+        needs_recompute = true;
         break;
     case 8: /* InterconnectSmokeAlarm */
         if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
             return MT_ATTR_ERR_VALUE;
         }
         ok = srv.SetInterconnectSmokeAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        needs_recompute = true;
         break;
     case 9: /* InterconnectCOAlarm */
         if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
             return MT_ATTR_ERR_VALUE;
         }
         ok = srv.SetInterconnectCOAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+        needs_recompute = true;
         break;
-    case 10: /* ContaminationState */
+    case 10: /* ContaminationState: not an ExpressedState priority */
         if (value >= (uint8_t)SmokeCoAlarmServer::ContaminationStateEnum::kUnknownEnumValue) {
             return MT_ATTR_ERR_VALUE;
         }
         ok = srv.SetContaminationState(ep, (SmokeCoAlarmServer::ContaminationStateEnum)value);
         break;
-    case 11: /* SmokeSensitivityLevel */
+    case 11: /* SmokeSensitivityLevel: not an ExpressedState priority */
         if (value >= (uint8_t)SmokeCoAlarmServer::SensitivityEnum::kUnknownEnumValue) {
             return MT_ATTR_ERR_VALUE;
         }
@@ -1984,6 +2044,9 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
         /* mt_at.c's cmd_mtalarm already rejects field outside 1..11 with
          * +MTERR:1; kept for defensiveness, unreachable in practice. */
         return MT_ATTR_ERR_VALUE;
+    }
+    if (ok && needs_recompute) {
+        srv.SetExpressedStateByPriority(ep, s_alarm_expressed_state_priority);
     }
     return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }
