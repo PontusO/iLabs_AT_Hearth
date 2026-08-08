@@ -1251,6 +1251,34 @@ AT+MTOPSTATE=99,1       -> +MTERR:2   (no endpoint 99)
 AT+MTOPSTATE=1,1        -> +MTERR:3   (ep 1 has no OperationalState cluster)
 ```
 
+> #### DEFECT F-C10-1: the controller could not invoke Pause/Stop/Start/Resume at all
+>
+> **Status: FIXED (task C11).** Found on the bench 2026-08-08 verifying the
+> seven-type batch (task C10); affected every build from the OperationalState
+> trio's introduction (task C4) up to and including tag `0.5.0`.
+>
+> Every controller invoke of `Pause`, `Stop`, `Start` or `Resume` was answered
+> `Status=0x81` (`UNSUPPORTED_COMMAND`) before `HearthOpStateDelegate` (§ above,
+> `main.cpp`) ever saw it. `AcceptedCommandList` read back `0 entries` on every
+> `OperationalState` endpoint. `AT+MTOPSTATE` itself worked throughout: the
+> state a host set was always read back correctly by the controller. Only the
+> command path, which this section's adjudication text describes, was
+> unreachable.
+>
+> Cause: `operational_state::create()` (`esp_matter_cluster.cpp:1752-1756`)
+> creates the cluster's attributes and events but calls no
+> `command::create_*`, unlike `valve_configuration_and_control::create()`
+> (`esp_matter_cluster.cpp:3451-3453`), which adds `Open`/`Close` itself. The
+> four helpers exist and are declared (`esp_matter_command.h:295-299`) but had
+> no call site anywhere in this SDK revision.
+>
+> Fix: `main/mt_devtypes.cpp` hand-adds the four `ACCEPTED` commands after
+> `create()` for all three OperationalState-backed device types (Laundry
+> Washer, Dishwasher, Laundry Dryer), the same after-create() shape the
+> firmware already used for `power_source`'s `BatPercentRemaining`. The
+> `SmokeCoAlarm` cluster's `SelfTestRequest` (§3.22) shared the identical gap
+> and got the identical fix in the same task.
+
 ### 3.22 `AT+MTALARM`: Smoke/CO Alarm state reporting
 
 Reports an event-emitting `SmokeCoAlarm` cluster (`92`/`0x005C`) state change
@@ -1323,6 +1351,14 @@ AT+MTALARM=9,12,0       -> +MTERR:1    (field outside 1..11)
 AT+MTALARM=99,1,1       -> +MTERR:2    (no endpoint 99)
 AT+MTALARM=1,1,1        -> +MTERR:3    (ep 1 has no SmokeCoAlarm cluster)
 ```
+
+> **DEFECT F-C10-1 also covered `SelfTestRequest`.** Until task C11,
+> `smoke_co_alarm::create()` (`esp_matter_cluster.cpp:1991-2042`) called no
+> `command::create_*` either, so the controller's `SelfTestRequest` was
+> answered `Status=0x81` (`UNSUPPORTED_COMMAND`) and the `+MTCMD:0,<ep>,92,0`
+> notify above never arrived. See §3.21's DEFECT note for the full account;
+> the fix hand-adds `smoke_co_alarm::command::create_self_test_request`
+> (`esp_matter_command.h:305`) after `create()` the same way.
 
 ### 3.23 `AT+MTCHIMESOUNDS`: Chime installed-sound list
 

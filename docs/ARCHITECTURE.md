@@ -1001,6 +1001,33 @@ lift `sdkconfig.defaults`'s own comment documents, a link-time dependency of
 block, a macro esp_matter's bundled `gen_config.h` defines unconditionally
 regardless of this repository's own Kconfig.)
 
+**Task C11: the same "SDK ships helpers with no call site" failure family
+hit the OperationalState trio and Smoke/CO Alarm too, the way it hit Chime
+above (F6).** Bench verification (task C10, finding F-C10-1) found that
+`operational_state::create()` and `smoke_co_alarm::create()`
+(`esp_matter_cluster.cpp:1752-1756` and `:1991-2042`) create attributes and
+events but call no `command::create_*` at all, so every `AcceptedCommandList`
+on these clusters was empty and a controller's `Pause`/`Stop`/`Start`/
+`Resume`/`SelfTestRequest` invoke was rejected `Status=0x81`
+(`UNSUPPORTED_COMMAND`) before the delegate ever ran, exactly the shape of
+gap F6 documents for Chime: the four `operational_state::command::create_*`
+helpers and `smoke_co_alarm::command::create_self_test_request` are declared
+(`esp_matter_command.h:295-299` and `:305`) and implemented, right next to
+`valve_configuration_and_control::create()`'s own `command::create_open`/
+`command::create_close` calls (`esp_matter_cluster.cpp:3451-3453`) that prove
+the mechanism works when a cluster's `create()` actually calls it. Unlike
+Chime, this gap needed no data-model-provider registration workaround: these
+two clusters go through the ordinary ember-managed path, so the fix is the
+five missing `command::create_*` calls, hand-added in `mt_devtypes.cpp` after
+`create()` for each affected thunk, the same after-create() shape
+`mk_power_source()` already used for `BatPercentRemaining`. `AT_MT_SPEC.md`
+§§3.21-3.22 carry the DEFECT F-C10-1 write-up. Three SDK gaps of this exact
+shape across one batch (F6, this one, and by extension anything the I90
+upstream ride-along turns up) is worth treating as a standing risk for any
+future device type this firmware adds: a cluster's `create()` populating
+attributes and events is not evidence its commands were wired too, and the
+only way to know is to read the `create()` body, not the header.
+
 ## 9. Decision log (summary)
 
 | Decision | Choice | Why |

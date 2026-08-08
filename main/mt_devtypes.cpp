@@ -537,7 +537,37 @@ static endpoint_t *mk_mode_select(node_t *n, uint8_t variant)
  * (esp_matter_endpoint.cpp: each just calls operational_state::create() then
  * event::create_operation_completion()), so the three thunks below differ
  * only in which namespace's create() they call.
+ *
+ * Task C11 (bench finding F-C10-1): operational_state::create()
+ * (esp_matter_cluster.cpp:1752-1756) adds attributes and events but calls no
+ * command::create_*, unlike valve_configuration_and_control::create()
+ * (esp_matter_cluster.cpp:3451-3453: command::create_open(cluster);
+ * command::create_close(cluster);). The four command helpers exist and are
+ * declared (esp_matter_command.h:295-299:
+ * operational_state::command::create_pause/create_stop/create_start/
+ * create_resume/create_operational_command_response) but have no call site in
+ * this SDK revision, so every OperationalState endpoint's AcceptedCommandList
+ * was empty and a controller's Pause/Stop/Start/Resume invoke was rejected
+ * UNSUPPORTED_COMMAND before main.cpp's HearthOpStateDelegate ever saw it
+ * (chip-tool: `Status=0x81` on all four, bench evidence
+ * task-C10-evidence/014244-opstate-start-allow.log). Hand-add the four
+ * ACCEPTED commands after create(), the same after-create() hand-add shape
+ * mk_power_source() below uses for BatPercentRemaining.
+ * create_operational_command_response() is NOT added: it is
+ * COMMAND_FLAG_GENERATED, the response CHIP sends back on its own once the
+ * accepted command exists, not something a controller invokes.
  */
+static void mt_opstate_add_commands(endpoint_t *ep)
+{
+    cluster_t *cl = cluster::get(ep, chip::app::Clusters::OperationalState::Id);
+    if (cl != nullptr) {
+        cluster::operational_state::command::create_pause(cl);
+        cluster::operational_state::command::create_stop(cl);
+        cluster::operational_state::command::create_start(cl);
+        cluster::operational_state::command::create_resume(cl);
+    }
+}
+
 static endpoint_t *mk_laundry_washer(node_t *n, uint8_t variant)
 {
     (void)variant;
@@ -552,6 +582,7 @@ static endpoint_t *mk_laundry_washer(node_t *n, uint8_t variant)
     if (ep == nullptr) {
         return nullptr;
     }
+    mt_opstate_add_commands(ep);
     mt_matter_opstate_delegate_set_endpoint(delegate, endpoint::get_id(ep));
     return ep;
 }
@@ -570,6 +601,7 @@ static endpoint_t *mk_dish_washer(node_t *n, uint8_t variant)
     if (ep == nullptr) {
         return nullptr;
     }
+    mt_opstate_add_commands(ep);
     mt_matter_opstate_delegate_set_endpoint(delegate, endpoint::get_id(ep));
     return ep;
 }
@@ -588,6 +620,7 @@ static endpoint_t *mk_laundry_dryer(node_t *n, uint8_t variant)
     if (ep == nullptr) {
         return nullptr;
     }
+    mt_opstate_add_commands(ep);
     mt_matter_opstate_delegate_set_endpoint(delegate, endpoint::get_id(ep));
     return ep;
 }
@@ -599,6 +632,18 @@ static endpoint_t *mk_laundry_dryer(node_t *n, uint8_t variant)
  * (mt_matter.h's mt_matter_alarm_set()) covers both without a variant to pick
  * one over the other, and the eleven-field surface is uniform across every
  * smoke_co_alarm endpoint this firmware creates.
+ *
+ * Task C11 (bench finding F-C10-1): smoke_co_alarm::create()
+ * (esp_matter_cluster.cpp:1991-2042) creates attributes and events but calls
+ * no command::create_*, the same SDK gap as OperationalState above. The
+ * helper exists and is declared (esp_matter_command.h:305:
+ * smoke_co_alarm::command::create_self_test_request) but has no call site, so
+ * SelfTestRequest was rejected UNSUPPORTED_COMMAND and
+ * emberAfPluginSmokeCoAlarmSelfTestRequestCommand() (main.cpp) never fired
+ * (chip-tool: `Status=0x81`, bench evidence
+ * task-C10-evidence/014411-smoke-selftest.log). Hand-add it after create(),
+ * the same after-create() shape mt_opstate_add_commands() above and
+ * mk_power_source() below use.
  */
 static endpoint_t *mk_smoke_co_alarm(node_t *n, uint8_t variant)
 {
@@ -607,7 +652,15 @@ static endpoint_t *mk_smoke_co_alarm(node_t *n, uint8_t variant)
     c.smoke_co_alarm.feature_flags =
         cluster::smoke_co_alarm::feature::smoke_alarm::get_id() |
         cluster::smoke_co_alarm::feature::co_alarm::get_id();
-    return smoke_co_alarm::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    endpoint_t *ep = smoke_co_alarm::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    cluster_t *cl = cluster::get(ep, chip::app::Clusters::SmokeCoAlarm::Id);
+    if (cl != nullptr) {
+        cluster::smoke_co_alarm::command::create_self_test_request(cl);
+    }
+    return ep;
 }
 
 /*
