@@ -23,12 +23,22 @@ from mt_regression import ATLink, cmd_retry
 
 class FakeTransport:
     """Stream double: read() drains a scripted rx buffer, write() records
-    and can trigger a scripted reply via on_write."""
+    and can trigger a scripted reply via on_write.
+
+    feed_line() and expect_write() (added for CmdResponder's self-test)
+    give a second, more targeted scripting style: feed_line() preloads a
+    line as if it had already arrived on the wire (a +MTCMD URC waiting
+    to be pumped), and expect_write() scripts a one-shot exact-match
+    reply to a specific write, which on_write's single global callback
+    cannot express when a test needs different replies to different
+    writes in the same run."""
 
     def __init__(self, on_write=None):
         self.rx = b""
         self.tx = b""
+        self.writes = []
         self.on_write = on_write
+        self._scripted = []
 
     def read(self, n=1):
         chunk, self.rx = self.rx[:n], self.rx[n:]
@@ -36,9 +46,27 @@ class FakeTransport:
 
     def write(self, data):
         self.tx += data
+        self.writes.append(data)
+        for i, (expected, reply) in enumerate(self._scripted):
+            if expected == data:
+                self._scripted.pop(i)
+                self.rx += reply
+                return len(data)
         if self.on_write:
             self.rx += self.on_write(data)
         return len(data)
+
+    def feed_line(self, line):
+        """Preload a line, terminator added, as if already on the wire."""
+        self.rx += line.encode("ascii") + b"\r\n"
+
+    def expect_write(self, data, then_lines=()):
+        """Script a one-shot reply: the next write() that matches data
+        byte-for-byte (caller supplies the full wire form, CRLF
+        included) appends then_lines, CRLF-joined, to rx."""
+        expected = data.encode("ascii") if isinstance(data, str) else data
+        reply = b"".join(l.encode("ascii") + b"\r\n" for l in then_lines)
+        self._scripted.append((expected, reply))
 
 
 def link_with_reply(reply):
@@ -2316,6 +2344,71 @@ class TestGateSkips(unittest.TestCase):
                 run_phase2(ctx)  # must not raise
         self.assertEqual(os.listdir(d1), [])
         self.assertEqual(os.listdir(d2), [])
+
+
+from mt_regression import CmdResponder
+
+
+class TestCmdResponder(unittest.TestCase):
+    """T5 Task 2: CmdResponder answers a forwarded +MTCMD URC the way a
+    host MCU would, except for seq 0 (notify-only), which spec 3.17 says
+    the firmware itself rejects (+MTERR:1) if anyone tries."""
+
+    def test_adjudicated_forward_answered(self):
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:7,3,96,0")
+        tr.expect_write("AT+MTCMDRESP=7,1\r\n", then_lines=["OK"])
+        r = CmdResponder(link)
+        fwd = r.expect(cluster=96, command=0, verdict=1)
+        self.assertEqual(fwd["seq"], 7)
+        self.assertEqual(fwd["ep"], 3)
+        self.assertIsNone(fwd["payload"])
+
+    def test_notify_never_answered(self):
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:0,4,92,0")
+        r = CmdResponder(link)
+        fwd = r.expect_notify(cluster=92, command=0)
+        self.assertEqual(fwd["seq"], 0)
+        self.assertEqual(tr.writes, [])   # nothing sent, ever
+
+    def test_five_field_payload_parsed(self):
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:9,4,1366,0,2")
+        tr.expect_write("AT+MTCMDRESP=9,0\r\n", then_lines=["OK"])
+        fwd = CmdResponder(link).expect(cluster=1366, command=0, verdict=0,
+                                        payload=2)
+        self.assertEqual(fwd["payload"], 2)
+
+    def test_wrong_cluster_returns_none(self):
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:7,3,96,0")
+        self.assertIsNone(CmdResponder(link).expect(
+            cluster=6, command=0, verdict=1, timeout=0.3))
+
+    def test_seq_zero_via_expect_still_never_answered(self):
+        """expect() (the adjudicated path) must honor the seq-0 rule too:
+        a notify-only forward reaching it by way of the general API must
+        not be answered just because the caller used the wrong method."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:0,4,92,0")
+        fwd = CmdResponder(link).expect(cluster=92, command=0, verdict=1)
+        self.assertEqual(fwd["seq"], 0)
+        self.assertEqual(tr.writes, [])
+
+    def test_expect_notify_rejects_nonzero_seq(self):
+        """expect_notify() must not accept an adjudicated (seq != 0)
+        forward: it asserts seq == 0, per the interface contract."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:7,3,96,0")
+        self.assertIsNone(CmdResponder(link).expect_notify(
+            cluster=96, command=0, timeout=0.3))
 
 
 if __name__ == "__main__":

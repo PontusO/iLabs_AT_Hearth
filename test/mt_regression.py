@@ -178,6 +178,68 @@ class ATLink:
         return dropped
 
 
+class CmdResponder:
+    """Answers a forwarded +MTCMD URC the way a host MCU would.
+
+    Wire form (spec 3.17): +MTCMD:<seq>,<ep>,<cluster>,<command>[,<payload>],
+    all decimal; the fifth field is the reserved payload slot (chime sends
+    its chimeID there).
+
+    seq 0 is notify-only and is NEVER answered: the firmware rejects
+    AT+MTCMDRESP=0,... with +MTERR:1 by design, so answering it would be a
+    harness bug, not a legitimate response. Both public methods route
+    through _match(), and only expect()'s non-zero branch ever calls
+    self.link.command(); there is no code path in this class that can
+    send AT+MTCMDRESP for seq 0."""
+
+    _RX = re.compile(r"\+MTCMD:(\d+),(\d+),(\d+),(\d+)(?:,(\d+))?$")
+
+    def __init__(self, link):
+        self.link = link
+
+    def _match(self, cluster, command, payload, timeout):
+        """Await the next +MTCMD URC and parse it, or None on timeout or
+        a mismatch (wrong cluster/command/payload). await_urc_ts returns
+        (timestamp, line); only the line matters here."""
+        got = self.link.await_urc_ts(r"\+MTCMD:", timeout=timeout)
+        if got is None:
+            return None
+        m = self._RX.match(got[1])
+        if not m:
+            return None
+        fwd = {"seq": int(m.group(1)), "ep": int(m.group(2)),
+               "cluster": int(m.group(3)), "command": int(m.group(4)),
+               "payload": int(m.group(5)) if m.group(5) else None}
+        if fwd["cluster"] != cluster or fwd["command"] != command:
+            return None
+        if payload is not None and fwd["payload"] != payload:
+            return None
+        return fwd
+
+    def expect(self, cluster, command, verdict, payload=None, timeout=5.0):
+        """Await the matching forward and answer it with verdict, unless
+        seq is 0: that branch returns without ever touching self.link,
+        so a notify can never be answered through this method either."""
+        fwd = self._match(cluster, command, payload, timeout)
+        if fwd is None:
+            return None
+        if fwd["seq"] == 0:
+            return fwd
+        res, _ = self.link.command(
+            "AT+MTCMDRESP=%d,%d" % (fwd["seq"], verdict))
+        if res != 0:
+            return None
+        return fwd
+
+    def expect_notify(self, cluster, command, payload=None, timeout=5.0):
+        """Await the matching forward and assert it is notify-only (seq
+        0). Never sends AT+MTCMDRESP, adjudicated or not."""
+        fwd = self._match(cluster, command, payload, timeout)
+        if fwd is None or fwd["seq"] != 0:
+            return None
+        return fwd
+
+
 class Suite:
     """Scores and prints checks in the ESP-NOW RegressionSuite's format,
     so the two rigs' reports read the same."""
