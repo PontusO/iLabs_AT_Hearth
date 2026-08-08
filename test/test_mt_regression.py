@@ -1067,6 +1067,117 @@ class TestPhase2GateTransport(unittest.TestCase):
         self.assertNotIn("AT+MTNET?", link.sent)
 
 
+from mt_regression import phase3_gate, _transport_gate
+
+
+class TestPhase3Gate(unittest.TestCase):
+    """T5 task 4: phase3_gate must refuse in exactly the same shapes
+    phase2_gate does, since both are now thin wrappers over the same
+    _transport_gate body. Mirrors TestPhase2Gate's cases one for one
+    rather than re-deriving them, so a divergence in the extraction
+    shows up as a phase3_gate test failing while phase2_gate's own
+    (unmodified) tests keep passing."""
+
+    def _args(self, **kw):
+        base = {"ssid": "net", "psk": "secret"}
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    @staticmethod
+    def _wifi_link():
+        return FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:WIFI,0,0,0"])})
+
+    def test_missing_creds_abort(self):
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool("/bin/true", d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase3_gate(
+                    chip, self._args(ssid=None), self._wifi_link())
+        self.assertIn("MT_SSID", problem)
+        self.assertEqual(transport, "WIFI")
+        self.assertIsNone(dataset)
+
+    def test_missing_binary_abort(self):
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool(os.path.join(d, "nope"), d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase3_gate(
+                    chip, self._args(), self._wifi_link())
+        self.assertIn("chip-tool", problem)
+        self.assertEqual(transport, "WIFI")
+
+    def test_missing_openocd_abort(self):
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool("/bin/true", d)
+            with mock.patch("mt_regression.shutil.which", return_value=None):
+                problem, transport, dataset = phase3_gate(
+                    chip, self._args(), self._wifi_link())
+        self.assertIn("openocd", problem)
+        self.assertIsNone(transport)
+        self.assertIsNone(dataset)
+
+    def test_healthy_gate_passes(self):
+        runner = FakeChipRunner(
+            [(0, fixture("chiptool_parse_setup_payload.txt"))])
+        with tempfile.TemporaryDirectory() as d:
+            binary = os.path.join(d, "chip-tool")
+            open(binary, "w").close()
+            os.chmod(binary, 0o755)
+            chip = ChipTool(binary, d, runner=runner)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase3_gate(
+                    chip, self._args(), self._wifi_link())
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "WIFI")
+        self.assertIsNone(dataset)
+
+    def test_thread_detected_skips_credentials_requires_otbr(self):
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+        ds_text = fixture("otctl_dataset_active.txt")
+
+        def fake_otctl(cmd_args, binary):
+            if cmd_args == ["state"]:
+                return 0, "leader\r\nDone\r\n"
+            if cmd_args == ["dataset", "active", "-x"]:
+                return 0, ds_text
+            raise AssertionError("unexpected ot-ctl call: %r" % (cmd_args,))
+
+        with tempfile.TemporaryDirectory() as d:
+            runner = FakeChipRunner(
+                [(0, fixture("chiptool_parse_setup_payload.txt"))])
+            binary = os.path.join(d, "chip-tool")
+            open(binary, "w").close()
+            os.chmod(binary, 0o755)
+            chip = ChipTool(binary, d, runner=runner)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase3_gate(
+                    chip, self._args(ssid=None, psk=None,
+                                     transport=None, dataset=None,
+                                     ot_ctl="/fake/ot-ctl"),
+                    link, otctl=fake_otctl)
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertEqual(dataset, parse_dataset(ds_text))
+
+    def test_delegates_to_the_same_transport_gate_body(self):
+        """The extraction's own guard: both wrappers must produce the
+        identical result for the identical input, since they are meant
+        to be indistinguishable to a caller."""
+        with tempfile.TemporaryDirectory() as d:
+            chip = ChipTool("/bin/true", d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                r2 = phase2_gate(chip, self._args(ssid=None),
+                                 self._wifi_link())
+                r3 = phase3_gate(chip, self._args(ssid=None),
+                                 self._wifi_link())
+        self.assertEqual(r2, r3)
+
+
 from mt_regression import swd_reset, operator_power_cycle
 
 
@@ -2499,6 +2610,402 @@ class TestT5Parsers(unittest.TestCase):
 
     def test_parse_string_list_no_match_is_empty(self):
         self.assertEqual(parse_string_list("no such content"), [])
+
+
+from mt_regression import (
+    PHASE3_COMPOSITION, Phase3Context, stage_composition,
+    restore_standard_state, step_3_1_compose, step_3_2_grammar,
+    step_3_3_selftest_wedge, step_3_4_stores, run_phase3, PHASE3_STEPS,
+)
+
+
+def fresh_phase3_ctx(link=None, chip=None):
+    if link is None:
+        link = FakeLink()
+    opts = types.SimpleNamespace(node_id=0x4845, ssid="net", psk="secret",
+                                 include_slow=False, include_manual=False,
+                                 keyword=None)
+    return Phase3Context(link=link, chip=chip, suite=Suite(), opts=opts)
+
+
+class TestStageComposition(unittest.TestCase):
+    """T5 task 4: extracted from 2.12's inline MTEPCLEAR/MTEP loop so
+    step_3_1_compose (and, later, the full restore) reuse it instead of
+    reimplementing the spec 3.9 grammar."""
+
+    def test_clears_then_appends_each_devtype_in_order(self):
+        link = FakeLink({"AT+MTEPCLEAR": (0, []), "AT+MTEP=0x0100": (0, []),
+                         "AT+MTEP=0x0071,1": (0, [])})
+        ok = stage_composition(link, ["0x0100", "0x0071,1"])
+        self.assertTrue(ok)
+        self.assertEqual(
+            link.sent,
+            ["AT+MTEPCLEAR", "AT+MTEP=0x0100", "AT+MTEP=0x0071,1"])
+
+    def test_a_failed_append_makes_the_whole_call_false_but_keeps_going(self):
+        link = FakeLink({"AT+MTEPCLEAR": (0, []), "AT+MTEP=0x0100": (0, []),
+                         "AT+MTEP=0x9999": (6, [])})
+        ok = stage_composition(link, ["0x0100", "0x9999"])
+        self.assertFalse(ok)
+        self.assertEqual(
+            link.sent, ["AT+MTEPCLEAR", "AT+MTEP=0x0100", "AT+MTEP=0x9999"])
+
+
+class TestPhase3Composition(unittest.TestCase):
+    """T5 task 4: every id in PHASE3_COMPOSITION is quoted from
+    AT_MT_SPEC.md's device table in the task-4 report; this test pins the
+    shape (slot order, count, the one deliberate duplicate id) rather
+    than the ids themselves, which a doc diff cannot catch."""
+
+    def test_eleven_slots_sequential(self):
+        slots = [slot for slot, _ in PHASE3_COMPOSITION]
+        self.assertEqual(slots, list(range(1, 12)))
+
+    def test_slot_ten_and_eleven_are_the_two_cabinet_variants(self):
+        # Slot 11 is not in the T5 design spec's 10-row table; it exists
+        # solely to make MTTEMPLEVELS's +MTERR:4 row testable (see the
+        # comment on PHASE3_COMPOSITION), and is called out in the
+        # task-4 report for review.
+        by_slot = dict(PHASE3_COMPOSITION)
+        self.assertEqual(by_slot[10], "0x0071,1")
+        self.assertEqual(by_slot[11], "0x0071")
+
+    def test_no_accidental_duplicate_devtype(self):
+        devtypes = [dt for _slot, dt in PHASE3_COMPOSITION]
+        bases = [dt.split(",")[0] for dt in devtypes]
+        dupes = {b for b in bases if bases.count(b) > 1}
+        self.assertEqual(dupes, {"0x0071"})
+
+
+class TestPhase3Context(unittest.TestCase):
+    def test_defaults(self):
+        ctx = fresh_phase3_ctx()
+        self.assertEqual(ctx.composition, PHASE3_COMPOSITION)
+        self.assertIsNot(ctx.composition, PHASE3_COMPOSITION)  # a copy
+        self.assertEqual(ctx.transport, "WIFI")
+        self.assertIsNone(ctx.dataset)
+        self.assertIsNone(ctx.chip2)
+        self.assertEqual(ctx.node_id, 0x4845)
+
+
+def phase3_reboot_commands():
+    """The AT+MTFRESET/MTEPCLEAR/MTEP*/MTEPAPPLY/MTRESET commands
+    step_3_1_compose sends for PHASE3_COMPOSITION, all answering OK."""
+    cmds = {"AT+MTFRESET": (0, []), "AT+MTEPCLEAR": (0, []),
+            "AT+MTEPAPPLY": (0, []), "AT+MTRESET": (0, [])}
+    for _slot, dt in PHASE3_COMPOSITION:
+        cmds["AT+MTEP=%s" % dt] = (0, [])
+    return cmds
+
+
+REBOOT_READY = {"AT+MTFRESET": ["+MTREADY"], "AT+MTEPAPPLY": ["+MTREADY"],
+                "AT+MTRESET": ["+MTREADY"]}
+
+
+class TestStep31Compose(unittest.TestCase):
+    """T5 task 4: the three-trap boot-rebuild pin (design spec 4.2 step
+    2)."""
+
+    def test_happy_path_reads_back_exact(self):
+        readback = ["+MTEP:%d,%d,%s" % (i, slot, dt)
+                   for i, (slot, dt) in enumerate(PHASE3_COMPOSITION)]
+        cmds = phase3_reboot_commands()
+        cmds["AT+MTEP?"] = (0, readback)
+        link = FakeLink(cmds, urcs_on_command=REBOOT_READY)
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_1_compose(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertIn("AT+MTEPAPPLY", link.sent)
+        self.assertEqual(link.sent.count("AT+MTRESET"), 1)
+
+    def test_no_ready_after_mtfresh_aborts(self):
+        cmds = phase3_reboot_commands()
+        link = FakeLink(cmds)  # no urcs_on_command: +MTREADY never arrives
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_3_1_compose(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_readback_mismatch_aborts(self):
+        cmds = phase3_reboot_commands()
+        cmds["AT+MTEP?"] = (0, ["+MTEP:0,1,0x0100"])  # short/stale readback
+        link = FakeLink(cmds, urcs_on_command=REBOOT_READY)
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_3_1_compose(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+def phase3_grammar_commands():
+    """Every AT command step_3_2_grammar sends, each answering the way
+    the row it exercises expects (result code, no lines needed except
+    the CurrentMode round trip)."""
+    return {
+        "AT+MTSWITCH=99": (2, []),
+        "AT+MTSWITCH=0": (3, []),
+        "AT+MTSWITCH=9": (0, []),
+        "AT+MTLOCK=99,1": (2, []),
+        "AT+MTLOCK=1,1": (3, []),
+        "AT+MTLOCK=8,1": (0, []),
+        "AT+MTVALVE=99,1": (2, []),
+        "AT+MTVALVE=1,1": (3, []),
+        "AT+MTVALVE=2,1": (0, []),
+        "AT+MTVALVE=2,1,50": (0, []),
+        'AT+MTMODES=99,0,"Quiet"': (2, []),
+        'AT+MTMODES=1,0,"Quiet"': (3, []),
+        'AT+MTMODES=3,0,"Quiet"': (0, []),
+        'AT+MTMODES=3,0,"Eco, low"': (0, []),
+        "AT+MTATTR=3,80,3": (0, ["+MTATTR:3,80,3,0"]),
+        "AT+MTOPSTATE=99,1": (2, []),
+        "AT+MTOPSTATE=1,1": (3, []),
+        "AT+MTOPSTATE=7,1": (0, []),
+        "AT+MTALARM=5,1,3": (1, []),
+        "AT+MTALARM=5,4,2": (1, []),
+        "AT+MTALARM=5,5,2": (1, []),
+        "AT+MTALARM=5,10,4": (1, []),
+        "AT+MTALARM=99,1,1": (2, []),
+        "AT+MTALARM=1,1,1": (3, []),
+        "AT+MTALARM=5,1,1": (0, []),
+        "AT+MTALARM=5,1,0": (0, []),
+        "AT+MTALARM=5,5,0": (0, []),
+        'AT+MTCHIMESOUNDS=99,1,"Doorbell"': (2, []),
+        'AT+MTCHIMESOUNDS=1,1,"Doorbell"': (3, []),
+        'AT+MTCHIMESOUNDS=4,1,"Doorbell"': (0, []),
+        'AT+MTCHIMESOUNDS=4,1,"Doorbell",2,"Alert, urgent"': (0, []),
+        "AT+MTCHIME=4,0,9": (1, []),
+        "AT+MTCHIME=99,0,1": (2, []),
+        "AT+MTCHIME=1,0,1": (3, []),
+        "AT+MTCHIME=4,0,1": (0, []),
+        "AT+MTCHIME=4,1,1": (0, []),
+        'AT+MTTEMPLEVELS=99,"Low"': (2, []),
+        'AT+MTTEMPLEVELS=1,"Low"': (3, []),
+        'AT+MTTEMPLEVELS=11,"Low"': (4, []),
+        'AT+MTTEMPLEVELS=10,"Low","Medium","High"': (0, []),
+        'AT+MTTEMPLEVELS=10,"Wine, red","Wine, white"': (0, []),
+    }
+
+
+class TestStep32Grammar(unittest.TestCase):
+    """T5 task 4: 40 of Task 1's 41 deferred rows (the 41st needs a real
+    forward, Task 5's job); see the step's own docstring."""
+
+    def test_forty_rows_all_pass(self):
+        link = FakeLink(phase3_grammar_commands())
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_2_grammar(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertEqual(len(ctx.suite.results), 40)
+
+    def test_a_wrong_code_fails_only_that_row(self):
+        cmds = phase3_grammar_commands()
+        cmds["AT+MTVALVE=99,1"] = (1, [])  # wrong: should be +MTERR:2
+        link = FakeLink(cmds)
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_2_grammar(ctx)
+        self.assertEqual(ctx.suite.failed, 1)
+
+
+class TestStep33SelftestWedge(unittest.TestCase):
+    """T5 task 4: bug B165's host-only reproduction, C10 report C12-4b
+    lifted verbatim (endpoint 1 -> 5), plus the SmokeState scenario."""
+
+    def _commands(self, resurrects=False):
+        after_reboot_expressed = (
+            ["+MTATTR:5,92,0,4"] if resurrects else ["+MTATTR:5,92,0,0"])
+        return {
+            "AT+MTATTR=5,92,0": [
+                (0, ["+MTATTR:5,92,0,0"]),        # clean start
+                (0, ["+MTATTR:5,92,0,4"]),        # mid-test
+                (0, ["+MTATTR:5,92,0,0"]),        # post-test
+                (0, after_reboot_expressed),      # after reboot
+                (0, ["+MTATTR:5,92,0,1"]),        # SmokeState Warning
+                (0, ["+MTATTR:5,92,0,0"]),        # SmokeState cleared
+            ],
+            "AT+MTALARM=5,5,1": (0, ["+MTATTR:5,92,5,1", "+MTATTR:5,92,0,4"]),
+            "AT+MTALARM=5,5,0": (0, ["+MTATTR:5,92,5,0", "+MTATTR:5,92,0,0"]),
+            "AT+MTATTR=5,92,5": (0, ["+MTATTR:5,92,5,0"]),
+            "AT+MTRESET": (0, []),
+            "AT+MTALARM=5,1,1": (0, []),
+            "AT+MTALARM=5,1,0": (0, []),
+        }
+
+    def test_c12_4b_sequence_plus_smokestate(self):
+        link = FakeLink(self._commands(),
+                        urcs_on_command={"AT+MTRESET": ["+MTREADY"]})
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_3_selftest_wedge(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_expressed_state_resurrecting_to_testing_fails(self):
+        """The direct B165 regression pin: if ExpressedState were still 4
+        (Testing) after the reboot, the old bug, this must FAIL, not
+        silently pass."""
+        link = FakeLink(self._commands(resurrects=True),
+                        urcs_on_command={"AT+MTRESET": ["+MTREADY"]})
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_3_selftest_wedge(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep34Stores(unittest.TestCase):
+    """T5 task 4: MTMODES/MTCHIMESOUNDS store edges re-pinned against
+    their real endpoints (design spec 4.2 step 5)."""
+
+    def test_seven_rows_all_pass(self):
+        commands = {
+            'AT+MTMODES=3,0,"Boost, high"': (0, []),
+            'AT+MTMODES=3,0,"A",0,"B"': (1, []),
+            "AT+MTMODES=3": (1, []),
+            'AT+MTMODES=3,0,"A",1,"B",2,"C",3,"D",4,"E",5,"F",6,"G",7,"H",8,"I"':
+                (1, []),
+            'AT+MTCHIMESOUNDS=4,1,"Alarm, loud"': (0, []),
+            'AT+MTCHIMESOUNDS=4,1,"Doorbell",1,"Chime"': (1, []),
+            "AT+MTCHIMESOUNDS=4": (1, []),
+        }
+        link = FakeLink(commands)
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_4_stores(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertEqual(len(ctx.suite.results), 7)
+
+
+class TestRestoreStandardState(unittest.TestCase):
+    """T5 task 4: design spec 4.4's restore, shared by run_phase3's
+    finally hook now and Task 5's full step_3_13_restore later."""
+
+    def _commands(self, ep_readback=None):
+        return {
+            "AT+MTFRESET": (0, []), "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []), "AT+MTEPAPPLY": (0, []),
+            "AT+MTEP?": (0, ep_readback or ["+MTEP:0,1,0x0100"]),
+            "AT+MTFABRICS?": (0, ["+MTFABRICS:0"]),
+        }
+
+    def test_happy_path_scored(self):
+        link = FakeLink(self._commands(), urcs_on_command={
+            "AT+MTFRESET": ["+MTREADY"], "AT+MTEPAPPLY": ["+MTREADY"]})
+        s = Suite()
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok = restore_standard_state(link, s)
+        self.assertTrue(ok)
+        self.assertEqual(s.failed, 0)
+        self.assertGreater(len(s.results), 0)
+
+    def test_unscored_when_no_suite(self):
+        link = FakeLink(self._commands(), urcs_on_command={
+            "AT+MTFRESET": ["+MTREADY"], "AT+MTEPAPPLY": ["+MTREADY"]})
+        ok = restore_standard_state(link, suite=None)
+        self.assertTrue(ok)
+
+    def test_failure_returns_false_and_is_scored(self):
+        link = FakeLink(self._commands(ep_readback=["+MTEP:0,1,0x0104"]),
+                        urcs_on_command={
+                            "AT+MTFRESET": ["+MTREADY"],
+                            "AT+MTEPAPPLY": ["+MTREADY"]})
+        s = Suite()
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok = restore_standard_state(link, s)
+        self.assertFalse(ok)
+        self.assertGreater(s.failed, 0)
+
+
+class TestRunPhase3(unittest.TestCase):
+    """T5 task 4: run_phase3's ordering/gate/requires machinery mirrors
+    run_phase2's exactly, plus the always-on finally restore (spec
+    4.4)."""
+
+    def _restore_commands(self):
+        return {
+            "AT+MTFRESET": (0, []), "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []), "AT+MTEPAPPLY": (0, []),
+            "AT+MTEP?": (0, ["+MTEP:0,1,0x0100"]),
+            "AT+MTFABRICS?": (0, ["+MTFABRICS:0"]),
+        }
+
+    def test_ordering_and_requires(self):
+        calls = []
+        steps = [
+            {"name": "one", "fn": lambda ctx: calls.append("one")},
+            {"name": "needs-one", "fn": lambda ctx: calls.append("dep"),
+             "requires": ["one"]},
+            {"name": "needs-missing", "fn": lambda ctx: calls.append("no"),
+             "requires": ["absent"]},
+        ]
+        link = FakeLink(self._restore_commands(), urcs_on_command={
+            "AT+MTFRESET": ["+MTREADY"], "AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase3_ctx(link)
+        saved = list(PHASE3_STEPS)
+        PHASE3_STEPS[:] = steps
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase3(ctx)
+        finally:
+            PHASE3_STEPS[:] = saved
+        self.assertEqual(calls, ["one", "dep"])
+        self.assertEqual([n for n, _ in ctx.suite.skipped], ["needs-missing"])
+
+    def test_finally_restores_even_on_abort(self):
+        def boom(ctx):
+            ctx.suite.check("boom", False, tag="P3")
+            raise StepAbort("dead")
+        steps = [{"name": "boom", "fn": boom},
+                 {"name": "after", "fn": lambda ctx: None}]
+        cmds = self._restore_commands()
+        cmds["AT+MTRESET"] = (0, [])  # recover_after_abort's own reset
+        link = FakeLink(cmds, urcs_on_command={
+            "AT+MTFRESET": ["+MTREADY"], "AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase3_ctx(link)
+        saved = list(PHASE3_STEPS)
+        PHASE3_STEPS[:] = steps
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase3(ctx)  # must not raise
+        finally:
+            PHASE3_STEPS[:] = saved
+        self.assertEqual([n for n, _ in ctx.suite.skipped], ["after"])
+        # the finally restore ran too (a second AT+MTFRESET beyond
+        # recover_after_abort's own AT+MTRESET)
+        self.assertIn("AT+MTFRESET", link.sent)
+
+    def test_registered_host_only_steps_are_exactly_three_one_through_four(self):
+        names = [s["name"] for s in PHASE3_STEPS]
+        self.assertEqual(names, [
+            "3.1 compose + boot-rebuild pin",
+            "3.2 endpoint-dependent grammar",
+            "3.3 self-test wedge reproduction",
+            "3.4 store grammar edges",
+        ])
+
+
+class TestMainPhase3Wiring(unittest.TestCase):
+    """T5 task 4: --phase 3 must be a valid argparse choice, and (the
+    same structural guarantee --phase 2 already relies on: args.phase
+    defaults to None) must never run without it being passed explicitly."""
+
+    def test_phase_three_is_a_valid_choice(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--port", "/dev/definitely-not-a-real-port-xyz",
+                      "--phase", "3"])
+        self.assertEqual(rc, 2)  # reaches the port-open failure, so
+                                  # argparse accepted the choice
+
+    def test_phase_four_is_rejected_by_argparse(self):
+        with contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main(["--phase", "4"])
 
 
 if __name__ == "__main__":

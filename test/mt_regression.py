@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-"""iLabs AT Hearth regression harness, stages T1+T2: Phases 0, 1 and 2.
+"""iLabs AT Hearth regression harness, stages T1-T5: Phases 0, 1, 2 and 3.
 
 Test inventory: docs/TESTING.md sections 5, 6 and 7 (2.1-2.5).
-Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-design.md
-and .../2026-07-30-c5-regression-harness-t2-design.md.
+Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-design.md,
+.../2026-07-30-c5-regression-harness-t2-design.md and
+.../2026-08-08-c5-regression-harness-t5-design.md (Phase 3).
 
 Phase 1 run: python3 test/mt_regression.py --port /dev/ttyACM0
 Phase 2 run: MT_SSID=... MT_PSK=... python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 2
+Phase 3 host-only segment: python3 test/mt_regression.py --port /dev/ttyACM0 \
+    --phase 3
+(only the host-only steps are registered so far; -k "3." will keep
+scoping to them once Task 5 appends the controller segment, since -k
+matches a literal substring, not a regex, and every step name starts
+with its own "3.N ")
 
 Standing rule (T1 design section 8, N23): never have an AT+MTATTR command
 in flight while a controller-driven +MTATTR URC is expected; ATLink would
-absorb the URC into the command's response lines. Phase 2 steps sequence
-around this by construction.
+absorb the URC into the command's response lines. Phase 2 and Phase 3
+steps sequence around this by construction.
 """
 
 import argparse
@@ -339,6 +346,58 @@ class Phase2Context:
         self.composition = None   # +MTEP: lines captured by run_phase2
         self.transport = "WIFI"   # set from phase2_gate's detection
         self.dataset = None       # Thread active dataset hex, if any
+
+
+# Slot order is load-bearing: step_3_2_grammar and friends reference
+# endpoints by slot. Ids verified against AT_MT_SPEC.md's device table
+# (T5 design spec section 4.2's spec rule); every id below is quoted
+# from that table in the task-4 report.
+#
+# Slot 11 is NOT in the design spec's 10-row table. It is added here,
+# deliberately, to make the MTTEMPLEVELS "+MTERR:4" row (deferred by
+# Task 1: "ep 4 built as the wrong variant") testable at all: slot 10
+# must be the TemperatureLevel variant (AT+MTEP=0x0071,1) so the
+# MTTEMPLEVELS OK/comma storage rows have a real Levels cabinet to write
+# to, and the two variants are mutually exclusive on one endpoint (spec
+# 3.9), so +MTERR:4 needs a second, TemperatureNumber-variant (plain
+# 0x0071, variant 0) cabinet that no other slot can double as. This is
+# flagged in the task-4 report for review rather than silently assumed.
+PHASE3_COMPOSITION = [
+    (1, "0x0100"),      # on/off light, regression anchor
+    (2, "0x0042"),      # water valve
+    (3, "0x0027"),      # mode select
+    (4, "0x0146"),      # chime
+    (5, "0x0076"),      # smoke/CO alarm
+    (6, "0x0011"),      # power source
+    (7, "0x0073"),      # laundry washer (opstate trio representative)
+    (8, "0x000A"),      # door lock
+    (9, "0x000F"),      # generic switch
+    (10, "0x0071,1"),   # temp-levels cabinet, TemperatureLevel variant
+    (11, "0x0071"),     # temp-number cabinet, variant 0 (MTTEMPLEVELS
+                         # +MTERR:4 target only; not in the design spec's
+                         # table, see the comment above)
+]
+
+
+class Phase3Context:
+    """Shared state the ordered Phase 3 steps hand each other, the same
+    role Phase2Context plays for Phase 2. .composition starts as the
+    ordered (slot, devtype_hex) list the run intends to declare
+    (PHASE3_COMPOSITION); step_3_1_compose does not change its shape,
+    since every later step indexes it by slot, not by re-parsing a
+    +MTEP? capture the way Phase 2's cleanup step does."""
+
+    def __init__(self, link, chip, suite, opts):
+        self.link = link
+        self.chip = chip
+        self.suite = suite
+        self.opts = opts
+        self.chip2 = None          # unused by the host-only segment;
+                                    # recover_after_abort tolerates None
+        self.node_id = getattr(opts, "node_id", 0x4845)
+        self.composition = list(PHASE3_COMPOSITION)
+        self.transport = "WIFI"    # set from phase3_gate's detection
+        self.dataset = None        # Thread active dataset hex, if any
 
 
 def step_2_1_factory_fresh(ctx):
@@ -724,13 +783,31 @@ def step_2_11_two_resets(ctx):
             res == 0 and lines == [], tag="P2")
 
 
+def stage_composition(link, devtypes):
+    """Stage a composition via the spec 3.9 grammar: AT+MTEPCLEAR opens
+    an empty staging session, then one AT+MTEP=<devtype> per entry, in
+    order. Returns True iff every command in the sequence answered OK.
+    Does not send AT+MTEPAPPLY: the two existing callers (2.12's rig
+    restore and, since T5, Phase 3's compose/restore steps) want
+    different framing around the apply-and-reboot that follows, so that
+    stays the caller's job.
+
+    Extracted from 2.12's inline MTEPCLEAR/MTEP loop (T5 task 4) so Phase
+    3 reuses it instead of reimplementing the same grammar; 2.12 itself
+    now calls this too, so the two staging call sites cannot drift."""
+    ok = link.command("AT+MTEPCLEAR")[0] == 0
+    for dt in devtypes:
+        ok = link.command("AT+MTEP=%s" % dt)[0] == 0 and ok
+    return ok
+
+
 def step_2_12_rig_restore(ctx):
     """TESTING.md 2.12 plus the T3 cleanup: after the 2.11 MTFRESET the
     old node must be gone and the device commissionable again, and the
     run must hand the next one the documented bench convention:
     factory-fresh WITH the composition declared. The replay uses the
-    spec 3.9 staging grammar; MTEPAPPLY persists and reboots on its
-    own."""
+    spec 3.9 staging grammar (stage_composition); MTEPAPPLY persists and
+    reboots on its own."""
     link, s, chip = ctx.link, ctx.suite, ctx.chip
     rc, _ = chip.run(["onoff", "read", "on-off", "0x%X" % ctx.node_id,
                       "1"], timeout=30)
@@ -748,9 +825,7 @@ def step_2_12_rig_restore(ctx):
     if not s.check("cleanup captured composition parses",
                    bool(devtypes), tag="P2"):
         raise StepAbort("no captured composition to restore")
-    ok = link.command("AT+MTEPCLEAR")[0] == 0
-    for dt in devtypes:
-        ok = link.command("AT+MTEP=%s" % dt)[0] == 0 and ok
+    ok = stage_composition(link, devtypes)
     s.check("cleanup composition staged", ok, tag="P2")
     link.drain(0.3)
     res, _ = link.command("AT+MTEPAPPLY", timeout=5.0)
@@ -853,6 +928,385 @@ def run_phase2(ctx):
         except StepAbort as exc:
             abort_reason = str(exc)
             recover_after_abort(ctx, abort_reason)
+
+
+def step_3_1_compose(ctx):
+    """T5 design spec section 4.2 step 2: declare PHASE3_COMPOSITION and
+    pin the boot-rebuild trio CLAUDE.md's "Things that will bite you"
+    warns about (endpoint composition must be built before
+    esp_matter::start() for ids to be reproducible; a failed
+    endpoint::create() aborts the whole composition rather than skipping
+    an entry; CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT must cover
+    every declared slot). AT+MTFRESET clears any prior state, the spec
+    3.9 staging grammar (stage_composition) declares the composition and
+    AT+MTEPAPPLY persists + reboots it, and a SECOND, plain AT+MTRESET
+    (no composition change) proves the ids survive a reboot that is not
+    itself the apply. AT+MTEP? must then read back every slot, in order,
+    with exactly the declared device type (and variant suffix, where
+    nonzero)."""
+    link, s = ctx.link, ctx.suite
+    res, _ = cmd_retry(link, "AT+MTFRESET", timeout=5.0)
+    if not s.check("3.1 MTFRESET -> OK", res == 0, tag="P3"):
+        raise StepAbort("AT+MTFRESET failed")
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    if not s.check("3.1 +MTREADY after MTFRESET", ready is not None,
+                   tag="P3"):
+        raise StepAbort("device did not come back from AT+MTFRESET")
+    devtypes = [dt for _slot, dt in PHASE3_COMPOSITION]
+    staged = stage_composition(link, devtypes)
+    if not s.check("3.1 composition staged", staged, tag="P3"):
+        raise StepAbort("staging the Phase 3 composition failed")
+    link.drain(0.3)
+    res, _ = link.command("AT+MTEPAPPLY", timeout=5.0)
+    if not s.check("3.1 MTEPAPPLY -> OK", res == 0, tag="P3"):
+        raise StepAbort("AT+MTEPAPPLY failed")
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    if not s.check("3.1 +MTREADY after MTEPAPPLY", ready is not None,
+                   tag="P3"):
+        raise StepAbort("device did not come back from AT+MTEPAPPLY")
+    res, _ = cmd_retry(link, "AT+MTRESET", timeout=5.0)
+    if not s.check("3.1 second MTRESET -> OK", res == 0, tag="P3"):
+        raise StepAbort("AT+MTRESET failed")
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    if not s.check("3.1 +MTREADY after second MTRESET", ready is not None,
+                   tag="P3"):
+        raise StepAbort("device did not come back from the second "
+                        "AT+MTRESET")
+    res, lines = cmd_retry(link, "AT+MTEP?")
+    expected = ["+MTEP:%d,%d,%s" % (i, slot, dt)
+               for i, (slot, dt) in enumerate(PHASE3_COMPOSITION)]
+    if not s.check("3.1 composition readback exact",
+                   res == 0 and lines == expected, tag="P3"):
+        raise StepAbort("Phase 3 composition did not read back as declared")
+
+
+def step_3_2_grammar(ctx):
+    """T5 design spec section 3/4.2 step 3: the endpoint-dependent
+    grammar rows Task 1 deferred (register_phase1_t5_negative's comments
+    name each one), now run against PHASE3_COMPOSITION's real endpoints.
+    One check per TESTING.md/AT_MT_SPEC.md row: 40 of Task 1's 41 named
+    rows land here. The 41st, AT+MTCMDRESP against an already-answered or
+    expired seq, needs a real forwarded command, which needs a
+    controller (CmdResponder), so it stays out of this host-only segment
+    and is Task 5's job.
+
+    MTALARM's SmokeState-Warning row is followed by an unscored clear so
+    ep5 hands step_3_3 a clean ExpressedState, the same
+    each-step-establishes-the-next-step's-preconditions discipline Phase
+    2 follows."""
+    link, s = ctx.link, ctx.suite
+
+    def c(name, fn):
+        s.check("3.2 %s" % name, fn(link), tag="P3")
+
+    def ok(cmd, **kw):
+        return expect_ok(cmd, **kw)
+
+    def err(cmd, code, **kw):
+        return expect_err(cmd, code, **kw)
+
+    # MTSWITCH (TESTING.md 6.2): ep9 is the composition's generic
+    # switch, ep0 the root endpoint used for the "wrong cluster" row.
+    c("MTSWITCH=99 -> +MTERR:2 (unknown ep)", err("AT+MTSWITCH=99", 2))
+    c("MTSWITCH=0 -> +MTERR:3 (root ep has no Switch cluster)",
+      err("AT+MTSWITCH=0", 3))
+    c("MTSWITCH=<switch ep> -> OK", ok("AT+MTSWITCH=9"))
+
+    # MTLOCK (TESTING.md 6.2): ep8 is the door lock; ep1 (light) stands
+    # in for "any endpoint without a DoorLock cluster", a role it plays
+    # for several families below.
+    c("MTLOCK=99,1 -> +MTERR:2 (unknown ep)", err("AT+MTLOCK=99,1", 2))
+    c("MTLOCK on non-door-lock ep -> +MTERR:3", err("AT+MTLOCK=1,1", 3))
+    c("MTLOCK=<lock ep>,1 -> OK", ok("AT+MTLOCK=8,1"))
+
+    # MTVALVE (TESTING.md 6.2): ep2 is the water valve.
+    c("MTVALVE=99,1 -> +MTERR:2 (unknown ep)", err("AT+MTVALVE=99,1", 2))
+    c("MTVALVE on non-valve ep -> +MTERR:3", err("AT+MTVALVE=1,1", 3))
+    c("MTVALVE=<valve ep>,1 -> OK", ok("AT+MTVALVE=2,1"))
+    c("MTVALVE=<valve ep>,1,50 -> OK (state and level)",
+      ok("AT+MTVALVE=2,1,50"))
+
+    # MTMODES (TESTING.md 6.2): ep3 is mode select.
+    c('MTMODES=99,0,"Quiet" -> +MTERR:2 (unknown ep)',
+      err('AT+MTMODES=99,0,"Quiet"', 2))
+    c("MTMODES on non-mode-select ep -> +MTERR:3",
+      err('AT+MTMODES=1,0,"Quiet"', 3))
+    c('MTMODES=<mode-select ep>,0,"Quiet" -> OK',
+      ok('AT+MTMODES=3,0,"Quiet"'))
+    c("MTMODES comma inside a label -> OK",
+      ok('AT+MTMODES=3,0,"Eco, low"'))
+    c("MTATTR CurrentMode round trip on mode-select ep",
+      ok("AT+MTATTR=3,80,3", line_re=r"\+MTATTR:3,80,3,\d+"))
+
+    # MTOPSTATE (TESTING.md 6.2): ep7 is the laundry washer (opstate
+    # trio representative).
+    c("MTOPSTATE=99,1 -> +MTERR:2 (unknown ep)",
+      err("AT+MTOPSTATE=99,1", 2))
+    c("MTOPSTATE on non-opstate ep -> +MTERR:3",
+      err("AT+MTOPSTATE=1,1", 3))
+    c("MTOPSTATE=<washer ep>,1 -> OK", ok("AT+MTOPSTATE=7,1"))
+
+    # MTALARM (TESTING.md 6.2): ep5 is the smoke/CO alarm. The four
+    # per-field enum-range rows carry +MTERR:1 but need the real
+    # SmokeCoAlarm instance (cmd_mtalarm's own comment: validated inside
+    # mt_matter_alarm_set(), not the handler), so they are
+    # composition-dependent despite the code.
+    c("MTALARM=<alarm ep>,1,3 -> +MTERR:1 (SmokeState range 0..2)",
+      err("AT+MTALARM=5,1,3", 1))
+    c("MTALARM=<alarm ep>,4,2 -> +MTERR:1 (DeviceMuted range 0..1)",
+      err("AT+MTALARM=5,4,2", 1))
+    c("MTALARM=<alarm ep>,5,2 -> +MTERR:1 (TestInProgress is boolean)",
+      err("AT+MTALARM=5,5,2", 1))
+    c("MTALARM=<alarm ep>,10,4 -> +MTERR:1 (ContaminationState range 0..3)",
+      err("AT+MTALARM=5,10,4", 1))
+    c("MTALARM=99,1,1 -> +MTERR:2 (unknown ep)",
+      err("AT+MTALARM=99,1,1", 2))
+    c("MTALARM on non-alarm ep -> +MTERR:3", err("AT+MTALARM=1,1,1", 3))
+    c("MTALARM=<alarm ep>,1,1 -> OK (SmokeState Warning)",
+      ok("AT+MTALARM=5,1,1"))
+    link.command("AT+MTALARM=5,1,0")  # unscored: clear before step_3_3
+    c("MTALARM=<alarm ep>,5,0 -> OK (TestInProgress false)",
+      ok("AT+MTALARM=5,5,0"))
+
+    # MTCHIMESOUNDS (TESTING.md 6.2): ep4 is the chime; ep1 (light)
+    # again stands in for "any endpoint without a Chime cluster".
+    c('MTCHIMESOUNDS=99,1,"Doorbell" -> +MTERR:2 (unknown ep)',
+      err('AT+MTCHIMESOUNDS=99,1,"Doorbell"', 2))
+    c("MTCHIMESOUNDS on non-chime ep -> +MTERR:3",
+      err('AT+MTCHIMESOUNDS=1,1,"Doorbell"', 3))
+    c('MTCHIMESOUNDS=<chime ep>,1,"Doorbell" -> OK',
+      ok('AT+MTCHIMESOUNDS=4,1,"Doorbell"'))
+    c("MTCHIMESOUNDS comma inside a name -> OK",
+      ok('AT+MTCHIMESOUNDS=4,1,"Doorbell",2,"Alert, urgent"'))
+
+    # MTCHIME (TESTING.md 6.2): same ep4/ep1 as MTCHIMESOUNDS. Id 9 is
+    # not among the sounds MTCHIMESOUNDS just installed (1, 2).
+    c("MTCHIME=<chime ep>,0,9 -> +MTERR:1 (chime id 9 not installed)",
+      err("AT+MTCHIME=4,0,9", 1))
+    c("MTCHIME=99,0,1 -> +MTERR:2 (unknown ep)",
+      err("AT+MTCHIME=99,0,1", 2))
+    c("MTCHIME on non-chime ep -> +MTERR:3", err("AT+MTCHIME=1,0,1", 3))
+    c("MTCHIME=<chime ep>,0,1 -> OK (SelectedChime = 1)",
+      ok("AT+MTCHIME=4,0,1"))
+    c("MTCHIME=<chime ep>,1,1 -> OK (Enabled = true)",
+      ok("AT+MTCHIME=4,1,1"))
+
+    # MTTEMPLEVELS (AT_MT_SPEC.md 3.16; TESTING.md has no dedicated
+    # table, only cross-references): ep10 is the TemperatureLevel
+    # variant, ep11 the TemperatureNumber variant (the +MTERR:4 target,
+    # see the PHASE3_COMPOSITION comment), ep1 the "no TemperatureControl
+    # cluster" stand-in, ep99 always unknown.
+    c('MTTEMPLEVELS=99,"Low" -> +MTERR:2 (unknown ep)',
+      err('AT+MTTEMPLEVELS=99,"Low"', 2))
+    c("MTTEMPLEVELS on non-templevels ep -> +MTERR:3",
+      err('AT+MTTEMPLEVELS=1,"Low"', 3))
+    c("MTTEMPLEVELS on TemperatureNumber-variant ep -> +MTERR:4",
+      err('AT+MTTEMPLEVELS=11,"Low"', 4))
+    c('MTTEMPLEVELS=<levels ep>,"Low","Medium","High" -> OK',
+      ok('AT+MTTEMPLEVELS=10,"Low","Medium","High"'))
+    c("MTTEMPLEVELS comma inside a label -> OK",
+      ok('AT+MTTEMPLEVELS=10,"Wine, red","Wine, white"'))
+
+
+def step_3_3_selftest_wedge(ctx):
+    """T5 design spec section 4.2 step 4: bug B165's host-only
+    reproduction, lifted verbatim from the C10 bench report's C12-4b
+    (.superpowers/sdd/2026-08-07-seven-type-batch/task-C10-report.md,
+    section "C12-4b: the exact old wedge shape, host-only, then a
+    reboot"), endpoint substituted 1 -> 5 for PHASE3_COMPOSITION's
+    smoke/CO alarm slot. No fabric, no controller: TestInProgress true
+    then false completes a self test purely over AT+MTATTR/AT+MTALARM,
+    and ExpressedState must read Normal (0) both immediately and after a
+    reboot, the direct regression case for the SetExpressedStateByPriority
+    recompute (fix 9c8af07, AT_MT_SPEC.md 3.22's DEFECT note). Each
+    AT+MTALARM call passes expect="+MTATTR:" so the attribute-changed
+    lines it raises land in that command's own response, matching how
+    the C10 evidence transcript captured them, rather than being queued
+    as unsolicited URCs.
+
+    A second scenario, not from the transcript but the same field, pins
+    SmokeState (field 1) driving ExpressedState the same way
+    TestInProgress does (AT_MT_SPEC.md 3.22: ExpressedState 1 is
+    kSmokeAlarm)."""
+    link, s = ctx.link, ctx.suite
+    link.drain(0.3)
+
+    def c(name, passed):
+        return s.check("3.3 %s" % name, passed, tag="P3")
+
+    res, lines = link.command("AT+MTATTR=5,92,0")
+    c("clean start: ExpressedState 0",
+      res == 0 and lines == ["+MTATTR:5,92,0,0"])
+    res, lines = link.command("AT+MTALARM=5,5,1", expect="+MTATTR:")
+    c("TestInProgress true -> OK, ExpressedState Testing",
+      res == 0 and lines == ["+MTATTR:5,92,5,1", "+MTATTR:5,92,0,4"])
+    res, lines = link.command("AT+MTATTR=5,92,0")
+    c("mid-test: ExpressedState 4 (Testing)",
+      res == 0 and lines == ["+MTATTR:5,92,0,4"])
+    res, lines = link.command("AT+MTALARM=5,5,0", expect="+MTATTR:")
+    c("TestInProgress false -> OK, ExpressedState Normal (the B165 fix)",
+      res == 0 and lines == ["+MTATTR:5,92,5,0", "+MTATTR:5,92,0,0"])
+    res, lines = link.command("AT+MTATTR=5,92,0")
+    c("post-test: ExpressedState back to 0",
+      res == 0 and lines == ["+MTATTR:5,92,0,0"])
+    res, _ = cmd_retry(link, "AT+MTRESET", timeout=5.0)
+    if not c("reboot -> OK", res == 0):
+        raise StepAbort("AT+MTRESET failed mid wedge-reproduction")
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    if not c("+MTREADY after reboot", ready is not None):
+        raise StepAbort("device did not come back from AT+MTRESET")
+    res, lines = link.command("AT+MTATTR=5,92,0")
+    c("after reboot: ExpressedState did not resurrect to Testing",
+      res == 0 and lines == ["+MTATTR:5,92,0,0"])
+    res, lines = link.command("AT+MTATTR=5,92,5")
+    c("after reboot: TestInProgress false",
+      res == 0 and lines == ["+MTATTR:5,92,5,0"])
+
+    # SmokeState scenario (brief for this task, not from the transcript).
+    res, _ = link.command("AT+MTALARM=5,1,1")
+    c("SmokeState Warning -> OK", res == 0)
+    res, lines = link.command("AT+MTATTR=5,92,0")
+    c("SmokeState Warning -> ExpressedState 1 (SmokeAlarm)",
+      res == 0 and lines == ["+MTATTR:5,92,0,1"])
+    res, _ = link.command("AT+MTALARM=5,1,0")
+    c("SmokeState cleared -> OK", res == 0)
+    res, lines = link.command("AT+MTATTR=5,92,0")
+    c("SmokeState cleared -> ExpressedState back to 0",
+      res == 0 and lines == ["+MTATTR:5,92,0,0"])
+
+
+def step_3_4_stores(ctx):
+    """T5 design spec section 4.2 step 5: MTMODES and MTCHIMESOUNDS store
+    edges re-pinned against their real endpoints (ep3, ep4), closing the
+    loop on Phase 1's order-independence claim for these +MTERR:1 rows
+    (register_phase1_t5_negative's docstring: verified against
+    mt_at.c's handlers, not just asserted) now that real mode-select and
+    chime endpoints exist to run them against."""
+    link, s = ctx.link, ctx.suite
+
+    def c(name, fn):
+        s.check("3.4 %s" % name, fn(link), tag="P3")
+
+    def ok(cmd, **kw):
+        return expect_ok(cmd, **kw)
+
+    def err(cmd, code, **kw):
+        return expect_err(cmd, code, **kw)
+
+    c("MTMODES comma inside a label -> OK (ep3)",
+      ok('AT+MTMODES=3,0,"Boost, high"'))
+    c("MTMODES duplicate id -> +MTERR:1 (ep3)",
+      err('AT+MTMODES=3,0,"A",0,"B"', 1))
+    c("MTMODES=3 -> +MTERR:1 (0 pairs, ep3)", err("AT+MTMODES=3", 1))
+    c("MTMODES 9 pairs -> +MTERR:1 (over the 1..8 limit, ep3)",
+      err('AT+MTMODES=3,0,"A",1,"B",2,"C",3,"D",4,"E",5,"F",6,"G",7,"H",8,"I"',
+          1))
+    c("MTCHIMESOUNDS comma inside a name -> OK (ep4)",
+      ok('AT+MTCHIMESOUNDS=4,1,"Alarm, loud"'))
+    c("MTCHIMESOUNDS duplicate id -> +MTERR:1 (ep4)",
+      err('AT+MTCHIMESOUNDS=4,1,"Doorbell",1,"Chime"', 1))
+    c("MTCHIMESOUNDS=4 -> +MTERR:1 (0 pairs, ep4)",
+      err("AT+MTCHIMESOUNDS=4", 1))
+
+
+def restore_standard_state(link, suite=None):
+    """Factory-reset and redeclare the bench's standard single-0x0100
+    composition (design spec section 4.4). Shared by run_phase3's
+    finally hook now, and by Task 5's full step_3_13_restore later, so
+    the two restore paths cannot drift. Unscored (suite=None) for a bare
+    best-effort recovery in recover_after_abort's style; when suite is
+    given, each stage is checked, so a restoration failure is visible in
+    the report rather than silently swallowed (spec 4.4: "the report
+    states whether restoration succeeded"). Returns True iff every stage
+    succeeded."""
+    def check(name, cond):
+        if suite is not None:
+            suite.check(name, cond, tag="P3")
+        return cond
+
+    ok = True
+    res, _ = cmd_retry(link, "AT+MTFRESET", timeout=5.0)
+    ok = check("restore MTFRESET -> OK", res == 0) and ok
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    ok = check("restore +MTREADY after MTFRESET", ready is not None) and ok
+    staged = stage_composition(link, ["0x0100"])
+    ok = check("restore composition staged", staged) and ok
+    link.drain(0.3)
+    res, _ = link.command("AT+MTEPAPPLY", timeout=5.0)
+    ok = check("restore MTEPAPPLY -> OK", res == 0) and ok
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    ok = check("restore +MTREADY after MTEPAPPLY", ready is not None) and ok
+    res, lines = cmd_retry(link, "AT+MTEP?")
+    ok = check("restore composition reads +MTEP:0,1,0x0100",
+               res == 0 and lines == ["+MTEP:0,1,0x0100"]) and ok
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    ok = check("restore fabrics 0",
+               res == 0 and lines == ["+MTFABRICS:0"]) and ok
+    return ok
+
+
+PHASE3_STEPS = []  # host-only entries below; Task 5 appends the
+                   # controller segment and the full step_3_13_restore.
+
+
+def run_phase3(ctx):
+    """Ordered execution for Phase 3 (design spec section 4), the same
+    abort/skip/gate/-k semantics run_phase2 uses. This task registers
+    only the host-only segment (3.1-3.4) in PHASE3_STEPS; Task 5 appends
+    the commissioned matrix and the full step_3_13_restore afterwards by
+    extending this same list, rather than replacing run_phase3 or
+    inserting StepAbort("task 5") placeholders: an empty tail here means
+    "not built yet", not a scored failure on every run until Task 5
+    lands, and Task 5's steps get the same requires-chain machinery for
+    free.
+
+    The finally block runs restore_standard_state unconditionally, on
+    both a clean finish and an abort: Phase 3 starts destructively
+    (AT+MTFRESET in step_3_1) and must never leave the bench in a
+    non-standard state, matching design spec section 4.4. The report
+    prints the restoration outcome explicitly either way."""
+    abort_reason = None
+    ran = set()
+    kw = getattr(ctx.opts, "keyword", None)
+    try:
+        for step in PHASE3_STEPS:
+            name, fn = step["name"], step["fn"]
+            if abort_reason is not None:
+                ctx.suite.skip(name, abort_reason)
+                continue
+            gate = step.get("gate")
+            if gate and not getattr(ctx.opts, gate, False):
+                ctx.suite.gate_skip(name, gate)
+                continue
+            if kw and kw not in name:
+                ctx.suite.gate_skip(name, "k=%s" % kw)
+                continue
+            missing = [r for r in step.get("requires", ()) if r not in ran]
+            if missing:
+                ctx.suite.skip(name, "requires step that did not run: %s"
+                               % missing[0])
+                continue
+            try:
+                fn(ctx)
+                ran.add(name)
+            except StepAbort as exc:
+                abort_reason = str(exc)
+                recover_after_abort(ctx, abort_reason)
+    finally:
+        restored = restore_standard_state(ctx.link, ctx.suite)
+        print("  (bench restoration: %s)" % ("OK" if restored else "FAILED"))
+
+
+PHASE3_STEPS[:] = [
+    {"name": "3.1 compose + boot-rebuild pin", "fn": step_3_1_compose},
+    {"name": "3.2 endpoint-dependent grammar", "fn": step_3_2_grammar,
+     "requires": ["3.1 compose + boot-rebuild pin"]},
+    {"name": "3.3 self-test wedge reproduction",
+     "fn": step_3_3_selftest_wedge,
+     "requires": ["3.1 compose + boot-rebuild pin"]},
+    {"name": "3.4 store grammar edges", "fn": step_3_4_stores,
+     "requires": ["3.1 compose + boot-rebuild pin"]},
+]
 
 
 DEFAULT_CHIPTOOL = os.path.expanduser(
@@ -1397,19 +1851,18 @@ def operator_power_cycle(port_path, printer=flush_print,
 GATE_REFERENCE_QR = "MT:Y.K9042C00KA0648G00"
 
 
-def phase2_gate(chip, args, link, otctl=otctl_run):
-    """Phase-2-only preflight, before anything destructive. Detects the
-    transport from the device and branches: WiFi needs credentials,
+def _transport_gate(chip, args, link, otctl):
+    """Shared preflight body for Phase 2 and Phase 3: detects the
+    transport from the device and branches, WiFi needs credentials,
     Thread needs a live border router and its active dataset (design
-    spec T4 section 2). Also covers what the WiFi-only gate always did:
-    chip-tool exists and runs as this user (the 2026-07-29 root-owned
-    counters file made every non-root run fail). Returns
-    (problem, transport, dataset); problem is None on success.
+    spec T4 section 2), then confirms chip-tool exists and runs as this
+    user (the 2026-07-29 root-owned counters file made every non-root
+    run fail). Returns (problem, transport, dataset); problem is None on
+    success.
 
-    otctl is a test seam, in the same style as ChipTool's injectable
-    runner: production call sites never pass it, so the real otctl_run
-    runs against the real binary; self-tests substitute a callable with
-    the same (args, binary) -> (rc, out) signature."""
+    Factored out of phase2_gate (T5 task 4) so Phase 3's gate reuses this
+    exact logic instead of copy-pasting it: phase2_gate's own self-tests
+    are the guard that the extraction changed nothing observable."""
     if shutil.which("openocd") is None:
         return ("openocd not on PATH: the 2.8 warm reboot resets the "
                 "RP2350 over SWD (see graph N22)", None, None)
@@ -1463,6 +1916,35 @@ def phase2_gate(chip, args, link, otctl=otctl_run):
                 "check it runs as this user (root-owned /tmp/chip_*.ini "
                 "is the known cause)", transport, dataset)
     return None, transport, dataset
+
+
+def phase2_gate(chip, args, link, otctl=otctl_run):
+    """Phase-2-only preflight, before anything destructive: the shared
+    transport/chip-tool checks (_transport_gate) plus nothing else, since
+    Phase 2's own destructive precondition (a factory-fresh-or-restorable
+    device) is established by its first step, not the gate.
+
+    otctl is a test seam, in the same style as ChipTool's injectable
+    runner: production call sites never pass it, so the real otctl_run
+    runs against the real binary; self-tests substitute a callable with
+    the same (args, binary) -> (rc, out) signature."""
+    return _transport_gate(chip, args, link, otctl)
+
+
+def phase3_gate(chip, args, link, otctl=otctl_run):
+    """Phase-3-only preflight: the same shared transport/chip-tool checks
+    as Phase 2 (design spec T5 section 4.1: "same code path as Phase 2's
+    gate"), so the two transports (and Thread's border-router liveness
+    check) behave identically for both phases. Phase 3's own destructive
+    precondition, that the run starts with AT+MTFRESET so its composition
+    can be declared deterministically, is enforced by step_3_1_compose
+    itself, not the gate: --phase 3 never running by default is main()'s
+    job (the same policy phase2_gate's caller already follows), and the
+    gate's job stays "is this bench usable at all", not "is state already
+    clean".
+
+    otctl is the same test seam phase2_gate takes."""
+    return _transport_gate(chip, args, link, otctl)
 
 
 def phase0(link, header):
@@ -1924,9 +2406,10 @@ def exit_code(suite, truncated):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", default=os.environ.get("MT_PORT", "/dev/ttyACM0"))
-    ap.add_argument("--phase", type=int, choices=[0, 1, 2], default=None,
+    ap.add_argument("--phase", type=int, choices=[0, 1, 2, 3], default=None,
                     help="run only this phase (0 runs just the preflight "
-                         "gate; 2 is stateful and never runs by default)")
+                         "gate; 2 and 3 are stateful and never run by "
+                         "default)")
     ap.add_argument("-k", dest="keyword", default=None,
                     help="run only tests whose name contains this substring")
     ap.add_argument("--baseline", default=None,
@@ -1961,7 +2444,7 @@ def main(argv=None):
                  "gated-out entries")
 
     chip = None
-    if args.phase == 2:
+    if args.phase in (2, 3):
         chip = ChipTool(args.chip_tool, args.storage)
 
     import serial
@@ -2001,6 +2484,18 @@ def main(argv=None):
             ctx.chip2 = ChipTool(args.chip_tool, args.storage + "-f2")
             ctx.chip2.wipe_storage()
             run_phase2(ctx)
+            capture_header(link, header)
+        elif args.phase == 3:
+            problem, transport, dataset = phase3_gate(chip, args, link)
+            if problem:
+                print("ABORT: " + problem)
+                return 2
+            header["node_id"] = "0x%X" % args.node_id
+            chip.wipe_storage()
+            ctx = Phase3Context(link, chip, suite, args)
+            ctx.transport = transport
+            ctx.dataset = dataset
+            run_phase3(ctx)
             capture_header(link, header)
         elif args.phase != 0:
             for phase, name, tag, fn, slow in TESTS:
