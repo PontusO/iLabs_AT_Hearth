@@ -2409,6 +2409,28 @@ class TestCmdResponder(unittest.TestCase):
         tr.feed_line("+MTCMD:7,3,96,0")
         self.assertIsNone(CmdResponder(link).expect_notify(
             cluster=96, command=0, timeout=0.3))
+        self.assertEqual(tr.writes, [])
+
+    def test_unrelated_forward_stays_queued_after_a_miss(self):
+        """Review finding (Important, task-2 review): _match() used to
+        await the broad pattern +MTCMD: and filter by cluster/command in
+        Python after await_urc_ts had already popped the entry, so a
+        forward for an unrelated cluster was consumed and discarded by a
+        call that was not asking for it, never to be seen again. This
+        pins the fix: an expect() that times out on the wrong
+        cluster/command must leave a queued, unrelated forward
+        untouched, so a later expect() for it still finds it."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:3,1,257,0")   # door lock forward, cluster 257
+        r = CmdResponder(link)
+        # a miss on an unrelated cluster/command must not consume it
+        self.assertIsNone(r.expect(cluster=129, command=0, verdict=1,
+                                   timeout=0.2))
+        # it is still there for the caller that actually wants it
+        tr.expect_write("AT+MTCMDRESP=3,1\r\n", then_lines=["OK"])
+        fwd = r.expect(cluster=257, command=0, verdict=1)
+        self.assertEqual(fwd["seq"], 3)
 
 
 if __name__ == "__main__":

@@ -190,7 +190,19 @@ class CmdResponder:
     harness bug, not a legitimate response. Both public methods route
     through _match(), and only expect()'s non-zero branch ever calls
     self.link.command(); there is no code path in this class that can
-    send AT+MTCMDRESP for seq 0."""
+    send AT+MTCMDRESP for seq 0.
+
+    _match() encodes cluster and command into the await_urc_ts() pattern
+    itself, not just "+MTCMD:", so a forward for some OTHER cluster or
+    command is never popped off ATLink.urcs by a call that is not asking
+    for it: it stays queued for whoever calls expect()/expect_notify()
+    for it later. Every other await_urc_ts call site in this module
+    follows the same rule (the regex carries the full match criteria) for
+    the same reason: ATLink.urcs is a live queue with no way back once an
+    entry is popped and discarded (urc_history is a record, not a
+    replayable queue), so a broad-match-then-filter-in-Python caller would
+    silently and irrecoverably drop any forward it was not the intended
+    recipient of."""
 
     _RX = re.compile(r"\+MTCMD:(\d+),(\d+),(\d+),(\d+)(?:,(\d+))?$")
 
@@ -198,10 +210,22 @@ class CmdResponder:
         self.link = link
 
     def _match(self, cluster, command, payload, timeout):
-        """Await the next +MTCMD URC and parse it, or None on timeout or
-        a mismatch (wrong cluster/command/payload). await_urc_ts returns
-        (timestamp, line); only the line matters here."""
-        got = self.link.await_urc_ts(r"\+MTCMD:", timeout=timeout)
+        """Await the +MTCMD forward for exactly this cluster and command,
+        and parse it, or None on timeout or a payload mismatch.
+
+        cluster and command are baked into the await pattern (anchored at
+        the start of the line, immediately after the seq and ep fields),
+        so a queued or arriving forward for a different cluster/command
+        is left untouched on ATLink.urcs rather than being popped and
+        discarded here: see the class docstring. payload stays a
+        post-parse filter, deliberately: a payload mismatch on the RIGHT
+        cluster/command is a genuine test failure to report as None, not
+        someone else's forward to leave alone.
+
+        await_urc_ts returns (timestamp, line); only the line matters
+        here."""
+        pattern = r"^\+MTCMD:\d+,\d+,%d,%d(,|$)" % (cluster, command)
+        got = self.link.await_urc_ts(pattern, timeout=timeout)
         if got is None:
             return None
         m = self._RX.match(got[1])
@@ -210,8 +234,6 @@ class CmdResponder:
         fwd = {"seq": int(m.group(1)), "ep": int(m.group(2)),
                "cluster": int(m.group(3)), "command": int(m.group(4)),
                "payload": int(m.group(5)) if m.group(5) else None}
-        if fwd["cluster"] != cluster or fwd["command"] != command:
-            return None
         if payload is not None and fwd["payload"] != payload:
             return None
         return fwd
