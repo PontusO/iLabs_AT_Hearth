@@ -947,6 +947,72 @@ def parse_onoff_read(text):
     return vals[-1] if vals else None
 
 
+def parse_int_attr(text):
+    """The last plain `<Label>: <int>` value chip-tool prints, e.g.
+    `CurrentMode: 2`. Anchored to `]` + 2-or-more spaces so it skips the
+    single-space `Endpoint: ... DataVersion: ...` summary line that
+    precedes every attribute value line: that line embeds several
+    `Word: number` fragments (DataVersion among them) that would
+    otherwise win as the last match. Validated against the Task 3
+    fixture (test/fixtures/t5/modes-current-mode.txt, `CurrentMode: 2`).
+    None on no match, never raises."""
+    vals = re.findall(r"\]\s{2,}[A-Za-z_][\w]*:\s*(-?\d+)\s*$",
+                      text, re.MULTILINE)
+    return int(vals[-1]) if vals else None
+
+
+def parse_status(text):
+    """The status of a command response, as an int. Two wire shapes
+    exist and both are tried, last match wins:
+      - a generic StatusIB failure, printed `status = 0x81
+        (UNSUPPORTED_COMMAND),`;
+      - OperationalState's business-logic verdict, printed
+        `ErrorStateID: 2`, which spec 3.21 calls "the wire response"
+        for that cluster (a Success at the StatusIB level can still
+        carry a non-zero ErrorStateID).
+    None on no match, never raises. Validated against the Task 3
+    fixture (test/fixtures/t5/opstate-pause-deny.txt, ErrorStateID 2)."""
+    status = re.findall(r"status\s*=\s*0x([0-9A-Fa-f]+)", text)
+    if status:
+        return int(status[-1], 16)
+    error_state = re.findall(r"ErrorStateID:\s*(\d+)", text)
+    if error_state:
+        return int(error_state[-1])
+    return None
+
+
+def parse_accepted_command_list(text):
+    """Every command id in an `AcceptedCommandList` (or similarly
+    numbered `[n]: <id> (Name)` list) chip-tool read, in order. Shape
+    validated against the Task 3 fixture
+    (test/fixtures/t5/opstate-accepted-command-list.txt: Pause, Stop,
+    Start, Resume -> [0, 1, 2, 3]). Empty list on no match, never
+    raises."""
+    return [int(m) for m in
+            re.findall(r"\[\d+\]:\s*(\d+)\s*\(", text)]
+
+
+def parse_event_count(text, event_name):
+    """How many times `event_name` was reported in a chip-tool
+    `read-event` capture, counting each `<event_name>: {` block.
+    Shape validated against the Task 3 fixture
+    (test/fixtures/t5/smoke-selftest-event-count.txt: two
+    SelfTestComplete events -> 2). 0 on no match, never raises."""
+    return len(re.findall(r"\b" + re.escape(event_name) + r":\s*\{", text))
+
+
+def parse_string_list(text):
+    """Every label in a chip-tool struct-list read that names its
+    labels `Label:` (SupportedModes) or `Name:` (InstalledChimeSounds),
+    in order, verbatim including any comma inside the label text --
+    the field runs to end of line, so `Label: Normal, standard` keeps
+    its comma. Shape validated against the Task 3 fixture
+    (test/fixtures/t5/modes-supported-modes.txt: ["Quiet", "Normal,
+    standard", "Boost"]). Empty list on no match, never raises."""
+    return [m.rstrip() for m in
+            re.findall(r"(?:Label|Name):\s*(.+)$", text, re.MULTILINE)]
+
+
 class Subscriber:
     """Background subscription via `chip-tool interactive start` with the
     subscribe command written to its stdin. Interactive mode is not a

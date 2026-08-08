@@ -1,0 +1,9 @@
+/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool operationalstate read accepted-command-list 1 6 --storage-directory /tmp/claude-1000/-mnt-f86c891c-33c6-4bb7-afe1-2c8846257177-src-git-iLabs-AT-Hearth/de70628e-db23-4600-9cf3-e5740a1efb64/scratchpad/ct-storage
+[1786148120.235] [3184179:3184181] [TOO] Sending ReadAttribute to:
+[1786148120.235] [3184179:3184181] [TOO] 	cluster 0x0000_0060, attribute: 0x0000_FFF9, endpoint 6
+[1786148120.312] [3184179:3184181] [TOO] Endpoint: 6 Cluster: 0x0000_0060 Attribute 0x0000_FFF9 DataVersion: 777013685
+[1786148120.312] [3184179:3184181] [TOO]   AcceptedCommandList: 4 entries
+[1786148120.312] [3184179:3184181] [TOO]     [1]: 0 (Pause)
+[1786148120.312] [3184179:3184181] [TOO]     [2]: 1 (Stop)
+[1786148120.312] [3184179:3184181] [TOO]     [3]: 2 (Start)
+[1786148120.312] [3184179:3184181] [TOO]     [4]: 3 (Resume)

@@ -1,0 +1,15 @@
+/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool smokecoalarm read-event self-test-complete 1 1 --storage-directory /tmp/claude-1000/-mnt-f86c891c-33c6-4bb7-afe1-2c8846257177-src-git-iLabs-AT-Hearth/de70628e-db23-4600-9cf3-e5740a1efb64/scratchpad/ct-storage
+[1786152253.604] [3224822:3224824] [TOO] Sending ReadEvent to:
+[1786152253.604] [3224822:3224824] [TOO] 	cluster 0x0000_005C, event: 0x0000_0005, endpoint 1
+[1786152253.681] [3224822:3224824] [TOO] Endpoint: 1 Cluster: 0x0000_005C Event 0x0000_0005
+[1786152253.681] [3224822:3224824] [TOO]   Event number: 65540
+[1786152253.681] [3224822:3224824] [TOO]   Priority: Info
+[1786152253.681] [3224822:3224824] [TOO]   Timestamp: 42586
+[1786152253.681] [3224822:3224824] [TOO]   SelfTestComplete: {
+[1786152253.681] [3224822:3224824] [TOO]    }
+[1786152253.681] [3224822:3224824] [TOO] Endpoint: 1 Cluster: 0x0000_005C Event 0x0000_0005
+[1786152253.681] [3224822:3224824] [TOO]   Event number: 65542
+[1786152253.681] [3224822:3224824] [TOO]   Priority: Info
+[1786152253.681] [3224822:3224824] [TOO]   Timestamp: 47672
+[1786152253.681] [3224822:3224824] [TOO]   SelfTestComplete: {
+[1786152253.681] [3224822:3224824] [TOO]    }

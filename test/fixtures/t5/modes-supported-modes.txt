@@ -1,0 +1,20 @@
+/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool modeselect read supported-modes 1 1 --storage-directory /tmp/claude-1000/-mnt-f86c891c-33c6-4bb7-afe1-2c8846257177-src-git-iLabs-AT-Hearth/de70628e-db23-4600-9cf3-e5740a1efb64/scratchpad/ct-storage
+[1786154004.391] [3245400:3245402] [TOO] Sending ReadAttribute to:
+[1786154004.392] [3245400:3245402] [TOO] 	cluster 0x0000_0050, attribute: 0x0000_0002, endpoint 1
+[1786154004.468] [3245400:3245402] [TOO] Endpoint: 1 Cluster: 0x0000_0050 Attribute 0x0000_0002 DataVersion: 4054274713
+[1786154004.468] [3245400:3245402] [TOO]   SupportedModes: 3 entries
+[1786154004.468] [3245400:3245402] [TOO]     [1]: {
+[1786154004.468] [3245400:3245402] [TOO]       Label: Quiet
+[1786154004.468] [3245400:3245402] [TOO]       Mode: 0
+[1786154004.469] [3245400:3245402] [TOO]       SemanticTags: 0 entries
+[1786154004.469] [3245400:3245402] [TOO]      }
+[1786154004.469] [3245400:3245402] [TOO]     [2]: {
+[1786154004.469] [3245400:3245402] [TOO]       Label: Normal, standard
+[1786154004.469] [3245400:3245402] [TOO]       Mode: 1
+[1786154004.469] [3245400:3245402] [TOO]       SemanticTags: 0 entries
+[1786154004.469] [3245400:3245402] [TOO]      }
+[1786154004.469] [3245400:3245402] [TOO]     [3]: {
+[1786154004.469] [3245400:3245402] [TOO]       Label: Boost
+[1786154004.469] [3245400:3245402] [TOO]       Mode: 2
+[1786154004.469] [3245400:3245402] [TOO]       SemanticTags: 0 entries
+[1786154004.469] [3245400:3245402] [TOO]      }

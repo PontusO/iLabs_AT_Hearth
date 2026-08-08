@@ -2433,5 +2433,73 @@ class TestCmdResponder(unittest.TestCase):
         self.assertEqual(fwd["seq"], 3)
 
 
+from mt_regression import (parse_int_attr, parse_status,
+                           parse_accepted_command_list, parse_event_count,
+                           parse_string_list)
+
+
+class TestT5Parsers(unittest.TestCase):
+    """T5 harness extension, Task 3: chip-tool output parsers for the
+    post-August-1 device type families. Every fixture is a trimmed,
+    verbatim excerpt of a real chip-tool capture from the C10 bench
+    round (.superpowers/sdd/2026-08-07-seven-type-batch/task-C10-evidence/),
+    grepped clean of SSID/PSK/pairing before being committed. Expected
+    values are the ones the C10 report recorded for that excerpt."""
+
+    def _fx(self, name):
+        return fixture(os.path.join("t5", name))
+
+    def test_parse_int_attr_reads_current_mode(self):
+        # 035330-c14-modes-current-mode.log: CurrentMode: 2 after the
+        # sketch's change-to-mode command landed.
+        self.assertEqual(
+            parse_int_attr(self._fx("modes-current-mode.txt")), 2)
+
+    def test_parse_int_attr_no_match_is_none(self):
+        self.assertIsNone(parse_int_attr("no such content"))
+
+    def test_parse_status_reads_operationalstate_deny(self):
+        # 022107-rerun-sketch-pause-deny.log: OperationalState's verdict
+        # IS the wire response (spec 3.21) -- ErrorStateID 2 on deny.
+        self.assertEqual(
+            parse_status(self._fx("opstate-pause-deny.txt")), 0x02)
+
+    def test_parse_status_no_match_is_none(self):
+        self.assertIsNone(parse_status("no such content"))
+
+    def test_parse_accepted_command_list_four_entries(self):
+        # 021520-rerun-operationalstate-accepted-command-list.log:
+        # Pause, Stop, Start, Resume.
+        self.assertEqual(
+            parse_accepted_command_list(
+                self._fx("opstate-accepted-command-list.txt")),
+            [0, 1, 2, 3])
+
+    def test_parse_accepted_command_list_no_match_is_empty(self):
+        self.assertEqual(parse_accepted_command_list("no such content"), [])
+
+    def test_parse_event_count_two_occurrences(self):
+        # 032413-c12-ev-after2.log: two SelfTestComplete events landed
+        # in one read-event call.
+        self.assertEqual(
+            parse_event_count(self._fx("smoke-selftest-event-count.txt"),
+                               "SelfTestComplete"),
+            2)
+
+    def test_parse_event_count_no_match_is_zero(self):
+        self.assertEqual(parse_event_count("no such content", "Whatever"),
+                          0)
+
+    def test_parse_string_list_preserves_comma_in_label(self):
+        # 035324-c14-modes-supported-modes.log: three SupportedModes
+        # labels, one of them containing a comma.
+        labels = parse_string_list(self._fx("modes-supported-modes.txt"))
+        self.assertEqual(labels, ["Quiet", "Normal, standard", "Boost"])
+        self.assertIn("Normal, standard", labels)
+
+    def test_parse_string_list_no_match_is_empty(self):
+        self.assertEqual(parse_string_list("no such content"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
