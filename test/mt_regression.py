@@ -1533,6 +1533,208 @@ def register_phase1_negative():
 register_phase1_negative()
 
 
+def register_phase1_t5_negative():
+    """T5: state-safe grammar rows for the post-August-1 command families
+    (TESTING.md 6.2 / AT_MT_SPEC.md 3.16), per the design spec's state-safety
+    split (docs/superpowers/specs/2026-08-08-c5-regression-harness-t5-design.md
+    section 3): bare-ERROR command-form rows and +MTERR:1 parse/range rows
+    only, since every one of them is rejected inside the handler itself,
+    before mt_at.c ever calls into a mt_matter_* bridge function (confirmed
+    against mt_at.c's cmd_mt* handlers). Rows needing +MTERR:2/3, +MTERR:4,
+    or OK all need a real, known endpoint from a declared composition and
+    belong to Phase 3, which owns one; each family's skipped rows are named
+    in a comment where they land instead.
+    """
+    n = lambda name, fn: add_test(1, name, fn, tag="AT-")
+
+    # MTSWITCH (TESTING.md 6.2, switch-colorlight round)
+    n("MTSWITCH? -> ERROR (query form)", expect_err("AT+MTSWITCH?", -1))
+    n("MTSWITCH no args -> ERROR", expect_err("AT+MTSWITCH", -1))
+    n("MTSWITCH= -> +MTERR:1 (empty argument)", expect_err("AT+MTSWITCH=", 1))
+    n("MTSWITCH=zz -> +MTERR:1 (ep not numeric)", expect_err("AT+MTSWITCH=zz", 1))
+    # MTSWITCH=99 (+MTERR:2, unknown endpoint), MTSWITCH=0 (+MTERR:3, root ep
+    # has no Switch cluster) and MTSWITCH=1 (OK) all need a known composition:
+    # Phase 3.
+
+    # MTCMDRESP / the verdict mailbox (TESTING.md 6.2, command forwarding C1)
+    n("MTCMDRESP? -> ERROR (query form)", expect_err("AT+MTCMDRESP?", -1))
+    n("MTCMDRESP no args -> ERROR", expect_err("AT+MTCMDRESP", -1))
+    n("MTCMDRESP=1 -> +MTERR:1 (fewer than 2 params)",
+      expect_err("AT+MTCMDRESP=1", 1))
+    n("MTCMDRESP=1,1,1 -> +MTERR:1 (more than 2 params)",
+      expect_err("AT+MTCMDRESP=1,1,1", 1))
+    n("MTCMDRESP=zz,1 -> +MTERR:1 (seq not numeric)",
+      expect_err("AT+MTCMDRESP=zz,1", 1))
+    n("MTCMDRESP=1,zz -> +MTERR:1 (verdict not numeric)",
+      expect_err("AT+MTCMDRESP=1,zz", 1))
+    n("MTCMDRESP=1,2 -> +MTERR:1 (verdict outside {0,1})",
+      expect_err("AT+MTCMDRESP=1,2", 1))
+    n("MTCMDRESP=99,1 -> +MTERR:1 (no forward pending)",
+      expect_err("AT+MTCMDRESP=99,1", 1))
+    n("MTCMDRESP=0,1 -> +MTERR:1 (seq 0 reserved)",
+      expect_err("AT+MTCMDRESP=0,1", 1))
+    # MTCMDRESP against a seq that was already answered or expired carries
+    # the same +MTERR:1, but needs a real forward to have happened first
+    # (mt_cmdbox_answer() has real prior state to check against): Phase 3.
+
+    # MTLOCK (TESTING.md 6.2, doorlock round)
+    n("MTLOCK? -> ERROR (query form)", expect_err("AT+MTLOCK?", -1))
+    n("MTLOCK no args -> ERROR", expect_err("AT+MTLOCK", -1))
+    n("MTLOCK=1 -> +MTERR:1 (fewer than 2 params)", expect_err("AT+MTLOCK=1", 1))
+    n("MTLOCK=1,1,1,1 -> +MTERR:1 (more than 3 params)",
+      expect_err("AT+MTLOCK=1,1,1,1", 1))
+    n("MTLOCK=zz,1 -> +MTERR:1 (ep not numeric)", expect_err("AT+MTLOCK=zz,1", 1))
+    n("MTLOCK=1,zz -> +MTERR:1 (state not numeric)", expect_err("AT+MTLOCK=1,zz", 1))
+    n("MTLOCK=1,3 -> +MTERR:1 (state outside 0..2)", expect_err("AT+MTLOCK=1,3", 1))
+    n("MTLOCK=1,1,zz -> +MTERR:1 (source not numeric)",
+      expect_err("AT+MTLOCK=1,1,zz", 1))
+    n("MTLOCK=1,1,11 -> +MTERR:1 (source above max)",
+      expect_err("AT+MTLOCK=1,1,11", 1))
+    # MTLOCK=99,1 (+MTERR:2), a non-door-lock ep (+MTERR:3) and a real
+    # door-lock ep (OK) all need a known composition: Phase 3.
+
+    # MTVALVE (TESTING.md 6.2, 0.5.0 C2)
+    n("MTVALVE? -> ERROR (query form)", expect_err("AT+MTVALVE?", -1))
+    n("MTVALVE no args -> ERROR", expect_err("AT+MTVALVE", -1))
+    n("MTVALVE=1 -> +MTERR:1 (too few params)", expect_err("AT+MTVALVE=1", 1))
+    n("MTVALVE=1,1,1,1 -> +MTERR:1 (too many)", expect_err("AT+MTVALVE=1,1,1,1", 1))
+    n("MTVALVE=zz,1 -> +MTERR:1 (ep not numeric)", expect_err("AT+MTVALVE=zz,1", 1))
+    n("MTVALVE=1,zz -> +MTERR:1 (state not numeric)", expect_err("AT+MTVALVE=1,zz", 1))
+    n("MTVALVE=1,3 -> +MTERR:1 (state outside 0..2)", expect_err("AT+MTVALVE=1,3", 1))
+    n("MTVALVE=1,1,zz -> +MTERR:1 (level not numeric)",
+      expect_err("AT+MTVALVE=1,1,zz", 1))
+    n("MTVALVE=1,1,101 -> +MTERR:1 (level above 100)",
+      expect_err("AT+MTVALVE=1,1,101", 1))
+    # MTVALVE=99,1 (+MTERR:2), a non-valve ep (+MTERR:3), and a real valve ep
+    # with or without a level (both OK) all need a known composition: Phase 3.
+
+    # MTMODES (TESTING.md 6.2, 0.5.0 C3)
+    n("MTMODES? -> ERROR (query form)", expect_err("AT+MTMODES?", -1))
+    n("MTMODES no args -> ERROR", expect_err("AT+MTMODES", -1))
+    n("MTMODES=1 -> +MTERR:1 (no pairs after the endpoint)",
+      expect_err("AT+MTMODES=1", 1))
+    n('MTMODES=zz,0,"Quiet" -> +MTERR:1 (ep not numeric)',
+      expect_err('AT+MTMODES=zz,0,"Quiet"', 1))
+    n('MTMODES=1,zz,"Quiet" -> +MTERR:1 (mode not numeric)',
+      expect_err('AT+MTMODES=1,zz,"Quiet"', 1))
+    n("MTMODES=1,0,Quiet -> +MTERR:1 (missing quotes)",
+      expect_err("AT+MTMODES=1,0,Quiet", 1))
+    n("MTMODES quote character inside a label -> +MTERR:1",
+      expect_err(r'AT+MTMODES=1,0,"Lo\"w"', 1))
+    n('MTMODES=1,0,"" -> +MTERR:1 (empty label)',
+      expect_err('AT+MTMODES=1,0,""', 1))
+    n("MTMODES label over 32 bytes -> +MTERR:1",
+      expect_err('AT+MTMODES=1,0,"12345678901234567890123456789012X"', 1))
+    n('MTMODES=1,0,"Quiet",0,"Silent" -> +MTERR:1 (mode 0 repeated)',
+      expect_err('AT+MTMODES=1,0,"Quiet",0,"Silent"', 1))
+    n("MTMODES 9 pairs -> +MTERR:1 (over the 1..8 limit)",
+      expect_err(
+          'AT+MTMODES=1,0,"A",1,"B",2,"C",3,"D",4,"E",5,"F",6,"G",7,"H",8,"I"',
+          1))
+    # MTMODES=99,... (+MTERR:2), a non-mode-select ep (+MTERR:3), both OK
+    # storage rows (plain and comma-in-label), and the CurrentMode
+    # AT+MTATTR round trip all need a known composition: Phase 3.
+
+    # MTOPSTATE (TESTING.md 6.2, 0.5.0 C4)
+    n("MTOPSTATE? -> ERROR (query form)", expect_err("AT+MTOPSTATE?", -1))
+    n("MTOPSTATE no args -> ERROR", expect_err("AT+MTOPSTATE", -1))
+    n("MTOPSTATE=1 -> +MTERR:1 (fewer than 2 params)",
+      expect_err("AT+MTOPSTATE=1", 1))
+    n("MTOPSTATE=1,1,1 -> +MTERR:1 (more than 2 params)",
+      expect_err("AT+MTOPSTATE=1,1,1", 1))
+    n("MTOPSTATE=zz,1 -> +MTERR:1 (ep not numeric)",
+      expect_err("AT+MTOPSTATE=zz,1", 1))
+    n("MTOPSTATE=1,zz -> +MTERR:1 (state not numeric)",
+      expect_err("AT+MTOPSTATE=1,zz", 1))
+    n("MTOPSTATE=1,3 -> +MTERR:1 (state 3/Error reserved)",
+      expect_err("AT+MTOPSTATE=1,3", 1))
+    n("MTOPSTATE=1,4 -> +MTERR:1 (state outside range)",
+      expect_err("AT+MTOPSTATE=1,4", 1))
+    # MTOPSTATE=99,1 (+MTERR:2), a non-opstate ep (+MTERR:3), and a real
+    # washer/dishwasher/dryer ep (OK) all need a known composition: Phase 3.
+
+    # MTALARM (TESTING.md 6.2, 0.5.0 C5)
+    n("MTALARM? -> ERROR (query form)", expect_err("AT+MTALARM?", -1))
+    n("MTALARM no args -> ERROR", expect_err("AT+MTALARM", -1))
+    n("MTALARM=1,1 -> +MTERR:1 (fewer than 3 params)",
+      expect_err("AT+MTALARM=1,1", 1))
+    n("MTALARM=1,1,1,1 -> +MTERR:1 (more than 3 params)",
+      expect_err("AT+MTALARM=1,1,1,1", 1))
+    n("MTALARM=zz,1,1 -> +MTERR:1 (ep not numeric)",
+      expect_err("AT+MTALARM=zz,1,1", 1))
+    n("MTALARM=1,zz,1 -> +MTERR:1 (field not numeric)",
+      expect_err("AT+MTALARM=1,zz,1", 1))
+    n("MTALARM=1,0,0 -> +MTERR:1 (field 0/ExpressedState is derived)",
+      expect_err("AT+MTALARM=1,0,0", 1))
+    n("MTALARM=1,12,0 -> +MTERR:1 (field outside 1..11)",
+      expect_err("AT+MTALARM=1,12,0", 1))
+    n("MTALARM=1,1,zz -> +MTERR:1 (value not numeric)",
+      expect_err("AT+MTALARM=1,1,zz", 1))
+    # The four per-field enum-range rows (AT+MTALARM=<alarm ep>,1,3 and
+    # friends: field 1/4/5/10's value bounds) are validated inside
+    # mt_matter_alarm_set(), not the handler: cmd_mtalarm's own comment says
+    # it needs the field's real SDK enum type, which only a genuine
+    # SmokeCoAlarm cluster instance has. Not order-independent, so not here,
+    # despite carrying +MTERR:1. MTALARM=99,1,1 (+MTERR:2), a non-alarm ep
+    # (+MTERR:3), the two OK rows, the self-test bench case, and the B165
+    # regression pin all need a known composition too: all of the above go
+    # to Phase 3.
+
+    # MTCHIMESOUNDS (TESTING.md 6.2, 0.5.0 C6; bench used chime ep 3,
+    # non-chime ep 7)
+    n("MTCHIMESOUNDS? -> ERROR (query form)", expect_err("AT+MTCHIMESOUNDS?", -1))
+    n("MTCHIMESOUNDS no args -> ERROR", expect_err("AT+MTCHIMESOUNDS", -1))
+    n("MTCHIMESOUNDS=3 -> +MTERR:1 (no pairs)", expect_err("AT+MTCHIMESOUNDS=3", 1))
+    n("MTCHIMESOUNDS=3,1,Doorbell -> +MTERR:1 (missing quotes)",
+      expect_err("AT+MTCHIMESOUNDS=3,1,Doorbell", 1))
+    n("MTCHIMESOUNDS duplicate id -> +MTERR:1 (id 1 repeated)",
+      expect_err('AT+MTCHIMESOUNDS=3,1,"Doorbell",1,"Chime"', 1))
+    n('MTCHIMESOUNDS=3,1,"" -> +MTERR:1 (empty name)',
+      expect_err('AT+MTCHIMESOUNDS=3,1,""', 1))
+    # MTCHIMESOUNDS=99,... (+MTERR:2), ep 7/non-chime (+MTERR:3), and both OK
+    # storage rows (plain and comma-in-name) all need a known composition:
+    # Phase 3.
+
+    # MTCHIME (TESTING.md 6.2, 0.5.0 C6; same bench ep 3/7 as MTCHIMESOUNDS)
+    n("MTCHIME? -> ERROR (query form)", expect_err("AT+MTCHIME?", -1))
+    n("MTCHIME no args -> ERROR", expect_err("AT+MTCHIME", -1))
+    n("MTCHIME=3,0 -> +MTERR:1 (fewer than 3 params)",
+      expect_err("AT+MTCHIME=3,0", 1))
+    n("MTCHIME=3,0,1,1 -> +MTERR:1 (more than 3 params)",
+      expect_err("AT+MTCHIME=3,0,1,1", 1))
+    n("MTCHIME=3,2,1 -> +MTERR:1 (2 not a valid <what>)",
+      expect_err("AT+MTCHIME=3,2,1", 1))
+    n("MTCHIME=3,1,2 -> +MTERR:1 (2 not a valid bool for Enabled)",
+      expect_err("AT+MTCHIME=3,1,2", 1))
+    # MTCHIME=3,0,9 (chime id 9 not installed) is validated inside
+    # mt_matter_chime_set(), not the handler (cmd_mtchime's own comment: the
+    # SDK's SetSelectedChime() answers Status::NotFound), so it needs real
+    # installed sounds from a live AT+MTCHIMESOUNDS call first. MTCHIME=99,0,1
+    # (+MTERR:2), ep 7/non-chime (+MTERR:3), and the two OK rows all need a
+    # known composition too: all of the above go to Phase 3.
+
+    # MTTEMPLEVELS (doorlock round). TESTING.md 6.2 has no dedicated table
+    # for this family, only pattern cross-references from the MTLOCK and
+    # MTMODES tables ("the AT+MTTEMPLEVELS pattern" / "rule"); its own
+    # worked example lives in AT_MT_SPEC.md 3.16, used as the row source
+    # here instead.
+    n("MTTEMPLEVELS? -> ERROR (set-only, query form)",
+      expect_err("AT+MTTEMPLEVELS?", -1))
+    n("MTTEMPLEVELS no args -> ERROR", expect_err("AT+MTTEMPLEVELS", -1))
+    n("MTTEMPLEVELS=4 -> +MTERR:1 (no labels)", expect_err("AT+MTTEMPLEVELS=4", 1))
+    n("MTTEMPLEVELS=4,Low -> +MTERR:1 (missing quotes)",
+      expect_err("AT+MTTEMPLEVELS=4,Low", 1))
+    n("MTTEMPLEVELS quote character inside a label -> +MTERR:1",
+      expect_err(r'AT+MTTEMPLEVELS=4,"Low","Lo\"w"', 1))
+    # MTTEMPLEVELS=9,"Low" (+MTERR:2, no endpoint 9), MTTEMPLEVELS=1,"Low"
+    # (+MTERR:3, ep 1 has no TemperatureControl cluster), and
+    # MTTEMPLEVELS=4,"Low" (+MTERR:4, ep 4 built as the wrong variant) all
+    # need a known composition: Phase 3.
+
+
+register_phase1_t5_negative()
+
+
 PHASE2_STEPS[:] = [
     {"name": "2.1 factory-fresh baseline", "fn": step_2_1_factory_fresh},
     {"name": "2.2 onboarding codes stable", "fn": step_2_2_codes_stable},
