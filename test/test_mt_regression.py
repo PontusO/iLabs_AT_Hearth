@@ -2620,8 +2620,8 @@ from mt_regression import (
     step_3_3_selftest_wedge, step_3_4_stores, run_phase3, PHASE3_STEPS,
     step_3_5_commission, step_3_6_valve, step_3_7_modes, step_3_8_chime,
     step_3_9_opstate, step_3_10_smoke, step_3_11_power,
-    step_3_12_lock_switch_levels, step_3_13_restore, invoke_chip,
-    parse_indexed_list, CmdResponder,
+    step_3_12_lock_switch_levels, step_3_13_restore,
+    step_3_14_root_urc_sweep, invoke_chip, parse_indexed_list, CmdResponder,
 )
 
 
@@ -2985,7 +2985,7 @@ class TestRunPhase3(unittest.TestCase):
         # recover_after_abort's own AT+MTRESET)
         self.assertIn("AT+MTFRESET", link.sent)
 
-    def test_registered_steps_are_the_full_1_through_12_chain(self):
+    def test_registered_steps_are_the_full_1_through_12_chain_plus_sweep(self):
         names = [s["name"] for s in PHASE3_STEPS]
         self.assertEqual(names, [
             "3.1 compose + boot-rebuild pin",
@@ -3000,6 +3000,7 @@ class TestRunPhase3(unittest.TestCase):
             "3.10 smoke/CO alarm",
             "3.11 power source",
             "3.12 lock, switch, temp levels",
+            "3.14 root-endpoint URC sweep",
         ])
 
 
@@ -3538,6 +3539,33 @@ class TestStep313Restore(unittest.TestCase):
     def test_not_registered_in_phase3_steps(self):
         fn_objs = [s["fn"] for s in PHASE3_STEPS]
         self.assertNotIn(step_3_13_restore, fn_objs)
+
+
+class TestStep314RootUrcSweep(unittest.TestCase):
+    """T5 task 5 fix round (Important finding): the identical
+    root-endpoint URC sweep Phase 2 needed (TestStep26/
+    step_2_6_root_urc_sweep), mirrored for Phase 3, scored last across
+    the whole run's urc_history."""
+
+    def test_clean_history_passes(self):
+        link = FakeLink()
+        link.urc_history = [(0.0, "+MTEVT:0"), (1.0, "+MTATTR:2,129,4,0"),
+                            (2.0, "+MTREADY")]
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_14_root_urc_sweep(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_root_endpoint_attr_urc_fails(self):
+        link = FakeLink()
+        link.urc_history = [(0.0, "+MTEVT:0"), (1.0, "+MTATTR:0,40,2,1"),
+                            (2.0, "+MTREADY")]
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_14_root_urc_sweep(ctx)
+        failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("3.14 no root-endpoint +MTATTR URC in the whole run",
+                      failed_names)
 
 
 class TestParseIndexedList(unittest.TestCase):

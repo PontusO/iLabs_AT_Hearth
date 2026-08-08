@@ -1758,6 +1758,31 @@ def step_3_12_lock_switch_levels(ctx):
             tag="P3")
 
 
+def step_3_14_root_urc_sweep(ctx):
+    """Design spec 4.3's standing-disciplines bullet ("no
+    `+MTATTR:0,...` ever"), pinned by a dedicated sweep for the same
+    reason step_2_6_root_urc_sweep exists for Phase 2: this project
+    already judged "no step touches endpoint 0, so it can't happen" an
+    insufficient guarantee once before (that is exactly what
+    step_2_6_root_urc_sweep was built to stop relying on), and the
+    T5 task 5 review raised the identical gap for Phase 3.
+
+    Scored last and unconditional (no "requires"), spanning the WHOLE
+    Phase 3 run's URC history from step_3_1 onward, not only the
+    controller segment (3.5-3.12): the same scope step_2_6 gives Phase
+    2, since a stray root-endpoint attribute report could in principle
+    surface from any of the several reboots in the chain (step_3_1's
+    two resets, the commissioning cycle in step_3_5), not only from a
+    controller-driven write."""
+    bad = [u for _, u in ctx.link.urc_history
+           if u.startswith("+MTATTR:0,")]
+    ctx.suite.check(
+        "3.14 no root-endpoint +MTATTR URC in the whole run",
+        not bad, tag="P3")
+    if bad:
+        print("    offending (first 5): %s" % bad[:5])
+
+
 def step_3_13_restore(ctx):
     """T5 design spec 4.4's restore, as its own named step: AT+MTFRESET,
     the standard single-0x0100 composition, AT+MTEPAPPLY (which per spec
@@ -1821,14 +1846,16 @@ PHASE3_STEPS = []  # host-only entries below; Task 5 appends the
 
 def run_phase3(ctx):
     """Ordered execution for Phase 3 (design spec section 4), the same
-    abort/skip/gate/-k semantics run_phase2 uses. This task registers
-    only the host-only segment (3.1-3.4) in PHASE3_STEPS; Task 5 appends
-    the commissioned matrix and the full step_3_13_restore afterwards by
-    extending this same list, rather than replacing run_phase3 or
-    inserting StepAbort("task 5") placeholders: an empty tail here means
-    "not built yet", not a scored failure on every run until Task 5
-    lands, and Task 5's steps get the same requires-chain machinery for
-    free.
+    abort/skip/gate/-k semantics run_phase2 uses. PHASE3_STEPS registers
+    the full chain: the host-only segment (3.1-3.4, no fabric, no
+    controller), the commissioned matrix (3.5-3.12, one family per
+    step), and the root-endpoint URC sweep (3.14, scored last, mirroring
+    step_2_6_root_urc_sweep) that closes design spec 4.3's
+    standing-disciplines bullet. step_3_13_restore exists as a named
+    function but is deliberately NOT in this list: the finally block
+    below already runs its body (restore_standard_state) unconditionally
+    on every exit path, so registering it too would run the same
+    reset/apply cycle twice on a clean pass.
 
     The finally block runs restore_standard_state unconditionally, on
     both a clean finish and an abort: Phase 3 starts destructively
@@ -1892,6 +1919,7 @@ PHASE3_STEPS[:] = [
      "requires": ["3.5 commission"]},
     {"name": "3.12 lock, switch, temp levels",
      "fn": step_3_12_lock_switch_levels, "requires": ["3.5 commission"]},
+    {"name": "3.14 root-endpoint URC sweep", "fn": step_3_14_root_urc_sweep},
 ]
 
 
