@@ -2,7 +2,7 @@
   "header": {
     "at_core_repo_head": "11c9935ea392b62c0a9c84c5197483aa1fee41ef",
     "cgmr": "0.1.0",
-    "fw_repo_head": "bb5101f61210461eb202a68fa089fe4d095b3785",
+    "fw_repo_head": "8c7b4246293516838526afa5b0b42a679696ea07",
     "manual_code": "34970112332",
     "net": "+MTNET:THREAD,1,1,0",
     "port": "/dev/ttyACM2",

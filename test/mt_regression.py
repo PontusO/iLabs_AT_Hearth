@@ -478,7 +478,7 @@ def step_2_3_commission(ctx):
     """TESTING.md 2.3 plus the DE24 window-event contract: the AT-side
     and controller-side views must agree, and exactly one +MTEVT:4 must
     follow +MTEVT:3 (order proven by timestamps, because a queue scan
-    alone would let the old pre-eb15d0f leak pass)."""
+    alone would let the old pre-8711123 leak pass)."""
     link, s, chip = ctx.link, ctx.suite, ctx.chip
     rc, out = chip.run(["payload", "parse-setup-payload", ctx.qr],
                        timeout=15)
@@ -658,7 +658,7 @@ def step_2_8_warm_reboot(ctx):
             res == 0 and lines == ["+MTFABRICS:1"], tag="P2")
     res, lines = cmd_retry(link, "AT+MTATTR=1,6,0")
     # B63 regression guard: the value survives the reboot since commit
-    # 8100af4 (StartUpOnOff null instead of esp-matter's boot-Off
+    # 4410498 (StartUpOnOff null instead of esp-matter's boot-Off
     # default). Before that fix every boot forcibly persisted a 0 over
     # the healthy restore, and this check pinned that behavior.
     s.check("2.8 attribute value survived (B63 guard)",
@@ -673,7 +673,7 @@ def step_2_8_warm_reboot(ctx):
 def step_2_9_cold_boot(ctx):
     """TESTING.md 2.9, the B4.3 boot-loop regression territory: a URC
     fired during esp_matter::start(), before the AT UART exists, once
-    boot-looped the device forever. Since the B63 fix (8100af4,
+    boot-looped the device forever. Since the B63 fix (4410498,
     StartUpOnOff null) no state changes at init, so that path only arms
     if a controller configures StartUpOnOff to change state at boot;
     what this step proves is the commissioned device coming cleanly
@@ -1126,7 +1126,7 @@ def step_3_3_selftest_wedge(ctx):
     then false completes a self test purely over AT+MTATTR/AT+MTALARM,
     and ExpressedState must read Normal (0) both immediately and after a
     reboot, the direct regression case for the SetExpressedStateByPriority
-    recompute (fix 9c8af07, AT_MT_SPEC.md 3.22's DEFECT note). Each
+    recompute (fix 7781dd1, AT_MT_SPEC.md 3.22's DEFECT note). Each
     AT+MTALARM call passes expect="+MTATTR:" so the attribute-changed
     lines it raises land in that command's own response, matching how
     the C10 evidence transcript captured them, rather than being queued
@@ -1725,8 +1725,8 @@ def step_3_12_lock_switch_levels(ctx):
     mt_cmd_forward() boolean with no cluster-specific response wrapper,
     the same bare-StatusIB shape step_3_8's chime deny uses. Both the
     allow and deny paths were then observed live on both transports
-    (wifi-devicetypes.json at 7e5f9a7, thread-devicetypes.json at
-    9f90f48, both 165/165): the WiFi run and the Thread run each
+    (wifi-devicetypes.json at 5a8e159, thread-devicetypes.json at
+    38fea8d, both 165/165): the WiFi run and the Thread run each
     answered wire status 0x1 on deny, 0x0 on allow, confirming the
     derivation.
 
