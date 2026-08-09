@@ -615,6 +615,37 @@ int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const char *cons
  */
 int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value);
 
+/* ---- Microwave Oven Control (RVC + Microwave batch, task 4) ------------- */
+
+/*
+ * The delegate-pool handout pattern (see mt_matter_valve_delegate_alloc()'s
+ * doc comment above, which this mirrors): one delegate OBJECT per endpoint,
+ * the same F7 VerifyOrDie reasoning as mt_matter_opstate_delegate_alloc()
+ * above, sized by MT_COMP_MAX_ENDPOINTS for the same reason (one
+ * MicrowaveOvenControl cluster per microwave endpoint).
+ *
+ * Unlike every other pool in this file, this cluster's own SDK init callback
+ * (MicrowaveOvenControlDelegateInitCB, esp_matter_delegate_callbacks.cpp)
+ * looks up TWO other delegates by cluster id (MicrowaveOvenMode,
+ * OperationalState, both fetched through cluster::get()+get_delegate_impl())
+ * and VerifyOrReturns - silently creating no Instance at all, no log, no
+ * error - if either comes back null alongside this one. So the microwave
+ * thunk (mt_devtypes.cpp) must allocate and wire all three delegate pools
+ * before microwave_oven::create() runs: this one (config.microwave_oven_
+ * control.delegate), the ModeBase pool keyed by MicrowaveOvenMode::Id
+ * (config.microwave_oven_mode.delegate, mt_matter_modebase_delegate_alloc()
+ * above), and the plain OperationalState pool
+ * (config.operational_state.delegate, mt_matter_opstate_delegate_alloc()
+ * above) - the same three-non-null precondition the class comment on
+ * HearthMwocDelegate (main.cpp) documents in full.
+ *
+ * mt_matter_mwoc_delegate_alloc() returns nullptr once MT_COMP_MAX_ENDPOINTS
+ * slots are handed out, same abort-the-boot-rebuild contract as every other
+ * pool in this file.
+ */
+void *mt_matter_mwoc_delegate_alloc(void);
+void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep);
+
 #ifdef __cplusplus
 }
 #endif

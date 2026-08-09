@@ -17,7 +17,7 @@
 /*  Firmware identity                                                  */
 /* ------------------------------------------------------------------ */
 
-#define MT_FW_VERSION       "0.5.0"
+#define MT_FW_VERSION       "0.6.0"
 #define MT_MANUFACTURER     "iLabs Electronics"
 #define MT_MODEL            "ESP32-C6 Hearth"
 

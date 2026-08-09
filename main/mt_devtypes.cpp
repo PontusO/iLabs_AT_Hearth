@@ -852,6 +852,100 @@ static endpoint_t *mk_rvc(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * F2/F7 (RVC + Microwave batch, task 4): microwave_oven::config_t
+ * (esp_matter_endpoint.h:871-877) nests THREE cluster configs -
+ * operational_state (inherited from its app_with_operational_state_config
+ * base), microwave_oven_mode and microwave_oven_control - each needing its
+ * own delegate pool slot, allocated before create() runs, the same
+ * before/after shape every pool in this file follows (the real endpoint id
+ * is not known until create() returns it). All three MUST be non-null
+ * before create() runs: MicrowaveOvenControlDelegateInitCB
+ * (esp_matter_delegate_callbacks.cpp) looks up the mode and opstate
+ * delegates by cluster id and silently builds nothing at all - no Instance,
+ * no log, no error - if either comes back null alongside this cluster's own
+ * delegate (main.cpp's HearthMwocDelegate class comment has the full
+ * citation trail).
+ *
+ * microwave_oven::add() (esp_matter_endpoint.cpp:1620-1632) creates the
+ * PLAIN OperationalState cluster (0x0060), not a derived one the way RVC's
+ * add() does above, so the washer-era hand-add applies verbatim:
+ * mt_opstate_add_commands() (same call mk_laundry_washer()/mk_dish_washer()/
+ * mk_laundry_dryer() above use), same landmine (operational_state::create()
+ * wires attributes and events but no command::create_*, C11's finding).
+ * There is deliberately no Identify cluster on this device type
+ * (microwave_oven::config_t's base has no identify field at all,
+ * esp_matter_endpoint.h:213-218, unlike e.g. water_valve::config_t which
+ * adds one explicitly) - not an omission to fix.
+ *
+ * PowerAsNumber is mandatory, not a choice: microwave_oven_control::create()
+ * (esp_matter_cluster.cpp:3058-3100) runs VALIDATE_FEATURES_EXACT_ONE
+ * against it alone and aborts cluster creation on anything else.
+ * PowerNumberLimits is deliberately NOT set alongside it - its own add()
+ * (esp_matter_feature.cpp:2975-2992) only applies when PowerAsNumber's bit
+ * is ABSENT from the feature map, the inverse of the cluster's own spec
+ * conformance, so with PowerAsNumber mandatory here that add() can never
+ * reach its "apply" branch: dead code in this pinned tree (main.cpp's
+ * HearthMwocDelegate class comment has the full trace). Read through the
+ * SDK's own feature-id accessor
+ * (cluster::microwave_oven_control::feature::power_as_number::get_id()),
+ * the same "never transcribe a CHIP enum value by hand" precedent
+ * mk_smoke_co_alarm()/mk_power_source() above follow for their own feature
+ * flags.
+ *
+ * AddMoreTime hand-add: microwave_oven_control::create() wires
+ * SetCookingParameters unconditionally but never calls
+ * cluster::microwave_oven_control::command::create_add_more_time()
+ * (esp_matter_command.cpp:2590) - the helper exists, declared, zero callers
+ * anywhere in the pinned tree, the identical "SDK ships the creator, nothing
+ * calls it" shape mt_opstate_add_commands() above and mk_smoke_co_alarm()'s
+ * SelfTestRequest hand-add use. Added by hand after create(), same
+ * after-create() shape as every other hand-add in this file.
+ */
+static endpoint_t *mk_microwave_oven(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    void *opstate_delegate = mt_matter_opstate_delegate_alloc();
+    if (opstate_delegate == nullptr) {
+        ESP_LOGE(TAG, "operational state delegate pool exhausted (microwave)");
+        return nullptr;
+    }
+    void *mode_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::MicrowaveOvenMode::Id);
+    if (mode_delegate == nullptr) {
+        ESP_LOGE(TAG, "modebase delegate pool exhausted (microwave oven mode)");
+        return nullptr;
+    }
+    void *mwoc_delegate = mt_matter_mwoc_delegate_alloc();
+    if (mwoc_delegate == nullptr) {
+        ESP_LOGE(TAG, "microwave oven control delegate pool exhausted");
+        return nullptr;
+    }
+
+    microwave_oven::config_t c;
+    c.operational_state.delegate      = opstate_delegate;
+    c.microwave_oven_mode.delegate    = mode_delegate;
+    c.microwave_oven_control.delegate = mwoc_delegate;
+    c.microwave_oven_control.feature_flags = cluster::microwave_oven_control::feature::power_as_number::get_id();
+
+    endpoint_t *ep = microwave_oven::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+
+    mt_opstate_add_commands(ep);
+
+    cluster_t *control_cl = cluster::get(ep, chip::app::Clusters::MicrowaveOvenControl::Id);
+    if (control_cl != nullptr) {
+        cluster::microwave_oven_control::command::create_add_more_time(control_cl);
+    }
+
+    uint16_t ep_id = endpoint::get_id(ep);
+    mt_matter_opstate_delegate_set_endpoint(opstate_delegate, ep_id);
+    mt_matter_modebase_delegate_set_endpoint(mode_delegate, ep_id);
+    mt_matter_mwoc_delegate_set_endpoint(mwoc_delegate, ep_id);
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -895,6 +989,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { power_source::get_device_type_id(),             mk_power_source,            "power_source",            0 },
     { chime::get_device_type_id(),                    mk_chime,                   "chime",                   0 },
     { robotic_vacuum_cleaner::get_device_type_id(),   mk_rvc,                     "robotic_vacuum_cleaner",  0 },
+    { microwave_oven::get_device_type_id(),           mk_microwave_oven,          "microwave_oven",          0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

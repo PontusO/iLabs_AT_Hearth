@@ -102,6 +102,14 @@
  * no extra include), so no separate include is needed for those. */
 #include <app/clusters/mode-base-server/mode-base-server.h>
 
+/* RVC + Microwave batch, task 4: MicrowaveOvenControl::Delegate/Instance
+ * live in this dedicated header. Unlike RvcOperationalState (whose Delegate/
+ * Instance are nested inside operational-state-server.h, already included
+ * above, per that class's own comment in this file) no other header this
+ * file already includes pulls this one in transitively, so - the same as
+ * mode-base-server.h just above - it needs its own explicit include. */
+#include <app/clusters/microwave-oven-control-server/microwave-oven-control-server.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -2467,6 +2475,246 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
     }
 
     return MT_ATTR_ERR_CLUSTER;
+}
+
+/*
+ * ---- Microwave Oven Control (RVC + Microwave batch, task 4) --------------
+ *
+ * microwave_oven::add() (esp_matter_endpoint.cpp:1620-1632, verified against
+ * the pinned tree) creates three clusters on the endpoint: the PLAIN
+ * OperationalState cluster (0x0060, F7's pool above - the microwave has no
+ * derived opstate cluster the way RVC does, so mt_opstate_add_commands()'s
+ * washer-era command hand-add applies here verbatim, same landmine, same
+ * fix), MicrowaveOvenMode (0x005E, task 2's ModeBase pool, keyed by
+ * MicrowaveOvenMode::Id), and MicrowaveOvenControl (0x005F, this delegate).
+ * There is deliberately no Identify cluster on this device type
+ * (microwave_oven::config_t's base, app_with_operational_state_config, has
+ * no identify field at all, esp_matter_endpoint.h:213-218, unlike e.g.
+ * water_valve::config_t which adds one explicitly) - not an omission to fix.
+ *
+ * MicrowaveOvenControlDelegateInitCB (esp_matter_delegate_callbacks.cpp:
+ * 270-308) is the one init callback in this codebase that depends on TWO
+ * OTHER clusters' delegates already being registered on the same endpoint:
+ * it looks up MicrowaveOvenMode's and OperationalState's delegates through
+ * cluster::get()+get_delegate_impl() and requires ALL THREE (those two, plus
+ * this cluster's own config.delegate) non-null -
+ * "VerifyOrReturn(delegate != nullptr && microwave_oven_mode_delegate !=
+ * nullptr && operational_state_delegate != nullptr);" - before constructing
+ * anything. Fail that check and the callback returns having built nothing:
+ * no Instance, no log line, no error path of any kind, so a microwave
+ * endpoint with a missing delegate would silently answer every
+ * MicrowaveOvenControl read/write/invoke as if the cluster were not
+ * registered at all. mk_microwave_oven() (mt_devtypes.cpp) therefore
+ * allocates and wires all three delegate pools BEFORE calling create(), and
+ * this class comment is the citation trail mt_matter.h's own
+ * mt_matter_mwoc_delegate_alloc() doc comment points back to.
+ *
+ * Three pure-virtual groups (microwave-oven-control-server.h, verified
+ * against the pinned tree):
+ *   - HandleSetCookingParametersCallback/HandleModifyCookTimeSecondsCallback:
+ *     the two forwarded commands, implemented below.
+ *   - GetMaxCookTimeSec/GetPowerSettingNum/GetMinPowerNum/GetMaxPowerNum/
+ *     GetPowerStepNum: plain getters. GetMaxCookTimeSec is 86400 (24h, the
+ *     design spec's fixed bound, never host-configurable this round).
+ *     GetPowerSettingNum returns the last accepted power (default 100, the
+ *     SDK's own kDefaultMaxPowerNum) - see the field-resolution note below
+ *     for why this firmware is the sole owner of that value. GetMinPowerNum/
+ *     GetMaxPowerNum/GetPowerStepNum (10/100/10, the SDK's own kDefault*
+ *     constants) exist only to satisfy the pure-virtual contract: neither
+ *     Instance::Read() nor Instance::HandleSetCookingParameters() ever calls
+ *     them on this firmware, both read the identical kDefault* constants
+ *     directly whenever PowerNumberLimits is unset (see the feature-flag
+ *     note below for why it always is).
+ *   - GetWattSettingByIndex/GetCurrentWattIndex/GetWattRating: the
+ *     PowerInWatts side of the cluster, which this firmware never enables
+ *     (see the feature-flag note below). GetWattSettingByIndex answers
+ *     CHIP_ERROR_NOT_FOUND at every index (the same "index until exhausted,
+ *     empty list" shape HearthChimeDelegate/HearthTempLevelsDelegate use
+ *     elsewhere in this file); GetCurrentWattIndex/GetWattRating are 0/0
+ *     stubs, reachable only because WattRating (unlike SelectedWattIndex) is
+ *     NOT feature-gated in Instance::Read() and so is always readable
+ *     regardless of which power feature is enabled.
+ *
+ * Field resolution, traced against Instance::HandleSetCookingParameters()
+ * (microwave-oven-control-server.cpp, verified line by line against the
+ * pinned tree, not assumed from the Delegate header's doc comments alone):
+ * cookMode/cookTimeSec/startAfterSetting arrive at the delegate ALREADY
+ * RESOLVED, never Optional at all - the callback's own C++ signature below
+ * declares them uint8_t/uint32_t/bool, not Optional<...>. The server
+ * defaults cookMode to whichever mode carries the kNormal tag when the
+ * invoke omits it, cookTimeSec to kDefaultCookTimeSec (30 s), and
+ * startAfterSetting to false, all before this delegate is ever called. Only
+ * powerSettingNum/wattSettingIndex remain Optional<uint8_t> at the delegate
+ * boundary, and because this firmware enables PowerAsNumber only (below),
+ * the server's own PowerInWatts branch never runs: powerSettingNum ALWAYS
+ * carries a value here (the server defaults it to MaxPower, 100, when the
+ * invoke omits it too) and wattSettingIndex is ALWAYS NullOptional. So on
+ * this firmware's actual wire traffic the four forwarded fields are never
+ * empty in practice; the empty-field convention AT_MT_SPEC.md 3.17
+ * documents for the general multi-field form still applies verbatim, it
+ * just never triggers here (it would on a hypothetical future PowerInWatts
+ * build, where wattSettingIndex could be the field left empty instead).
+ *
+ * Feature flags: PowerAsNumber is MANDATORY, not a choice -
+ * microwave_oven_control::create() (esp_matter_cluster.cpp:3058-3100) runs
+ * VALIDATE_FEATURES_EXACT_ONE against it alone and ABORTS cluster creation
+ * (ABORT_CLUSTER_CREATE) on anything else, so mk_microwave_oven() below sets
+ * it unconditionally. PowerNumberLimits is deliberately NOT set, and this is
+ * a decision, not an oversight: its own add() (esp_matter_feature.cpp:
+ * 2975-2992) only applies the limits when PowerAsNumber's bit is ABSENT from
+ * the feature map - "if ((get_feature_map_value(cluster) &
+ * power_as_number_feature_map) != power_as_number_feature_map) { ... } else
+ * { ESP_LOGE(...); return ESP_ERR_NOT_SUPPORTED; }" - the inverse of the
+ * cluster's own spec conformance (Instance::Init()'s VerifyOrReturnError
+ * requires PowerNumberLimits to imply PowerAsNumber, not exclude it). With
+ * PowerAsNumber mandatory on every microwave endpoint this firmware builds,
+ * that add() can never reach its "apply" branch here, so enabling
+ * PowerNumberLimits would buy nothing but a logged ESP_ERR_NOT_SUPPORTED:
+ * dead code in this pinned tree. MinPower/MaxPower/PowerStep therefore
+ * always read the SDK's own compiled-in defaults (10/100/10), not this
+ * delegate's getters, exactly as the class comment above already notes.
+ *
+ * CookTime/PowerSetting ownership and visibility: CookTime lives in
+ * MicrowaveOvenControl::Instance itself (SetCookTimeSec()/GetCookTimeSec()),
+ * set here on an allowed SetCookingParameters/AddMoreTime the same way the
+ * SDK's own reference implementation does it
+ * (examples/microwave-oven-app/.../microwave-oven-device.cpp:
+ * "mMicrowaveOvenControlInstance.SetCookTimeSec(cookTimeSec);", the pattern
+ * this class's own two Handle*Callback methods below follow). PowerSetting lives
+ * in this delegate object instead (m_power_setting), since the Delegate
+ * interface has no SetPowerSettingNum() of any kind - GetPowerSettingNum()
+ * is the only hook, so accepting a new value on allow is this firmware's own
+ * bookkeeping, not an SDK-provided setter. Both attributes are served by
+ * Instance::Read() (an AttributeAccessInterface, exactly like ModeBase's
+ * CurrentMode and OperationalState's OperationalState attribute, §3.20.1/
+ * §3.21 of AT_MT_SPEC.md), so neither write ever reaches
+ * esp_matter::attribute::set_val(): no +MTATTR URC fires for either, and
+ * AT+MTATTR has no path to read or write them. A host observes CookTime/
+ * PowerSetting only through a commissioned controller.
+ */
+class HearthMwocDelegate : public chip::app::Clusters::MicrowaveOvenControl::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+
+    /* GetInstance() is protected in the base Delegate; this passthrough is
+     * the same mechanism HearthOpStateDelegate::instance() uses above: the
+     * Instance is constructed by MicrowaveOvenControlDelegateInitCB (the
+     * class comment above), which calls SetInstance() on this delegate
+     * exactly once, before mt_at_start() lets any command reach this class
+     * (the same s_at_up boot ordering CLAUDE.md documents everywhere else).
+     * Used here to reach Instance::SetCookTimeSec() on an allowed forward. */
+    chip::app::Clusters::MicrowaveOvenControl::Instance *instance() { return GetInstance(); }
+
+    /*
+     * SetCookingParameters: the four-field forward, field order fixed
+     * (cookMode,cookTime,power,startAfter) per AT_MT_SPEC.md §3.17. cookMode/
+     * cookTimeSec/startAfterSetting are already-resolved plain values (the
+     * class comment above traces why); only powerSettingNum needs a
+     * HasValue() check, and on this firmware's PowerAsNumber-only build it
+     * always has one (same citation). wattSettingIndex is not forwarded at
+     * all: it is always NullOptional here and carries no information the
+     * host needs to see.
+     *
+     * Same raw-passthrough verdict shape as HearthChimeDelegate::
+     * PlayChimeSound() above, not the OperationalState family's
+     * GenericOperationalError indirection: Instance::HandleSetCookingParameters()
+     * (microwave-oven-control-server.cpp) copies whatever Status this
+     * returns straight into the command's InvokeResponse via
+     * ctx.mCommandHandler.AddStatus(), no remapping. CookTime/PowerSetting
+     * are applied only on allow: a denied command is a refusal to actually
+     * accept the new cooking parameters, so nothing is written for the host
+     * to have refused.
+     */
+    chip::Protocols::InteractionModel::Status HandleSetCookingParametersCallback(
+        uint8_t cookMode, uint32_t cookTimeSec, bool startAfterSetting,
+        chip::Optional<uint8_t> powerSettingNum, chip::Optional<uint8_t> wattSettingIndex) override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        char fields[40];
+        int n = 0;
+        n += snprintf(fields + n, sizeof(fields) - n, "%u,", (unsigned)cookMode);
+        n += snprintf(fields + n, sizeof(fields) - n, "%lu,", (unsigned long)cookTimeSec);
+        n += powerSettingNum.HasValue()
+                 ? snprintf(fields + n, sizeof(fields) - n, "%u,", (unsigned)powerSettingNum.Value())
+                 : snprintf(fields + n, sizeof(fields) - n, ",");
+        n += snprintf(fields + n, sizeof(fields) - n, "%u", startAfterSetting ? 1u : 0u);
+        (void)n;
+        bool allow = mt_cmd_forward_fields(m_ep, chip::app::Clusters::MicrowaveOvenControl::Id,
+                                            chip::app::Clusters::MicrowaveOvenControl::Commands::SetCookingParameters::Id,
+                                            fields);
+        if (allow) {
+            if (instance() != nullptr) {
+                instance()->SetCookTimeSec(cookTimeSec);
+            }
+            if (powerSettingNum.HasValue()) {
+                m_power_setting = powerSettingNum.Value();
+            }
+        }
+        return allow ? Status::Success : Status::Failure;
+    }
+
+    /*
+     * AddMoreTime: the single-field forward, finalCookTimeSec, AT_MT_SPEC.md
+     * §3.17. Same allow-applies/deny-refuses and raw-passthrough-verdict
+     * shape as SetCookingParameters above.
+     */
+    chip::Protocols::InteractionModel::Status HandleModifyCookTimeSecondsCallback(uint32_t finalCookTimeSec) override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        char fields[16];
+        snprintf(fields, sizeof(fields), "%lu", (unsigned long)finalCookTimeSec);
+        bool allow = mt_cmd_forward_fields(m_ep, chip::app::Clusters::MicrowaveOvenControl::Id,
+                                            chip::app::Clusters::MicrowaveOvenControl::Commands::AddMoreTime::Id, fields);
+        if (allow && instance() != nullptr) {
+            instance()->SetCookTimeSec(finalCookTimeSec);
+        }
+        return allow ? Status::Success : Status::Failure;
+    }
+
+    /* PowerAsNumber-only stubs; see the class comment above for why the
+     * SDK never actually calls the three plain getters below this round. */
+    CHIP_ERROR GetWattSettingByIndex(uint8_t index, uint16_t &wattSetting) override
+    {
+        (void)index;
+        (void)wattSetting;
+        return CHIP_ERROR_NOT_FOUND;
+    }
+
+    uint32_t GetMaxCookTimeSec() const override { return 86400; }
+    uint8_t  GetPowerSettingNum() const override { return m_power_setting; }
+    uint8_t  GetMinPowerNum() const override { return 10; }
+    uint8_t  GetMaxPowerNum() const override { return 100; }
+    uint8_t  GetPowerStepNum() const override { return 10; }
+    uint8_t  GetCurrentWattIndex() const override { return 0; }
+    uint16_t GetWattRating() const override { return 0; }
+
+private:
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+    uint8_t m_power_setting = 100; /* kDefaultMaxPowerNum, the SDK's own PowerSetting default */
+};
+
+/*
+ * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, the same shape as
+ * s_opstate_delegates/s_chime_delegates above. Exposed to mt_devtypes.cpp
+ * through the same opaque void* pair pattern, so that file never has to name
+ * HearthMwocDelegate or any CHIP delegate type.
+ */
+static HearthMwocDelegate s_mwoc_delegates[MT_COMP_MAX_ENDPOINTS];
+static size_t             s_mwoc_delegate_next = 0;
+
+extern "C" void *mt_matter_mwoc_delegate_alloc(void)
+{
+    if (s_mwoc_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
+        return nullptr;
+    }
+    return &s_mwoc_delegates[s_mwoc_delegate_next++];
+}
+
+extern "C" void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    static_cast<HearthMwocDelegate *>(delegate)->set_endpoint(ep);
 }
 
 /*
