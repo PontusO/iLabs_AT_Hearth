@@ -408,31 +408,72 @@ void *mt_matter_opstate_delegate_alloc(void);
 void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep);
 
 /*
- * AT+MTOPSTATE: set ep's OperationalState cluster (0x0060) CurrentState
+ * AT+MTOPSTATE: set ep's OperationalState-family cluster CurrentState
  * through the SDK's own Instance::SetOperationalState(), so the
  * OperationalState attribute report a subscribed controller expects is
- * actually emitted (main.cpp's HearthOpStateDelegate class comment has the
- * full F7 citation trail, including why this needs no registry beyond the
- * delegate pool itself). Same split-ownership shape as AT+MTLOCK/AT+MTVALVE:
- * the firmware never calls this on its own after an allowed +MTCMD verdict
- * (Pause/Resume/Start/Stop, cluster 0x0060 commands 0-3), since only the
- * host knows when the physical appliance has actually completed the
- * transition.
+ * actually emitted (main.cpp's HearthOpStateDelegate/HearthRvcOpStateDelegate
+ * class comments have the full F7/task-3 citation trails, including why
+ * this needs no registry beyond the delegate pools themselves). Same
+ * split-ownership shape as AT+MTLOCK/AT+MTVALVE: the firmware never calls
+ * this on its own after an allowed +MTCMD verdict, since only the host
+ * knows when the physical appliance has actually completed the transition.
  *
- * <state> is an OperationalStateEnum wire value: 0 Stopped, 1 Running, 2
- * Paused. mt_at.c rejects 3 (Error) itself before calling this, since kError
- * is reserved for the error-detection path (F7), never a state this command
- * may set directly; SetOperationalState() enforces the identical rule
- * independently (see main.cpp), so a state that somehow slipped past the
- * handler would still be refused here, not silently accepted.
+ * ep's cluster decides which state space is legal, checked here (not just
+ * in mt_at.c) so a plain OperationalState endpoint can never be handed an
+ * RVC-only derived-cluster state:
+ *   - ep has the base OperationalState cluster (0x0060, dish/laundry
+ *     washer/dryer): <state> is 0 Stopped, 1 Running, 2 Paused only.
+ *   - ep has RvcOperationalState (0x0061, RVC + Microwave batch task 3):
+ *     <state> is one of {0, 1, 2, 0x40 kSeekingCharger, 0x41 kCharging,
+ *     0x42 kDocked}.
+ * mt_at.c's cmd_mtopstate rejects anything outside the UNION of both sets
+ * with +MTERR:1 before this is ever called (it cannot know which cluster ep
+ * actually has); this bridge is what narrows that down to the cluster-
+ * specific legal set, answering MT_ATTR_ERR_VALUE (+MTERR:1) for a state
+ * that is in the union but not legal for ep's own cluster - e.g. 0x40 on a
+ * plain washer endpoint. 3 (Error) is outside the union entirely and is
+ * rejected by mt_at.c itself for both cluster kinds: kError is reserved for
+ * the error-detection path (F7), never a state this command may set
+ * directly; SetOperationalState() enforces the identical rule independently
+ * (see main.cpp), so a state that somehow slipped past both checks would
+ * still be refused there, not silently accepted.
  *
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
- * MT_ATTR_ERR_CLUSTER when ep has no OperationalState cluster,
- * MT_ATTR_ERR_FAILED when no delegate/Instance is reachable for ep (should
- * not happen once esp_matter::start() has run, see main.cpp) or
+ * MT_ATTR_ERR_CLUSTER when ep has neither OperationalState-family cluster,
+ * MT_ATTR_ERR_VALUE for a state outside the cluster-specific legal set
+ * above, MT_ATTR_ERR_FAILED when no delegate/Instance is reachable for ep
+ * (should not happen once esp_matter::start() has run, see main.cpp) or
  * SetOperationalState() itself reports failure.
  */
 int mt_matter_opstate_set(uint16_t ep, uint8_t state);
+
+/* ---- RVC OperationalState (RVC + Microwave batch, task 3) --------------- */
+
+/*
+ * The delegate-pool handout pattern (see mt_matter_valve_delegate_alloc()
+ * above, which this mirrors): one delegate OBJECT per endpoint, same F7
+ * VerifyOrDie reasoning as mt_matter_opstate_delegate_alloc() above, sized
+ * by MT_COMP_MAX_ENDPOINTS for the same reason (one RvcOperationalState
+ * cluster per RVC endpoint, unlike ModeBase's two-per-endpoint shape).
+ *
+ * Unlike every other cluster::create() in this codebase,
+ * rvc_operational_state::create() wires no delegate and calls no
+ * command::create_* on its own (its config_t is an empty struct with no
+ * delegate field at all: this cluster is fully app-owned, design spec
+ * section 9). mt_devtypes.cpp's mk_rvc()/mt_rvc_opstate_add_commands()
+ * therefore both allocate this delegate before create() runs (matching
+ * every other pool's before/after shape) AND hand it to
+ * esp_matter::cluster::set_delegate_and_init_callback() themselves, since no SDK
+ * init callback exists to do it automatically the way
+ * OperationalStateDelegateInitCB does for the base OperationalState
+ * cluster.
+ *
+ * mt_matter_rvc_opstate_delegate_alloc() returns nullptr once
+ * MT_COMP_MAX_ENDPOINTS slots are handed out, same abort-the-boot-rebuild
+ * contract as every other pool in this file.
+ */
+void *mt_matter_rvc_opstate_delegate_alloc(void);
+void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep);
 
 /* ---- air quality (C1b, bug B139) ------------------------------------ */
 

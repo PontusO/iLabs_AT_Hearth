@@ -845,26 +845,36 @@ static int cmd_mtmodes(at_type_t type, char *args)
 
 /*
  * AT+MTOPSTATE=<ep>,<state> -> report the host's own OperationalState
- * transition on <ep> (design spec F7: the washer/dishwasher/dryer trio),
- * typically once the host has actually finished executing an allowed
- * Pause/Resume/Start/Stop +MTCMD verdict (cluster 0x0060, commands 0..3;
- * unlike the water valve's F1, that verdict already fails the command on the
- * wire when denied, so this command is purely the "it actually happened"
- * report, the same split AT+MTLOCK/AT+MTVALVE use). Set-only, the
- * AT+MTLOCK/AT+MTVALVE convention: bare/query forms answer a plain ERROR.
+ * transition on <ep> (design spec F7: the washer/dishwasher/dryer trio, and
+ * RVC + Microwave batch task 3: the robotic vacuum cleaner's
+ * RvcOperationalState cluster), typically once the host has actually
+ * finished executing an allowed Pause/Resume/Start/Stop/GoHome +MTCMD
+ * verdict; unlike the water valve's F1, that verdict already fails the
+ * command on the wire when denied, so this command is purely the "it
+ * actually happened" report, the same split AT+MTLOCK/AT+MTVALVE use).
+ * Set-only, the AT+MTLOCK/AT+MTVALVE convention: bare/query forms answer a
+ * plain ERROR.
  *
- * <state>: 0 Stopped, 1 Running, 2 Paused (OperationalStateEnum wire
- * values, spec F7). 3 (Error) is rejected HERE, in the handler, with
- * +MTERR:1: kError is reserved for the error-detection path, never a state
- * this command may set directly, so the bridge (mt_matter_opstate_set())
- * never has to reason about it. This is the same "wire protocol value fixed
- * by the Matter spec, checked directly" reasoning AT+MTLOCK/AT+MTVALVE's
- * <state> follow.
+ * <state>: this handler only checks membership in the UNION of both
+ * clusters' legal states, since it cannot know which cluster <ep> actually
+ * has (mt_at.c stays free of any esp_matter/CHIP header); the bridge
+ * (mt_matter_opstate_set(), main.cpp) narrows that down per-cluster and
+ * answers +MTERR:1 (MT_ATTR_ERR_VALUE) for a union member illegal on ep's
+ * own cluster. The union is {0, 1, 2, 0x40, 0x41, 0x42}: 0 Stopped, 1
+ * Running, 2 Paused are common to both clusters (OperationalStateEnum wire
+ * values, spec F7); 0x40 kSeekingCharger, 0x41 kCharging, 0x42 kDocked are
+ * RvcOperationalState's own derived-cluster-number-space states (design
+ * spec section 9, RvcOperationalState::OperationalStateEnum, Enums.h). 3
+ * (Error) is rejected HERE, in the handler, for both clusters: kError is
+ * reserved for the error-detection path, never a state this command may set
+ * directly, so the bridge never has to reason about it. This is the same
+ * "wire protocol value fixed by the Matter spec, checked directly"
+ * reasoning AT+MTLOCK/AT+MTVALVE's <state> follow.
  *
  * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
- * +MTERR:3 the endpoint has no OperationalState cluster. A bare ERROR covers
- * an unclassified runtime failure, routed through attr_err_to_mterr() like
- * every other bridge call in this file.
+ * +MTERR:3 the endpoint has neither OperationalState-family cluster. A bare
+ * ERROR covers an unclassified runtime failure, routed through
+ * attr_err_to_mterr() like every other bridge call in this file.
  */
 static int cmd_mtopstate(at_type_t type, char *args)
 {
@@ -881,7 +891,10 @@ static int cmd_mtopstate(at_type_t type, char *args)
     if (!parse_u(f[0], &ep) || ep > 0xFFFF) {
         return MT_ERR_BAD_PARAM;
     }
-    if (!parse_u(f[1], &state) || state > 2) {
+    if (!parse_u(f[1], &state)) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (!(state <= 2 || state == 0x40 || state == 0x41 || state == 0x42)) {
         return MT_ERR_BAD_PARAM;
     }
 

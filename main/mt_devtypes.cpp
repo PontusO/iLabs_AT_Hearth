@@ -727,6 +727,131 @@ static endpoint_t *mk_chime(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * HearthRvcOpStateInitCB is defined in main.cpp, next to the
+ * HearthRvcOpStateDelegate class it constructs a
+ * chip::app::Clusters::RvcOperationalState::Instance for. It cannot be
+ * reached through mt_matter.h's usual extern "C" bridge pattern:
+ * esp_matter::cluster::set_delegate_and_init_callback() (called below) takes a
+ * delegate_init_callback_t, which is a C++-linkage function pointer type
+ * (esp_matter_data_model.h), and an extern "C" wrapper would hand back a
+ * pointer of the wrong linkage to assign to it. A plain forward declaration
+ * is enough (ordinary external C++ linkage, matching signatures across
+ * translation units, exactly like any other multi-file C++ program), and
+ * keeps HearthRvcOpStateDelegate itself private to main.cpp.
+ */
+void HearthRvcOpStateInitCB(void *delegate, uint16_t endpoint_id);
+
+/*
+ * F7/RVC: rvc_operational_state::create() (esp_matter_cluster.cpp:3103-3134,
+ * verified against the pinned tree) is fully app-owned - empty config_t, no
+ * delegate wiring, no command::create_* call at all, unlike
+ * operational_state::create() above (which at least wires config.delegate
+ * through its own generic init callback). Everything has to happen here by
+ * hand:
+ *   - Pause (0x00) / Resume (0x03) reuse the BASE OperationalState command
+ *     helpers (create_pause/create_resume take the cluster handle, so they
+ *     register against whichever cluster cl actually is - RvcOperationalState
+ *     here, same numeric command ids as the base cluster, verified against
+ *     RvcOperationalState/CommandIds.h).
+ *   - GoHome (0x80) has no SDK helper at all (no create_go_home in
+ *     esp_matter_command.h), so it is added with the raw
+ *     esp_matter::command::create().
+ *   - create_operational_command_response() (COMMAND_FLAG_GENERATED) IS
+ *     added here, unlike mt_opstate_add_commands() above: that trio gets its
+ *     generated-command wiring for free from esp-matter's own
+ *     OperationalStateDelegateInitCB path, this cluster gets none from
+ *     anywhere else at all.
+ *   - set_delegate_and_init_callback() is called directly, since no SDK
+ *     RvcOperationalStateDelegateInitCB exists to reuse (verified:
+ *     esp_matter_delegate_callbacks.h declares only the base
+ *     OperationalStateDelegateInitCB).
+ */
+static void mt_rvc_opstate_add_commands(endpoint_t *ep, void *delegate)
+{
+    cluster_t *cl = cluster::get(ep, chip::app::Clusters::RvcOperationalState::Id);
+    if (cl != nullptr) {
+        cluster::operational_state::command::create_pause(cl);
+        cluster::operational_state::command::create_resume(cl);
+        esp_matter::command::create(cl, chip::app::Clusters::RvcOperationalState::Commands::GoHome::Id,
+                                     COMMAND_FLAG_ACCEPTED, NULL);
+        cluster::operational_state::command::create_operational_command_response(cl);
+        esp_matter::cluster::set_delegate_and_init_callback(cl, HearthRvcOpStateInitCB, delegate);
+    }
+}
+
+/*
+ * F2/F7: robotic_vacuum_cleaner::config_t (esp_matter_endpoint.h:762-769)
+ * carries rvc_run_mode::config_t (has a delegate field) and
+ * rvc_operational_state::config_t (common::config_t, EMPTY - no delegate
+ * field at all, see mt_rvc_opstate_add_commands()'s comment above).
+ * robotic_vacuum_cleaner::add() (esp_matter_endpoint.cpp:1389-1400) creates
+ * identify, rvc_run_mode and rvc_operational_state (plus its
+ * OperationCompletion event) but NOT rvc_clean_mode: that cluster is added
+ * by hand after create(), the same "creator exists, nothing wires it, add
+ * it after create()" shape mk_power_source() above uses for
+ * BatPercentRemaining.
+ *
+ * Three delegates per endpoint: two ModeBase (RvcRunMode, RvcCleanMode,
+ * Task 2's pool, keyed by (ep, cluster)) plus one RVC opstate delegate
+ * (this task's own pool, keyed by ep alone - see mt_matter.h). All three
+ * are allocated before create()/the hand-added cluster runs, the same
+ * before/after shape every delegate pool in this file uses: the real
+ * endpoint id is not known until create() returns it, but each delegate
+ * must already exist (config.rvc_run_mode.delegate needs a valid pointer;
+ * mt_rvc_opstate_add_commands() needs one to hand to
+ * set_delegate_and_init_callback()) before that point. On pool exhaustion,
+ * abort loudly by returning nullptr, same as every other failed create()
+ * in this file - even after robotic_vacuum_cleaner::create() has already
+ * succeeded (rvc_clean_mode exhaustion case), consuming the endpoint id
+ * this project's own composition rules describe (CLAUDE.md: a failed
+ * create() consumes no id, but this project accepts the whole boot rebuild
+ * aborting on any single failure over silently skipping an entry).
+ */
+static endpoint_t *mk_rvc(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    void *run_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::RvcRunMode::Id);
+    if (run_delegate == nullptr) {
+        ESP_LOGE(TAG, "modebase delegate pool exhausted (rvc run mode)");
+        return nullptr;
+    }
+    void *clean_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::RvcCleanMode::Id);
+    if (clean_delegate == nullptr) {
+        ESP_LOGE(TAG, "modebase delegate pool exhausted (rvc clean mode)");
+        return nullptr;
+    }
+    void *opstate_delegate = mt_matter_rvc_opstate_delegate_alloc();
+    if (opstate_delegate == nullptr) {
+        ESP_LOGE(TAG, "rvc operational state delegate pool exhausted");
+        return nullptr;
+    }
+
+    robotic_vacuum_cleaner::config_t c;
+    c.rvc_run_mode.delegate = run_delegate;
+    /* rvc_operational_state's config_t is common::config_t: empty, no
+     * delegate field to fill (see the class comment above). */
+    endpoint_t *ep = robotic_vacuum_cleaner::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+
+    cluster::rvc_clean_mode::config_t clean_c;
+    clean_c.delegate = clean_delegate;
+    if (cluster::rvc_clean_mode::create(ep, &clean_c, CLUSTER_FLAG_SERVER) == nullptr) {
+        ESP_LOGE(TAG, "creating rvc_clean_mode cluster failed");
+        return nullptr;
+    }
+
+    mt_rvc_opstate_add_commands(ep, opstate_delegate);
+
+    uint16_t ep_id = endpoint::get_id(ep);
+    mt_matter_modebase_delegate_set_endpoint(run_delegate, ep_id);
+    mt_matter_modebase_delegate_set_endpoint(clean_delegate, ep_id);
+    mt_matter_rvc_opstate_delegate_set_endpoint(opstate_delegate, ep_id);
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -769,6 +894,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { smoke_co_alarm::get_device_type_id(),           mk_smoke_co_alarm,          "smoke_co_alarm",          0 },
     { power_source::get_device_type_id(),             mk_power_source,            "power_source",            0 },
     { chime::get_device_type_id(),                    mk_chime,                   "chime",                   0 },
+    { robotic_vacuum_cleaner::get_device_type_id(),   mk_rvc,                     "robotic_vacuum_cleaner",  0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

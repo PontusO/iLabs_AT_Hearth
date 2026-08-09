@@ -2176,49 +2176,297 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
 }
 
 /*
- * AT+MTOPSTATE bridge: find ep's delegate in the pool (the same pool
- * mt_matter_opstate_delegate_alloc() hands out from) and, through it, the
- * Instance the SDK attached (HearthOpStateDelegate::instance(), see the
- * class comment above for the mechanism), then call
+ * ---- RVC OperationalState (RVC + Microwave batch, task 3) ----------------
+ *
+ * Unlike the base OperationalState cluster the trio above uses,
+ * rvc_operational_state::create() (esp_matter_cluster.cpp:3103-3134,
+ * verified against the pinned tree) is fully app-owned: config_t is
+ * common::config_t, an EMPTY struct with no delegate field at all
+ * (esp_matter_cluster.h:1007-1010), and create()'s body only creates
+ * attributes/events - no set_delegate_and_init_callback() call, no
+ * command::create_* call, unlike every other cluster::create() in this
+ * codebase. Everything F7's OperationalState trio above gets for free from
+ * esp-matter (delegate wiring, Instance construction, all four commands)
+ * this cluster needs done by hand: mt_rvc_opstate_add_commands()
+ * (mt_devtypes.cpp) wires the commands and calls
+ * set_delegate_and_init_callback() itself, and HearthRvcOpStateInitCB below
+ * constructs the Instance at that same callback pass rather than relying on
+ * any SDK-provided RvcOperationalStateDelegateInitCB (none exists:
+ * esp_matter_delegate_callbacks.h declares only the base
+ * OperationalStateDelegateInitCB, nothing RVC-specific).
+ *
+ * Class hierarchy (operational-state-server.h:376-455, verified against the
+ * pinned tree):
+ *   RvcOperationalState::Delegate : public OperationalState::Delegate
+ *     - HandleStartStateCallback/HandleStopStateCallback are already
+ *       overridden in the base RvcOperationalState::Delegate itself (Start/
+ *       Stop are not supported by this cluster at all), each answering
+ *       kUnknownEnumValue - so this class does not implement them.
+ *     - HandleGoHomeCommandCallback has a default body (same
+ *       kUnknownEnumValue) but is virtual, not final: overridden below.
+ *     - HandlePauseStateCallback/HandleResumeStateCallback remain pure
+ *       virtual from the OperationalState::Delegate base and MUST be
+ *       implemented here.
+ *   RvcOperationalState::Instance : public OperationalState::Instance
+ *     - Constructed with (Delegate*, EndpointId); its constructor passes
+ *       Id (RvcOperationalState::Id) as the ClusterId to the protected
+ *       three-argument OperationalState::Instance constructor
+ *       (operational-state-server.h:421-423).
+ *     - Overrides IsDerivedClusterStatePauseCompatible/
+ *       IsDerivedClusterStateResumeCompatible/InvokeDerivedClusterCommand;
+ *       these run INSIDE the base Instance's HandlePauseState/
+ *       HandleResumeState/GoHome dispatch, entirely server-side, BEFORE
+ *       this delegate is ever consulted (operational-state-server.cpp:
+ *       414-570, verified line by line):
+ *         - Pause is compatible with kSeekingCharger in addition to the
+ *           base's own kRunning/kPaused (IsDerivedClusterStatePauseCompatible,
+ *           :522-525).
+ *         - Resume is compatible with kCharging/kDocked
+ *           (IsDerivedClusterStateResumeCompatible, :527-531).
+ *         - GoHome from kCharging/kDocked answers ErrorStateID 3
+ *           (kCommandInvalidInState) WITHOUT calling this delegate at all
+ *           (:556-559).
+ *         - GoHome from kSeekingCharger answers success (kNoError) WITHOUT
+ *           calling this delegate either (:561 guards the call on "opState
+ *           != kSeekingCharger") - the cluster already treats "already
+ *           seeking the charger" as a no-op success.
+ *       None of these three guards are duplicated here: this delegate's
+ *       three Handle*Callback methods only ever run for the cases the
+ *       server has already decided are legitimate adjudication requests.
+ *
+ * bind_instance()/instance(): unlike HearthOpStateDelegate above (which
+ * reaches its Instance through the base Delegate's protected GetInstance()
+ * passthrough, since esp-matter's own generic OperationalStateDelegateInitCB
+ * constructs that Instance on this class's behalf), this class stores its
+ * own typed RvcOperationalState::Instance* directly, set by
+ * HearthRvcOpStateInitCB right after construction: since this codebase
+ * writes that init callback itself (no SDK equivalent exists), it can hand
+ * the pointer over exactly this way - one plain member, rather than a
+ * second protected-accessor passthrough for no behavioural difference
+ * (GetInstance() would return the identical pointer, upcast to
+ * OperationalState::Instance*).
+ *
+ * Forward/deny mapping and endpoint tracking: identical shape to
+ * HearthOpStateDelegate's forward() above - mt_cmd_forward() against
+ * RvcOperationalState::Id, kNoError on allow, kUnableToCompleteOperation on
+ * deny (the same in-tree-example precedent HearthOpStateDelegate's comment
+ * above cites). GoHome carries no forwarded payload (Task 1's
+ * mt_cmd_forward, not mt_cmd_forward_payload): the GoHome command itself has
+ * no fields.
+ */
+class HearthRvcOpStateDelegate : public chip::app::Clusters::RvcOperationalState::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+
+    /* Set once, by HearthRvcOpStateInitCB below, right after the Instance is
+     * constructed (see the class comment above for why this is a plain
+     * member rather than the GetInstance() passthrough pattern). */
+    void bind_instance(chip::app::Clusters::RvcOperationalState::Instance *inst) { m_instance = inst; }
+    chip::app::Clusters::RvcOperationalState::Instance *instance() { return m_instance; }
+
+    chip::app::DataModel::Nullable<uint32_t> GetCountdownTime() override
+    {
+        return chip::app::DataModel::NullNullable;
+    }
+
+    /*
+     * Seven states, RVC's own enum (RvcOperationalState::OperationalStateEnum,
+     * Enums.h): the four base states plus the three derived-number-space
+     * ones AT+MTOPSTATE may set (design spec section 9's exact set,
+     * verified against the pinned Enums.h). kEmptyingDustBin/kCleaningMop/
+     * kFillingWaterTank/kUpdatingMaps (0x43-0x46) exist in the enum but are
+     * out of this task's scope (not in the AT+MTOPSTATE union either), so
+     * are not published here.
+     */
+    CHIP_ERROR GetOperationalStateAtIndex(
+        size_t index, chip::app::Clusters::OperationalState::GenericOperationalState &operationalState) override
+    {
+        using chip::app::Clusters::RvcOperationalState::OperationalStateEnum;
+        static const OperationalStateEnum states[] = {
+            OperationalStateEnum::kStopped,       OperationalStateEnum::kRunning, OperationalStateEnum::kPaused,
+            OperationalStateEnum::kError,         OperationalStateEnum::kSeekingCharger,
+            OperationalStateEnum::kCharging,      OperationalStateEnum::kDocked,
+        };
+        if (index >= (sizeof(states) / sizeof(states[0]))) {
+            return CHIP_ERROR_NOT_FOUND;
+        }
+        operationalState.Set(chip::to_underlying(states[index]));
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR GetOperationalPhaseAtIndex(size_t index, chip::MutableCharSpan &operationalPhase) override
+    {
+        /* PhaseList ships null, same v2-parking note as HearthOpStateDelegate
+         * above. */
+        (void)index;
+        (void)operationalPhase;
+        return CHIP_ERROR_NOT_FOUND;
+    }
+
+    void HandlePauseStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::RvcOperationalState::Commands::Pause::Id, err);
+    }
+
+    void HandleResumeStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::RvcOperationalState::Commands::Resume::Id, err);
+    }
+
+    void HandleGoHomeCommandCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::RvcOperationalState::Commands::GoHome::Id, err);
+    }
+
+private:
+    void forward(uint32_t command, chip::app::Clusters::OperationalState::GenericOperationalError &err)
+    {
+        using chip::app::Clusters::OperationalState::ErrorStateEnum;
+        bool allow = mt_cmd_forward(m_ep, chip::app::Clusters::RvcOperationalState::Id, command);
+        err.Set(chip::to_underlying(allow ? ErrorStateEnum::kNoError : ErrorStateEnum::kUnableToCompleteOperation));
+    }
+
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+    chip::app::Clusters::RvcOperationalState::Instance *m_instance = nullptr;
+};
+
+/*
+ * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, same sizing rationale as
+ * s_opstate_delegates above: one delegate OBJECT per endpoint (F7's
+ * VerifyOrDie), and an RVC endpoint carries exactly one RvcOperationalState
+ * cluster, so the pool is sized by endpoint count, not by the
+ * (endpoint, cluster) pair shape the ModeBase pool needs.
+ */
+static HearthRvcOpStateDelegate s_rvc_opstate_delegates[MT_COMP_MAX_ENDPOINTS];
+static size_t                   s_rvc_opstate_delegate_next = 0;
+
+extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
+{
+    if (s_rvc_opstate_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
+        return nullptr;
+    }
+    return &s_rvc_opstate_delegates[s_rvc_opstate_delegate_next++];
+}
+
+extern "C" void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    /* Belt-and-braces: HearthRvcOpStateInitCB below also sets this, the
+     * moment esp_matter::start()'s init-callback pass constructs the
+     * Instance, since (unlike the base OperationalState trio) this codebase
+     * writes that callback itself and can set the endpoint there directly.
+     * Calling this from mt_devtypes.cpp right after create() keeps this
+     * pool's fixup shape identical to every other delegate pool in this
+     * file; setting the same value twice (this call, then the init
+     * callback's own) is harmless. */
+    static_cast<HearthRvcOpStateDelegate *>(delegate)->set_endpoint(ep);
+}
+
+/*
+ * Constructs the RvcOperationalState::Instance at the SDK's usual
+ * init-callback timing (esp_matter_data_model_provider.cpp's
+ * provider::Startup(), which runs during esp_matter::start(), after the
+ * boot rebuild's endpoints all exist and before mt_at_start() can let any
+ * AT+MTOPSTATE/+MTCMD reach this delegate - the same s_at_up boot ordering
+ * CLAUDE.md documents everywhere else). No SDK-provided
+ * RvcOperationalStateDelegateInitCB exists to reuse (see the class comment
+ * above), so mt_rvc_opstate_add_commands() (mt_devtypes.cpp) hands this
+ * function straight to esp_matter::cluster::set_delegate_and_init_callback() itself.
+ *
+ * Not extern "C": esp_matter::cluster::set_delegate_and_init_callback() takes a
+ * delegate_init_callback_t, a C++-linkage function pointer type
+ * (esp_matter_data_model.h), so this cannot be wrapped the way every other
+ * mt_devtypes.cpp <-> main.cpp bridge is (mt_matter.h's extern "C" contract
+ * would give it the wrong linkage to assign). mt_devtypes.cpp forward-
+ * declares this one function by name instead, matching signatures, ordinary
+ * external C++ linkage; HearthRvcOpStateDelegate itself stays private to
+ * this file.
+ *
+ * The SDK's own calling convention discards Init()'s return value (see the
+ * ModeBase placeholder-mode comment above for the identical traced
+ * mechanism: esp_matter's generic init-callback wrappers call Init() with
+ * no check at all), so there is otherwise no diagnostic whatsoever if this
+ * ever fails; logged loudly here since nothing else will.
+ */
+void HearthRvcOpStateInitCB(void *delegate, uint16_t endpoint_id)
+{
+    auto *d = static_cast<HearthRvcOpStateDelegate *>(delegate);
+    d->set_endpoint(endpoint_id);
+    auto *inst = new chip::app::Clusters::RvcOperationalState::Instance(d, endpoint_id);
+    d->bind_instance(inst);
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "RvcOperationalState::Instance::Init failed on ep %u: %" CHIP_ERROR_FORMAT, (unsigned)endpoint_id,
+                 err.Format());
+    }
+}
+
+/*
+ * AT+MTOPSTATE bridge: find ep's delegate in whichever pool matches its
+ * cluster and, through it, the Instance the SDK attached
+ * (HearthOpStateDelegate::instance()/HearthRvcOpStateDelegate::instance(),
+ * see each class comment above for its own mechanism), then call
  * Instance::SetOperationalState() directly - it is declared to take a plain
  * uint8_t, not an enum (operational-state-server.h:97), so state is passed
- * through unconverted.
+ * through unconverted. mt_matter.h's own doc comment on this function has
+ * the full per-cluster state-space table; this body is its implementation.
  *
- * mt_at.c's cmd_mtopstate has already rejected state == 3 (Error) with
- * +MTERR:1 before this is ever called: kError is reserved for
- * OnOperationalErrorDetected (F7), not a state AT+MTOPSTATE may set
- * directly, so only 0..2 ever reach here. SetOperationalState() itself
- * enforces the identical rule independently
- * (operational-state-server.cpp:101-107: "if (aOpState ==
+ * mt_at.c's cmd_mtopstate has already rejected anything outside the UNION
+ * of both clusters' legal state sets with +MTERR:1 before this is ever
+ * called (it cannot know which cluster ep actually has), so this bridge is
+ * what narrows a value that is legal for the WRONG cluster (e.g. 0x40 on a
+ * plain OperationalState endpoint) down to MT_ATTR_ERR_VALUE.
+ * SetOperationalState() itself enforces the same per-cluster rule
+ * independently (operational-state-server.cpp:101-107: "if (aOpState ==
  * to_underlying(OperationalStateEnum::kError) || !IsSupportedOperationalState(aOpState))
  * { return CHIP_ERROR_INVALID_ARGUMENT; }"), so a state that somehow slipped
- * past the handler would map to MT_ATTR_ERR_FAILED here rather than being
+ * past both checks would map to MT_ATTR_ERR_FAILED here rather than being
  * silently accepted.
  */
 extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
 {
+    using namespace chip::app::Clusters;
     ChipStackLock lock;
     if (esp_matter::endpoint::get(ep) == nullptr) {
         return MT_ATTR_ERR_ENDPOINT;
     }
-    if (esp_matter::cluster::get(ep, chip::app::Clusters::OperationalState::Id) == nullptr) {
-        return MT_ATTR_ERR_CLUSTER;
-    }
-    chip::app::Clusters::OperationalState::Instance *inst = nullptr;
-    for (auto &d : s_opstate_delegates) {
-        if (d.endpoint() == ep) {
-            inst = d.instance();
-            break;
+
+    if (esp_matter::cluster::get(ep, OperationalState::Id) != nullptr) {
+        if (state > 2) {
+            return MT_ATTR_ERR_VALUE;
         }
+        OperationalState::Instance *inst = nullptr;
+        for (auto &d : s_opstate_delegates) {
+            if (d.endpoint() == ep) {
+                inst = d.instance();
+                break;
+            }
+        }
+        if (inst == nullptr) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
     }
-    if (inst == nullptr) {
-        return MT_ATTR_ERR_FAILED;
+
+    if (esp_matter::cluster::get(ep, RvcOperationalState::Id) != nullptr) {
+        if (!(state <= 2 || state == 0x40 || state == 0x41 || state == 0x42)) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        OperationalState::Instance *inst = nullptr;
+        for (auto &d : s_rvc_opstate_delegates) {
+            if (d.endpoint() == ep) {
+                inst = d.instance();
+                break;
+            }
+        }
+        if (inst == nullptr) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
     }
-    CHIP_ERROR err = inst->SetOperationalState(state);
-    if (err != CHIP_NO_ERROR) {
-        return MT_ATTR_ERR_FAILED;
-    }
-    return MT_ATTR_OK;
+
+    return MT_ATTR_ERR_CLUSTER;
 }
 
 /*
