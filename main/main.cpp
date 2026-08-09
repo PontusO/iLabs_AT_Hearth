@@ -1627,14 +1627,28 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
  * GetModeValueByIndex(0, ...) FIRST, before any AT+MTMODES cluster-aware
  * call has ever run for that (ep, cluster) - the Instance is constructed
  * from esp_matter::start()'s init-callback pass, ahead of mt_at_start()
- * (this project's own boot-ordering rule), and VerifyOrDie's on
- * emberAfContainsServer if index 0 answers PROVIDER_LIST_EXHAUSTED. So an
- * empty slot must still answer index 0: mode 0, the cluster's tag-0 default
- * (design spec section 9's "Tag-0 defaults, exact policy" table), label
- * "Mode0". The moment the host sends the real list the placeholder is
- * superseded; there is no separate "is this the placeholder" flag to clear,
- * find_slot()/the count==0 check below simply prefer a stored entry whenever
- * one exists.
+ * (this project's own boot-ordering rule). Checked against the SDK source
+ * rather than assumed: Init() (mode-base-server.cpp) calls
+ * ReturnErrorOnFailure(mDelegate->GetModeValueByIndex(0, mCurrentMode))
+ * as its FIRST line, so a PROVIDER_LIST_EXHAUSTED there returns immediately,
+ * before the VerifyOrDie on emberAfContainsServer a few lines later (an
+ * unrelated check, for whether the cluster was zap-registered, not for this)
+ * and before RegisterThisInstance()/the AttributeAccessInterface and
+ * CommandHandlerInterface registrations later in the same function ever run.
+ * The SDK's own init callback (esp_matter's InitModeDelegate() and its
+ * per-cluster wrappers, esp_matter_delegate_callbacks.cpp) discards Init()'s
+ * return value outright ("modeInstance->Init();", no check), so this failure
+ * does not crash the device: the Instance object exists (its constructor's
+ * own SetInstance() call already ran, so this delegate's instance()
+ * passthrough would return it) but is never registered, so reads, writes and
+ * commands against that cluster would go unanswered with no diagnostic at
+ * all. Quieter, not louder, and correspondingly worse to debug than a boot
+ * panic. So an empty slot must still answer index 0: mode 0, the cluster's
+ * tag-0 default (design spec section 9's "Tag-0 defaults, exact policy"
+ * table), label "Mode0". The moment the host sends the real list the
+ * placeholder is superseded; there is no separate "is this the placeholder"
+ * flag to clear, find_slot()/the count==0 check below simply prefer a stored
+ * entry whenever one exists.
  */
 struct mt_mb_entry_t {
     uint8_t  mode;
@@ -1855,9 +1869,16 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         }
     }
     if (!slot) {
-        /* Cannot happen in practice: MT_MB_MAX_LISTS covers every
-         * (endpoint, cluster) pair this composition can create. Defensive
-         * return, same reasoning as mt_matter_modes_set() above. */
+        /* MT_MB_MAX_LISTS (8) bounds how many distinct (endpoint, cluster)
+         * ModeBase lists this firmware stores at once; it is smaller than
+         * MT_COMP_MAX_ENDPOINTS (16), so a composition dense enough in
+         * RvcRunMode/RvcCleanMode/MicrowaveOvenMode instances CAN exhaust it
+         * (e.g. more than 8 such cluster instances combined, which the
+         * three-ModeBase-clusters-per-RVC-endpoint shape in this batch makes
+         * reachable well under 16 endpoints). This return is the safe
+         * fallback for that case: the call is refused with MT_ATTR_ERR_FAILED
+         * rather than silently overwriting an unrelated (endpoint, cluster)
+         * slot. */
         return MT_ATTR_ERR_FAILED;
     }
 

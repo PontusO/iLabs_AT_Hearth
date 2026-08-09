@@ -373,8 +373,10 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
  * MT_ATTR_ERR_CLUSTER when cluster is not one of the three ModeBase ids, or
  * ep has no such cluster, MT_ATTR_ERR_FAILED for a bad count or an internal
- * failure (store exhaustion; cannot happen in practice, MT_MB_MAX_LISTS
- * covers every ModeBase cluster instance this composition can create).
+ * failure (store exhaustion: MT_MB_MAX_LISTS (8) is smaller than
+ * MT_COMP_MAX_ENDPOINTS (16), so a composition with enough ModeBase cluster
+ * instances CAN exhaust it; refused with this code rather than silently
+ * overwriting an unrelated (endpoint, cluster) slot).
  */
 int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
                             const char *const *labels, uint8_t count);
