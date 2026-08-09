@@ -90,6 +90,18 @@
 #include <app/ClusterCallbacks.h>
 #include <app/server-cluster/ServerClusterInterfaceRegistry.h>
 
+/* RVC + Microwave batch, task 2: ModeBase::Delegate/Instance (RvcRunMode,
+ * RvcCleanMode, MicrowaveOvenMode all derive from the abstract ModeBase
+ * cluster and share this one interface), StatusCode, the ChangeToModeResponse
+ * command shape, and (transitively, via cluster-objects.h -> clusters/shared/
+ * Structs.h) detail::Structs::ModeTagStruct::Type this file's
+ * HearthModeBaseDelegate implements. RvcRunMode::Id/RvcCleanMode::Id/
+ * MicrowaveOvenMode::Id and their ModeTag enums are already visible via
+ * esp_matter.h's own transitive include of the generated per-cluster ids and
+ * cluster-enums.h (see mt_devtypes.cpp's identical use of ::Id constants with
+ * no extra include), so no separate include is needed for those. */
+#include <app/clusters/mode-base-server/mode-base-server.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -1575,6 +1587,330 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
     MatterReportingAttributeChangeCallback(
         ep, chip::app::Clusters::ModeSelect::Id,
         chip::app::Clusters::ModeSelect::Attributes::SupportedModes::Id);
+    return MT_ATTR_OK;
+}
+
+/*
+ * ---- ModeBase: RVC run/clean mode, microwave mode (RVC + Microwave batch, task 2) -----
+ *
+ * RvcRunMode (0x0054), RvcCleanMode (0x0055) and MicrowaveOvenMode (0x005E)
+ * are all concrete derivations of the abstract ModeBase cluster
+ * (mode-base-server.h): one shared Delegate interface, one shared Instance
+ * class parameterised by cluster id at construction (design spec section 2).
+ * Unlike ModeSelect (HearthSupportedModesManager above), which needs exactly
+ * ONE manager object because SupportedModesManager dispatches on endpoint id
+ * itself, ModeBase needs one delegate OBJECT per (endpoint, cluster) pair:
+ * the thunk's set_delegate_and_init_callback() call (esp_matter_cluster.cpp's
+ * rvc_run_mode/rvc_clean_mode/microwave_oven_mode::create(), Tasks 3-4) news a
+ * ModeBase::Instance per cluster instance and its constructor calls
+ * Delegate::SetInstance() on it (mode-base-server.h), the identical
+ * one-Instance-per-delegate contract F7's OperationalState pool below is
+ * built around (VerifyOrDie on a second Instance sharing a delegate). Same
+ * pool shape as HearthOpStateDelegate below: mt_devtypes.cpp allocates a slot
+ * before create(), fixes the endpoint after, per the pattern
+ * mt_matter_valve_delegate_alloc()'s doc comment (mt_matter.h) explains in
+ * full. The cluster id is fixed at ALLOC time here rather than by a second
+ * setter: unlike the endpoint id, it is already known to the caller before
+ * create() runs (it is literally which cluster::create() is about to be
+ * called), and the delegate needs it immediately to answer
+ * GetModeValueByIndex(0, ...) correctly the moment Instance::Init() asks
+ * (below), which happens before set_endpoint() can run.
+ *
+ * Store: MT_MB_MAX_LISTS slots keyed by (ep, cluster), the same shape as
+ * s_mode_slots above but with a per-entry uint16_t tag alongside the mode
+ * value and label (design spec 3.1's mandatory <tag> field). Full
+ * replacement per AT+MTMODES cluster-aware call, RAM only, never persisted:
+ * the same not-persisted contract as every other host-fed list in this file
+ * (MTMODES, MTTEMPLEVELS, MTCHIMESOUNDS).
+ *
+ * Placeholder mode 0: ModeBase::Instance::Init() reads
+ * GetModeValueByIndex(0, ...) FIRST, before any AT+MTMODES cluster-aware
+ * call has ever run for that (ep, cluster) - the Instance is constructed
+ * from esp_matter::start()'s init-callback pass, ahead of mt_at_start()
+ * (this project's own boot-ordering rule), and VerifyOrDie's on
+ * emberAfContainsServer if index 0 answers PROVIDER_LIST_EXHAUSTED. So an
+ * empty slot must still answer index 0: mode 0, the cluster's tag-0 default
+ * (design spec section 9's "Tag-0 defaults, exact policy" table), label
+ * "Mode0". The moment the host sends the real list the placeholder is
+ * superseded; there is no separate "is this the placeholder" flag to clear,
+ * find_slot()/the count==0 check below simply prefer a stored entry whenever
+ * one exists.
+ */
+struct mt_mb_entry_t {
+    uint8_t  mode;
+    uint16_t tag;
+    char     label[MT_MB_MAX_LABEL_LEN + 1];
+};
+
+struct mt_mb_slot_t {
+    bool     used;
+    uint16_t ep;
+    uint32_t cluster;
+    uint8_t  count;
+    mt_mb_entry_t entries[MT_MB_MAX_COUNT];
+};
+static mt_mb_slot_t s_mb_slots[MT_MB_MAX_LISTS];
+
+class HearthModeBaseDelegate : public chip::app::Clusters::ModeBase::Delegate
+{
+public:
+    void set_cluster(chip::ClusterId cluster) { m_cluster = cluster; }
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+    chip::ClusterId  cluster() const { return m_cluster; }
+
+    /* GetInstance() is protected in the base Delegate; this passthrough is
+     * the same mechanism HearthOpStateDelegate::instance() uses below (see
+     * its class comment for the full citation trail): mt_matter_modebase_set()
+     * needs the Instance to clamp CurrentMode when a replacement list drops
+     * the value it currently holds. */
+    chip::app::Clusters::ModeBase::Instance *instance() { return GetInstance(); }
+
+    CHIP_ERROR Init() override { return CHIP_NO_ERROR; }
+
+    CHIP_ERROR GetModeLabelByIndex(uint8_t modeIndex, chip::MutableCharSpan &label) override
+    {
+        mt_mb_slot_t *slot = find_slot();
+        if (slot == nullptr || slot->count == 0) {
+            if (modeIndex != 0) {
+                return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+            }
+            return chip::CopyCharSpanToMutableCharSpan(chip::CharSpan::fromCharString("Mode0"), label);
+        }
+        if (modeIndex >= slot->count) {
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        return chip::CopyCharSpanToMutableCharSpan(chip::CharSpan::fromCharString(slot->entries[modeIndex].label),
+                                                    label);
+    }
+
+    CHIP_ERROR GetModeValueByIndex(uint8_t modeIndex, uint8_t &value) override
+    {
+        mt_mb_slot_t *slot = find_slot();
+        if (slot == nullptr || slot->count == 0) {
+            if (modeIndex != 0) {
+                return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+            }
+            value = 0;
+            return CHIP_NO_ERROR;
+        }
+        if (modeIndex >= slot->count) {
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        value = slot->entries[modeIndex].mode;
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR GetModeTagsByIndex(
+        uint8_t modeIndex,
+        chip::app::DataModel::List<chip::app::Clusters::detail::Structs::ModeTagStruct::Type> &tags) override
+    {
+        mt_mb_slot_t *slot = find_slot();
+        uint16_t tag_value;
+        if (slot == nullptr || slot->count == 0) {
+            if (modeIndex != 0) {
+                return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+            }
+            tag_value = placeholder_tag();
+        } else {
+            if (modeIndex >= slot->count) {
+                return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+            }
+            tag_value = slot->entries[modeIndex].tag;
+        }
+        /* The SDK hands in a buffer sized for kMaxNumOfModeTags (8); this
+         * delegate only ever publishes one tag per mode, so size 1 always
+         * fits. Defensive check mirrors the SDK's own rvc-mode-delegates.cpp
+         * reference delegate (examples/rvc-app), which guards the same way
+         * before writing. */
+        if (tags.size() < 1) {
+            return CHIP_ERROR_INVALID_ARGUMENT;
+        }
+        tags[0].value = tag_value;
+        tags.reduce_size(1);
+        return CHIP_NO_ERROR;
+    }
+
+    /*
+     * ChangeToMode::Id is 0x00 for both RvcRunMode and RvcCleanMode
+     * (verified against each cluster's generated CommandIds.h: both declare
+     * "inline constexpr CommandId Id = 0x00000000" for ChangeToMode), so one
+     * constant covers both. MicrowaveOvenMode never reaches this override at
+     * all: its generated CommandIds.h declares kAcceptedCommandsCount = 0,
+     * so the SDK wires no ChangeToMode command for it at all (design spec
+     * 3.3's plan-time correction; the microwave's mode is selected through
+     * SetCookingParameters' cookMode field instead). UnsupportedMode is
+     * answered by the SDK's own pre-check (Instance::HandleChangeToMode,
+     * mode-base-server.cpp) before this delegate method is ever called, so
+     * only kSuccess/kGenericFailure are this function's business, per design
+     * spec 3.3's adjudicated-ChangeToMode decision.
+     */
+    void HandleChangeToMode(uint8_t NewMode,
+                             chip::app::Clusters::ModeBase::Commands::ChangeToModeResponse::Type &response) override
+    {
+        bool allow = mt_cmd_forward_payload(m_ep, m_cluster,
+                                             chip::app::Clusters::RvcRunMode::Commands::ChangeToMode::Id, NewMode);
+        response.status = chip::to_underlying(allow ? chip::app::Clusters::ModeBase::StatusCode::kSuccess
+                                                      : chip::app::Clusters::ModeBase::StatusCode::kGenericFailure);
+    }
+
+private:
+    mt_mb_slot_t *find_slot() const
+    {
+        for (auto &s : s_mb_slots) {
+            if (s.used && s.ep == m_ep && s.cluster == m_cluster) {
+                return &s;
+            }
+        }
+        return nullptr;
+    }
+
+    /* Tag-0 defaults, design spec section 9's exact policy, placeholder case
+     * only (index 0 of an otherwise-empty list): RvcRunMode gets kIdle,
+     * RvcCleanMode gets kVacuum, MicrowaveOvenMode gets kNormal.
+     * mt_matter_modebase_set() below applies the identical table to real
+     * host-declared entries at store time. */
+    uint16_t placeholder_tag() const
+    {
+        using namespace chip::app::Clusters;
+        if (m_cluster == RvcRunMode::Id) {
+            return chip::to_underlying(RvcRunMode::ModeTag::kIdle);
+        }
+        if (m_cluster == RvcCleanMode::Id) {
+            return chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
+        }
+        return chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
+    }
+
+    chip::EndpointId m_ep      = chip::kInvalidEndpointId;
+    chip::ClusterId  m_cluster = chip::kInvalidClusterId;
+};
+
+/*
+ * Pool of MT_MB_MAX_LISTS delegate objects. mt_devtypes.cpp (Tasks 3-4 of
+ * this batch) hands one out per (endpoint, cluster) it creates through
+ * mt_matter_modebase_delegate_alloc(cluster_id), the same alloc-before-
+ * create shape as every other pool in this file; the cluster id is fixed at
+ * alloc time (see the class comment above for why), the endpoint id after
+ * create() returns it.
+ */
+static HearthModeBaseDelegate s_mb_delegates[MT_MB_MAX_LISTS];
+static size_t                 s_mb_delegate_next = 0;
+
+extern "C" void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
+{
+    if (s_mb_delegate_next >= MT_MB_MAX_LISTS) {
+        return nullptr;
+    }
+    HearthModeBaseDelegate *d = &s_mb_delegates[s_mb_delegate_next++];
+    d->set_cluster(cluster_id);
+    return d;
+}
+
+extern "C" void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    static_cast<HearthModeBaseDelegate *>(delegate)->set_endpoint(ep);
+}
+
+/*
+ * The bridge for AT+MTMODES's cluster-aware form. Grammar and content rules
+ * (count bounds, mode-value uniqueness, tag range, label content) are
+ * enforced by cmd_mtmodes() in mt_at.c before this is ever called; the
+ * bounds re-checked here are defensive, the same split as
+ * mt_matter_modes_set() above. This bridge is the sole place that validates
+ * cluster against the three ModeBase ids: mt_at.c stays free of any
+ * esp_matter/CHIP header and cannot read those ids itself.
+ */
+extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
+                                       const char *const *labels, uint8_t count)
+{
+    using namespace chip::app::Clusters;
+    ChipStackLock lock;
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id && cluster != MicrowaveOvenMode::Id) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (esp_matter::cluster::get(ep, cluster) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1 || count > MT_MB_MAX_COUNT) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_mb_slot_t *slot = nullptr;
+    for (auto &s : s_mb_slots) {
+        if (s.used && s.ep == ep && s.cluster == cluster) {
+            slot = &s;
+            break;
+        }
+    }
+    if (!slot) {
+        for (auto &s : s_mb_slots) {
+            if (!s.used) {
+                slot = &s;
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        /* Cannot happen in practice: MT_MB_MAX_LISTS covers every
+         * (endpoint, cluster) pair this composition can create. Defensive
+         * return, same reasoning as mt_matter_modes_set() above. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(labels[i]);
+        if (len < 1 || len > MT_MB_MAX_LABEL_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        /* Tag-0 defaults, design spec section 9's exact policy, substituted
+         * at store time so every read (GetModeTagsByIndex above) is
+         * branch-free. */
+        uint16_t tag = tags[i];
+        if (tag == 0) {
+            if (cluster == RvcRunMode::Id) {
+                tag = chip::to_underlying(i == 0 ? RvcRunMode::ModeTag::kIdle : RvcRunMode::ModeTag::kCleaning);
+            } else if (cluster == RvcCleanMode::Id) {
+                tag = chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
+            } else {
+                tag = chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
+            }
+        }
+        slot->entries[i].mode = modes[i];
+        slot->entries[i].tag  = tag;
+        memcpy(slot->entries[i].label, labels[i], len + 1);
+    }
+    slot->ep      = ep;
+    slot->cluster = cluster;
+    slot->count   = count;
+    slot->used    = true;
+
+    MatterReportingAttributeChangeCallback(ep, cluster, ModeBase::Attributes::SupportedModes::Id);
+
+    /* CurrentMode clamp: if the Instance's cached CurrentMode is no longer
+     * one of the new list's mode values, reset it to the new list's first
+     * entry. UpdateCurrentMode() reports the CurrentMode change itself
+     * (mode-base-server.cpp) when it actually changes, so nothing further is
+     * needed here. Skipped rather than failed when the Instance is not
+     * (yet) reachable through the pool: the SupportedModes half of this call
+     * has already succeeded, and an unreachable Instance here would mean
+     * esp_matter::start()'s init-callback pass has not finished, which
+     * cannot happen once mt_at_start() lets any AT+MTMODES call reach this
+     * bridge (the same s_at_up boot-ordering this project relies on
+     * elsewhere). */
+    for (auto &d : s_mb_delegates) {
+        if (d.endpoint() == ep && d.cluster() == cluster) {
+            ModeBase::Instance *inst = d.instance();
+            if (inst != nullptr && !inst->IsSupportedMode(inst->GetCurrentMode())) {
+                inst->UpdateCurrentMode(slot->entries[0].mode);
+            }
+            break;
+        }
+    }
+
     return MT_ATTR_OK;
 }
 

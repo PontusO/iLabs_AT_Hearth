@@ -567,17 +567,34 @@ static int cmd_mtvalve(at_type_t type, char *args)
 }
 
 /*
- * AT+MTMODES=<ep>,<mode>,"<label>"[,<mode>,"<label>",...] -> replace ep's
- * ModeSelect SupportedModes list, 1..MT_MODES_MAX_COUNT mode/label pairs.
- * Set-only, the AT+MTTEMPLEVELS convention: bare/query forms answer a plain
- * ERROR. Not persisted: the host is expected to re-send it every boot, same
- * contract as AT+MTTEMPLEVELS.
+ * AT+MTMODES has two forms, disambiguated by type (AT_MT_SPEC.md 3.20):
  *
- * Parsed here directly off the raw argument string, the same reason
- * AT+MTTEMPLEVELS is: a comma inside a quoted label is legal content, and
- * at_split_args() would split on it. Grammar and content rules (violating
- * any of these is +MTERR:1, decided here before mt_matter_modes_set() is
- * ever called):
+ *   AT+MTMODES=<ep>,<mode>,"<label>"[,<mode>,"<label>",...]
+ *       -> replace ep's ModeSelect SupportedModes list (the original form).
+ *   AT+MTMODES=<ep>,<cluster>,<mode>,<tag>,"<label>"[,...]
+ *       -> replace the (ep, cluster) ModeBase cluster's SupportedModes list
+ *          (RvcRunMode, RvcCleanMode or MicrowaveOvenMode; RVC + Microwave
+ *          batch, task 2).
+ *
+ * Both are set-only, the AT+MTTEMPLEVELS convention: bare/query forms answer
+ * a plain ERROR. Neither is persisted: the host is expected to re-send its
+ * list every boot, same contract as AT+MTTEMPLEVELS.
+ *
+ * Both are parsed here directly off the raw argument string, the same
+ * reason AT+MTTEMPLEVELS is: a comma inside a quoted label is legal content,
+ * and at_split_args() would split on it.
+ *
+ * Disambiguation, by type: after <ep> is parsed and its trailing comma
+ * nulled, the next value is either the ModeSelect form's <mode> (immediately
+ * followed by a quoted "<label>") or the cluster-aware form's <cluster>
+ * (immediately followed by another numeric <mode>). So the character right
+ * after the comma ending that first value tells the two forms apart: a `"`
+ * means ModeSelect, a digit means cluster-aware. Hex "0x.." cluster ids
+ * still start with the digit '0', so this still resolves correctly; any
+ * other character is a malformed command either way.
+ *
+ * ModeSelect form grammar and content rules (violating any of these is
+ * +MTERR:1, decided here before mt_matter_modes_set() is ever called):
  *   - <ep>: a bare unsigned token, hex or decimal, up to the first comma.
  *   - 1..MT_MODES_MAX_COUNT <mode>,"<label>" pairs.
  *   - <mode>: a bare unsigned token, hex or decimal, 0..255 (u8); no two
@@ -589,9 +606,24 @@ static int cmd_mtvalve(at_type_t type, char *args)
  *     the token early, leaving trailing bytes the "junk after the closing
  *     quote" check below rejects.
  *
- * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
- * +MTERR:3 the endpoint has no ModeSelect cluster. A bare ERROR covers an
- * unclassified runtime failure, routed through attr_err_to_mterr() like
+ * Cluster-aware form grammar: the same shape with a leading <cluster> and a
+ * <tag> field inserted into each triple (+MTERR:1 on any violation, decided
+ * here before mt_matter_modebase_set() is ever called):
+ *   - <cluster>: a bare unsigned token, hex or decimal; validated against
+ *     the three legal ModeBase cluster ids in the bridge (main.cpp), not
+ *     here, since this C translation unit has no esp_matter/CHIP header to
+ *     read those ids from.
+ *   - 1..MT_MB_MAX_COUNT <mode>,<tag>,"<label>" triples, same <mode> and
+ *     label rules as the ModeSelect form above, mode uniqueness included.
+ *   - <tag>: a bare unsigned token, hex or decimal, 0..0xFFFF (u16); a value
+ *     above that range is +MTERR:1. 0 means "cluster's conformance default",
+ *     substituted by the bridge at store time (AT_MT_SPEC.md 3.20's tag-0
+ *     default table); any other value passes through as-is.
+ *
+ * Lookup errors follow the established division for both forms: +MTERR:2
+ * unknown endpoint, +MTERR:3 the endpoint has no cluster of the relevant
+ * kind (ModeSelect, or the requested ModeBase cluster). A bare ERROR covers
+ * an unclassified runtime failure, routed through attr_err_to_mterr() like
  * every other bridge call in this file.
  */
 static int cmd_mtmodes(at_type_t type, char *args)
@@ -615,16 +647,120 @@ static int cmd_mtmodes(at_type_t type, char *args)
         return MT_ERR_BAD_PARAM;
     }
 
-    uint8_t modes[MT_MODES_MAX_COUNT];
-    const char *labels[MT_MODES_MAX_COUNT];
-    char label_buf[MT_MODES_MAX_COUNT][MT_MODES_MAX_LABEL_LEN + 1];
+    /* Form disambiguation: find the comma ending the first value after <ep>
+     * and look at what follows it. See the function comment above. */
+    char *lookahead_comma = strchr(p, ',');
+    if (!lookahead_comma) {
+        return MT_ERR_BAD_PARAM;
+    }
+    bool cluster_aware;
+    if (lookahead_comma[1] == '"') {
+        cluster_aware = false;
+    } else if (lookahead_comma[1] >= '0' && lookahead_comma[1] <= '9') {
+        cluster_aware = true;
+    } else {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    if (!cluster_aware) {
+        uint8_t modes[MT_MODES_MAX_COUNT];
+        const char *labels[MT_MODES_MAX_COUNT];
+        char label_buf[MT_MODES_MAX_COUNT][MT_MODES_MAX_LABEL_LEN + 1];
+        uint8_t count = 0;
+
+        while (*p != '\0') {
+            /* <mode>: a bare token up to the comma before the opening quote. */
+            char *mode_comma = strchr(p, ',');
+            if (!mode_comma) {
+                return MT_ERR_BAD_PARAM;  /* mode with no label to follow it */
+            }
+            *mode_comma = '\0';
+            unsigned long mode;
+            if (!parse_u(p, &mode) || mode > 0xFF) {
+                return MT_ERR_BAD_PARAM;
+            }
+            p = mode_comma + 1;
+
+            if (*p != '"') {
+                return MT_ERR_BAD_PARAM;
+            }
+            p++;
+            char *start = p;
+            while (*p != '"') {
+                if (*p == '\0') {
+                    return MT_ERR_BAD_PARAM;  /* unterminated quote */
+                }
+                p++;
+            }
+            size_t len = (size_t)(p - start);
+            p++;  /* past the closing quote */
+
+            if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
+                return MT_ERR_BAD_PARAM;
+            }
+            if (count >= MT_MODES_MAX_COUNT) {
+                return MT_ERR_BAD_PARAM;
+            }
+            for (size_t i = 0; i < len; i++) {
+                unsigned char c = (unsigned char)start[i];
+                if (c < 0x20 || c > 0x7E) {
+                    return MT_ERR_BAD_PARAM;
+                }
+            }
+            for (uint8_t i = 0; i < count; i++) {
+                if (modes[i] == (uint8_t)mode) {
+                    return MT_ERR_BAD_PARAM;  /* duplicate mode value in this list */
+                }
+            }
+            memcpy(label_buf[count], start, len);
+            label_buf[count][len] = '\0';
+            labels[count] = label_buf[count];
+            modes[count] = (uint8_t)mode;
+            count++;
+
+            if (*p == ',') {
+                p++;
+                if (*p == '\0') {
+                    return MT_ERR_BAD_PARAM;  /* trailing comma, no next pair */
+                }
+                continue;
+            }
+            if (*p == '\0') {
+                break;
+            }
+            return MT_ERR_BAD_PARAM;  /* junk after the closing quote */
+        }
+
+        if (count < 1) {
+            return MT_ERR_BAD_PARAM;
+        }
+
+        int r = mt_matter_modes_set((uint16_t)ep, modes, labels, count);
+        if (r != MT_ATTR_OK) {
+            return attr_err_to_mterr(r);
+        }
+        return AT_R_OK;
+    }
+
+    /* Cluster-aware form: <cluster>,<mode>,<tag>,"<label>"[,...]. */
+    *lookahead_comma = '\0';
+    unsigned long cluster;
+    if (!parse_u(p, &cluster)) {
+        return MT_ERR_BAD_PARAM;
+    }
+    p = lookahead_comma + 1;
+
+    uint8_t modes[MT_MB_MAX_COUNT];
+    uint16_t tags[MT_MB_MAX_COUNT];
+    const char *labels[MT_MB_MAX_COUNT];
+    char label_buf[MT_MB_MAX_COUNT][MT_MB_MAX_LABEL_LEN + 1];
     uint8_t count = 0;
 
     while (*p != '\0') {
-        /* <mode>: a bare token up to the comma before the opening quote. */
+        /* <mode>: a bare token up to the comma before <tag>. */
         char *mode_comma = strchr(p, ',');
         if (!mode_comma) {
-            return MT_ERR_BAD_PARAM;  /* mode with no label to follow it */
+            return MT_ERR_BAD_PARAM;  /* mode with no tag/label to follow it */
         }
         *mode_comma = '\0';
         unsigned long mode;
@@ -632,6 +768,18 @@ static int cmd_mtmodes(at_type_t type, char *args)
             return MT_ERR_BAD_PARAM;
         }
         p = mode_comma + 1;
+
+        /* <tag>: a bare token up to the comma before the opening quote. */
+        char *tag_comma = strchr(p, ',');
+        if (!tag_comma) {
+            return MT_ERR_BAD_PARAM;  /* tag with no label to follow it */
+        }
+        *tag_comma = '\0';
+        unsigned long tag;
+        if (!parse_u(p, &tag) || tag > 0xFFFF) {
+            return MT_ERR_BAD_PARAM;
+        }
+        p = tag_comma + 1;
 
         if (*p != '"') {
             return MT_ERR_BAD_PARAM;
@@ -647,10 +795,10 @@ static int cmd_mtmodes(at_type_t type, char *args)
         size_t len = (size_t)(p - start);
         p++;  /* past the closing quote */
 
-        if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
+        if (len < 1 || len > MT_MB_MAX_LABEL_LEN) {
             return MT_ERR_BAD_PARAM;
         }
-        if (count >= MT_MODES_MAX_COUNT) {
+        if (count >= MT_MB_MAX_COUNT) {
             return MT_ERR_BAD_PARAM;
         }
         for (size_t i = 0; i < len; i++) {
@@ -668,12 +816,13 @@ static int cmd_mtmodes(at_type_t type, char *args)
         label_buf[count][len] = '\0';
         labels[count] = label_buf[count];
         modes[count] = (uint8_t)mode;
+        tags[count] = (uint16_t)tag;
         count++;
 
         if (*p == ',') {
             p++;
             if (*p == '\0') {
-                return MT_ERR_BAD_PARAM;  /* trailing comma, no next pair */
+                return MT_ERR_BAD_PARAM;  /* trailing comma, no next triple */
             }
             continue;
         }
@@ -687,7 +836,7 @@ static int cmd_mtmodes(at_type_t type, char *args)
         return MT_ERR_BAD_PARAM;
     }
 
-    int r = mt_matter_modes_set((uint16_t)ep, modes, labels, count);
+    int r = mt_matter_modebase_set((uint16_t)ep, (uint32_t)cluster, modes, tags, labels, count);
     if (r != MT_ATTR_OK) {
         return attr_err_to_mterr(r);
     }

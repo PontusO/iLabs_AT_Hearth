@@ -299,6 +299,86 @@ void *mt_matter_mode_select_manager(void);
  */
 int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels, uint8_t count);
 
+/* ---- ModeBase: RVC run/clean mode, microwave mode (RVC + Microwave batch, task 2) --- */
+
+/*
+ * Bounds for AT+MTMODES's cluster-aware form (AT_MT_SPEC.md 3.20). Shared
+ * between the handler (mt_at.c, which enforces them before calling the
+ * bridge below) and the per-(endpoint, cluster) store the bridge writes into
+ * (main.cpp), so the two cannot drift apart. MT_MB_MAX_COUNT/
+ * MT_MB_MAX_LABEL_LEN mirror MT_MODES_MAX_COUNT/MT_MODES_MAX_LABEL_LEN
+ * above; MT_MB_MAX_LISTS is the number of (endpoint, cluster) lists this
+ * firmware can store, a distinct axis from MT_COMP_MAX_ENDPOINTS because a
+ * single RVC endpoint carries TWO ModeBase clusters at once (RvcRunMode and
+ * RvcCleanMode, design spec section 2.1), so the store is keyed by the pair,
+ * not by endpoint alone.
+ */
+#define MT_MB_MAX_LISTS     8   /* (endpoint, cluster) lists this firmware can store */
+#define MT_MB_MAX_COUNT     8   /* mode/tag/label triples per list, 1..this many     */
+#define MT_MB_MAX_LABEL_LEN 32  /* bytes per label, excluding the NUL                */
+
+/*
+ * The delegate-pool handout pattern (see mt_matter_valve_delegate_alloc()'s
+ * doc comment above, which this mirrors), with one difference: ModeBase
+ * needs a delegate per (endpoint, cluster) PAIR, not per endpoint alone,
+ * because RvcRunMode and RvcCleanMode can both live on the same RVC
+ * endpoint and each needs its own delegate object (F7's one-delegate-per-
+ * Instance rule: ModeBase::Delegate::SetInstance() VerifyOrDies if a second
+ * Instance tries to share one, the identical shape the OperationalState pool
+ * above is built around). The cluster id is fixed at ALLOC time here, not
+ * after: unlike the endpoint id, it is already known to the caller
+ * (mt_devtypes.cpp, Tasks 3-4 of this batch) before create() runs - it is
+ * literally which cluster::create() the thunk is about to call - and the
+ * delegate needs it immediately, since ModeBase::Instance::Init() reads
+ * GetModeValueByIndex(0, ...) before set_endpoint() has any chance to run
+ * (see the placeholder-mode reasoning on mt_matter_modebase_set() below).
+ *
+ * mt_matter_modebase_delegate_alloc() returns nullptr once MT_MB_MAX_LISTS
+ * slots are handed out, so the caller aborts the boot rebuild the same way a
+ * failed create() itself would (see mt_matter_valve_delegate_alloc()'s
+ * comment above for the full reasoning).
+ */
+void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id);
+void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
+
+/*
+ * AT+MTMODES's cluster-aware form: replace the (ep, cluster) ModeBase
+ * cluster's SupportedModes list, host-fed, never persisted, the same
+ * re-sent-every-boot contract as the ModeSelect form
+ * (mt_matter_modes_set() above) and every other host-fed list in this
+ * header. cluster must be one of the three ModeBase cluster ids
+ * (RvcRunMode, RvcCleanMode, MicrowaveOvenMode); this bridge is the sole
+ * place that validates it, since mt_at.c stays free of any esp_matter/CHIP
+ * header and cannot read those ids itself (see this file's own top
+ * comment). modes[0..count-1]/tags[0..count-1]/labels[0..count-1] are
+ * parallel arrays; the handler has already checked count, mode-value
+ * uniqueness, tag range (<= 0xFFFF) and every label against
+ * MT_MB_MAX_COUNT/MT_MB_MAX_LABEL_LEN, printable ASCII and no double quote,
+ * so this bridge trusts them and only re-checks bounds defensively.
+ *
+ * tags[i] == 0 is substituted at STORE time (not read time) with the
+ * cluster's conformance-required default, design spec section 9's exact
+ * policy: RvcRunMode's first declared mode gets kIdle, every later one
+ * kCleaning; RvcCleanMode gets kVacuum on every mode; MicrowaveOvenMode gets
+ * kNormal on every mode. Substituting at store time rather than in the
+ * delegate's GetModeTagsByIndex() keeps every read branch-free. A nonzero
+ * tag passes through unvalidated beyond the u16 range check mt_at.c already
+ * performed: tag semantics beyond that are the host's business.
+ *
+ * Also clamps CurrentMode when the replacement list drops the value it
+ * currently holds (main.cpp), through the SDK's own
+ * ModeBase::Instance::UpdateCurrentMode(), so a controller never observes a
+ * CurrentMode that is not a member of the just-published SupportedModes.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when cluster is not one of the three ModeBase ids, or
+ * ep has no such cluster, MT_ATTR_ERR_FAILED for a bad count or an internal
+ * failure (store exhaustion; cannot happen in practice, MT_MB_MAX_LISTS
+ * covers every ModeBase cluster instance this composition can create).
+ */
+int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
+                            const char *const *labels, uint8_t count);
+
 /* ---- OperationalState trio (seven-type batch, task C4) ------------------ */
 
 /*

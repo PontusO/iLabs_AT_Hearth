@@ -137,7 +137,21 @@ CONFIG_SUPPORT_DEVICE_ENERGY_MANAGEMENT_MODE_CLUSTER=n
 CONFIG_SUPPORT_DIAGNOSTIC_LOGS_CLUSTER=n
 CONFIG_SUPPORT_DISHWASHER_ALARM_CLUSTER=n
 CONFIG_SUPPORT_DISHWASHER_MODE_CLUSTER=n
-CONFIG_SUPPORT_MICROWAVE_OVEN_MODE_CLUSTER=n
+# MICROWAVE_OVEN_MODE_CLUSTER: re-enabled, RVC + Microwave batch task 2. This
+# and RVC_RUN_MODE/RVC_CLEAN_MODE below all map to the SAME cluster
+# directory, src/app/clusters/mode-base-server (cluster_dir.cmake): the
+# abstract ModeBase cluster's Instance/Delegate is shared by every concrete
+# derivation (RvcRunMode, RvcCleanMode, MicrowaveOvenMode, DishwasherMode,
+# etc; see the "DISHWASHER_MODE" line above, still excluded since this
+# firmware never creates that endpoint). Any one of the three re-enables the
+# directory; all three are listed here because main.cpp's
+# HearthModeBaseDelegate/mt_matter_modebase_set (task 2) call
+# ModeBase::Instance methods directly, unconditionally, before any thunk in
+# mt_devtypes.cpp creates a concrete cluster (Tasks 3-4), so leaving any of
+# the three excluded is inert now but would silently reintroduce the same
+# "undefined reference to ModeBase::Instance::<method>" link failure the
+# CHIME_CLUSTER/MODE_SELECT_CLUSTER comments above document the general
+# shape of, the moment a rebase or edit removed one of the others.
 CONFIG_SUPPORT_ECOSYSTEM_INFORMATION_CLUSTER=n
 CONFIG_SUPPORT_ELECTRICAL_ENERGY_MEASUREMENT_CLUSTER=n
 CONFIG_SUPPORT_ELECTRICAL_POWER_MEASUREMENT_CLUSTER=n
@@ -181,8 +195,12 @@ CONFIG_SUPPORT_POWER_SOURCE_CONFIGURATION_CLUSTER=n
 CONFIG_SUPPORT_RADON_CONCENTRATION_MEASUREMENT_CLUSTER=n
 CONFIG_SUPPORT_REFRIGERATOR_ALARM_CLUSTER=n
 CONFIG_SUPPORT_REFRIGERATOR_AND_TEMPERATURE_CONTROLLED_CABINET_MODE_CLUSTER=n
-CONFIG_SUPPORT_RVC_CLEAN_MODE_CLUSTER=n
-CONFIG_SUPPORT_RVC_RUN_MODE_CLUSTER=n
+# RVC_CLEAN_MODE_CLUSTER / RVC_RUN_MODE_CLUSTER: re-enabled, RVC + Microwave
+# batch task 2. See the MICROWAVE_OVEN_MODE_CLUSTER comment above: all three
+# pull in the same src/app/clusters/mode-base-server directory, and this
+# file's own main.cpp additions reference chip::app::Clusters::ModeBase::
+# Instance methods unconditionally, ahead of the endpoint thunks Tasks 3-4
+# add.
 CONFIG_SUPPORT_SERVICE_AREA_CLUSTER=n
 # SMOKE_CO_ALARM_CLUSTER: re-enabled, task C5 (seven-type batch) creates a
 # smoke_co_alarm endpoint (mt_devtypes.cpp's mk_smoke_co_alarm()).
