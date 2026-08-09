@@ -1858,7 +1858,10 @@ def step_3_15_rvc(ctx):
     rule) but not read back a second time: 3.20.1's tag-0 table is the same
     mechanism on a second cluster, and 3.16's "asserting labels and tag
     values on cluster 0x54" is explicit about which cluster carries the
-    read-back check.
+    read-back check. RvcCleanMode's ChangeToMode is never invoked at all
+    in this step (no allow/deny round trip on cluster 85), so it cannot
+    carry the same-mode short-circuit disease the RvcRunMode deny below
+    was found to have: there is no repeated-value sequence to have it in.
 
     ChangeToMode is adjudicated for RvcRunMode (spec 3.20.1, unlike
     MicrowaveOvenMode, which has none): allow and deny both forward
@@ -1868,7 +1871,10 @@ def step_3_15_rvc(ctx):
     kSuccess / 2 kGenericFailure, spec 3.20.1), parsed by
     parse_change_to_mode_status (INFERENCE, see its own docstring) since
     that response is a StatusIB Success either way -- parse_status's own
-    branches would find nothing here.
+    branches would find nothing here. The deny MUST target a mode
+    different from whatever the allow just installed as CurrentMode: see
+    the comment at the deny invoke below (Task 9 bench finding,
+    task-9-report.md section 6).
 
     RvcOperationalState (97/0x61) registers Pause (0), Resume (3) and
     GoHome (0x80) (spec 3.17/3.21): all three are exercised both ways
@@ -1949,11 +1955,23 @@ def step_3_15_rvc(ctx):
     s.check("3.15 ChangeToMode allow: status 0 (kSuccess)",
             parse_change_to_mode_status(out) == 0, tag="P3")
 
-    handle = invoke_chip(ctx, ["rvcrunmode", "change-to-mode", "1", node,
+    # The deny MUST ask for a mode different from CurrentMode. Asking
+    # again for mode 1 (what the allow above just installed) hits
+    # mode-base-server.cpp:401-410's own same-mode short-circuit ("If the
+    # NewMode field is the same as the value of the CurrentMode attribute
+    # the ChangeToModeResponse command SHALL have the Status field set to
+    # Success"): the SDK answers kSuccess itself, before
+    # HandleChangeToMode() is ever called, so no +MTCMD is raised at all.
+    # Found live on the WiFi bench (task-9-report.md section 6, both
+    # failing checks traced to this exact line); mode 0 is the other mode
+    # this step already declared over AT+MTMODES above, so no extra
+    # staging is needed to pick a legitimately different, still-supported
+    # target.
+    handle = invoke_chip(ctx, ["rvcrunmode", "change-to-mode", "0", node,
                               "12"], timeout=30)
-    fwd = responder.expect(cluster=84, command=0, verdict=0, payload=1,
+    fwd = responder.expect(cluster=84, command=0, verdict=0, payload=0,
                            timeout=5.0)
-    s.check("3.15 ChangeToMode deny: forward answered, payload == mode 1",
+    s.check("3.15 ChangeToMode deny: forward answered, payload == mode 0",
             fwd is not None, tag="P3")
     rc, out = handle.join(30)
     s.check("3.15 ChangeToMode deny: chip-tool exits 0 (Success at the "
@@ -1961,6 +1979,11 @@ def step_3_15_rvc(ctx):
             rc == 0, tag="P3")
     s.check("3.15 ChangeToMode deny: status 2 (kGenericFailure)",
             parse_change_to_mode_status(out) == 2, tag="P3")
+
+    rc, out = chip.run(["rvcrunmode", "read", "current-mode", node, "12"],
+                       timeout=30)
+    s.check("3.15 ChangeToMode deny: CurrentMode still 1 (deny changed "
+            "nothing)", rc == 0 and parse_int_attr(out) == 1, tag="P3")
 
     # --- RvcOperationalState: Pause/Resume/GoHome, both verdicts ---
     def allow(name, verb, command, precondition, next_state):
@@ -2067,6 +2090,17 @@ def step_3_16_microwave(ctx):
     traffic per Task 4's trace (`power` always resolves because this
     firmware never enables PowerInWatts, and `cookMode`/`cookTime`/
     `startAfter` are resolved by the SDK before the delegate ever runs).
+    Unlike RvcRunMode's ChangeToMode (step_3_15's own same-mode
+    short-circuit finding, Task 9), SetCookingParameters carries no
+    "unchanged value" short-circuit of any kind: read against the pinned
+    SDK (microwave-oven-control-server.cpp's HandleSetCookingParameters(),
+    the whole VerifyOrExit chain from opState through the power/watt
+    branches), every check is a range/support/state check, never a
+    comparison against the delegate's current CookTime/PowerSetting, so
+    the delegate is always called once validation passes. The allow and
+    deny below already use genuinely different values (90/80 vs 60/50)
+    for this reason, and that is confirmed safe by source, not by
+    accident.
     Allow reads CookTime/PowerSetting back from the controller afterward
     (spec 3.17: both are Instance/delegate-owned, never ember-backed, so
     only a controller read reaches them). Deny is a bare StatusIB failure

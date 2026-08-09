@@ -3721,7 +3721,16 @@ class TestStep315Rvc(unittest.TestCase):
     Pause/Resume/GoHome each answered both ways, the 0x40-0x42 read-back
     trio, and the two GoHome no-forward server guards."""
 
-    def _ctx(self, guard_leaks_forward=False, wrong_deny_fixture=False):
+    def _ctx(self, guard_leaks_forward=False, wrong_deny_fixture=False,
+            ctm_modes=None):
+        # ctm_modes, when given, collects every mode ChangeToMode was
+        # actually invoked with, in call order: test_allow_then_deny_...
+        # below uses this to pin the fix (allow 1, deny 0) rather than
+        # just trusting that the step's checks all pass, since a
+        # regression back to "deny asks for the same mode the allow just
+        # installed" would still pass FakeChipRunner's scripted replies
+        # (see that test's docstring for why).
+        ctm_modes = [] if ctm_modes is None else ctm_modes
         link = FakeLink({
             "AT+MTOPSTATE=7,0x40": (1, []),
             "AT+MTOPSTATE=7,64": (1, []),
@@ -3753,6 +3762,7 @@ class TestStep315Rvc(unittest.TestCase):
             (0, fixture(os.path.join(
                 "rvc-microwave", "changetomode-response-allow-synthetic.txt"))),
             (0, fixture(os.path.join("rvc-microwave", deny_ctm_fixture))),
+            (0, "[TOO]   CurrentMode: 1"),         # CurrentMode after deny
             (0, "[TOO]       ErrorStateID: 0"),   # pause allow
             (0, "[TOO]       ErrorStateID: 0"),   # resume allow
             (0, "[TOO]       ErrorStateID: 0"),   # go-home allow
@@ -3769,9 +3779,19 @@ class TestStep315Rvc(unittest.TestCase):
 
         def on_call(argv):
             if "rvcrunmode" in argv and "change-to-mode" in argv:
+                # The mode requested is the positional argument right
+                # after "change-to-mode" in chip.run's fully-built argv;
+                # reading it back (rather than hardcoding "1" for every
+                # call) is what makes this fixture actually exercise the
+                # fix (allow mode 1, deny mode 0) instead of masking a
+                # regression back to the same-mode short-circuit bug
+                # (Task 9, mode-base-server.cpp:401-410) the same way the
+                # old fixture did.
+                mode = argv[argv.index("change-to-mode") + 1]
+                ctm_modes.append(mode)
                 counts["ctm"] += 1
                 seq = 1 if counts["ctm"] == 1 else 2
-                link.push_urcs(["+MTCMD:%d,12,84,0,1" % seq])
+                link.push_urcs(["+MTCMD:%d,12,84,0,%s" % (seq, mode)])
                 return
             if "rvcoperationalstate" not in argv:
                 return
@@ -3827,6 +3847,38 @@ class TestStep315Rvc(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_15_rvc(ctx)
         self.assertGreater(ctx.suite.failed, 0)
+
+    def test_allow_then_deny_uses_a_different_mode(self):
+        """Task 9 bench finding pin: the deny must ask for a mode
+        different from the one the allow just installed as CurrentMode,
+        or mode-base-server.cpp:401-410's same-mode short-circuit answers
+        kSuccess before the delegate is ever consulted, raising no +MTCMD
+        at all (task-9-report.md section 6, both failing checks traced to
+        this exact line, reproduced live on the WiFi bench).
+
+        FakeChipRunner has no model of CurrentMode at all: it answers
+        whatever the scripted line says regardless of which mode was
+        actually requested, so it could not have caught the original bug
+        on its own (the deny's fixture was simply wrong for the sequence
+        the step was really issuing, and nothing in this double would
+        have noticed the mismatch). That is why this test inspects the
+        actual argv the step sent, via ctm_modes, rather than only
+        trusting that step_3_15_rvc's own checks passed: checking argv is
+        the one thing standing between this test suite and silently
+        re-accepting the same-mode regression the bench had to find.
+        Building a real CurrentMode model into FakeChipRunner to catch
+        this class of bug directly is deliberately out of scope this
+        round (YAGNI): the bench is what actually validates command
+        semantics against the live SDK, and the harness's job is the
+        wire protocol and assertion machinery around it, not
+        re-implementing ModeBase server logic."""
+        modes = []
+        ctx = self._ctx(ctm_modes=modes)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_15_rvc(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertEqual(modes, ["1", "0"])
 
 
 class TestStep316Microwave(unittest.TestCase):
