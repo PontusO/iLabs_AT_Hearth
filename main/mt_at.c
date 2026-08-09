@@ -42,13 +42,16 @@
  * MT_AT_LINE_MAX buffer on the CHIP task's stack. Truncation is safe. */
 #define MT_EVT_LINE_MAX 48
 
-/* Longest +MTCMD/+MTCMDTO line: "+MTCMD:" + up to four u32 fields (10 digits
- * each: seq, cluster, command, and the reserved fifth payload field added by
- * C1's mt_cmd_forward_payload()) plus the u16 ep (5 digits) and four commas:
- * 7 + 10 + 1 + 5 + 1 + 10 + 1 + 10 + 1 + 10 = 56, plus the terminating NUL.
- * 72 leaves the same kind of headroom MT_EVT_LINE_MAX does for +MTEVT, again
- * off the CHIP task's stack rather than the 512-byte MT_AT_LINE_MAX buffer. */
-#define MT_CMD_LINE_MAX 72
+/* Longest +MTCMD/+MTCMDTO line: "+MTCMD:" + seq, ep, cluster, command (the
+ * fixed head) plus a caller-formatted tail of up to four more fields
+ * (mt_cmd_forward_fields(), the RVC/microwave batch's SetCookingParameters
+ * and friends). Five numeric heads worst case (seq, ep, cluster, command,
+ * 10 digits each bar ep's 5) plus a four-field comma-joined tail (10 digits
+ * each) comfortably fits in 112 with room to spare; 72 was sized only for
+ * the single optional payload field mt_cmd_forward_payload() added on top of
+ * the four-field base. Same rationale as MT_EVT_LINE_MAX: off the CHIP
+ * task's stack rather than the 512-byte MT_AT_LINE_MAX buffer. */
+#define MT_CMD_LINE_MAX 112
 
 /* +MTERR:<n> code space (mirrors the ESP-NOW layout: 1..99 carry a code,
  * >= MT_ERR_GENERIC is a plain "ERROR"). Real codes are assigned in B4. */
@@ -1355,16 +1358,23 @@ static portMUX_TYPE s_cmdbox_mux = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t s_cmd_sem = NULL;
 
 /*
- * Shared body of mt_cmd_forward() and mt_cmd_forward_payload(): open a
- * mailbox slot, raise the "+MTCMD:<seq>,..." URC, and block up to 1000 ms
- * for the host's verdict. has_payload selects which of the two wire forms
- * gets formatted; payload is ignored when has_payload is false. Everything
- * else, the fail-closed guards, the double drain around the semaphore, the
- * timeout/+MTCMDTO path, is identical between the two public entry points,
- * so it lives here once rather than twice.
+ * Shared body of mt_cmd_forward(), mt_cmd_forward_payload() and
+ * mt_cmd_forward_fields(): open a mailbox slot, raise the "+MTCMD:<seq>,..."
+ * URC, and block up to 1000 ms for the host's verdict. fields is the
+ * already-formatted, comma-joined tail to append after <seq>,<ep>,<cluster>,
+ * <command>; NULL or an empty string means no tail at all, reproducing
+ * mt_cmd_forward()'s exact four-field line. The caller (mt_cmd_forward_payload()
+ * for the single-field legacy form, mt_cmd_forward_fields() for the
+ * multi-field RVC/microwave batch callers) owns formatting the tail,
+ * including rendering an absent optional field as an empty string between
+ * two commas; this function never inspects field contents, only whether
+ * there is a tail at all. Everything else, the fail-closed guards, the
+ * double drain around the semaphore, the timeout/+MTCMDTO path, is identical
+ * across all three public entry points, so it lives here once rather than
+ * three times.
  */
 static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t command,
-                                   bool has_payload, uint32_t payload)
+                                   const char *fields)
 {
     /* Fail closed with no URC at all if the AT link is not up yet: there is
      * no host to forward to, and raising one before mt_at_start() has run
@@ -1407,13 +1417,14 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
     xSemaphoreTake(s_cmd_sem, 0);
 
     char line[MT_CMD_LINE_MAX];
-    if (has_payload) {
-        snprintf(line, sizeof(line), "+MTCMD:%lu,%u,%lu,%lu,%lu",
-                 (unsigned long)seq, ep, (unsigned long)cluster, (unsigned long)command,
-                 (unsigned long)payload);
+    if (fields != NULL && fields[0] != '\0') {
+        snprintf(line, sizeof(line), "+MTCMD:%lu,%u,%lu,%lu,%s",
+                 (unsigned long)seq, ep, (unsigned long)cluster,
+                 (unsigned long)command, fields);
     } else {
         snprintf(line, sizeof(line), "+MTCMD:%lu,%u,%lu,%lu",
-                 (unsigned long)seq, ep, (unsigned long)cluster, (unsigned long)command);
+                 (unsigned long)seq, ep, (unsigned long)cluster,
+                 (unsigned long)command);
     }
     mt_at_urc(line);
 
@@ -1448,12 +1459,28 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
 
 bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command)
 {
-    return mt_cmd_forward_common(ep, cluster, command, false, 0);
+    return mt_cmd_forward_common(ep, cluster, command, NULL);
 }
 
 bool mt_cmd_forward_payload(uint16_t ep, uint32_t cluster, uint32_t command, uint32_t payload)
 {
-    return mt_cmd_forward_common(ep, cluster, command, true, payload);
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%lu", (unsigned long)payload);
+    return mt_cmd_forward_common(ep, cluster, command, buf);
+}
+
+/*
+ * fields is the caller's own comma-joined tail, already formatted (for
+ * example "1,30,80,1" for four present fields, or "1,,80," when the second
+ * and fourth are absent optionals): this function does no formatting of its
+ * own beyond splicing that string in after the fixed <seq>,<ep>,<cluster>,
+ * <command> head. NULL or an empty string means no tail, same as
+ * mt_cmd_forward(). See mt_at.h for the full contract and AT_MT_SPEC.md
+ * §3.17 for the per-command arity each consumer documents.
+ */
+bool mt_cmd_forward_fields(uint16_t ep, uint32_t cluster, uint32_t command, const char *fields)
+{
+    return mt_cmd_forward_common(ep, cluster, command, fields);
 }
 
 /*

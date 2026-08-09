@@ -154,6 +154,22 @@ bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command);
 bool mt_cmd_forward_payload(uint16_t ep, uint32_t cluster, uint32_t command, uint32_t payload);
 
 /*
+ * The general form behind mt_cmd_forward() and mt_cmd_forward_payload():
+ * raises "+MTCMD:<seq>,<ep>,<cluster>,<command>[,<fields>]" and blocks the
+ * same way for the same verdict. fields is a caller-formatted, comma-joined
+ * tail, not a value this function parses or counts: the caller decides how
+ * many fields the command's wire form carries and joins them itself (for
+ * example "1,30,80,1"), and renders an absent optional field as an empty
+ * string between its two commas (for example "1,,80,") rather than omitting
+ * the field position. NULL or an empty string means no tail at all, the same
+ * "+MTCMD:<seq>,<ep>,<cluster>,<command>" shape mt_cmd_forward() raises.
+ * Arity is documented per command in AT_MT_SPEC.md §3.17, not enforced here.
+ * First consumers: RVC and microwave oven command forwards (Tasks 3-4 of the
+ * RVC + microwave batch).
+ */
+bool mt_cmd_forward_fields(uint16_t ep, uint32_t cluster, uint32_t command, const char *fields);
+
+/*
  * Raise a notify-only "+MTCMD:0,<ep>,<cluster>,<command>" URC and return
  * immediately: no mailbox slot, no semaphore, no blocking. seq 0 is
  * reserved for this form (mt_cmdbox_open() never issues it, and
