@@ -1099,8 +1099,8 @@ def step_3_2_grammar(ctx):
     c("MTCHIME=<chime ep>,1,1 -> OK (Enabled = true)",
       ok("AT+MTCHIME=4,1,1"))
 
-    # MTTEMPLEVELS (AT_MT_SPEC.md 3.16; TESTING.md has no dedicated
-    # table, only cross-references): ep10 is the TemperatureLevel
+    # MTTEMPLEVELS (AT_MT_SPEC.md 3.16; TESTING.md 6.2 has its own table
+    # now, around line 367): ep10 is the TemperatureLevel
     # variant, ep11 the TemperatureNumber variant (the +MTERR:4 target,
     # see the PHASE3_COMPOSITION comment), ep1 the "no TemperatureControl
     # cluster" stand-in, ep99 always unknown.
@@ -1888,7 +1888,8 @@ def restore_standard_state(link, suite=None):
 
 
 PHASE3_STEPS = []  # host-only entries below; Task 5 appends the
-                   # controller segment and the full step_3_13_restore.
+                   # controller segment. step_3_13_restore is deliberately
+                   # NOT appended here: see its docstring and run_phase3's.
 
 
 def run_phase3(ctx):
@@ -3062,11 +3063,11 @@ def register_phase1_t5_negative():
     # (+MTERR:2), ep 7/non-chime (+MTERR:3), and the two OK rows all need a
     # known composition too: all of the above go to Phase 3.
 
-    # MTTEMPLEVELS (doorlock round). TESTING.md 6.2 has no dedicated table
-    # for this family, only pattern cross-references from the MTLOCK and
-    # MTMODES tables ("the AT+MTTEMPLEVELS pattern" / "rule"); its own
-    # worked example lives in AT_MT_SPEC.md 3.16, used as the row source
-    # here instead.
+    # MTTEMPLEVELS (doorlock round). TESTING.md 6.2 now has its own
+    # dedicated table (around line 367), in addition to the pattern
+    # cross-references from the MTLOCK and MTMODES tables ("the
+    # AT+MTTEMPLEVELS pattern" / "rule"); its worked example still lives
+    # in AT_MT_SPEC.md 3.16, used as the row source here.
     n("MTTEMPLEVELS? -> ERROR (set-only, query form)",
       expect_err("AT+MTTEMPLEVELS?", -1))
     n("MTTEMPLEVELS no args -> ERROR", expect_err("AT+MTTEMPLEVELS", -1))
@@ -3178,7 +3179,13 @@ def main(argv=None):
         "fw_repo_head": repo_head(REPO_ROOT),
         "at_core_repo_head": repo_head(
             os.path.join(os.path.dirname(REPO_ROOT), "iLabs_AT_ESP-now")),
-        "ssid": args.ssid,
+        # Always null, never args.ssid: baseline files are committed to a
+        # public repo, and the project constraint is that neither PSK nor
+        # SSID may appear in a committed file. The SSID identifies the
+        # user's home network (bug B181 made the cost of loose
+        # credential-adjacent hygiene concrete). The key stays present so
+        # all six baseline files keep the same header shape.
+        "ssid": None,
     }
     suite = Suite()
     truncated = False
