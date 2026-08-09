@@ -9,12 +9,11 @@ Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-des
 Phase 1 run: python3 test/mt_regression.py --port /dev/ttyACM0
 Phase 2 run: MT_SSID=... MT_PSK=... python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 2
-Phase 3 host-only segment: python3 test/mt_regression.py --port /dev/ttyACM0 \
-    --phase 3
-(only the host-only steps are registered so far; -k "3." will keep
-scoping to them once Task 5 appends the controller segment, since -k
-matches a literal substring, not a regex, and every step name starts
-with its own "3.N ")
+Phase 3 run (host-only segment plus the full controller matrix, including
+the RVC + Microwave batch's slots 12-13): python3 test/mt_regression.py \
+    --port /dev/ttyACM0 --phase 3
+(-k "3." scopes to Phase 3's own steps, since -k matches a literal
+substring, not a regex, and every step name starts with its own "3.N ")
 
 Standing rule (T1 design section 8, N23): never have an AT+MTATTR command
 in flight while a controller-driven +MTATTR URC is expected; ATLink would
@@ -189,9 +188,15 @@ class ATLink:
 class CmdResponder:
     """Answers a forwarded +MTCMD URC the way a host MCU would.
 
-    Wire form (spec 3.17): +MTCMD:<seq>,<ep>,<cluster>,<command>[,<payload>],
-    all decimal; the fifth field is the reserved payload slot (chime sends
-    its chimeID there).
+    Wire form (spec 3.17): +MTCMD:<seq>,<ep>,<cluster>,<command>[,<p1>[,
+    <p2>[,<p3>[,<p4>]]]], all decimal, up to four trailing payload fields
+    (widened from the single optional field by the RVC + Microwave batch's
+    mt_cmd_forward_fields(): chime's PlayChimeSound chimeID and ModeBase's
+    ChangeToMode newMode still send one, MicrowaveOvenControl's
+    SetCookingParameters sends four). A field a given invoke did not carry
+    renders as an empty position, not an omitted one, so the tail can hold
+    interior gaps (e.g. ",,80,1" for p1/p2 absent, p3=80, p4=1); _RX and
+    _match() below parse every position, not just the first.
 
     seq 0 is notify-only and is NEVER answered: the firmware rejects
     AT+MTCMDRESP=0,... with +MTERR:1 by design, so answering it would be a
@@ -212,7 +217,14 @@ class CmdResponder:
     silently and irrecoverably drop any forward it was not the intended
     recipient of."""
 
-    _RX = re.compile(r"\+MTCMD:(\d+),(\d+),(\d+),(\d+)(?:,(\d+))?$")
+    # Group 5 captures the WHOLE tail after <command> (0 to 4 repetitions
+    # of ",<digits-or-empty>"), not just one field: _match() below strips
+    # the tail's own leading comma and splits the remainder on "," to
+    # recover each position, empty string -> None. A bare four-field
+    # forward with no payload at all still matches (0 repetitions, group 5
+    # ""), the identical backward-compatible shape the old single-field
+    # regex accepted.
+    _RX = re.compile(r"\+MTCMD:(\d+),(\d+),(\d+),(\d+)((?:,\d*){0,4})$")
 
     def __init__(self, link):
         self.link = link
@@ -230,6 +242,13 @@ class CmdResponder:
         cluster/command is a genuine test failure to report as None, not
         someone else's forward to leave alone.
 
+        payload accepts either shape a caller needs: a bare int compares
+        against fields[0] only (the legacy single-field consumers: chime's
+        chimeID, ModeBase's ChangeToMode newMode); a list/tuple compares
+        against the full parsed fields list exactly, position by position,
+        including any interior None for an empty field -- the shape
+        MicrowaveOvenControl's four-field SetCookingParameters needs.
+
         await_urc_ts returns (timestamp, line); only the line matters
         here."""
         pattern = r"^\+MTCMD:\d+,\d+,%d,%d(,|$)" % (cluster, command)
@@ -239,11 +258,19 @@ class CmdResponder:
         m = self._RX.match(got[1])
         if not m:
             return None
+        tail = m.group(5)
+        fields = ([int(f) if f != "" else None for f in tail[1:].split(",")]
+                  if tail else [])
         fwd = {"seq": int(m.group(1)), "ep": int(m.group(2)),
                "cluster": int(m.group(3)), "command": int(m.group(4)),
-               "payload": int(m.group(5)) if m.group(5) else None}
-        if payload is not None and fwd["payload"] != payload:
-            return None
+               "fields": fields,
+               "payload": fields[0] if fields else None}
+        if payload is not None:
+            if isinstance(payload, (list, tuple)):
+                if fields != list(payload):
+                    return None
+            elif fwd["payload"] != payload:
+                return None
         return fwd
 
     def expect(self, cluster, command, verdict, payload=None, timeout=5.0):
@@ -377,6 +404,14 @@ PHASE3_COMPOSITION = [
     (11, "0x0071"),     # temp-number cabinet, variant 0 (MTTEMPLEVELS
                          # +MTERR:4 target only; not in the design spec's
                          # table, see the comment above)
+    (12, "0x0074"),     # robotic vacuum cleaner (RvcRunMode, RvcCleanMode,
+                         # RvcOperationalState), RVC + Microwave batch,
+                         # endpoint 12 to match AT_MT_SPEC.md 3.20.1/3.21's
+                         # own worked examples verbatim
+    (13, "0x0079"),     # microwave oven (MicrowaveOvenMode,
+                         # MicrowaveOvenControl, base OperationalState),
+                         # RVC + Microwave batch, endpoint 13 to match
+                         # AT_MT_SPEC.md 3.20.1's own worked example
 ]
 
 
@@ -1805,6 +1840,354 @@ def step_3_12_lock_switch_levels(ctx):
             tag="P3")
 
 
+def step_3_15_rvc(ctx):
+    """RVC + Microwave batch, harness task: the Robotic Vacuum Cleaner
+    slot (PHASE3_COMPOSITION 12, endpoint 12, matching AT_MT_SPEC.md
+    3.20.1/3.21's own worked examples verbatim so every id in this step is
+    cross-checked against a line in the spec, not just derived here).
+
+    RvcRunMode (cluster 84/0x54) and RvcCleanMode (85/0x55) are staged over
+    the cluster-aware AT+MTMODES form (spec 3.20.1): RvcRunMode's command
+    mixes an explicit kIdle tag (0x4000) with a tag-0 default (which must
+    resolve to kCleaning, 0x4001, since it is not the first mode); the
+    controller read-back on cluster 0x54 asserts both the labels
+    (parse_string_list, already proven against ModeSelect's identical
+    `Label:` field) and the tags (parse_mode_tag_values, INFERENCE, see its
+    own docstring). RvcCleanMode is staged too (both modes tag-0, which
+    must both resolve to kVacuum, 0x4001, unlike RvcRunMode's per-position
+    rule) but not read back a second time: 3.20.1's tag-0 table is the same
+    mechanism on a second cluster, and 3.16's "asserting labels and tag
+    values on cluster 0x54" is explicit about which cluster carries the
+    read-back check.
+
+    ChangeToMode is adjudicated for RvcRunMode (spec 3.20.1, unlike
+    MicrowaveOvenMode, which has none): allow and deny both forward
+    cluster 84 command 0 with the requested mode as the single payload
+    field (the same one-field shape chime's PlayChimeSound uses), and the
+    verdict decides the wire ChangeToModeResponse's own `status` field (0
+    kSuccess / 2 kGenericFailure, spec 3.20.1), parsed by
+    parse_change_to_mode_status (INFERENCE, see its own docstring) since
+    that response is a StatusIB Success either way -- parse_status's own
+    branches would find nothing here.
+
+    RvcOperationalState (97/0x61) registers Pause (0), Resume (3) and
+    GoHome (0x80) (spec 3.17/3.21): all three are exercised both ways
+    (allow and deny), the same verdict-is-wire-response shape step_3_9's
+    washer uses (ErrorStateID 0 kNoError / 2 kUnableToCompleteOperation),
+    from base states (Running/Paused) the base OperationalState::Delegate
+    already treats as compatible for Pause/Resume, and Running (not
+    short-circuited) for GoHome. AT+MTOPSTATE's RVC-only states (0x40
+    SeekingCharger, 0x41 Charging, 0x42 Docked) are then each set and read
+    back controller-side in turn.
+
+    Two washer-ep negative membership rows from the cluster-aware
+    AT+MTOPSTATE table (AT_MT_SPEC.md 3.21's example, TESTING.md 6.2) ride
+    along here since they need PHASE3_COMPOSITION's washer slot (7) and a
+    known RVC-only value, and this is the step that first has both: `0x40`
+    and its decimal alias `64` are both legal union members
+    (cmd_mtopstate()'s own gate passes them) but illegal on the washer's
+    plain OperationalState cluster, so mt_matter_opstate_set() narrows both
+    to +MTERR:1, distinct from the +MTERR:3 "no such cluster at all" row
+    step_3_2_grammar already covers.
+
+    GoHome's two no-forward server guards (spec 3.21, the design spec
+    section 9 trace) are pinned exactly like step_3_9's in-state guard: a
+    GoHome from Docked reaches `operational-state-server.cpp`'s own guard
+    before HearthRvcOpStateDelegate ever sees it, answering ErrorStateID 3
+    (kCommandInvalidInState) with no +MTCMD raised at all; a GoHome from
+    SeekingCharger is the cluster's own already-there no-op, answering
+    ErrorStateID 0 with, again, no forward. Both are proven with a
+    synchronous chip.run() (no CmdResponder thread needed), the same
+    reasoning step_3_9's in-state guard and step_3_10's notify-only
+    self-test use: nothing blocks a verdict that is never asked for.
+
+    State is restored to 0 (Stopped, the state RvcOperationalState shares
+    with the base cluster) at the end, so a later step or the finally
+    restore does not inherit RVC-only state."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    # Cluster-aware AT+MTOPSTATE negative membership, washer ep (7):
+    # 0x40/64 are legal union members but illegal on the plain
+    # OperationalState cluster (spec 3.21's own worked example).
+    s.check("3.15 AT+MTOPSTATE=<washer ep>,0x40 -> +MTERR:1 (RVC-only "
+            "state, not legal on the base cluster)",
+            expect_err("AT+MTOPSTATE=7,0x40", 1)(link), tag="P3")
+    s.check("3.15 AT+MTOPSTATE=<washer ep>,64 -> +MTERR:1 (decimal alias "
+            "of 0x40, same rejection)",
+            expect_err("AT+MTOPSTATE=7,64", 1)(link), tag="P3")
+
+    # --- modes (spec 3.20.1) ---
+    res, _ = link.command(
+        'AT+MTMODES=12,84,0,16384,"Idle",1,0,"Cleaning"')
+    s.check("3.15 RvcRunMode staged (explicit kIdle tag + tag-0 default) "
+            "-> OK", res == 0, tag="P3")
+    res, _ = link.command('AT+MTMODES=12,85,0,0,"Vacuum",1,0,"Mop"')
+    s.check("3.15 RvcCleanMode staged (tag-0 default on both modes) -> OK",
+            res == 0, tag="P3")
+
+    rc, out = chip.run(["rvcrunmode", "read", "supported-modes", node,
+                        "12"], timeout=30)
+    s.check("3.15 RvcRunMode SupportedModes labels verbatim",
+            rc == 0 and parse_string_list(out) == ["Idle", "Cleaning"],
+            tag="P3")
+    s.check("3.15 RvcRunMode ModeTags: explicit kIdle (0x4000), defaulted "
+            "kCleaning (0x4001)",
+            rc == 0 and parse_mode_tag_values(out) == [0x4000, 0x4001],
+            tag="P3")
+
+    # --- ChangeToMode: allow and deny (spec 3.20.1) ---
+    handle = invoke_chip(ctx, ["rvcrunmode", "change-to-mode", "1", node,
+                              "12"], timeout=30)
+    fwd = responder.expect(cluster=84, command=0, verdict=1, payload=1,
+                           timeout=5.0)
+    s.check("3.15 ChangeToMode allow: forward answered, payload == mode 1",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.15 ChangeToMode allow: chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.15 ChangeToMode allow: status 0 (kSuccess)",
+            parse_change_to_mode_status(out) == 0, tag="P3")
+
+    handle = invoke_chip(ctx, ["rvcrunmode", "change-to-mode", "1", node,
+                              "12"], timeout=30)
+    fwd = responder.expect(cluster=84, command=0, verdict=0, payload=1,
+                           timeout=5.0)
+    s.check("3.15 ChangeToMode deny: forward answered, payload == mode 1",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.15 ChangeToMode deny: chip-tool exits 0 (Success at the "
+            "StatusIB level; the verdict lives in the response struct)",
+            rc == 0, tag="P3")
+    s.check("3.15 ChangeToMode deny: status 2 (kGenericFailure)",
+            parse_change_to_mode_status(out) == 2, tag="P3")
+
+    # --- RvcOperationalState: Pause/Resume/GoHome, both verdicts ---
+    def allow(name, verb, command, precondition, next_state):
+        res, _ = link.command("AT+MTOPSTATE=12,%d" % precondition)
+        s.check("3.15 %s allow precondition -> OK" % name, res == 0,
+                tag="P3")
+        handle = invoke_chip(ctx, ["rvcoperationalstate", verb, node, "12"],
+                             timeout=30)
+        fwd = responder.expect(cluster=97, command=command, verdict=1,
+                               timeout=5.0)
+        s.check("3.15 %s +MTCMD forward answered allow" % name,
+                fwd is not None, tag="P3")
+        rc, out = handle.join(30)
+        s.check("3.15 %s chip-tool exits 0 (allow)" % name, rc == 0,
+                tag="P3")
+        s.check("3.15 %s ErrorStateID 0 (kNoError) on allow" % name,
+                parse_status(out) == 0, tag="P3")
+        res, _ = link.command("AT+MTOPSTATE=12,%d" % next_state)
+        s.check("3.15 host reports %s transition -> OK" % name, res == 0,
+                tag="P3")
+
+    def deny(name, verb, command, precondition):
+        res, _ = link.command("AT+MTOPSTATE=12,%d" % precondition)
+        s.check("3.15 %s deny precondition -> OK" % name, res == 0,
+                tag="P3")
+        handle = invoke_chip(ctx, ["rvcoperationalstate", verb, node, "12"],
+                             timeout=30)
+        fwd = responder.expect(cluster=97, command=command, verdict=0,
+                               timeout=5.0)
+        s.check("3.15 %s +MTCMD forward answered deny" % name,
+                fwd is not None, tag="P3")
+        rc, out = handle.join(30)
+        s.check("3.15 %s chip-tool exits 0 (deny; Success at the StatusIB "
+                "level, the verdict lives in ErrorStateID)" % name,
+                rc == 0, tag="P3")
+        s.check("3.15 %s ErrorStateID 2 (kUnableToCompleteOperation) on "
+                "deny" % name, parse_status(out) == 2, tag="P3")
+
+    allow("pause", "pause", 0, 1, 2)             # Running -> Paused
+    allow("resume", "resume", 3, 2, 1)           # Paused -> Running
+    allow("go-home", "go-home", 0x80, 1, 0x40)   # Running -> SeekingCharger
+    deny("pause", "pause", 0, 1)                 # Running, denied
+    deny("resume", "resume", 3, 2)               # Paused, denied
+    deny("go-home", "go-home", 0x80, 1)          # Running, denied
+
+    # --- AT+MTOPSTATE 0x40/0x41/0x42, each read back controller-side ---
+    for state, name in ((0x40, "SeekingCharger"), (0x41, "Charging"),
+                        (0x42, "Docked")):
+        res, _ = link.command("AT+MTOPSTATE=12,%d" % state)
+        s.check("3.15 AT+MTOPSTATE=12,0x%02X (%s) -> OK" % (state, name),
+                res == 0, tag="P3")
+        rc, out = chip.run(["rvcoperationalstate", "read",
+                            "operational-state", node, "12"], timeout=30)
+        s.check("3.15 controller reads OperationalState 0x%02X (%s)"
+                % (state, name),
+                rc == 0 and parse_int_attr(out) == state, tag="P3")
+
+    # --- GoHome no-forward server guards (spec 3.21) ---
+    res, _ = link.command("AT+MTOPSTATE=12,0x42")
+    s.check("3.15 guard precondition: Docked -> OK", res == 0, tag="P3")
+    link.drain(0.3)
+    rc, out = chip.run(["rvcoperationalstate", "go-home", node, "12"],
+                       timeout=30)
+    s.check("3.15 GoHome from Docked: chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.15 GoHome from Docked: ErrorStateID 3 "
+            "(kCommandInvalidInState)", parse_status(out) == 3, tag="P3")
+    s.check("3.15 GoHome from Docked: no +MTCMD raised (server guard, "
+            "delegate never reached)",
+            link.assert_no_urc(r"\+MTCMD:", 2.0), tag="P3")
+
+    res, _ = link.command("AT+MTOPSTATE=12,0x40")
+    s.check("3.15 guard precondition: SeekingCharger -> OK", res == 0,
+            tag="P3")
+    link.drain(0.3)
+    rc, out = chip.run(["rvcoperationalstate", "go-home", node, "12"],
+                       timeout=30)
+    s.check("3.15 GoHome from SeekingCharger: chip-tool exits 0", rc == 0,
+            tag="P3")
+    s.check("3.15 GoHome from SeekingCharger: ErrorStateID 0 (kNoError, "
+            "already-seeking no-op)", parse_status(out) == 0, tag="P3")
+    s.check("3.15 GoHome from SeekingCharger: no +MTCMD raised (cluster's "
+            "own no-op, delegate never reached)",
+            link.assert_no_urc(r"\+MTCMD:", 2.0), tag="P3")
+
+    # --- restore ---
+    res, _ = link.command("AT+MTOPSTATE=12,0")
+    s.check("3.15 state restored to 0 (Stopped) at step end", res == 0,
+            tag="P3")
+
+
+def step_3_16_microwave(ctx):
+    """RVC + Microwave batch, harness task: the Microwave Oven slot
+    (PHASE3_COMPOSITION 13, endpoint 13, matching AT_MT_SPEC.md 3.20.1's
+    own worked example). MicrowaveOvenMode (94/0x5E) has no ChangeToMode
+    command at all (spec 3.20.1): its mode is selected only through
+    SetCookingParameters' cookMode field, so this step's mode coverage is
+    staging plus a controller read-back, not a change round trip the way
+    step_3_15's RvcRunMode gets.
+
+    SetCookingParameters (cluster 95/0x5F command 0, spec 3.17) is the
+    first four-field consumer the widened CmdResponder exists for:
+    payload order is cookMode, cookTime, power, startAfter (spec 3.17's
+    own field list), all four present on this firmware's actual wire
+    traffic per Task 4's trace (`power` always resolves because this
+    firmware never enables PowerInWatts, and `cookMode`/`cookTime`/
+    `startAfter` are resolved by the SDK before the delegate ever runs).
+    Allow reads CookTime/PowerSetting back from the controller afterward
+    (spec 3.17: both are Instance/delegate-owned, never ember-backed, so
+    only a controller read reaches them). Deny is a bare StatusIB failure
+    (spec 3.17: HandleSetCookingParametersCallback returns a Status
+    directly, no GenericOperationalError indirection the way
+    OperationalState's family uses), so it is pinned the T5-vacuousness
+    way (task-7-report.md section 6): rc != 0 AND the wire status is
+    checked to be exactly 0x1 (Failure), not just "some nonzero exit",
+    reusing parse_status's existing StatusIB branch (no new parser needed
+    here, unlike ChangeToModeResponse's embedded status field).
+
+    AddMoreTime (command 1, spec 3.17) carries a single payload field, but
+    it is NOT the delta the controller sent (`TimeToAdd`): it is the
+    server-computed absolute `finalCookTimeSec`, so the assertion is
+    against CookTime-after-add, not the argument chip-tool was given.
+
+    The washer-rule opstate spot check closes the loop on spec 3.21's own
+    claim that Microwave Oven wires "the same plain OperationalState
+    cluster, not a derived one": a Pause from Stopped answers ErrorStateID
+    3 with no forward, the identical in-state guard step_3_9 already
+    proved for the washer, now observed on the microwave's own endpoint.
+
+    State is restored to 0 (Stopped) at the end; the opstate spot check
+    already leaves it there (Pause from Stopped never changes the state),
+    but the explicit command below makes that fact resilient to a later
+    change in what the spot check itself does."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    # --- mode list (spec 3.20.1) ---
+    res, _ = link.command('AT+MTMODES=13,94,0,0,"Normal"')
+    s.check("3.16 MicrowaveOvenMode staged (tag-0 default) -> OK",
+            res == 0, tag="P3")
+    rc, out = chip.run(["microwaveovenmode", "read", "supported-modes",
+                        node, "13"], timeout=30)
+    s.check("3.16 MicrowaveOvenMode SupportedModes label verbatim",
+            rc == 0 and parse_string_list(out) == ["Normal"], tag="P3")
+    s.check("3.16 MicrowaveOvenMode ModeTags: defaulted kNormal (0x4000)",
+            rc == 0 and parse_mode_tag_values(out) == [0x4000], tag="P3")
+
+    # --- SetCookingParameters: allow, four-field payload ---
+    handle = invoke_chip(ctx, ["microwaveovencontrol",
+                              "set-cooking-parameters", node, "13",
+                              "--CookMode", "0", "--CookTime", "90",
+                              "--PowerSetting", "80",
+                              "--StartAfterSetting", "0"], timeout=30)
+    fwd = responder.expect(cluster=95, command=0, verdict=1,
+                           payload=[0, 90, 80, 0], timeout=5.0)
+    s.check("3.16 SetCookingParameters allow: forward answered, all four "
+            "fields present (cookMode=0, cookTime=90, power=80, "
+            "startAfter=0)", fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.16 SetCookingParameters allow: chip-tool exits 0", rc == 0,
+            tag="P3")
+
+    rc, out = chip.run(["microwaveovencontrol", "read", "cook-time", node,
+                        "13"], timeout=30)
+    s.check("3.16 controller reads CookTime 90",
+            rc == 0 and parse_int_attr(out) == 90, tag="P3")
+    rc, out = chip.run(["microwaveovencontrol", "read", "power-setting",
+                        node, "13"], timeout=30)
+    s.check("3.16 controller reads PowerSetting 80",
+            rc == 0 and parse_int_attr(out) == 80, tag="P3")
+
+    # --- SetCookingParameters: deny, bare StatusIB Failure ---
+    handle = invoke_chip(ctx, ["microwaveovencontrol",
+                              "set-cooking-parameters", node, "13",
+                              "--CookMode", "0", "--CookTime", "60",
+                              "--PowerSetting", "50",
+                              "--StartAfterSetting", "0"], timeout=30)
+    fwd = responder.expect(cluster=95, command=0, verdict=0,
+                           payload=[0, 60, 50, 0], timeout=5.0)
+    s.check("3.16 SetCookingParameters deny: forward answered", fwd is not None,
+            tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.16 SetCookingParameters deny: chip-tool reports Failure "
+            "(rc != 0)", rc != 0, tag="P3")
+    s.check("3.16 SetCookingParameters deny: wire status 0x1 (Failure, "
+            "which failure WHICH is pinned, not just any nonzero exit)",
+            parse_status(out) == 0x1, tag="P3")
+    rc, out = chip.run(["microwaveovencontrol", "read", "cook-time", node,
+                        "13"], timeout=30)
+    s.check("3.16 CookTime unchanged by the deny (still 90)",
+            rc == 0 and parse_int_attr(out) == 90, tag="P3")
+
+    # --- AddMoreTime: allow, single-field ABSOLUTE finalCookTimeSec ---
+    handle = invoke_chip(ctx, ["microwaveovencontrol", "add-more-time",
+                              "30", node, "13"], timeout=30)
+    fwd = responder.expect(cluster=95, command=1, verdict=1, payload=120,
+                           timeout=5.0)
+    s.check("3.16 AddMoreTime allow: forward answered, payload == 120 "
+            "(the server-computed absolute finalCookTimeSec, 90+30, NOT "
+            "the 30 s delta chip-tool sent)", fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.16 AddMoreTime allow: chip-tool exits 0", rc == 0, tag="P3")
+    rc, out = chip.run(["microwaveovencontrol", "read", "cook-time", node,
+                        "13"], timeout=30)
+    s.check("3.16 controller reads CookTime 120 after AddMoreTime",
+            rc == 0 and parse_int_attr(out) == 120, tag="P3")
+
+    # --- washer-rule opstate spot check (spec 3.21) ---
+    res, _ = link.command("AT+MTOPSTATE=13,0")
+    s.check("3.16 opstate spot check precondition: Stopped -> OK",
+            res == 0, tag="P3")
+    link.drain(0.3)
+    rc, out = chip.run(["operationalstate", "pause", node, "13"],
+                       timeout=30)
+    s.check("3.16 opstate spot check: chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.16 opstate spot check: ErrorStateID 3 "
+            "(kCommandInvalidInState, same washer in-state guard)",
+            parse_status(out) == 3, tag="P3")
+    s.check("3.16 opstate spot check: no +MTCMD raised",
+            link.assert_no_urc(r"\+MTCMD:", 2.0), tag="P3")
+
+    # --- restore ---
+    res, _ = link.command("AT+MTOPSTATE=13,0")
+    s.check("3.16 state restored to 0 (Stopped) at step end", res == 0,
+            tag="P3")
+
+
 def step_3_14_root_urc_sweep(ctx):
     """Design spec 4.3's standing-disciplines bullet ("no
     `+MTATTR:0,...` ever"), pinned by a dedicated sweep for the same
@@ -1967,6 +2350,10 @@ PHASE3_STEPS[:] = [
      "requires": ["3.5 commission"]},
     {"name": "3.12 lock, switch, temp levels",
      "fn": step_3_12_lock_switch_levels, "requires": ["3.5 commission"]},
+    {"name": "3.15 robotic vacuum cleaner", "fn": step_3_15_rvc,
+     "requires": ["3.5 commission"]},
+    {"name": "3.16 microwave oven", "fn": step_3_16_microwave,
+     "requires": ["3.5 commission"]},
     {"name": "3.14 root-endpoint URC sweep", "fn": step_3_14_root_urc_sweep},
 ]
 
@@ -2150,6 +2537,57 @@ def parse_indexed_list(text):
     on no match, never raises."""
     return [m.rstrip() for m in
             re.findall(r"\[\d+\]:\s*(.+)$", text, re.MULTILINE)]
+
+
+def parse_mode_tag_values(text):
+    """Every `ModeTagStruct.Value` chip-tool prints for a `ModeBase`
+    `SupportedModes` read (`RvcRunMode`/`RvcCleanMode`/`MicrowaveOvenMode`),
+    in the order the mode entries appear, one value per mode: this
+    firmware's `GetModeTagsByIndex()` (`main.cpp`) always publishes exactly
+    one tag per mode (`tags.reduce_size(1)`), never a multi-tag list.
+
+    INFERENCE (RVC + Microwave batch harness task, pending Task 9's bench
+    capture): derived the same way `parse_indexed_list` was, from the
+    pinned SDK's own print path rather than a live capture, because no
+    local device implements these three clusters to capture against.
+    `DataModelLogger.cpp`'s generic `chip::app::Clusters::detail::Structs::
+    ModeTagStruct` `LogValue` overload (shared by all three ModeBase-derived
+    clusters, distinct from `ModeSelect`'s own `SemanticTags` struct) prints
+    `"Value: <u16>"` for the tag's `value` field and nothing at all for
+    `mfgCode`, since it is `chip::Optional<VendorId>` and the generic
+    `Optional<T>` `LogValue` template in `DataModelLogger.h` emits no line
+    when a value is absent -- confirmed against `main.cpp`:
+    `GetModeTagsByIndex()` only ever writes `tags[0].value`, `mfgCode` is
+    never touched. So a mode's tag block reads `"ModeTags: 1 entries"` then
+    one `"[1]: {"` `"Value: <tag>"` `"}"`, no `MfgCode:` line to confuse the
+    regex with. Empty list on no match, never raises."""
+    return [int(m) for m in re.findall(r"\bValue:\s*(\d+)", text)]
+
+
+def parse_change_to_mode_status(text):
+    """The `status` field chip-tool prints for a `ModeBase`
+    `ChangeToModeResponse` (`RvcRunMode`/`RvcCleanMode`'s `ChangeToMode`
+    command), as an int: `0` `kSuccess`, `1` `kUnsupportedMode`, `2`
+    `kGenericFailure`, `3` `kInvalidInMode` (`AT_MT_SPEC.md` 3.20.1).
+
+    INFERENCE (RVC + Microwave batch harness task, pending Task 9's bench
+    capture): derived from `DataModelLogger.cpp`'s per-cluster `LogValue`
+    overload for `RvcRunMode::Commands::ChangeToModeResponse` (and
+    `RvcCleanMode`'s identical sibling), which prints `"status: <int>"`
+    (plain decimal, no `0x` prefix and no enclosing parenthesised name) and
+    a separate `"statusText: ..."` line. This is `ModeBase`'s own status
+    space, not the interaction-model `StatusIB` `parse_status`'s
+    `"status = 0x.."` branch reads: a denied `ChangeToMode` is still a
+    `StatusIB` `Success` (the SDK always returns a `ChangeToModeResponse`;
+    the verdict lives inside it, not at the `StatusIB` level), so
+    `parse_status` would find nothing here. The regex requires the literal
+    `"status:"` (colon immediately after the word), which does not match
+    `"statusText:"` (no colon after `"status"` there), so the two lines
+    cannot be confused. Last match wins, so a capture that also contains an
+    earlier attribute read still returns the command response's own value.
+    None on no match, never raises."""
+    vals = re.findall(r"\bstatus:\s*(\d+)", text)
+    return int(vals[-1]) if vals else None
 
 
 class Subscriber:
@@ -3085,6 +3523,70 @@ def register_phase1_t5_negative():
 
 
 register_phase1_t5_negative()
+
+
+def register_phase1_t6_negative():
+    """RVC + Microwave batch, harness task: the state-safe subset of the
+    new grammar TESTING.md 6.2 gained in tasks 2 and 3 of this batch (the
+    cluster-aware AT+MTMODES form, task 2, corrected wording at 8af7c4c;
+    the AT+MTOPSTATE extended-state range, task 3), the same
+    order-independent-only split register_phase1_t5_negative established:
+    a row lands here only when it is rejected inside the handler itself,
+    before mt_at.c looks up any endpoint, per TESTING.md's own "first N
+    rows are order-independent" callouts for each table. Everything else
+    (the +MTERR:2/3 lookups, the OK storage/read-back rows) needs a real
+    RVC or microwave endpoint from a declared composition and belongs to
+    Phase 3 (step_3_15_rvc / step_3_16_microwave), named where TESTING.md
+    itself says so.
+
+    A sibling of register_phase1_t5_negative, not an addition to it: this
+    batch's rows are a distinct project from the seven-type-batch grammar
+    completion that function covers, so keeping them in their own
+    function keeps each one's docstring an accurate description of what
+    it actually registers."""
+    n = lambda name, fn: add_test(1, name, fn, tag="AT-")
+
+    # AT+MTMODES cluster-aware form (TESTING.md 6.2, RVC + Microwave batch
+    # task 2): the first four rows of that table are order-independent,
+    # rejected by cmd_mtmodes()'s own form disambiguation and triple
+    # parsing before any endpoint lookup runs. ep 1 (a light in every
+    # composition this suite declares) stands in for "any endpoint": none
+    # of these four rows ever reaches the lookup that would care which
+    # endpoint it is.
+    n('MTMODES=1,84 -> +MTERR:1 (no second comma follows 84 at all, so '
+      'the parser cannot even disambiguate the form)',
+      expect_err("AT+MTMODES=1,84", 1))
+    n('MTMODES=1,84,0,"x" -> +MTERR:1 (<tag> missing: no comma '
+      'terminates a <tag> token before "x"\'s opening quote)',
+      expect_err('AT+MTMODES=1,84,0,"x"', 1))
+    n('MTMODES=1,84,0,zz,"x" -> +MTERR:1 (<tag> not numeric)',
+      expect_err('AT+MTMODES=1,84,0,zz,"x"', 1))
+    n('MTMODES=1,84,0,70000,"x" -> +MTERR:1 (<tag> above 0xFFFF)',
+      expect_err('AT+MTMODES=1,84,0,70000,"x"', 1))
+    # MTMODES=99,84,... (+MTERR:2), the light-ep/RvcRunMode-absent and
+    # rvc-ep/wrong-cluster +MTERR:3 pair, and every OK row (explicit
+    # tags, tag-0 defaults on RvcRunMode/RvcCleanMode/MicrowaveOvenMode,
+    # comma inside a label) all need a known composition carrying the
+    # RVC or microwave device type: Phase 3 (step_3_15_rvc /
+    # step_3_16_microwave).
+
+    # AT+MTOPSTATE extended-state range (TESTING.md 6.2, RVC + Microwave
+    # batch task 3): 0x43/kEmptyingDustBin is a real RvcOperationalState
+    # enumerator, but outside this command's union entirely (the union
+    # only publishes 0x40-0x42), so it is rejected the same
+    # order-independent way as the existing =1,3/=1,4 rows
+    # register_phase1_t5_negative already carries, before any endpoint
+    # lookup.
+    n("MTOPSTATE=1,0x43 -> +MTERR:1 (kEmptyingDustBin exists in "
+      "RvcOperationalState's own enum but outside this command's union "
+      "entirely)", expect_err("AT+MTOPSTATE=1,0x43", 1))
+    # AT+MTOPSTATE=<washer ep>,0x40 and its decimal alias 64 (+MTERR:1,
+    # legal union member but illegal on the plain OperationalState
+    # cluster) and every AT+MTOPSTATE=<rvc ep>,{0x40,0x41,0x42,1} OK row
+    # need a known composition: Phase 3 (step_3_15_rvc).
+
+
+register_phase1_t6_negative()
 
 
 PHASE2_STEPS[:] = [

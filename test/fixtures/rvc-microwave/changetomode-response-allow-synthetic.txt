@@ -1,0 +1,13 @@
+# SYNTHETIC (RVC + Microwave batch, harness task 5). No local chip-tool
+# build has an RvcRunMode cluster to capture a real ChangeToModeResponse
+# against yet (Task 9's bench run is what replaces this). Line shape
+# derived from DataModelLogger.cpp's RvcRunMode::Commands::
+# ChangeToModeResponse LogValue overload: "status: <int>" (plain decimal,
+# not the "status = 0x.." StatusIB shape parse_status's own regex reads),
+# then a separate "statusText: " line. status 0 is kSuccess
+# (AT_MT_SPEC.md 3.20.1), the allow verdict.
+[1786200010.200] [100000:100001] [TOO] Endpoint: 12 Cluster: 0x0000_0054 Command 0x0000_0001
+[1786200010.200] [100000:100001] [TOO]   ChangeToModeResponse: {
+[1786200010.200] [100000:100001] [TOO]     status: 0
+[1786200010.200] [100000:100001] [TOO]     statusText:
+[1786200010.200] [100000:100001] [TOO]    }

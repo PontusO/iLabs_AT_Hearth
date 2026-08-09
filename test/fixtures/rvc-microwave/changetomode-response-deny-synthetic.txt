@@ -1,0 +1,12 @@
+# SYNTHETIC (RVC + Microwave batch, harness task 5). Same provenance as
+# changetomode-response-allow-synthetic.txt; status 2 is kGenericFailure
+# (AT_MT_SPEC.md 3.20.1), the deny verdict. Still a StatusIB Success at
+# the interaction-model level (the SDK always returns a
+# ChangeToModeResponse; the verdict lives inside its own status field),
+# which is exactly why parse_status's "status = 0x.." branch would find
+# nothing in this capture and a dedicated parser is needed.
+[1786200011.300] [100000:100001] [TOO] Endpoint: 12 Cluster: 0x0000_0054 Command 0x0000_0001
+[1786200011.300] [100000:100001] [TOO]   ChangeToModeResponse: {
+[1786200011.300] [100000:100001] [TOO]     status: 2
+[1786200011.300] [100000:100001] [TOO]     statusText:
+[1786200011.300] [100000:100001] [TOO]    }

@@ -1,0 +1,30 @@
+# SYNTHETIC (RVC + Microwave batch, harness task 5). No local chip-tool
+# build has an RvcRunMode cluster to capture a real SupportedModes read
+# against yet (Task 9's bench run is what replaces this). Line shape
+# derived from the pinned SDK's own print path, not hand-cleaned from a
+# real run: DataModelLogger.cpp's generic
+# chip::app::Clusters::detail::Structs::ModeOptionStruct/ModeTagStruct
+# LogValue overloads (shared by every ModeBase-derived cluster, distinct
+# from ModeSelect's own Label/SemanticTags struct), for the composition
+# AT_MT_SPEC.md 3.20.1's own worked example stages: mode 0 "Idle" with an
+# explicit kIdle tag (0x4000), mode 1 "Cleaning" with a tag-0 default that
+# resolves to kCleaning (0x4001) because it is not the first mode. See
+# parse_mode_tag_values' docstring for the MfgCode-is-absent reasoning.
+[1786200000.100] [100000:100001] [TOO] Endpoint: 12 Cluster: 0x0000_0054 Attribute 0x0000_0000 DataVersion: 1
+[1786200000.100] [100000:100001] [TOO]   SupportedModes: 2 entries
+[1786200000.100] [100000:100001] [TOO]     [1]: {
+[1786200000.100] [100000:100001] [TOO]       Label: Idle
+[1786200000.100] [100000:100001] [TOO]       Mode: 0
+[1786200000.100] [100000:100001] [TOO]       ModeTags: 1 entries
+[1786200000.100] [100000:100001] [TOO]         [1]: {
+[1786200000.100] [100000:100001] [TOO]           Value: 16384
+[1786200000.100] [100000:100001] [TOO]          }
+[1786200000.100] [100000:100001] [TOO]      }
+[1786200000.100] [100000:100001] [TOO]     [2]: {
+[1786200000.100] [100000:100001] [TOO]       Label: Cleaning
+[1786200000.100] [100000:100001] [TOO]       Mode: 1
+[1786200000.100] [100000:100001] [TOO]       ModeTags: 1 entries
+[1786200000.100] [100000:100001] [TOO]         [1]: {
+[1786200000.100] [100000:100001] [TOO]           Value: 16385
+[1786200000.100] [100000:100001] [TOO]          }
+[1786200000.100] [100000:100001] [TOO]      }

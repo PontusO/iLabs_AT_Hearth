@@ -2577,6 +2577,89 @@ class TestCmdResponder(unittest.TestCase):
         fwd = r.expect(cluster=257, command=0, verdict=1)
         self.assertEqual(fwd["seq"], 3)
 
+    # -- RVC + Microwave batch: _RX/_match widened from one trailing
+    # numeric field to up to four, per command (mt_cmd_forward_fields(),
+    # AT_MT_SPEC.md 3.17). Tested both directions: parsing a wire tail
+    # with interior empty positions into fields (this test group), and
+    # the payload= matcher accepting a list/tuple to assert the full
+    # field list, present-and-empty positions alike (the next group).
+
+    def test_four_field_payload_with_interior_empty_positions_parsed(self):
+        """The exact shape AT_MT_SPEC.md 3.17 uses to illustrate the
+        empty-field convention: p1/p2 absent (rendered as empty, not
+        omitted), p3=80, p4=1. fields must come back [None, None, 80, 1],
+        not shifted down to [80, 1]."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:9,13,95,0,,,80,1")
+        tr.expect_write("AT+MTCMDRESP=9,1\r\n", then_lines=["OK"])
+        fwd = CmdResponder(link).expect(cluster=95, command=0, verdict=1)
+        self.assertEqual(fwd["fields"], [None, None, 80, 1])
+        self.assertIsNone(fwd["payload"])  # fields[0] is the empty p1
+
+    def test_four_field_payload_all_present_parsed(self):
+        """SetCookingParameters' real wire shape (Task 4's trace): every
+        one of the four fields present, none empty."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:8,13,95,0,1,900,80,0")
+        tr.expect_write("AT+MTCMDRESP=8,1\r\n", then_lines=["OK"])
+        fwd = CmdResponder(link).expect(cluster=95, command=0, verdict=1)
+        self.assertEqual(fwd["fields"], [1, 900, 80, 0])
+        self.assertEqual(fwd["payload"], 1)  # fields[0], legacy alias
+
+    def test_bare_four_field_form_still_parses_as_no_payload(self):
+        """Backward compatibility: a forward with no trailing fields at
+        all (the pre-existing bare form, e.g. the door lock/valve) must
+        still come back fields=[], payload=None, exactly as before the
+        widening."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:7,3,96,0")
+        tr.expect_write("AT+MTCMDRESP=7,1\r\n", then_lines=["OK"])
+        fwd = CmdResponder(link).expect(cluster=96, command=0, verdict=1)
+        self.assertEqual(fwd["fields"], [])
+        self.assertIsNone(fwd["payload"])
+
+    def test_payload_list_matches_fields_including_none_positions(self):
+        """The payload= filter accepts a list/tuple for the multi-field
+        case and requires an exact match, empty positions (None) and
+        all: this is how step_3_16_microwave asserts SetCookingParameters'
+        four-field payload."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:9,13,95,0,,,80,1")
+        tr.expect_write("AT+MTCMDRESP=9,1\r\n", then_lines=["OK"])
+        fwd = CmdResponder(link).expect(cluster=95, command=0, verdict=1,
+                                        payload=[None, None, 80, 1])
+        self.assertIsNotNone(fwd)
+
+    def test_payload_list_mismatch_returns_none(self):
+        """A payload= list that does not match the parsed fields exactly
+        (even by one position) must report the miss as None, the same
+        exactness expect()'s single-int payload= already had."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:9,13,95,0,,,80,1")
+        fwd = CmdResponder(link).expect(cluster=95, command=0, verdict=1,
+                                        payload=[None, None, 80, 2],
+                                        timeout=0.2)
+        self.assertIsNone(fwd)
+        self.assertEqual(tr.writes, [])  # never answered a mismatch
+
+    def test_single_field_legacy_int_payload_still_works(self):
+        """The pre-widening single-int payload= form (chime's chimeID,
+        ModeBase's ChangeToMode newMode) must be unaffected by the
+        widening: compares against fields[0] only."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:11,12,84,0,1")
+        tr.expect_write("AT+MTCMDRESP=11,1\r\n", then_lines=["OK"])
+        fwd = CmdResponder(link).expect(cluster=84, command=0, verdict=1,
+                                        payload=1)
+        self.assertEqual(fwd["fields"], [1])
+        self.assertEqual(fwd["payload"], 1)
+
 
 from mt_regression import (parse_int_attr, parse_status,
                            parse_accepted_command_list, parse_event_count,
@@ -2662,6 +2745,53 @@ class TestT5Parsers(unittest.TestCase):
                          ["Quiet", "Eco, low"])
 
 
+class TestRvcMicrowaveParsers(unittest.TestCase):
+    """RVC + Microwave batch, harness task 5: parse_mode_tag_values and
+    parse_change_to_mode_status, the two INFERENCE-marked parsers this
+    task adds. Unlike TestT5Parsers' fixtures (real chip-tool captures,
+    trimmed), every fixture here is SYNTHETIC (header comment in the
+    file): no local chip-tool build has an RvcRunMode/RvcCleanMode/
+    MicrowaveOvenMode cluster to capture a real read against, so these
+    were built to the pinned SDK's own print path instead of hand-cleaned
+    from a real run, per the fixture-provenance rule (never hand-clean a
+    real capture; when none exists, mark the substitute SYNTHETIC).
+    Task 9's bench run is what confirms or corrects the shape."""
+
+    def _fx(self, name):
+        return fixture(os.path.join("rvc-microwave", name))
+
+    def test_parse_mode_tag_values_explicit_then_defaulted(self):
+        text = self._fx("rvcrunmode-supported-modes-synthetic.txt")
+        self.assertEqual(parse_mode_tag_values(text), [0x4000, 0x4001])
+
+    def test_parse_mode_tag_values_labels_still_agree(self):
+        # The same fixture's labels must still parse the ModeSelect way
+        # (parse_string_list, already proven real): the two parsers read
+        # disjoint fields from the same struct list.
+        text = self._fx("rvcrunmode-supported-modes-synthetic.txt")
+        self.assertEqual(parse_string_list(text), ["Idle", "Cleaning"])
+
+    def test_parse_mode_tag_values_no_match_is_empty(self):
+        self.assertEqual(parse_mode_tag_values("no such content"), [])
+
+    def test_parse_change_to_mode_status_allow(self):
+        text = self._fx("changetomode-response-allow-synthetic.txt")
+        self.assertEqual(parse_change_to_mode_status(text), 0)
+
+    def test_parse_change_to_mode_status_deny(self):
+        text = self._fx("changetomode-response-deny-synthetic.txt")
+        self.assertEqual(parse_change_to_mode_status(text), 2)
+
+    def test_parse_change_to_mode_status_ignores_status_text_line(self):
+        # "statusText:" must never be mistaken for "status:" (no digits
+        # follow it here, so a wrong match would raise, not just mislead).
+        text = "[TOO]     statusText: some text\n[TOO]     status: 3"
+        self.assertEqual(parse_change_to_mode_status(text), 3)
+
+    def test_parse_change_to_mode_status_no_match_is_none(self):
+        self.assertIsNone(parse_change_to_mode_status("no such content"))
+
+
 from mt_regression import (
     PHASE3_COMPOSITION, Phase3Context, stage_composition,
     restore_standard_state, step_3_1_compose, step_3_2_grammar,
@@ -2669,7 +2799,9 @@ from mt_regression import (
     step_3_5_commission, step_3_6_valve, step_3_7_modes, step_3_8_chime,
     step_3_9_opstate, step_3_10_smoke, step_3_11_power,
     step_3_12_lock_switch_levels, step_3_13_restore,
-    step_3_14_root_urc_sweep, invoke_chip, parse_indexed_list, CmdResponder,
+    step_3_14_root_urc_sweep, step_3_15_rvc, step_3_16_microwave,
+    invoke_chip, parse_indexed_list, parse_mode_tag_values,
+    parse_change_to_mode_status, CmdResponder,
 )
 
 
@@ -2709,11 +2841,12 @@ class TestPhase3Composition(unittest.TestCase):
     """T5 task 4: every id in PHASE3_COMPOSITION is quoted from
     AT_MT_SPEC.md's device table in the task-4 report; this test pins the
     shape (slot order, count, the one deliberate duplicate id) rather
-    than the ids themselves, which a doc diff cannot catch."""
+    than the ids themselves, which a doc diff cannot catch. Slots 12-13
+    (RVC + Microwave batch harness task) extend the same pin."""
 
-    def test_eleven_slots_sequential(self):
+    def test_thirteen_slots_sequential(self):
         slots = [slot for slot, _ in PHASE3_COMPOSITION]
-        self.assertEqual(slots, list(range(1, 12)))
+        self.assertEqual(slots, list(range(1, 14)))
 
     def test_slot_ten_and_eleven_are_the_two_cabinet_variants(self):
         # Slot 11 is not in the T5 design spec's 10-row table; it exists
@@ -2723,6 +2856,14 @@ class TestPhase3Composition(unittest.TestCase):
         by_slot = dict(PHASE3_COMPOSITION)
         self.assertEqual(by_slot[10], "0x0071,1")
         self.assertEqual(by_slot[11], "0x0071")
+
+    def test_slot_twelve_and_thirteen_are_rvc_and_microwave(self):
+        # Endpoints 12/13 deliberately match AT_MT_SPEC.md 3.20.1/3.21's
+        # own worked examples verbatim, so step_3_15_rvc/step_3_16_
+        # microwave read the same endpoint numbers the spec's prose does.
+        by_slot = dict(PHASE3_COMPOSITION)
+        self.assertEqual(by_slot[12], "0x0074")
+        self.assertEqual(by_slot[13], "0x0079")
 
     def test_no_accidental_duplicate_devtype(self):
         devtypes = [dt for _slot, dt in PHASE3_COMPOSITION]
@@ -3033,7 +3174,7 @@ class TestRunPhase3(unittest.TestCase):
         # recover_after_abort's own AT+MTRESET)
         self.assertIn("AT+MTFRESET", link.sent)
 
-    def test_registered_steps_are_the_full_1_through_12_chain_plus_sweep(self):
+    def test_registered_steps_are_the_full_1_through_16_chain_plus_sweep(self):
         names = [s["name"] for s in PHASE3_STEPS]
         self.assertEqual(names, [
             "3.1 compose + boot-rebuild pin",
@@ -3048,6 +3189,8 @@ class TestRunPhase3(unittest.TestCase):
             "3.10 smoke/CO alarm",
             "3.11 power source",
             "3.12 lock, switch, temp levels",
+            "3.15 robotic vacuum cleaner",
+            "3.16 microwave oven",
             "3.14 root-endpoint URC sweep",
         ])
 
@@ -3569,6 +3712,243 @@ class TestStep312LockSwitchLevels(unittest.TestCase):
         ctx = self._ctx(push_deny_urc=False)
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_12_lock_switch_levels(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep315Rvc(unittest.TestCase):
+    """RVC + Microwave batch, harness task 5: modes (explicit + tag-0
+    default tags), ChangeToMode allow/deny, RvcOperationalState's
+    Pause/Resume/GoHome each answered both ways, the 0x40-0x42 read-back
+    trio, and the two GoHome no-forward server guards."""
+
+    def _ctx(self, guard_leaks_forward=False, wrong_deny_fixture=False):
+        link = FakeLink({
+            "AT+MTOPSTATE=7,0x40": (1, []),
+            "AT+MTOPSTATE=7,64": (1, []),
+            'AT+MTMODES=12,84,0,16384,"Idle",1,0,"Cleaning"': (0, []),
+            'AT+MTMODES=12,85,0,0,"Vacuum",1,0,"Mop"': (0, []),
+            "AT+MTCMDRESP=1,1": (0, []),
+            "AT+MTCMDRESP=2,0": (0, []),
+            "AT+MTCMDRESP=3,1": (0, []),
+            "AT+MTCMDRESP=4,1": (0, []),
+            "AT+MTCMDRESP=5,1": (0, []),
+            "AT+MTCMDRESP=6,0": (0, []),
+            "AT+MTCMDRESP=7,0": (0, []),
+            "AT+MTCMDRESP=8,0": (0, []),
+            "AT+MTOPSTATE=12,1": (0, []),
+            "AT+MTOPSTATE=12,2": (0, []),
+            "AT+MTOPSTATE=12,64": (0, []),
+            "AT+MTOPSTATE=12,65": (0, []),
+            "AT+MTOPSTATE=12,66": (0, []),
+            "AT+MTOPSTATE=12,0x42": (0, []),
+            "AT+MTOPSTATE=12,0x40": (0, []),
+            "AT+MTOPSTATE=12,0": (0, []),
+        })
+        deny_ctm_fixture = ("changetomode-response-allow-synthetic.txt"
+                           if wrong_deny_fixture else
+                           "changetomode-response-deny-synthetic.txt")
+        script = [
+            (0, fixture(os.path.join(
+                "rvc-microwave", "rvcrunmode-supported-modes-synthetic.txt"))),
+            (0, fixture(os.path.join(
+                "rvc-microwave", "changetomode-response-allow-synthetic.txt"))),
+            (0, fixture(os.path.join("rvc-microwave", deny_ctm_fixture))),
+            (0, "[TOO]       ErrorStateID: 0"),   # pause allow
+            (0, "[TOO]       ErrorStateID: 0"),   # resume allow
+            (0, "[TOO]       ErrorStateID: 0"),   # go-home allow
+            (0, "[TOO]       ErrorStateID: 2"),   # pause deny
+            (0, "[TOO]       ErrorStateID: 2"),   # resume deny
+            (0, "[TOO]       ErrorStateID: 2"),   # go-home deny
+            (0, "[TOO]   OperationalState: 64"),  # 0x40 read-back
+            (0, "[TOO]   OperationalState: 65"),  # 0x41 read-back
+            (0, "[TOO]   OperationalState: 66"),  # 0x42 read-back
+            (0, "[TOO]       ErrorStateID: 3"),   # go-home guard: Docked
+            (0, "[TOO]       ErrorStateID: 0"),   # go-home guard: SeekingCharger
+        ]
+        counts = {"pause": 0, "resume": 0, "go-home": 0, "ctm": 0}
+
+        def on_call(argv):
+            if "rvcrunmode" in argv and "change-to-mode" in argv:
+                counts["ctm"] += 1
+                seq = 1 if counts["ctm"] == 1 else 2
+                link.push_urcs(["+MTCMD:%d,12,84,0,1" % seq])
+                return
+            if "rvcoperationalstate" not in argv:
+                return
+            if "pause" in argv:
+                counts["pause"] += 1
+                if counts["pause"] == 1:
+                    link.push_urcs(["+MTCMD:3,12,97,0"])
+                elif counts["pause"] == 2:
+                    link.push_urcs(["+MTCMD:6,12,97,0"])
+            elif "resume" in argv:
+                counts["resume"] += 1
+                if counts["resume"] == 1:
+                    link.push_urcs(["+MTCMD:4,12,97,3"])
+                elif counts["resume"] == 2:
+                    link.push_urcs(["+MTCMD:7,12,97,3"])
+            elif "go-home" in argv:
+                counts["go-home"] += 1
+                if counts["go-home"] == 1:
+                    link.push_urcs(["+MTCMD:5,12,97,128"])
+                elif counts["go-home"] == 2:
+                    link.push_urcs(["+MTCMD:8,12,97,128"])
+                elif guard_leaks_forward:
+                    # Regression shape: if a guard ever regressed and
+                    # forwarded anyway, assert_no_urc must catch it.
+                    link.push_urcs(["+MTCMD:9,12,97,128"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_15_rvc(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_guard_leaking_a_forward_fails(self):
+        ctx = self._ctx(guard_leaks_forward=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_15_rvc(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_wrong_change_to_mode_status_fails(self):
+        # A corrupted deny fixture (status 0/kSuccess instead of 2/
+        # kGenericFailure) must fail the check, not silently pass -- pins
+        # that parse_change_to_mode_status's value is actually asserted,
+        # not just "some response arrived".
+        ctx = self._ctx(wrong_deny_fixture=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_15_rvc(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep316Microwave(unittest.TestCase):
+    """RVC + Microwave batch, harness task 5: mode list read-back,
+    SetCookingParameters allow (four-field payload) and deny, cook-time/
+    power-setting read-back, AddMoreTime's absolute finalCookTimeSec
+    payload, and the washer-rule opstate spot check."""
+
+    def _ctx(self, deny_rc=1):
+        link = FakeLink({
+            'AT+MTMODES=13,94,0,0,"Normal"': (0, []),
+            "AT+MTCMDRESP=1,1": (0, []),
+            "AT+MTCMDRESP=2,0": (0, []),
+            "AT+MTCMDRESP=3,1": (0, []),
+            "AT+MTOPSTATE=13,0": (0, []),
+        })
+        script = [
+            (0, "\n".join([
+                "[TOO]   SupportedModes: 1 entries",
+                "[TOO]     [1]: {",
+                "[TOO]       Label: Normal",
+                "[TOO]       Mode: 0",
+                "[TOO]       ModeTags: 1 entries",
+                "[TOO]         [1]: {",
+                "[TOO]           Value: 16384",
+                "[TOO]          }",
+                "[TOO]      }",
+            ])),
+            (0, "[TOO]     status = 0x00 (SUCCESS),"),   # set-cooking allow
+            (0, "[TOO]   CookTime: 90"),                 # cook-time read
+            (0, "[TOO]   PowerSetting: 80"),              # power-setting read
+            (deny_rc, "[TOO]     status = 0x01 (FAILURE),\n"
+                      "[TOO] Run command failure"),        # set-cooking deny
+            (0, "[TOO]   CookTime: 90"),                  # cook-time re-read
+            (0, "[TOO]     status = 0x00 (SUCCESS),"),    # add-more-time allow
+            (0, "[TOO]   CookTime: 120"),                 # cook-time after add
+            (0, "[TOO]       ErrorStateID: 3"),           # opstate spot check
+        ]
+        calls = {"scp": 0}
+
+        def on_call(argv):
+            if "set-cooking-parameters" in argv:
+                calls["scp"] += 1
+                if calls["scp"] == 1:
+                    link.push_urcs(["+MTCMD:1,13,95,0,0,90,80,0"])
+                else:
+                    link.push_urcs(["+MTCMD:2,13,95,0,0,60,50,0"])
+            elif "add-more-time" in argv:
+                link.push_urcs(["+MTCMD:3,13,95,1,120"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_16_microwave(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_deny_reported_success_fails(self):
+        # Regression shape: if a denied SetCookingParameters ever exited 0
+        # (Success) instead of Failure, this must fail, not silently pass.
+        ctx = self._ctx(deny_rc=0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_16_microwave(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_add_more_time_payload_is_absolute_not_delta(self):
+        # If the harness ever asserted the payload against the 30 s delta
+        # chip-tool sent instead of the server-computed absolute
+        # finalCookTimeSec (120), the forward would go unanswered and the
+        # step must fail, not silently accept the wrong shape.
+        link = FakeLink({
+            'AT+MTMODES=13,94,0,0,"Normal"': (0, []),
+            "AT+MTCMDRESP=1,1": (0, []), "AT+MTCMDRESP=2,0": (0, []),
+            "AT+MTOPSTATE=13,0": (0, []),
+        })
+        script = [
+            (0, "\n".join([
+                "[TOO]   SupportedModes: 1 entries",
+                "[TOO]     [1]: {  Label: Normal",
+                "[TOO]       ModeTags: 1 entries",
+                "[TOO]         [1]: {  Value: 16384",
+            ])),
+            (0, "[TOO]     status = 0x00 (SUCCESS),"),
+            (0, "[TOO]   CookTime: 90"),
+            (0, "[TOO]   PowerSetting: 80"),
+            (1, "[TOO]     status = 0x01 (FAILURE),\n[TOO] Run command "
+                "failure"),
+            (0, "[TOO]   CookTime: 90"),
+            (0, "[TOO]     status = 0x00 (SUCCESS),"),
+            (0, "[TOO]   CookTime: 90"),            # unchanged: wrong payload
+                                                     # meant the forward was
+                                                     # never actually answered
+            (0, "[TOO]       ErrorStateID: 3"),     # opstate spot check
+        ]
+        calls = {"scp": 0}
+
+        def on_call(argv):
+            if "set-cooking-parameters" in argv:
+                calls["scp"] += 1
+                if calls["scp"] == 1:
+                    link.push_urcs(["+MTCMD:1,13,95,0,0,90,80,0"])
+                else:
+                    link.push_urcs(["+MTCMD:2,13,95,0,0,60,50,0"])
+            elif "add-more-time" in argv:
+                # wrong: pushes the 30 s delta instead of the absolute
+                # finalCookTimeSec (120) -- must not satisfy payload=120
+                link.push_urcs(["+MTCMD:3,13,95,1,30"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_16_microwave(ctx)
         self.assertGreater(ctx.suite.failed, 0)
 
 
