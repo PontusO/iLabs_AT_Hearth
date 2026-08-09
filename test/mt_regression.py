@@ -1717,18 +1717,18 @@ def step_3_12_lock_switch_levels(ctx):
     Status::Failure to the controller"), so a deny is a plain StatusIB
     failure, not a Success wrapper with an embedded verdict field.
 
-    Task-7 fix F4: the deny path was never reached live before the F3
-    fix above (every doorlock invoke hit H3's 0xc6 first), so "3.12
-    deny: wire status 0x1 (Failure)" below is AWAITING RE-RUN: it is
-    derived, not observed. Derivation: door-lock-server.cpp's
-    HandleRemoteLockOperation() ends with `commandObj->AddStatus(
-    commandPath, success ? Status::Success : Status::Failure)`, and
-    main.cpp's mt_door_lock_adjudicate() (the emberAfPluginDoorLockOn*
-    callback) returns exactly the mt_cmd_forward() boolean with no
-    cluster-specific response wrapper, the same bare-StatusIB shape
-    step_3_8's chime deny used -- and that one WAS observed live in run
-    5, at wire status 0x1. Confirm this one against a real capture on
-    the next bench pass rather than trusting the derivation twice.
+    Task-7 fix F4 derived "3.12 deny: wire status 0x1 (Failure)" below
+    from door-lock-server.cpp's HandleRemoteLockOperation(), which ends
+    with `commandObj->AddStatus(commandPath, success ? Status::Success
+    : Status::Failure)`, and main.cpp's mt_door_lock_adjudicate() (the
+    emberAfPluginDoorLockOn* callback), which returns exactly the
+    mt_cmd_forward() boolean with no cluster-specific response wrapper,
+    the same bare-StatusIB shape step_3_8's chime deny uses. Both the
+    allow and deny paths were then observed live on both transports
+    (wifi-devicetypes.json at 7e5f9a7, thread-devicetypes.json at
+    9f90f48, both 165/165): the WiFi run and the Thread run each
+    answered wire status 0x1 on deny, 0x0 on allow, confirming the
+    derivation.
 
     Switch events are fire-and-forget (spec 3.15): AT+MTSWITCH never
     echoes on the AT link, so the only way to observe it is a
@@ -1780,9 +1780,8 @@ def step_3_12_lock_switch_levels(ctx):
     # exact check went green for three runs on 0xc6
     # NEEDS_TIMED_INTERACTION, an error it was never testing for (H3).
     # "some non-zero exit" is not enough on its own; pin WHICH failure
-    # the way step_3_8 does with parse_status. AWAITING RE-RUN: see the
-    # docstring above for the derivation, since the deny path has never
-    # actually reached the wire yet.
+    # the way step_3_8 does with parse_status. Observed live on both
+    # transports (see the docstring above): wire status 0x1 on deny.
     s.check("3.12 deny: wire status 0x1 (Failure)",
             parse_status(out) == 0x1, tag="P3")
 
@@ -2208,6 +2207,12 @@ class Subscriber:
         return False
 
     def reports(self):
+        # This file-read path is outside _subprocess_runner, so it never
+        # goes through the central ANSI strip (_strip_ansi) that F1 (task
+        # 7 fix round 1) added there. Harmless today because
+        # parse_onoff_reports is not end-anchored, so a trailing escape
+        # cannot break its match; a future end-anchored parser reading
+        # Subscriber output must strip first.
         try:
             with open(self.out_path, "r", errors="replace") as f:
                 return parse_onoff_reports(f.read())
