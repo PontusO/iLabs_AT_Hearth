@@ -2580,10 +2580,11 @@ def parse_mode_tag_values(text):
     firmware's `GetModeTagsByIndex()` (`main.cpp`) always publishes exactly
     one tag per mode (`tags.reduce_size(1)`), never a multi-tag list.
 
-    INFERENCE (RVC + Microwave batch harness task, pending Task 9's bench
-    capture): derived the same way `parse_indexed_list` was, from the
-    pinned SDK's own print path rather than a live capture, because no
-    local device implements these three clusters to capture against.
+    CONFIRMED (RVC + Microwave batch harness task, HELD on the bench,
+    TESTING.md 8.7): derived the same way `parse_indexed_list` was, from
+    the pinned SDK's own print path, then matched the live wire capture on
+    the first attempt on both transports: TESTING.md 8.7 (WiFi) and the
+    Thread bench session's task-10-report.md section 5.2 (Thread).
     `DataModelLogger.cpp`'s generic `chip::app::Clusters::detail::Structs::
     ModeTagStruct` `LogValue` overload (shared by all three ModeBase-derived
     clusters, distinct from `ModeSelect`'s own `SemanticTags` struct) prints
@@ -2604,8 +2605,8 @@ def parse_change_to_mode_status(text):
     command), as an int: `0` `kSuccess`, `1` `kUnsupportedMode`, `2`
     `kGenericFailure`, `3` `kInvalidInMode` (`AT_MT_SPEC.md` 3.20.1).
 
-    INFERENCE (RVC + Microwave batch harness task, pending Task 9's bench
-    capture): derived from `DataModelLogger.cpp`'s per-cluster `LogValue`
+    CONFIRMED (RVC + Microwave batch harness task, HELD on the bench,
+    TESTING.md 8.7): derived from `DataModelLogger.cpp`'s per-cluster `LogValue`
     overload for `RvcRunMode::Commands::ChangeToModeResponse` (and
     `RvcCleanMode`'s identical sibling), which prints `"status: <int>"`
     (plain decimal, no `0x` prefix and no enclosing parenthesised name) and
@@ -2619,7 +2620,9 @@ def parse_change_to_mode_status(text):
     `"statusText:"` (no colon after `"status"` there), so the two lines
     cannot be confused. Last match wins, so a capture that also contains an
     earlier attribute read still returns the command response's own value.
-    None on no match, never raises."""
+    None on no match, never raises. Matched the live wire capture on the
+    first attempt on both transports: TESTING.md 8.7 (WiFi) and the Thread
+    bench session's task-10-report.md section 5.2 (Thread)."""
     vals = re.findall(r"\bstatus:\s*(\d+)", text)
     return int(vals[-1]) if vals else None
 

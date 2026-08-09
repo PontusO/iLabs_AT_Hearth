@@ -144,12 +144,13 @@ bool mt_at_event(int bit, const char *detail);
 bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command);
 
 /*
- * Identical to mt_cmd_forward(), plus one reserved fifth payload field on
+ * Identical to mt_cmd_forward(), plus one single trailing payload field on
  * the wire: raises "+MTCMD:<seq>,<ep>,<cluster>,<command>,<payload>" and
- * blocks the same way for the same verdict. The forwarding spec reserved
- * this exact extension so existing parsers, which read four fields and
- * ignore anything past the fourth comma, keep working unchanged. First
- * consumer: chime's PlayChimeSound chimeID (C6/C7).
+ * blocks the same way for the same verdict. AT_MT_SPEC.md 3.17's arity
+ * table documents this as the one-field case of the general documented-
+ * arity tail, so existing parsers, which read four fields and ignore
+ * anything past the fourth comma, keep working unchanged. First consumer:
+ * chime's PlayChimeSound chimeID (C6/C7).
  */
 bool mt_cmd_forward_payload(uint16_t ep, uint32_t cluster, uint32_t command, uint32_t payload);
 

@@ -2936,8 +2936,9 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
  * the SDK discards outright and always answers Success; and the
  * OperationalState trio, F7, whose verdict is remapped through
  * GenericOperationalError's own ErrorStateEnum rather than passed through
- * raw). Forward the chimeID through the reserved fifth +MTCMD payload field
- * (mt_cmd_forward_payload(), C1) so the host sees WHICH chime was requested,
+ * raw). Forward the chimeID through the single trailing +MTCMD payload
+ * field (mt_cmd_forward_payload(), C1, AT_MT_SPEC.md 3.17's arity table)
+ * so the host sees WHICH chime was requested,
  * and return the verdict directly: Status::Success on allow, Status::Failure
  * on deny.
  *
