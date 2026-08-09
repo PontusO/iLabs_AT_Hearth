@@ -753,9 +753,15 @@ class TestOtCtl(unittest.TestCase):
         text = fixture("otctl_dataset_active.txt")
         ds = parse_dataset(text)
         self.assertIsNotNone(ds)
-        # Tighten to the literal hex from the fixture
+        # Tighten to the literal hex from the fixture. This is a
+        # SYNTHETIC dataset (bug B181): it replaced a real bench capture
+        # that leaked live Thread NetworkKey/PSKc material into the
+        # public repo. NetworkKey and PSKc here are the fixed
+        # placeholders 00112233445566778899aabbccddeeff and
+        # ffeeddccbbaa99887766554433221100; the parser needs TLV shape,
+        # not authenticity.
         self.assertEqual(ds,
-                         "0e08000000000001000000030000154a0300000b35060004001fffe002089b5864fe07dfa4f30708fde5dcea6594714c051069f744dc29fa6e61dfb0a81afa4d75c8030f4f70656e5468726561642d363638620102668b0410835ada6028421bb7d979a77ec974e9450c0402a0f7f8")
+                         "0e08000000000001000000030000194a0300000b35060004001fffe0020811223344556677880708fd11223344556677051000112233445566778899aabbccddeeff030c53796e7468657469634e65740102abcd0410ffeeddccbbaa998877665544332211000c0402a0f7f8")
 
     def test_parse_dataset_garbage_is_none(self):
         self.assertIsNone(parse_dataset("Error 35: InvalidState\nDone\n"))

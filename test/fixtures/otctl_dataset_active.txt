@@ -1,2 +1,11 @@
-0e08000000000001000000030000154a0300000b35060004001fffe002089b5864fe07dfa4f30708fde5dcea6594714c051069f744dc29fa6e61dfb0a81afa4d75c8030f4f70656e5468726561642d363638620102668b0410835ada6028421bb7d979a77ec974e9450c0402a0f7f8
+# SYNTHETIC `ot-ctl dataset active -x` capture, constructed to the real
+# MeshCoP TLV shape. This replaced a real bench capture (bug B181) that
+# leaked live Thread NetworkKey and PSKc material into the public repo;
+# the leaked key was rotated on the rig. NetworkKey and PSKc below are
+# the fixed placeholder values 00112233445566778899aabbccddeeff and
+# ffeeddccbbaa99887766554433221100, network name "SyntheticNet", with
+# fresh channel/PAN ID/extended PAN ID/mesh-local prefix values that
+# match no real network. The parser only needs TLV shape, not
+# authenticity.
+0e08000000000001000000030000194a0300000b35060004001fffe0020811223344556677880708fd11223344556677051000112233445566778899aabbccddeeff030c53796e7468657469634e65740102abcd0410ffeeddccbbaa998877665544332211000c0402a0f7f8
 Done
