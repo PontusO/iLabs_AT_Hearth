@@ -190,9 +190,23 @@ CONFIG_SUPPORT_POWER_TOPOLOGY_CLUSTER=n
 # dish_washer/laundry_washer/laundry_dryer endpoints (mt_devtypes.cpp's
 # mk_dish_washer()/mk_laundry_washer()/mk_laundry_dryer()), all three wiring
 # the base OperationalState cluster (0x0060).
-CONFIG_SUPPORT_OPERATIONAL_STATE_OVEN_CLUSTER=n
+# OPERATIONAL_STATE_OVEN_CLUSTER / OVEN_MODE_CLUSTER: re-enabled, composed
+# appliance round task 4. A Temperature Controlled Cabinet composed under an
+# Oven gets OvenCavityOperationalState (0x0048) and OvenMode (0x0049)
+# hand-rolled onto it (mt_devtypes.cpp's mt_cabinet_add_heater()), and
+# main.cpp constructs chip::app::Clusters::OvenCavityOperationalState::
+# Instance and a ModeBase::Instance for them. Both flags map to directories
+# other re-enabled clusters already pull in (cluster_dir.cmake:
+# OPERATIONAL_STATE_OVEN -> src/app/clusters/operational-state-server, the
+# same directory OPERATIONAL_STATE_CLUSTER above pulls in; OVEN_MODE ->
+# src/app/clusters/mode-base-server, the same one MICROWAVE_OVEN_MODE and
+# the two RVC mode flags pull in), so re-enabling them changes nothing about
+# what is compiled TODAY. They are listed here for the reason the
+# MICROWAVE_OVEN_MODE_CLUSTER comment above gives for its own siblings: inert
+# now, but the moment a rebase or edit disabled whichever flag is currently
+# carrying the directory, the link failure would surface on these clusters
+# with nothing in this file pointing at why.
 CONFIG_SUPPORT_OPERATIONAL_STATE_RVC_CLUSTER=n
-CONFIG_SUPPORT_OVEN_MODE_CLUSTER=n
 CONFIG_SUPPORT_OZONE_CONCENTRATION_MEASUREMENT_CLUSTER=n
 CONFIG_SUPPORT_PM10_CONCENTRATION_MEASUREMENT_CLUSTER=n
 CONFIG_SUPPORT_PM1_CONCENTRATION_MEASUREMENT_CLUSTER=n

@@ -1617,7 +1617,9 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
 /*
  * ---- ModeBase: RVC run/clean mode, microwave mode (RVC + Microwave batch, task 2) -----
  *
- * RvcRunMode (0x0054), RvcCleanMode (0x0055) and MicrowaveOvenMode (0x005E)
+ * RvcRunMode (0x0054), RvcCleanMode (0x0055), MicrowaveOvenMode (0x005E),
+ * RefrigeratorAndTemperatureControlledCabinetMode (0x0052, composed appliance
+ * round task 3) and OvenMode (0x0049, task 4)
  * are all concrete derivations of the abstract ModeBase cluster
  * (mode-base-server.h): one shared Delegate interface, one shared Instance
  * class parameterised by cluster id at construction (design spec section 2).
@@ -1770,11 +1772,12 @@ public:
     }
 
     /*
-     * ChangeToMode::Id is 0x00 for RvcRunMode, RvcCleanMode AND (composed
+     * ChangeToMode::Id is 0x00 for RvcRunMode, RvcCleanMode, (composed
      * appliance round, task 3) RefrigeratorAndTemperatureControlledCabinetMode
-     * (verified against each cluster's generated CommandIds.h: all three
+     * AND (task 4) OvenMode
+     * (verified against each cluster's generated CommandIds.h: all four
      * declare "inline constexpr CommandId Id = 0x00000000" for ChangeToMode),
-     * so one constant covers all three. MicrowaveOvenMode never reaches this
+     * so one constant covers all four. MicrowaveOvenMode never reaches this
      * override at all: its generated CommandIds.h declares
      * kAcceptedCommandsCount = 0, so the SDK wires no ChangeToMode command for
      * it at all (design spec 3.3's plan-time correction; the microwave's mode
@@ -1807,11 +1810,15 @@ private:
 
     /* Tag-0 defaults, design spec section 9's exact policy, placeholder case
      * only (index 0 of an otherwise-empty list): RvcRunMode gets kIdle,
-     * RvcCleanMode gets kVacuum, MicrowaveOvenMode gets kNormal, and
+     * RvcCleanMode gets kVacuum, MicrowaveOvenMode gets kNormal,
      * (composed appliance round, task 3)
      * RefrigeratorAndTemperatureControlledCabinetMode gets kAuto (0x00, the
      * ModeBase common tag every ModeBase-derived cluster shares,
-     * Mode_Refrigerator.xml). mt_matter_modebase_set() below applies the
+     * Mode_Refrigerator.xml), and (task 4) OvenMode gets kBake (0x4000,
+     * Mode_Oven.xml's first oven-specific tag; the cluster also inherits the
+     * ModeBase common tags 0x00-0x09, but a cavity whose host has not yet
+     * declared a list is more usefully described as a bake cavity than as
+     * "Auto"). mt_matter_modebase_set() below applies the
      * identical table to real host-declared entries at store time. */
     uint16_t placeholder_tag() const
     {
@@ -1824,6 +1831,9 @@ private:
         }
         if (m_cluster == RefrigeratorAndTemperatureControlledCabinetMode::Id) {
             return chip::to_underlying(RefrigeratorAndTemperatureControlledCabinetMode::ModeTag::kAuto);
+        }
+        if (m_cluster == OvenMode::Id) {
+            return chip::to_underlying(OvenMode::ModeTag::kBake);
         }
         return chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
     }
@@ -1859,15 +1869,52 @@ extern "C" void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_
 }
 
 /*
+ * Constructs the ModeBase::Instance for OvenMode (0x0049) at the SDK's usual
+ * init-callback timing, the shape HearthRvcOpStateInitCB below documents in
+ * full (including why this is not extern "C").
+ *
+ * Every OTHER ModeBase cluster this firmware creates gets its Instance from
+ * an esp-matter init callback: RvcRunModeDelegateInitCB,
+ * RvcCleanModeDelegateInitCB, MicrowaveOvenModeDelegateInitCB,
+ * RefrigeratorAndTCCModeDelegateInitCB, each wired by that cluster's own
+ * esp_matter::cluster::<name>::create(). OvenMode has no such namespace and
+ * no such callback (esp_matter_delegate_callbacks.h declares neither), so
+ * mt_cabinet_add_heater() (mt_devtypes.cpp) hands this function to
+ * set_delegate_and_init_callback() itself.
+ *
+ * Feature 0: OvenMode's ONLY feature is DEPONOFF (bit 0), and Mode_Oven.xml
+ * revision 2 marks it <disallowConform/> ("Set OnOff feature, StartUpMode,
+ * and OnMode as disallowed"), so the feature map is 0 by conformance rather
+ * than by choice - the same 0 mt_cabinet_add_heater() writes into the
+ * cluster's own FeatureMap attribute, which is what keeps the Instance's
+ * answer and the ember attribute agreeing (the AirQuality B139 lesson).
+ * The SDK's own MicrowaveOvenModeDelegateInitCB reads the map back with
+ * get_feature_map_value() instead; that accessor is esp_matter-private, and
+ * with the only feature disallowed there is nothing for it to find.
+ */
+void HearthOvenModeInitCB(void *delegate, uint16_t endpoint_id)
+{
+    auto *d = static_cast<HearthModeBaseDelegate *>(delegate);
+    d->set_endpoint(endpoint_id);
+    auto *inst = new chip::app::Clusters::ModeBase::Instance(d, endpoint_id,
+                                                              chip::app::Clusters::OvenMode::Id, 0);
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "OvenMode ModeBase::Instance::Init failed on ep %u: %" CHIP_ERROR_FORMAT,
+                 (unsigned)endpoint_id, err.Format());
+    }
+}
+
+/*
  * The bridge for AT+MTMODES's cluster-aware form. Grammar and content rules
  * (count bounds, mode-value uniqueness, tag range, label content) are
  * enforced by cmd_mtmodes() in mt_at.c before this is ever called; the
  * bounds re-checked here are defensive, the same split as
  * mt_matter_modes_set() above. This bridge is the sole place that validates
- * cluster against the four ModeBase ids (composed appliance round, task 3
- * adds RefrigeratorAndTemperatureControlledCabinetMode to the three from the
- * RVC + Microwave batch): mt_at.c stays free of any esp_matter/CHIP header
- * and cannot read those ids itself.
+ * cluster against the five ModeBase ids (composed appliance round: task 3
+ * adds RefrigeratorAndTemperatureControlledCabinetMode and task 4 adds
+ * OvenMode to the three from the RVC + Microwave batch): mt_at.c stays free
+ * of any esp_matter/CHIP header and cannot read those ids itself.
  */
 extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
                                        const char *const *labels, uint8_t count)
@@ -1878,7 +1925,7 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         return MT_ATTR_ERR_ENDPOINT;
     }
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id && cluster != MicrowaveOvenMode::Id &&
-        cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id) {
+        cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id && cluster != OvenMode::Id) {
         return MT_ATTR_ERR_CLUSTER;
     }
     if (esp_matter::cluster::get(ep, cluster) == nullptr) {
@@ -1937,6 +1984,13 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                  * MicrowaveOvenMode above (not RvcRunMode's index-0 special
                  * case): Mode_Refrigerator.xml. */
                 tag = chip::to_underlying(RefrigeratorAndTemperatureControlledCabinetMode::ModeTag::kAuto);
+            } else if (cluster == OvenMode::Id) {
+                /* Bake (0x4000), Mode_Oven.xml's first oven-specific tag,
+                 * same constant-per-mode shape as the two clusters above:
+                 * OvenMode's conformance names no single mandatory tag, so
+                 * the default is the one a host that does not care about
+                 * tags most plausibly means. */
+                tag = chip::to_underlying(OvenMode::ModeTag::kBake);
             } else {
                 tag = chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
             }
@@ -2122,7 +2176,9 @@ class HearthOpStateDelegate : public chip::app::Clusters::OperationalState::Dele
 {
 public:
     void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    void set_cluster(chip::ClusterId cluster) { m_cluster = cluster; }
     chip::EndpointId endpoint() const { return m_ep; }
+    chip::ClusterId  cluster() const { return m_cluster; }
 
     /* GetInstance() is protected in the base Delegate; this passthrough is
      * how mt_matter_opstate_set() (below) reaches the Instance the SDK
@@ -2160,13 +2216,32 @@ public:
         return CHIP_ERROR_NOT_FOUND;
     }
 
+    /*
+     * Pause and Resume are disallowConform on OvenCavityOperationalState
+     * (OperationalState_Oven.xml revision 2, "Set Pause and Resume commands
+     * as disallowed"), so mt_cabinet_add_heater() (mt_devtypes.cpp) creates
+     * no command entry for either and a controller's invoke is refused
+     * UNSUPPORTED_COMMAND by the data model before it could reach here.
+     * These two overrides are still answered defensively, the same shape the
+     * SDK's own RvcOperationalState::Delegate uses for the Start/Stop its
+     * cluster does not support (operational-state-server.h:390-406:
+     * "err.Set(to_underlying(OperationalState::ErrorStateEnum::
+     * kUnknownEnumValue));"). Forwarding them instead would ask the host to
+     * adjudicate a command the cluster does not have.
+     */
     void HandlePauseStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
     {
+        if (unsupported_on_cavity(err)) {
+            return;
+        }
         forward(chip::app::Clusters::OperationalState::Commands::Pause::Id, err);
     }
 
     void HandleResumeStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
     {
+        if (unsupported_on_cavity(err)) {
+            return;
+        }
         forward(chip::app::Clusters::OperationalState::Commands::Resume::Id, err);
     }
 
@@ -2181,39 +2256,129 @@ public:
     }
 
 private:
+    /*
+     * The command ids passed to forward() are the BASE cluster's, and they
+     * are correct for the oven cavity too: OvenCavityOperationalState's own
+     * generated CommandIds.h declares Stop 0x01, Start 0x02 and
+     * OperationalCommandResponse 0x04, the identical numeric values the base
+     * OperationalState cluster uses (checked against both generated headers,
+     * not assumed from the derivation). Only the CLUSTER id differs per
+     * endpoint, which is exactly what m_cluster carries: a cavity's Stop
+     * forwards as +MTCMD against cluster 72/0x48 command 1, a washer's
+     * against cluster 96/0x60 command 1.
+     */
     void forward(uint32_t command, chip::app::Clusters::OperationalState::GenericOperationalError &err)
     {
         using chip::app::Clusters::OperationalState::ErrorStateEnum;
-        bool allow = mt_cmd_forward(m_ep, chip::app::Clusters::OperationalState::Id, command);
+        bool allow = mt_cmd_forward(m_ep, m_cluster, command);
         err.Set(chip::to_underlying(allow ? ErrorStateEnum::kNoError : ErrorStateEnum::kUnableToCompleteOperation));
     }
 
-    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+    bool unsupported_on_cavity(chip::app::Clusters::OperationalState::GenericOperationalError &err) const
+    {
+        using chip::app::Clusters::OperationalState::ErrorStateEnum;
+        if (m_cluster != chip::app::Clusters::OvenCavityOperationalState::Id) {
+            return false;
+        }
+        err.Set(chip::to_underlying(ErrorStateEnum::kUnknownEnumValue));
+        return true;
+    }
+
+    chip::EndpointId m_ep      = chip::kInvalidEndpointId;
+    /* Defaults to the base cluster so a slot handed out before task 4's
+     * cluster-aware alloc existed would still behave; every call site sets it
+     * explicitly (mt_matter_opstate_delegate_alloc()). */
+    chip::ClusterId  m_cluster = chip::app::Clusters::OperationalState::Id;
 };
 
 /*
  * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, same shape as
- * s_valve_delegates above: dish_washer/laundry_washer/laundry_dryer each
+ * s_valve_delegates above: dish_washer/laundry_washer/laundry_dryer, the
+ * microwave, and (composed appliance round, task 4) the oven cavity each
  * hand out their own object from this SHARED pool (F7: one delegate object
  * per endpoint, never shared between two Instances - VerifyOrDie above).
  * Exposed to mt_devtypes.cpp through the same opaque void* pair pattern as
  * the valve pool, so that file never has to name HearthOpStateDelegate or
- * any CHIP delegate type.
+ * any CHIP delegate type. The cluster id is fixed at alloc time (task 4),
+ * the same reasoning the ModeBase pool above documents; see mt_matter.h.
  */
 static HearthOpStateDelegate s_opstate_delegates[MT_COMP_MAX_ENDPOINTS];
 static size_t                s_opstate_delegate_next = 0;
 
-extern "C" void *mt_matter_opstate_delegate_alloc(void)
+extern "C" void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id)
 {
     if (s_opstate_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
         return nullptr;
     }
-    return &s_opstate_delegates[s_opstate_delegate_next++];
+    HearthOpStateDelegate *d = &s_opstate_delegates[s_opstate_delegate_next++];
+    d->set_cluster(cluster_id);
+    return d;
 }
 
 extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
 {
     static_cast<HearthOpStateDelegate *>(delegate)->set_endpoint(ep);
+}
+
+/*
+ * The pool lookup mt_matter_opstate_set() below uses for both clusters this
+ * pool now serves. Keyed by (endpoint, cluster) rather than endpoint alone:
+ * see that function's own comment.
+ */
+static chip::app::Clusters::OperationalState::Instance *find_opstate_instance(chip::EndpointId ep,
+                                                                              chip::ClusterId cluster)
+{
+    for (auto &d : s_opstate_delegates) {
+        if (d.endpoint() == ep && d.cluster() == cluster) {
+            return d.instance();
+        }
+    }
+    return nullptr;
+}
+
+/*
+ * ---- Oven cavity OperationalState (composed appliance round, task 4) -----
+ *
+ * OvenCavityOperationalState (0x0048) is the RVC opstate's situation one
+ * degree worse: esp-matter has no cluster::oven_cavity_operational_state
+ * namespace AT ALL (checked by grepping the whole component: the only oven
+ * symbols it carries are the endpoint namespace and the two empty
+ * MatterOven*PluginServerInitCallback stubs), so mt_cabinet_add_heater()
+ * (mt_devtypes.cpp) hand-rolls the cluster shell by mirroring
+ * rvc_operational_state::create() one cluster id over, and hands this
+ * function to set_delegate_and_init_callback() itself.
+ *
+ * CHIP, unlike esp-matter, DOES ship the server half: the generic
+ * OperationalState::Instance(Delegate*, EndpointId, ClusterId) constructor
+ * the brief named is PROTECTED (operational-state-server.h:177, inside the
+ * "protected:" block at :166), so it cannot be called from a free function
+ * like this one at all - but the header also declares a purpose-built
+ * OvenCavityOperationalState::Instance (:459-478) whose public two-argument
+ * constructor forwards to exactly that protected one with Id baked in. That
+ * is what is constructed here; no local subclass is needed to reach the
+ * protected constructor, and no derived Delegate exists for this cluster
+ * either (unlike RvcOperationalState, which needs one for GoHome), so the
+ * plain HearthOpStateDelegate above serves it with only its cluster id
+ * changed.
+ *
+ * The Instance's own constructor calls mDelegate->SetInstance(this)
+ * (operational-state-server.cpp), so HearthOpStateDelegate::instance()'s
+ * GetInstance() passthrough reaches it afterwards with no bookkeeping here,
+ * exactly as it does for the SDK-constructed base-cluster Instances. Not
+ * extern "C", for the same delegate_init_callback_t linkage reason
+ * HearthRvcOpStateInitCB below documents in full; mt_devtypes.cpp
+ * forward-declares it by name.
+ */
+void HearthOvenCavityOpStateInitCB(void *delegate, uint16_t endpoint_id)
+{
+    auto *d = static_cast<HearthOpStateDelegate *>(delegate);
+    d->set_endpoint(endpoint_id);
+    auto *inst = new chip::app::Clusters::OvenCavityOperationalState::Instance(d, endpoint_id);
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "OvenCavityOperationalState::Instance::Init failed on ep %u: %" CHIP_ERROR_FORMAT,
+                 (unsigned)endpoint_id, err.Format());
+    }
 }
 
 /*
@@ -2473,17 +2638,36 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
         return MT_ATTR_ERR_ENDPOINT;
     }
 
+    /*
+     * The base-cluster and oven-cavity branches share one delegate pool, so
+     * both look their Instance up by (endpoint, cluster), not by endpoint
+     * alone: no composition this firmware builds puts two
+     * OperationalState-family clusters on one endpoint, but matching the
+     * cluster too costs one comparison and removes the assumption entirely.
+     */
     if (esp_matter::cluster::get(ep, OperationalState::Id) != nullptr) {
         if (state > 2) {
             return MT_ATTR_ERR_VALUE;
         }
-        OperationalState::Instance *inst = nullptr;
-        for (auto &d : s_opstate_delegates) {
-            if (d.endpoint() == ep) {
-                inst = d.instance();
-                break;
-            }
+        OperationalState::Instance *inst = find_opstate_instance(ep, OperationalState::Id);
+        if (inst == nullptr) {
+            return MT_ATTR_ERR_FAILED;
         }
+        return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+    }
+
+    /*
+     * Composed appliance round, task 4: the oven cavity's cluster derives
+     * from OperationalState but adds no derived-number-space states of its
+     * own (OperationalState_Oven.xml constrains only the command set), so
+     * the legal set is the plain {0, 1, 2} - the same test the base branch
+     * above runs, deliberately not the RVC branch's widened one.
+     */
+    if (esp_matter::cluster::get(ep, OvenCavityOperationalState::Id) != nullptr) {
+        if (state > 2) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        OperationalState::Instance *inst = find_opstate_instance(ep, OvenCavityOperationalState::Id);
         if (inst == nullptr) {
             return MT_ATTR_ERR_FAILED;
         }

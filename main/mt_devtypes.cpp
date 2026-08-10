@@ -530,6 +530,11 @@ static endpoint_t *mk_mode_select(node_t *n, uint8_t variant)
  * each of the three thunks below hands out its own slot from the ONE shared
  * pool mt_matter_opstate_delegate_alloc() manages (main.cpp), the same
  * before-create()/after-create() endpoint-fixup shape mk_water_valve() uses.
+ * Its argument is the cluster the slot will serve (composed appliance round,
+ * task 4: the pool now also serves the oven cavity's
+ * OvenCavityOperationalState, and the delegate's command forwards carry
+ * whichever cluster id it was handed), so everything below passes the base
+ * OperationalState::Id.
  * dish_washer::config_t, laundry_washer::config_t and laundry_dryer::config_t
  * are all literally the same type (esp_matter_endpoint.h's
  * app_with_operational_state_config, aliased three times) and their add()
@@ -571,7 +576,7 @@ static void mt_opstate_add_commands(endpoint_t *ep)
 static endpoint_t *mk_laundry_washer(node_t *n, uint8_t variant)
 {
     (void)variant;
-    void *delegate = mt_matter_opstate_delegate_alloc();
+    void *delegate = mt_matter_opstate_delegate_alloc(chip::app::Clusters::OperationalState::Id);
     if (delegate == nullptr) {
         ESP_LOGE(TAG, "operational state delegate pool exhausted");
         return nullptr;
@@ -590,7 +595,7 @@ static endpoint_t *mk_laundry_washer(node_t *n, uint8_t variant)
 static endpoint_t *mk_dish_washer(node_t *n, uint8_t variant)
 {
     (void)variant;
-    void *delegate = mt_matter_opstate_delegate_alloc();
+    void *delegate = mt_matter_opstate_delegate_alloc(chip::app::Clusters::OperationalState::Id);
     if (delegate == nullptr) {
         ESP_LOGE(TAG, "operational state delegate pool exhausted");
         return nullptr;
@@ -609,7 +614,7 @@ static endpoint_t *mk_dish_washer(node_t *n, uint8_t variant)
 static endpoint_t *mk_laundry_dryer(node_t *n, uint8_t variant)
 {
     (void)variant;
-    void *delegate = mt_matter_opstate_delegate_alloc();
+    void *delegate = mt_matter_opstate_delegate_alloc(chip::app::Clusters::OperationalState::Id);
     if (delegate == nullptr) {
         ESP_LOGE(TAG, "operational state delegate pool exhausted");
         return nullptr;
@@ -905,7 +910,7 @@ static endpoint_t *mk_rvc(node_t *n, uint8_t variant)
 static endpoint_t *mk_microwave_oven(node_t *n, uint8_t variant)
 {
     (void)variant;
-    void *opstate_delegate = mt_matter_opstate_delegate_alloc();
+    void *opstate_delegate = mt_matter_opstate_delegate_alloc(chip::app::Clusters::OperationalState::Id);
     if (opstate_delegate == nullptr) {
         ESP_LOGE(TAG, "operational state delegate pool exhausted (microwave)");
         return nullptr;
@@ -1009,6 +1014,216 @@ static endpoint_t *mk_refrigerator(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * Composed appliance round, task 4: Oven (0x007B).
+ * oven::config_t (esp_matter_endpoint.h:751-760) is the refrigerator's shape
+ * exactly - a descriptor config and nothing else - and oven::add()
+ * (esp_matter_endpoint.cpp:1345-1370) calls add_device_type() and nothing
+ * else, so identify is hand-added after create() the same way
+ * mk_refrigerator() above does it, for the same reason.
+ *
+ * The parent endpoint is deliberately BARE beyond that. The Oven device type
+ * (Matter 1.5.1 Device Library) puts all of its function in its
+ * Temperature Controlled Cabinet children: the oven itself carries no mode,
+ * no operational state, no temperature control. Anything a host wants to
+ * drive lives on a cabinet composed under this endpoint
+ * (AT+MTEP's <parent_idx>, task 2), which is where
+ * mt_cabinet_add_heater() below attaches the two hand-rolled clusters.
+ */
+static endpoint_t *mk_oven(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    oven::config_t c;
+    endpoint_t *ep = oven::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    cluster::identify::config_t ic;
+    if (cluster::identify::create(ep, &ic, CLUSTER_FLAG_SERVER) == nullptr) {
+        return nullptr;
+    }
+    return ep;
+}
+
+/*
+ * ---- Parent-conditional cabinet clusters (composed appliance round, task 4)
+ *
+ * A Temperature Controlled Cabinet (0x0071) is one device type with two
+ * conformances: under a Refrigerator it is a Cooler and carries
+ * RefrigeratorAndTemperatureControlledCabinetMode; under an Oven it is a
+ * Heater and carries OvenMode plus OvenCavityOperationalState. Neither set is
+ * encoded in the composition blob: the cabinet's row records only its device
+ * type, variant and parent index, and the cluster set is DERIVED here from
+ * the parent's device type at rebuild time. That is what keeps the stored
+ * composition a product definition rather than a cluster list, and it is why
+ * mt_devtype_parent_ok() (below) refuses a cabinet under anything else: a
+ * third parent would be a cabinet with no defined conditional cluster set.
+ *
+ * Both functions return false on ANY failure, and mt_devtype_create() turns
+ * that into -1, which aborts the whole boot rebuild (this file's own
+ * failed-create() rule, CLAUDE.md). Skipping a failed augment would hand a
+ * commissioned controller a cabinet endpoint that looks right in the
+ * PartsList and answers nothing.
+ */
+static bool mt_cabinet_add_cooler(endpoint_t *ep)
+{
+    /* 8.6 check, run against esp_matter_cluster.cpp before writing this:
+     * refrigerator_and_tcc_mode::create() (:2903-2941) unconditionally calls
+     * mode_base::command::create_change_to_mode() and
+     * create_change_to_mode_response() after its CLUSTER_FLAG_SERVER block,
+     * and wires its own RefrigeratorAndTCCModeDelegateInitCB from
+     * config.delegate. Nothing to hand-add: the same clean result task 3's
+     * mk_refrigerator() got for this cluster on the parent endpoint. */
+    void *mode_delegate = mt_matter_modebase_delegate_alloc(
+        chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id);
+    if (mode_delegate == nullptr) {
+        ESP_LOGE(TAG, "modebase delegate pool exhausted (cooler cabinet mode)");
+        return false;
+    }
+    /* Unlike the node-level thunks, the endpoint already exists here, so its
+     * id is known before any cluster is created: fix the delegate's endpoint
+     * immediately rather than running the usual alloc-then-create-then-fix
+     * dance, which exists only because create() is what assigns the id. */
+    mt_matter_modebase_delegate_set_endpoint(mode_delegate, endpoint::get_id(ep));
+
+    cluster::refrigerator_and_tcc_mode::config_t mc;
+    mc.delegate = mode_delegate;
+    if (cluster::refrigerator_and_tcc_mode::create(ep, &mc, CLUSTER_FLAG_SERVER) == nullptr) {
+        ESP_LOGE(TAG, "creating refrigerator_and_tcc_mode cluster failed");
+        return false;
+    }
+    return true;
+}
+
+/*
+ * HearthOvenModeInitCB and HearthOvenCavityOpStateInitCB are defined in
+ * main.cpp, next to the delegate pools they construct Instances against.
+ * Plain forward declarations rather than mt_matter.h's extern "C" bridge
+ * pattern, for the delegate_init_callback_t linkage reason
+ * HearthRvcOpStateInitCB's own declaration above explains in full.
+ */
+void HearthOvenModeInitCB(void *delegate, uint16_t endpoint_id);
+void HearthOvenCavityOpStateInitCB(void *delegate, uint16_t endpoint_id);
+
+/*
+ * The heater cabinet's two clusters are the 8.6 disease at its most severe
+ * grade yet (ARCHITECTURE.md 8.9). For the RVC's opstate the SDK at least
+ * had a cluster::rvc_operational_state namespace whose create() built the
+ * attribute set and left only the commands and the delegate to hand-add.
+ * Here esp-matter ships NOTHING: there is no cluster::oven_mode and no
+ * cluster::oven_cavity_operational_state namespace anywhere in the component
+ * (verified by grep over the whole of components/esp_matter; the only oven
+ * symbols it carries at all are the endpoint::oven namespace and two empty
+ * MatterOven*PluginServerInitCallback stubs in
+ * data_model_provider/esp_matter_plugin_server_init_callbacks.cpp). Both
+ * cluster shells below are therefore mirrored line for line from the nearest
+ * SDK body, read side by side while writing rather than from memory:
+ *
+ *   - OvenMode mirrors rvc_run_mode::create() (esp_matter_cluster.cpp:
+ *     2943-2980), which is byte-identical to refrigerator_and_tcc_mode::
+ *     create() (:2903-2941) apart from the cluster id and the init callback.
+ *   - OvenCavityOperationalState mirrors rvc_operational_state::create()
+ *     (:3103-3134), the derived-opstate shape, NOT the base
+ *     operational_state::create() (:1752-1789): the base body additionally
+ *     wires config.delegate through OperationalStateDelegateInitCB and
+ *     creates the OperationalError event, neither of which applies to a
+ *     hand-rolled derived cluster with its own init callback.
+ *
+ * Three things in those bodies are deliberately not reproduced, each inert
+ * here: the "if (flags & CLUSTER_FLAG_SERVER)" wrapper (this firmware only
+ * ever creates server clusters, so the branch is always taken), the
+ * "if (config)" guard around create_current_mode() (there is no config_t to
+ * be null), and rvc_operational_state::create()'s
+ * "if (flags & CLUSTER_FLAG_CLIENT) create_default_binding_cluster()" tail
+ * (rvc_run_mode::create() has no such tail at all). Everything else,
+ * including the add_function_list(cluster, NULL, CLUSTER_FLAG_NONE) call
+ * that looks like a no-op, is mirrored verbatim rather than judged.
+ *
+ * Cluster revisions come from the XMLs, never transcribed from a sibling
+ * cluster: Mode_Oven.xml (1.5.1) is revision 2, OperationalState_Oven.xml
+ * (1.5.1) is revision 2. Both differ from the values esp-matter's own
+ * esp_matter_cluster_revisions.h carries for the clusters being mirrored
+ * (rvc_run_mode 4, rvc_operational_state 3), which is exactly why the
+ * revision cannot be copied along with the rest of the body.
+ *
+ * Commands. OvenMode gets ChangeToMode/ChangeToModeResponse through the
+ * cluster-agnostic mode_base::command helpers (they take the cluster handle
+ * and register against whatever cluster it is, so no OvenMode-specific
+ * helper is needed; OvenMode's generated CommandIds.h declares the same
+ * 0x00/0x01 pair). OvenCavityOperationalState gets Stop (0x01), Start (0x02)
+ * and OperationalCommandResponse (0x04) ONLY: OperationalState_Oven.xml
+ * revision 2 marks Pause (0x00) and Resume (0x03) <disallowConform/>
+ * ("Set Pause and Resume commands as disallowed"), and the generated
+ * CommandIds.h agrees (kAcceptedCommandsCount = 2, with no Pause or Resume
+ * namespace in the file at all). The three helpers used are again
+ * cluster-agnostic and again carry the right numeric ids
+ * (operational_state::command::create_stop/create_start use
+ * OperationalState::Commands::Stop::Id/Start::Id, 0x01/0x02, matching the
+ * oven cluster's own; esp_matter_command.cpp:2205-2224), so no raw
+ * esp_matter::command::create() is needed here the way GoHome needed one.
+ * The delegate's Pause/Resume paths answer the base-class unsupported route
+ * anyway (main.cpp), so a data model that somehow admitted the command still
+ * would not forward it to the host.
+ */
+static bool mt_cabinet_add_heater(endpoint_t *ep)
+{
+    uint16_t ep_id = endpoint::get_id(ep);
+
+    void *mode_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::OvenMode::Id);
+    if (mode_delegate == nullptr) {
+        ESP_LOGE(TAG, "modebase delegate pool exhausted (oven mode)");
+        return false;
+    }
+    void *opstate_delegate =
+        mt_matter_opstate_delegate_alloc(chip::app::Clusters::OvenCavityOperationalState::Id);
+    if (opstate_delegate == nullptr) {
+        ESP_LOGE(TAG, "operational state delegate pool exhausted (oven cavity)");
+        return false;
+    }
+    /* Endpoint already exists, so both delegates can be fixed up before
+     * anything else runs: see mt_cabinet_add_cooler()'s note above. */
+    mt_matter_modebase_delegate_set_endpoint(mode_delegate, ep_id);
+    mt_matter_opstate_delegate_set_endpoint(opstate_delegate, ep_id);
+
+    /* OvenMode (0x0049), mirroring rvc_run_mode::create(). */
+    cluster_t *mode_cl = esp_matter::cluster::create(ep, chip::app::Clusters::OvenMode::Id, CLUSTER_FLAG_SERVER);
+    if (mode_cl == nullptr) {
+        ESP_LOGE(TAG, "creating OvenMode cluster failed");
+        return false;
+    }
+    esp_matter::cluster::add_function_list(mode_cl, NULL, CLUSTER_FLAG_NONE);
+    cluster::global::attribute::create_feature_map(mode_cl, 0);
+    cluster::mode_base::attribute::create_supported_modes(mode_cl, NULL, 0, 0);
+    cluster::global::attribute::create_cluster_revision(mode_cl, 2); /* Mode_Oven.xml 1.5.1 */
+    cluster::mode_base::attribute::create_current_mode(mode_cl, 0);
+    cluster::mode_base::command::create_change_to_mode(mode_cl);
+    cluster::mode_base::command::create_change_to_mode_response(mode_cl);
+    esp_matter::cluster::set_delegate_and_init_callback(mode_cl, HearthOvenModeInitCB, mode_delegate);
+
+    /* OvenCavityOperationalState (0x0048), mirroring
+     * rvc_operational_state::create(). */
+    cluster_t *ops_cl = esp_matter::cluster::create(ep, chip::app::Clusters::OvenCavityOperationalState::Id,
+                                                     CLUSTER_FLAG_SERVER);
+    if (ops_cl == nullptr) {
+        ESP_LOGE(TAG, "creating OvenCavityOperationalState cluster failed");
+        return false;
+    }
+    esp_matter::cluster::add_function_list(ops_cl, NULL, CLUSTER_FLAG_NONE);
+    cluster::global::attribute::create_feature_map(ops_cl, 0);
+    cluster::operational_state::attribute::create_phase_list(ops_cl, NULL, 0, 0);
+    cluster::operational_state::attribute::create_current_phase(ops_cl, 0);
+    cluster::operational_state::attribute::create_operational_state_list(ops_cl, NULL, 0, 0);
+    cluster::operational_state::attribute::create_operational_state(ops_cl, 0);
+    cluster::operational_state::attribute::create_operational_error(ops_cl, NULL, 0, 0);
+    cluster::global::attribute::create_cluster_revision(ops_cl, 2); /* OperationalState_Oven.xml 1.5.1 */
+    cluster::operational_state::command::create_stop(ops_cl);
+    cluster::operational_state::command::create_start(ops_cl);
+    cluster::operational_state::command::create_operational_command_response(ops_cl);
+    esp_matter::cluster::set_delegate_and_init_callback(ops_cl, HearthOvenCavityOpStateInitCB, opstate_delegate);
+
+    return true;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -1054,6 +1269,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { robotic_vacuum_cleaner::get_device_type_id(),   mk_rvc,                     "robotic_vacuum_cleaner",  0 },
     { microwave_oven::get_device_type_id(),           mk_microwave_oven,          "microwave_oven",          0 },
     { refrigerator::get_device_type_id(),             mk_refrigerator,            "refrigerator",            0 },
+    { oven::get_device_type_id(),                     mk_oven,                    "oven",                    0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);
@@ -1084,13 +1300,11 @@ extern "C" bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant)
 
 /*
  * Append-time parenting policy (design spec 2.3). Tasks 3 to 5 extend this
- * table with the refrigerator, oven, and cook-surface rows; this task adds
- * the refrigerator row and swaps its arm off the temporary macro.
+ * table with the refrigerator, oven, and cook-surface rows; task 4 adds the
+ * oven row and swaps its arm off the temporary macro onto the namespace
+ * accessor, so both arms now read their id the way this file requires
+ * everywhere else.
  *
- * oven does not yet have its own esp_matter::endpoint namespace in this file
- * (Task 4 adds it), so its device type id is still read from the SDK's raw
- * macro here rather than transcribed as a literal; swap it to
- * oven::get_device_type_id() in the task that adds its namespace.
  * cook_surface is not referenced at all yet: it is not in s_devtypes, so
  * mt_devtype_is_known() rejects it before this function would ever see it,
  * and its arm lands with its row in Task 5.
@@ -1102,9 +1316,10 @@ extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint3
         parent_devtype != 0) {
         /* unparented cabinets stay legal (the standalone rows); a parented
          * one only under the two appliances that give it a legal
-         * conditional cluster set */
+         * conditional cluster set (mt_cabinet_add_cooler()/
+         * mt_cabinet_add_heater() above are that set) */
         return parent_devtype == refrigerator::get_device_type_id() ||
-               parent_devtype == ESP_MATTER_OVEN_DEVICE_TYPE_ID;
+               parent_devtype == oven::get_device_type_id();
     }
     return true; /* generic parenting: PartsList reflects whatever the host declares */
 }
@@ -1131,6 +1346,33 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
             endpoint::set_parent_endpoint(ep, parent) != ESP_OK) {
             ESP_LOGE(TAG, "parenting 0x%04X under ep %u failed",
                      (unsigned)devtype_id, parent_ep_id);
+            return -1;
+        }
+    }
+
+    /*
+     * Parent-conditional clusters (composed appliance round, task 4): a
+     * Temperature Controlled Cabinet's cluster set is derived from its
+     * parent's device type, never stored (see mt_cabinet_add_cooler()'s
+     * comment above). Runs after the parenting call, so the endpoint is
+     * already attached to its parent when the clusters land, and before
+     * out_ep_id is published, so a failed augment fails the whole create -
+     * mt_comp_rebuild() then aborts the composition rather than leaving a
+     * commissioned device with a cabinet that answers nothing.
+     * An UNPARENTED cabinet (parent_devtype 0) keeps the bare
+     * TemperatureControl-only shape earlier compositions declared: this
+     * block does not run for it at all.
+     */
+    if (devtype_id == temperature_controlled_cabinet::get_device_type_id()) {
+        bool ok = true;
+        if (parent_devtype == refrigerator::get_device_type_id()) {
+            ok = mt_cabinet_add_cooler(ep);
+        } else if (parent_devtype == oven::get_device_type_id()) {
+            ok = mt_cabinet_add_heater(ep);
+        }
+        if (!ok) {
+            ESP_LOGE(TAG, "cabinet conditional clusters under parent 0x%04X failed",
+                     (unsigned)parent_devtype);
             return -1;
         }
     }

@@ -352,8 +352,9 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  * re-sent-every-boot contract as the ModeSelect form
  * (mt_matter_modes_set() above) and every other host-fed list in this
  * header. cluster must be one of the ModeBase cluster ids (RvcRunMode,
- * RvcCleanMode, MicrowaveOvenMode, and - composed appliance round, task 3 -
- * RefrigeratorAndTemperatureControlledCabinetMode); this bridge is the sole
+ * RvcCleanMode, MicrowaveOvenMode, and - composed appliance round -
+ * RefrigeratorAndTemperatureControlledCabinetMode from task 3 and OvenMode
+ * from task 4); this bridge is the sole
  * place that validates it, since mt_at.c stays free of any esp_matter/CHIP
  * header and cannot read those ids itself (see this file's own top
  * comment). modes[0..count-1]/tags[0..count-1]/labels[0..count-1] are
@@ -368,7 +369,9 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  * kCleaning; RvcCleanMode gets kVacuum on every mode; MicrowaveOvenMode gets
  * kNormal on every mode; RefrigeratorAndTemperatureControlledCabinetMode gets
  * kAuto (0x00, the ModeBase common tag every mode gets, Mode_Refrigerator.xml)
- * on every mode. Substituting at store time rather than in the delegate's
+ * on every mode; OvenMode gets kBake (0x4000, Mode_Oven.xml's first
+ * oven-specific tag) on every mode. Substituting at store time rather than
+ * in the delegate's
  * GetModeTagsByIndex() keeps every read branch-free. A nonzero tag passes
  * through unvalidated beyond the u16 range check mt_at.c already performed:
  * tag semantics beyond that are the host's business.
@@ -406,13 +409,26 @@ int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, 
  * so mt_devtypes.cpp never has to name HearthOpStateDelegate or any CHIP
  * delegate type.
  *
+ * cluster_id (composed appliance round, task 4) is fixed at ALLOC time, the
+ * same reasoning mt_matter_modebase_delegate_alloc() above documents: the
+ * caller already knows which cluster it is about to create, the delegate
+ * needs it before any endpoint id exists, and one delegate CLASS now serves
+ * two clusters. The base OperationalState cluster (0x0060, the washer trio
+ * and the microwave) passes OperationalState::Id; the oven cavity's
+ * OvenCavityOperationalState (0x0048) passes its own id, which is what makes
+ * that endpoint's Stop/Start forwards carry cluster 0x0048 rather than
+ * 0x0060, and what routes Pause/Resume (disallowConform in
+ * OperationalState_Oven.xml) to the unsupported answer instead of a forward.
+ * RvcOperationalState is NOT in this pool: it needs its own Delegate
+ * subclass for GoHome, so it keeps the separate pool below.
+ *
  * mt_matter_opstate_delegate_alloc() returns nullptr once
  * MT_COMP_MAX_ENDPOINTS slots are handed out, so the caller aborts the boot
  * rebuild the same way a failed create() itself would (see
  * mt_matter_valve_delegate_alloc()'s doc comment above for the full
  * reasoning).
  */
-void *mt_matter_opstate_delegate_alloc(void);
+void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id);
 void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep);
 
 /*
@@ -434,20 +450,28 @@ void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep);
  *   - ep has RvcOperationalState (0x0061, RVC + Microwave batch task 3):
  *     <state> is one of {0, 1, 2, 0x40 kSeekingCharger, 0x41 kCharging,
  *     0x42 kDocked}.
- * mt_at.c's cmd_mtopstate rejects anything outside the UNION of both sets
- * with +MTERR:1 before this is ever called (it cannot know which cluster ep
- * actually has); this bridge is what narrows that down to the cluster-
- * specific legal set, answering MT_ATTR_ERR_VALUE (+MTERR:1) for a state
- * that is in the union but not legal for ep's own cluster - e.g. 0x40 on a
- * plain washer endpoint. 3 (Error) is outside the union entirely and is
- * rejected by mt_at.c itself for both cluster kinds: kError is reserved for
+ *   - ep has OvenCavityOperationalState (0x0048, composed appliance round
+ *     task 4, the heater cabinet under an Oven): <state> is 0, 1, 2 only.
+ *     The cluster derives from OperationalState and defines NO derived
+ *     number-space states of its own (OperationalState_Oven.xml adds only
+ *     command conformance, no state enum), so its legal set is the plain
+ *     one, identical to the base cluster's.
+ * mt_at.c's cmd_mtopstate rejects anything outside the UNION of all three
+ * sets with +MTERR:1 before this is ever called (it cannot know which cluster
+ * ep actually has, and the union is unchanged by task 4: the cavity's set is
+ * a subset of the base cluster's, so the handler needs no edit at all); this
+ * bridge is what narrows that down to the cluster-specific legal set,
+ * answering MT_ATTR_ERR_VALUE (+MTERR:1) for a state that is in the union but
+ * not legal for ep's own cluster - e.g. 0x40 on a plain washer or an oven
+ * cavity endpoint. 3 (Error) is outside the union entirely and is
+ * rejected by mt_at.c itself for every cluster kind: kError is reserved for
  * the error-detection path (F7), never a state this command may set
  * directly; SetOperationalState() enforces the identical rule independently
  * (see main.cpp), so a state that somehow slipped past both checks would
  * still be refused there, not silently accepted.
  *
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
- * MT_ATTR_ERR_CLUSTER when ep has neither OperationalState-family cluster,
+ * MT_ATTR_ERR_CLUSTER when ep has no OperationalState-family cluster at all,
  * MT_ATTR_ERR_VALUE for a state outside the cluster-specific legal set
  * above, MT_ATTR_ERR_FAILED when no delegate/Instance is reachable for ep
  * (should not happen once esp_matter::start() has run, see main.cpp) or
