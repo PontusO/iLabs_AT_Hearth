@@ -2440,7 +2440,10 @@ def step_3_18_oven_cavity(ctx):
     0x81 UNSUPPORTED_COMMAND with NO +MTCMD raised. chip-tool's own
     ovencavityoperationalstate verbs are stop/start only (the pinned
     binary agrees with the XML), so the pause probe goes through
-    command-by-id 0 with an empty JSON payload.
+    command-by-id 0 with an empty JSON payload; the `status = 0x81`
+    print shape parse_status reads on that path is CONFIRMED (composed
+    appliance round, HELD on the bench on both transports, TESTING.md
+    8.8).
 
     OvenMode rows (TESTING.md 6.2): the <cavity ep> staging row verbatim
     (tag 0 resolves to kBake, 0x4000, for every mode on cluster 0x49;
@@ -3020,10 +3023,12 @@ def parse_parts_list(text):
     element is a PLAIN unsigned integer, as ints: the shape Descriptor's
     `PartsList` (`list[endpoint-no]`) uses.
 
-    INFERENCE (composed appliance round, task 6): derived from the pinned
-    SDK's own print path the same way `parse_indexed_list` was, and not
-    yet matched against a live capture; Tasks 11/12's bench runs are the
-    validation. `DataModelLogger.cpp`'s `PartsList` case decodes a
+    CONFIRMED (composed appliance round, HELD on the bench, TESTING.md
+    8.8): derived from the pinned SDK's own print path the same way
+    `parse_indexed_list` was, then matched the live wire captures on the
+    first attempt on both transports (the 2026-08-10 WiFi and Thread
+    bench sessions, tasks 11/12; zero harness changes in either).
+    `DataModelLogger.cpp`'s `PartsList` case decodes a
     `DecodableList<chip::EndpointId>` and hands it to the generic
     `DecodableList<T>` template in `DataModelLogger.h` (:119-140), which
     labels each entry `"[i]"`; `EndpointId` is an integral typedef
@@ -3048,9 +3053,11 @@ def parse_notify_active(text):
     the alarms that BECAME active in that event (the spec's
     becameActive semantics for the `Active` field).
 
-    INFERENCE (composed appliance round, task 6): derived from the
-    pinned SDK's own print path, not yet matched against a live capture;
-    Tasks 11/12's bench runs are the validation. `DataModelLogger.cpp`'s
+    CONFIRMED (composed appliance round, HELD on the bench, TESTING.md
+    8.8): derived from the pinned SDK's own print path, then matched the
+    live wire captures on the first attempt on both transports (the
+    2026-08-10 WiFi and Thread bench sessions, tasks 11/12; zero harness
+    changes in either). `DataModelLogger.cpp`'s
     `RefrigeratorAlarm::Events::Notify` `LogValue` overload (:9713-9760)
     prints the four fields with the labels `Active`, `Inactive`,
     `State`, `Mask`; each is a `BitMask<AlarmBitmap>`, routed through
