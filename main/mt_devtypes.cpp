@@ -946,6 +946,69 @@ static endpoint_t *mk_microwave_oven(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * Composed appliance round, task 3: Refrigerator (0x0070).
+ * refrigerator::config_t (esp_matter_endpoint.h:740-749) carries only a
+ * descriptor config, no identify field at all (unlike app_base_config-derived
+ * types): refrigerator::add() (esp_matter_endpoint.cpp:1319-1343) calls
+ * add_device_type() and nothing else, so identify is added by hand after
+ * create(), the same after-create() shape mk_power_source() and
+ * mk_air_quality_sensor() above use for their own hand-added clusters.
+ * cluster::identify::create()'s signature (endpoint_t*, config_t*, uint8_t
+ * flags) is the one every other manual cluster::xxx::create() call in this
+ * file already uses (e.g. mk_extended_color_light()'s color_control feature
+ * add above), the same shape the SDK's own laundry_washer::add() body uses
+ * to attach a cluster onto an endpoint that common::create() already made.
+ *
+ * 8.6 check (design spec, run against esp_matter_cluster.cpp before writing
+ * this thunk): unlike the OperationalState trio and SmokeCoAlarm, THIS PAIR
+ * IS CLEAN, no hand-added commands needed.
+ *   - refrigerator_and_tcc_mode::create() (esp_matter_cluster.cpp:2903-2941)
+ *     unconditionally calls mode_base::command::create_change_to_mode() and
+ *     create_change_to_mode_response() after the CLUSTER_FLAG_SERVER block,
+ *     the identical shape rvc_run_mode::create() (:2943-2980) uses, not the
+ *     operational_state/smoke_co_alarm disease. ChangeToMode is wired for
+ *     free.
+ *   - refrigerator_alarm::create() (esp_matter_cluster.cpp:2870-2898) has no
+ *     "Commands" section at all, matching RefrigeratorAlarm.xml (1.5.1): its
+ *     one command, ModifyEnabledAlarms (0x01), carries <disallowConform/>,
+ *     so there is nothing to wire.
+ */
+static endpoint_t *mk_refrigerator(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    void *mode_delegate = mt_matter_modebase_delegate_alloc(
+        chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id);
+    if (mode_delegate == nullptr) {
+        ESP_LOGE(TAG, "modebase delegate pool exhausted (refrigerator mode)");
+        return nullptr; /* pool exhausted; fail clean, the washer precedent */
+    }
+    refrigerator::config_t c;
+    endpoint_t *ep = refrigerator::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    /* identify: optional conformance, but every controller UI expects it;
+     * refrigerator::config_t has no identify field of its own (see above),
+     * so it is added by hand, same shape as every other hand-added cluster
+     * in this file. */
+    cluster::identify::config_t ic;
+    if (cluster::identify::create(ep, &ic, CLUSTER_FLAG_SERVER) == nullptr) {
+        return nullptr;
+    }
+    cluster::refrigerator_and_tcc_mode::config_t mc;
+    mc.delegate = mode_delegate;
+    if (cluster::refrigerator_and_tcc_mode::create(ep, &mc, CLUSTER_FLAG_SERVER) == nullptr) {
+        return nullptr;
+    }
+    cluster::refrigerator_alarm::config_t ac; /* mask=1 state=0 supported=1: door open */
+    if (cluster::refrigerator_alarm::create(ep, &ac, CLUSTER_FLAG_SERVER) == nullptr) {
+        return nullptr;
+    }
+    mt_matter_modebase_delegate_set_endpoint(mode_delegate, endpoint::get_id(ep));
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -990,6 +1053,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { chime::get_device_type_id(),                    mk_chime,                   "chime",                   0 },
     { robotic_vacuum_cleaner::get_device_type_id(),   mk_rvc,                     "robotic_vacuum_cleaner",  0 },
     { microwave_oven::get_device_type_id(),           mk_microwave_oven,          "microwave_oven",          0 },
+    { refrigerator::get_device_type_id(),             mk_refrigerator,            "refrigerator",            0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);
@@ -1020,16 +1084,16 @@ extern "C" bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant)
 
 /*
  * Append-time parenting policy (design spec 2.3). Tasks 3 to 5 extend this
- * table with the refrigerator, oven, and cook-surface rows; this task lands
- * only the cabinet arm and the permissive default.
+ * table with the refrigerator, oven, and cook-surface rows; this task adds
+ * the refrigerator row and swaps its arm off the temporary macro.
  *
- * refrigerator and oven do not yet have their own esp_matter::endpoint
- * namespaces in this file (Tasks 3 and 4 add them), so their device type ids
- * are read from the SDK's raw macros here rather than transcribed as
- * literals; swap each to <ns>::get_device_type_id() in the task that adds
- * its namespace. cook_surface is not referenced at all yet: it is not in
- * s_devtypes, so mt_devtype_is_known() rejects it before this function would
- * ever see it, and its arm lands with its row in Task 5.
+ * oven does not yet have its own esp_matter::endpoint namespace in this file
+ * (Task 4 adds it), so its device type id is still read from the SDK's raw
+ * macro here rather than transcribed as a literal; swap it to
+ * oven::get_device_type_id() in the task that adds its namespace.
+ * cook_surface is not referenced at all yet: it is not in s_devtypes, so
+ * mt_devtype_is_known() rejects it before this function would ever see it,
+ * and its arm lands with its row in Task 5.
  */
 extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
 {
@@ -1039,7 +1103,7 @@ extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint3
         /* unparented cabinets stay legal (the standalone rows); a parented
          * one only under the two appliances that give it a legal
          * conditional cluster set */
-        return parent_devtype == ESP_MATTER_REFRIGERATOR_DEVICE_TYPE_ID ||
+        return parent_devtype == refrigerator::get_device_type_id() ||
                parent_devtype == ESP_MATTER_OVEN_DEVICE_TYPE_ID;
     }
     return true; /* generic parenting: PartsList reflects whatever the host declares */

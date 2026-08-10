@@ -203,8 +203,16 @@ CONFIG_SUPPORT_PM2_5_CONCENTRATION_MEASUREMENT_CLUSTER=n
 # this firmware does not use and leaves disabled.
 CONFIG_SUPPORT_POWER_SOURCE_CONFIGURATION_CLUSTER=n
 CONFIG_SUPPORT_RADON_CONCENTRATION_MEASUREMENT_CLUSTER=n
-CONFIG_SUPPORT_REFRIGERATOR_ALARM_CLUSTER=n
-CONFIG_SUPPORT_REFRIGERATOR_AND_TEMPERATURE_CONTROLLED_CABINET_MODE_CLUSTER=n
+# REFRIGERATOR_ALARM_CLUSTER / REFRIGERATOR_AND_TEMPERATURE_CONTROLLED_CABINET_MODE_CLUSTER:
+# re-enabled, composed appliance round task 3 creates a refrigerator endpoint
+# (mt_devtypes.cpp's mk_refrigerator()), which wires both clusters. Left
+# disabled, the RefrigeratorAlarm server methods this firmware's
+# mt_matter_alarm_set() fridge branch calls (main.cpp) link-fail (undefined
+# reference to RefrigeratorAlarmServer::Instance() and friends,
+# MatterRefrigeratorAlarmPluginServerInitCallback()), the same link-time-only
+# failure mode CONFIG_SUPPORT_MICROWAVE_OVEN_CONTROL_CLUSTER's comment above
+# describes: cluster_dir.cmake gates which src/app/clusters/*-server
+# directory actually gets compiled into libCHIP.a.
 # RVC_CLEAN_MODE_CLUSTER / RVC_RUN_MODE_CLUSTER: re-enabled, RVC + Microwave
 # batch task 2. See the MICROWAVE_OVEN_MODE_CLUSTER comment above: all three
 # pull in the same src/app/clusters/mode-base-server directory, and this

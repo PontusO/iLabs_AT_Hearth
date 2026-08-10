@@ -77,6 +77,18 @@
  * until now. */
 #include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
 
+/* Composed appliance round, task 3: RefrigeratorAlarmServer::Instance() and
+ * its Get*Value/Set*Value methods (refrigerator-alarm-server.h), the second
+ * cluster mt_matter_alarm_set() now dispatches to. RefrigeratorAlarm::Id and
+ * the BitMask<RefrigeratorAlarm::AlarmMap> type it takes are already visible
+ * via esp_matter.h's own transitive include of the generated per-cluster ids
+ * and cluster-enums.h (the same "no extra include needed for the ::Id/enum
+ * types themselves" precedent mode-base-server.h's own comment below
+ * documents for RvcRunMode/RvcCleanMode/MicrowaveOvenMode); only the server
+ * class itself needs its own header, the same split smoke-co-alarm-server.h
+ * above has from SmokeCoAlarm's own ::Id/enum visibility. */
+#include <app/clusters/refrigerator-alarm-server/refrigerator-alarm-server.h>
+
 /* C6 (seven-type batch, chime): ChimeDelegate (three pure virtuals this
  * file's HearthChimeDelegate implements) and ChimeCluster (SetSelectedChime/
  * SetEnabled, called through the data model provider's registry, see
@@ -1758,18 +1770,20 @@ public:
     }
 
     /*
-     * ChangeToMode::Id is 0x00 for both RvcRunMode and RvcCleanMode
-     * (verified against each cluster's generated CommandIds.h: both declare
-     * "inline constexpr CommandId Id = 0x00000000" for ChangeToMode), so one
-     * constant covers both. MicrowaveOvenMode never reaches this override at
-     * all: its generated CommandIds.h declares kAcceptedCommandsCount = 0,
-     * so the SDK wires no ChangeToMode command for it at all (design spec
-     * 3.3's plan-time correction; the microwave's mode is selected through
-     * SetCookingParameters' cookMode field instead). UnsupportedMode is
-     * answered by the SDK's own pre-check (Instance::HandleChangeToMode,
-     * mode-base-server.cpp) before this delegate method is ever called, so
-     * only kSuccess/kGenericFailure are this function's business, per design
-     * spec 3.3's adjudicated-ChangeToMode decision.
+     * ChangeToMode::Id is 0x00 for RvcRunMode, RvcCleanMode AND (composed
+     * appliance round, task 3) RefrigeratorAndTemperatureControlledCabinetMode
+     * (verified against each cluster's generated CommandIds.h: all three
+     * declare "inline constexpr CommandId Id = 0x00000000" for ChangeToMode),
+     * so one constant covers all three. MicrowaveOvenMode never reaches this
+     * override at all: its generated CommandIds.h declares
+     * kAcceptedCommandsCount = 0, so the SDK wires no ChangeToMode command for
+     * it at all (design spec 3.3's plan-time correction; the microwave's mode
+     * is selected through SetCookingParameters' cookMode field instead).
+     * UnsupportedMode is answered by the SDK's own pre-check
+     * (Instance::HandleChangeToMode, mode-base-server.cpp) before this
+     * delegate method is ever called, so only kSuccess/kGenericFailure are
+     * this function's business, per design spec 3.3's adjudicated-ChangeToMode
+     * decision.
      */
     void HandleChangeToMode(uint8_t NewMode,
                              chip::app::Clusters::ModeBase::Commands::ChangeToModeResponse::Type &response) override
@@ -1793,9 +1807,12 @@ private:
 
     /* Tag-0 defaults, design spec section 9's exact policy, placeholder case
      * only (index 0 of an otherwise-empty list): RvcRunMode gets kIdle,
-     * RvcCleanMode gets kVacuum, MicrowaveOvenMode gets kNormal.
-     * mt_matter_modebase_set() below applies the identical table to real
-     * host-declared entries at store time. */
+     * RvcCleanMode gets kVacuum, MicrowaveOvenMode gets kNormal, and
+     * (composed appliance round, task 3)
+     * RefrigeratorAndTemperatureControlledCabinetMode gets kAuto (0x00, the
+     * ModeBase common tag every ModeBase-derived cluster shares,
+     * Mode_Refrigerator.xml). mt_matter_modebase_set() below applies the
+     * identical table to real host-declared entries at store time. */
     uint16_t placeholder_tag() const
     {
         using namespace chip::app::Clusters;
@@ -1804,6 +1821,9 @@ private:
         }
         if (m_cluster == RvcCleanMode::Id) {
             return chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
+        }
+        if (m_cluster == RefrigeratorAndTemperatureControlledCabinetMode::Id) {
+            return chip::to_underlying(RefrigeratorAndTemperatureControlledCabinetMode::ModeTag::kAuto);
         }
         return chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
     }
@@ -1844,8 +1864,10 @@ extern "C" void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_
  * enforced by cmd_mtmodes() in mt_at.c before this is ever called; the
  * bounds re-checked here are defensive, the same split as
  * mt_matter_modes_set() above. This bridge is the sole place that validates
- * cluster against the three ModeBase ids: mt_at.c stays free of any
- * esp_matter/CHIP header and cannot read those ids itself.
+ * cluster against the four ModeBase ids (composed appliance round, task 3
+ * adds RefrigeratorAndTemperatureControlledCabinetMode to the three from the
+ * RVC + Microwave batch): mt_at.c stays free of any esp_matter/CHIP header
+ * and cannot read those ids itself.
  */
 extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
                                        const char *const *labels, uint8_t count)
@@ -1855,7 +1877,8 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
     if (esp_matter::endpoint::get(ep) == nullptr) {
         return MT_ATTR_ERR_ENDPOINT;
     }
-    if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id && cluster != MicrowaveOvenMode::Id) {
+    if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id && cluster != MicrowaveOvenMode::Id &&
+        cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id) {
         return MT_ATTR_ERR_CLUSTER;
     }
     if (esp_matter::cluster::get(ep, cluster) == nullptr) {
@@ -1908,6 +1931,12 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                 tag = chip::to_underlying(i == 0 ? RvcRunMode::ModeTag::kIdle : RvcRunMode::ModeTag::kCleaning);
             } else if (cluster == RvcCleanMode::Id) {
                 tag = chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
+            } else if (cluster == RefrigeratorAndTemperatureControlledCabinetMode::Id) {
+                /* Auto (0x00), the ModeBase common tag every mode gets,
+                 * same constant-per-mode shape as RvcCleanMode/
+                 * MicrowaveOvenMode above (not RvcRunMode's index-0 special
+                 * case): Mode_Refrigerator.xml. */
+                tag = chip::to_underlying(RefrigeratorAndTemperatureControlledCabinetMode::ModeTag::kAuto);
             } else {
                 tag = chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
             }
@@ -2782,8 +2811,23 @@ static const std::array<SmokeCoAlarmServer::ExpressedStateEnum, SmokeCoAlarmServ
     };
 
 /*
- * AT+MTALARM bridge: dispatch <field> (already checked 1..11 by
- * mt_at.c's cmd_mtalarm) to the matching SmokeCoAlarmServer setter, after
+ * AT+MTALARM bridge (composed appliance round, task 3: restructured into a
+ * per-cluster dispatcher). <field> is checked only against the UNION bound
+ * 0..11 by mt_at.c's cmd_mtalarm (0..7 fridge, 1..11 smoke; mt_at.c stays
+ * free of any esp_matter/CHIP header and cannot know which cluster <ep>
+ * carries), so this bridge looks up <ep>'s alarm cluster first and dispatches
+ * to the matching family: SmokeCoAlarm checked before RefrigeratorAlarm,
+ * MT_ATTR_ERR_CLUSTER if <ep> carries neither. No device type this firmware
+ * creates wires both clusters on one endpoint, so the check order is not
+ * itself a behaviour decision, only a fixed order to test in.
+ *
+ * The smoke branch is the pre-existing body, UNCHANGED, with one addition at
+ * its top: field 0 (ExpressedState) is derived and never settable, so it now
+ * answers MT_ATTR_ERR_VALUE here (moved down from mt_at.c's cmd_mtalarm,
+ * which used to reject field 0 for every cluster before this bridge was ever
+ * reached; now that field 0 is a legal DoorOpen bit for the fridge branch,
+ * the rejection has to be per-family, so it lives here instead). Every other
+ * smoke field dispatches to the matching SmokeCoAlarmServer setter, after
  * range-checking <value> against THAT field's own SDK enum
  * (smoke-co-alarm-server.h:40-46 aliases the five enum types off
  * chip::app::Clusters::SmokeCoAlarm::*Enum). Every AlarmStateEnum field
@@ -2808,104 +2852,170 @@ static const std::array<SmokeCoAlarmServer::ExpressedStateEnum, SmokeCoAlarmServ
  * already raised SelfTestComplete by the time the recompute below runs, and
  * the recompute raises AllClear only if the new priority verdict actually
  * differs from the wedged kTesting, a distinct fact, not a duplicate of it.
+ *
+ * The fridge branch (RefrigeratorAlarm, 87/0x0057; see AT_MT_SPEC.md 3.22)
+ * treats <field> as the alarm BIT number, <value> as
+ * 0/1. RefrigeratorAlarmServer::Instance()'s Get*Value/Set*Value methods
+ * (refrigerator-alarm-server.h, verified against the pinned tree) are the
+ * exact shape used below: GetSupportedValue/GetStateValue/SetStateValue,
+ * each taking a BitMask<RefrigeratorAlarm::AlarmMap>. AlarmMap is a compat
+ * alias for AlarmBitmap (CompatEnumNames.h: "using AlarmMap = AlarmBitmap",
+ * PR 31517 renamed the type), a uint32_t-backed enum
+ * (RefrigeratorAlarm/Enums.h); the Matter spec (checked 1.2 through 1.5.1's
+ * RefrigeratorAlarm.xml) defines exactly ONE bit in every revision,
+ * DoorOpen at bit 0 - not the eight-bit-wide bitmap this task's brief
+ * assumed. field > 7 is kept anyway as a defensive union-shaped bound (it
+ * also happens to be a full byte), not because AlarmMap's own width demands
+ * it: the real gate is GetSupportedValue()'s bit test just below, which
+ * already rejects any field this device's config (mk_refrigerator(),
+ * mt_devtypes.cpp: mask=1 state=0 supported=1) does not advertise.
+ * SetStateValue() writes the State attribute AND emits the cluster's Notify
+ * event itself (refrigerator-alarm-server.cpp:115-149, "When State changes
+ * we are generating Notify event"), so - like the smoke branch's own
+ * setters - a raw AT+MTATTR write to the same attribute would reach the
+ * wire but skip the event a subscribed controller expects; this bridge
+ * exists for exactly that reason on both clusters.
  */
 extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
 {
+    using namespace chip::app::Clusters;
     ChipStackLock lock;
     if (esp_matter::endpoint::get(ep) == nullptr) {
         return MT_ATTR_ERR_ENDPOINT;
     }
-    if (esp_matter::cluster::get(ep, chip::app::Clusters::SmokeCoAlarm::Id) == nullptr) {
-        return MT_ATTR_ERR_CLUSTER;
+
+    if (esp_matter::cluster::get(ep, SmokeCoAlarm::Id) != nullptr) {
+        if (field == 0) {
+            /* ExpressedState is derived by the server from the other ten
+             * fields and is never settable directly (the rejection that
+             * used to live in mt_at.c's cmd_mtalarm before field 0 became a
+             * legal fridge value too). */
+            return MT_ATTR_ERR_VALUE;
+        }
+
+        SmokeCoAlarmServer &srv = SmokeCoAlarmServer::Instance();
+        bool ok;
+        bool needs_recompute = false;
+        switch (field) {
+        case 1: /* SmokeState */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetSmokeState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 2: /* COState */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetCOState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 3: /* BatteryAlert */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetBatteryAlert(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 4: /* DeviceMuted: not an ExpressedState priority, no recompute */
+            if (value >= (uint8_t)SmokeCoAlarmServer::MuteStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetDeviceMuted(ep, (SmokeCoAlarmServer::MuteStateEnum)value);
+            break;
+        case 5: /* TestInProgress: bool, the self-test completion path at 0 */
+            if (value > 1) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetTestInProgress(ep, value != 0);
+            needs_recompute = true;
+            break;
+        case 6: /* HardwareFaultAlert: bool */
+            if (value > 1) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetHardwareFaultAlert(ep, value != 0);
+            needs_recompute = true;
+            break;
+        case 7: /* EndOfServiceAlert */
+            if (value >= (uint8_t)SmokeCoAlarmServer::EndOfServiceEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetEndOfServiceAlert(ep, (SmokeCoAlarmServer::EndOfServiceEnum)value);
+            needs_recompute = true;
+            break;
+        case 8: /* InterconnectSmokeAlarm */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetInterconnectSmokeAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 9: /* InterconnectCOAlarm */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetInterconnectCOAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 10: /* ContaminationState: not an ExpressedState priority */
+            if (value >= (uint8_t)SmokeCoAlarmServer::ContaminationStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetContaminationState(ep, (SmokeCoAlarmServer::ContaminationStateEnum)value);
+            break;
+        case 11: /* SmokeSensitivityLevel: not an ExpressedState priority */
+            if (value >= (uint8_t)SmokeCoAlarmServer::SensitivityEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetSmokeSensitivityLevel(ep, (SmokeCoAlarmServer::SensitivityEnum)value);
+            break;
+        default:
+            /* mt_at.c's cmd_mtalarm caps field at 11 (the union bound) with
+             * +MTERR:1; kept for defensiveness, unreachable in practice. */
+            return MT_ATTR_ERR_VALUE;
+        }
+        if (ok && needs_recompute) {
+            srv.SetExpressedStateByPriority(ep, s_alarm_expressed_state_priority);
+        }
+        return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
     }
 
-    SmokeCoAlarmServer &srv = SmokeCoAlarmServer::Instance();
-    bool ok;
-    bool needs_recompute = false;
-    switch (field) {
-    case 1: /* SmokeState */
-        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
-            return MT_ATTR_ERR_VALUE;
-        }
-        ok = srv.SetSmokeState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
-        needs_recompute = true;
-        break;
-    case 2: /* COState */
-        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
-            return MT_ATTR_ERR_VALUE;
-        }
-        ok = srv.SetCOState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
-        needs_recompute = true;
-        break;
-    case 3: /* BatteryAlert */
-        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
-            return MT_ATTR_ERR_VALUE;
-        }
-        ok = srv.SetBatteryAlert(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
-        needs_recompute = true;
-        break;
-    case 4: /* DeviceMuted: not an ExpressedState priority, no recompute */
-        if (value >= (uint8_t)SmokeCoAlarmServer::MuteStateEnum::kUnknownEnumValue) {
-            return MT_ATTR_ERR_VALUE;
-        }
-        ok = srv.SetDeviceMuted(ep, (SmokeCoAlarmServer::MuteStateEnum)value);
-        break;
-    case 5: /* TestInProgress: bool, the self-test completion path at 0 */
+    if (esp_matter::cluster::get(ep, RefrigeratorAlarm::Id) != nullptr) {
+        /* field is the alarm bit number, value 0/1 */
         if (value > 1) {
             return MT_ATTR_ERR_VALUE;
         }
-        ok = srv.SetTestInProgress(ep, value != 0);
-        needs_recompute = true;
-        break;
-    case 6: /* HardwareFaultAlert: bool */
-        if (value > 1) {
+        if (field > 7) {
+            /* defensive union-shaped bound; see the class comment above for
+             * why AlarmMap's own width does not actually demand this */
             return MT_ATTR_ERR_VALUE;
         }
-        ok = srv.SetHardwareFaultAlert(ep, value != 0);
-        needs_recompute = true;
-        break;
-    case 7: /* EndOfServiceAlert */
-        if (value >= (uint8_t)SmokeCoAlarmServer::EndOfServiceEnum::kUnknownEnumValue) {
-            return MT_ATTR_ERR_VALUE;
+
+        auto &server = RefrigeratorAlarmServer::Instance();
+        chip::BitMask<RefrigeratorAlarm::AlarmMap> supported, state;
+        auto bit = static_cast<RefrigeratorAlarm::AlarmMap>(1u << field);
+        if (server.GetSupportedValue(ep, &supported) != chip::Protocols::InteractionModel::Status::Success ||
+            !supported.Has(bit)) {
+            return MT_ATTR_ERR_VALUE; /* bit not supported on this device */
         }
-        ok = srv.SetEndOfServiceAlert(ep, (SmokeCoAlarmServer::EndOfServiceEnum)value);
-        needs_recompute = true;
-        break;
-    case 8: /* InterconnectSmokeAlarm */
-        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
-            return MT_ATTR_ERR_VALUE;
+        if (server.GetStateValue(ep, &state) != chip::Protocols::InteractionModel::Status::Success) {
+            return MT_ATTR_ERR_FAILED;
         }
-        ok = srv.SetInterconnectSmokeAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
-        needs_recompute = true;
-        break;
-    case 9: /* InterconnectCOAlarm */
-        if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
-            return MT_ATTR_ERR_VALUE;
+        if (value) {
+            state.Set(bit);
+        } else {
+            state.Clear(bit);
         }
-        ok = srv.SetInterconnectCOAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
-        needs_recompute = true;
-        break;
-    case 10: /* ContaminationState: not an ExpressedState priority */
-        if (value >= (uint8_t)SmokeCoAlarmServer::ContaminationStateEnum::kUnknownEnumValue) {
-            return MT_ATTR_ERR_VALUE;
-        }
-        ok = srv.SetContaminationState(ep, (SmokeCoAlarmServer::ContaminationStateEnum)value);
-        break;
-    case 11: /* SmokeSensitivityLevel: not an ExpressedState priority */
-        if (value >= (uint8_t)SmokeCoAlarmServer::SensitivityEnum::kUnknownEnumValue) {
-            return MT_ATTR_ERR_VALUE;
-        }
-        ok = srv.SetSmokeSensitivityLevel(ep, (SmokeCoAlarmServer::SensitivityEnum)value);
-        break;
-    default:
-        /* mt_at.c's cmd_mtalarm already rejects field outside 1..11 with
-         * +MTERR:1; kept for defensiveness, unreachable in practice. */
-        return MT_ATTR_ERR_VALUE;
+        /* SetStateValue writes the attribute AND emits the Notify event
+         * (refrigerator-alarm-server.cpp:115-149); one call, both effects. */
+        return server.SetStateValue(ep, state) == chip::Protocols::InteractionModel::Status::Success
+                   ? MT_ATTR_OK
+                   : MT_ATTR_ERR_FAILED;
     }
-    if (ok && needs_recompute) {
-        srv.SetExpressedStateByPriority(ep, s_alarm_expressed_state_priority);
-    }
-    return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+
+    return MT_ATTR_ERR_CLUSTER;
 }
 
 /*

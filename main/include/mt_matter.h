@@ -351,8 +351,9 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  * cluster's SupportedModes list, host-fed, never persisted, the same
  * re-sent-every-boot contract as the ModeSelect form
  * (mt_matter_modes_set() above) and every other host-fed list in this
- * header. cluster must be one of the three ModeBase cluster ids
- * (RvcRunMode, RvcCleanMode, MicrowaveOvenMode); this bridge is the sole
+ * header. cluster must be one of the ModeBase cluster ids (RvcRunMode,
+ * RvcCleanMode, MicrowaveOvenMode, and - composed appliance round, task 3 -
+ * RefrigeratorAndTemperatureControlledCabinetMode); this bridge is the sole
  * place that validates it, since mt_at.c stays free of any esp_matter/CHIP
  * header and cannot read those ids itself (see this file's own top
  * comment). modes[0..count-1]/tags[0..count-1]/labels[0..count-1] are
@@ -365,10 +366,12 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  * cluster's conformance-required default, design spec section 9's exact
  * policy: RvcRunMode's first declared mode gets kIdle, every later one
  * kCleaning; RvcCleanMode gets kVacuum on every mode; MicrowaveOvenMode gets
- * kNormal on every mode. Substituting at store time rather than in the
- * delegate's GetModeTagsByIndex() keeps every read branch-free. A nonzero
- * tag passes through unvalidated beyond the u16 range check mt_at.c already
- * performed: tag semantics beyond that are the host's business.
+ * kNormal on every mode; RefrigeratorAndTemperatureControlledCabinetMode gets
+ * kAuto (0x00, the ModeBase common tag every mode gets, Mode_Refrigerator.xml)
+ * on every mode. Substituting at store time rather than in the delegate's
+ * GetModeTagsByIndex() keeps every read branch-free. A nonzero tag passes
+ * through unvalidated beyond the u16 range check mt_at.c already performed:
+ * tag semantics beyond that are the host's business.
  *
  * Also clamps CurrentMode when the replacement list drops the value it
  * currently holds (main.cpp), through the SDK's own
@@ -376,7 +379,7 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  * CurrentMode that is not a member of the just-published SupportedModes.
  *
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
- * MT_ATTR_ERR_CLUSTER when cluster is not one of the three ModeBase ids, or
+ * MT_ATTR_ERR_CLUSTER when cluster is not one of the ModeBase ids above, or
  * ep has no such cluster, MT_ATTR_ERR_FAILED for a bad count or an internal
  * failure (store exhaustion: MT_MB_MAX_LISTS (8) is smaller than
  * MT_COMP_MAX_ENDPOINTS (16), so a composition with enough ModeBase cluster
@@ -503,39 +506,55 @@ void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep);
  */
 uint32_t mt_air_quality_feature_mask(void);
 
-/* ---- smoke/co alarm (seven-type batch, task C5) -------------------------- */
+/* ---- smoke/co alarm + refrigerator alarm (seven-type batch task C5;
+ * cluster-aware dispatch added composed appliance round task 3) ----------- */
 
 /*
- * AT+MTALARM: set field <field> (1..11) of ep's SmokeCoAlarm cluster through
- * one of the cluster's own eleven event-emitting Set* methods
- * (SmokeCoAlarmServer::Instance(), design spec F4), never a raw AT+MTATTR
- * write: the setters fire the cluster's spec-mandated events (SmokeAlarm,
- * COAlarm, MuteEnded, HardwareFault, EndOfService, AllClear, LowBattery,
- * SelfTestComplete) and the critical-alarm auto-unmute, both of which a raw
- * write to the same ember-managed attribute storage would silently skip.
+ * AT+MTALARM: set field <field> of ep's alarm cluster, dispatched by which
+ * cluster <ep> actually carries (this bridge is the sole place that checks
+ * that; mt_at.c stays free of any esp_matter/CHIP header). mt_at.c's
+ * cmd_mtalarm only checks the UNION bound, field <= 11, before this is ever
+ * called: SmokeCoAlarm's own legal range is 1..11 (field 0, ExpressedState,
+ * is derived and never settable, rejected here rather than in the handler,
+ * since field 0 is a legal DoorOpen bit for the other cluster); RefrigeratorAlarm's
+ * own legal range is 0..7 (an alarm bit number).
  *
- * mt_at.c's cmd_mtalarm has already rejected field outside 1..11 with
- * +MTERR:1 before this is ever called (field 0, ExpressedState, is derived
- * by the server from the other ten and is never settable directly, so it is
- * not in that range at all). This bridge maps field to the matching setter
- * and range-checks <value> against THAT field's own SDK enum bound (each
- * setter takes a differently-typed enum, so mt_at.c, plain C with no SDK
- * access, cannot do this itself); the two boolean fields (TestInProgress,
- * HardwareFaultAlert) are checked against 0/1 instead. An out-of-range value
- * returns MT_ATTR_ERR_VALUE (+MTERR:1, the C1b/B139 precedent); a setter
- * returning false (the field already held that value, or the underlying
- * ember write failed) maps to MT_ATTR_ERR_FAILED, a bare ERROR.
- *
- * Field 5 (TestInProgress) value 0 is the self-test completion path: the
- * SDK's own SetTestInProgress() recognises the true->false edge and fires
+ * SmokeCoAlarm branch (unchanged behaviour from before this task, field 0's
+ * rejection aside): sets one of the cluster's eleven event-emitting Set*
+ * methods (SmokeCoAlarmServer::Instance(), design spec F4), never a raw
+ * AT+MTATTR write: the setters fire the cluster's spec-mandated events
+ * (SmokeAlarm, COAlarm, MuteEnded, HardwareFault, EndOfService, AllClear,
+ * LowBattery, SelfTestComplete) and the critical-alarm auto-unmute, both of
+ * which a raw write to the same ember-managed attribute storage would
+ * silently skip. This bridge maps field to the matching setter and
+ * range-checks <value> against THAT field's own SDK enum bound (each setter
+ * takes a differently-typed enum, so mt_at.c, plain C with no SDK access,
+ * cannot do this itself); the two boolean fields (TestInProgress,
+ * HardwareFaultAlert) are checked against 0/1 instead. Field 5
+ * (TestInProgress) value 0 is the self-test completion path: the SDK's own
+ * SetTestInProgress() recognises the true->false edge and fires
  * SelfTestComplete, the far end of the notify-only +MTCMD:0,... a
  * controller's SelfTestRequest raises (mt_cmd_notify(), C1; see
  * emberAfPluginSmokeCoAlarmSelfTestRequestCommand() in main.cpp).
  *
+ * RefrigeratorAlarm branch (composed appliance round, task 3): <field> is
+ * the alarm BIT number (0 DoorOpen, the only bit the Matter spec defines in
+ * any revision through 1.5.1), <value> is 0/1. Checked against the
+ * endpoint's own Supported bitmap (RefrigeratorAlarmServer::
+ * Instance().GetSupportedValue()) before being written through SetStateValue,
+ * which writes the State attribute AND emits the cluster's Notify event
+ * itself (refrigerator-alarm-server.cpp:115-149) - the same "one call, both
+ * effects" reason AT+MTATTR is not used here either.
+ *
+ * An out-of-range <value> or an unsupported bit returns MT_ATTR_ERR_VALUE
+ * (+MTERR:1, the C1b/B139 precedent); a setter returning false (the field
+ * already held that value, or the underlying ember write failed) maps to
+ * MT_ATTR_ERR_FAILED, a bare ERROR.
+ *
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
- * MT_ATTR_ERR_CLUSTER when ep has no SmokeCoAlarm cluster, MT_ATTR_ERR_VALUE
- * for a <value> outside the field's own range, MT_ATTR_ERR_FAILED when the
- * setter itself reports failure.
+ * MT_ATTR_ERR_CLUSTER when ep has neither alarm cluster, MT_ATTR_ERR_VALUE
+ * for a <field>/<value> outside the matched cluster's own range,
+ * MT_ATTR_ERR_FAILED when the setter itself reports failure.
  */
 int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value);
 
