@@ -1224,6 +1224,63 @@ static bool mt_cabinet_add_heater(endpoint_t *ep)
     return true;
 }
 
+/*
+ * Composed appliance round, task 5: Cook Surface (0x0077).
+ * cook_surface::config_t (esp_matter_endpoint.h:832-841) carries a descriptor
+ * and a temperature_control config, so the variant scheme is the cabinet's
+ * exactly (mk_temperature_controlled_cabinet() above, same B119 trap): exactly
+ * one of TemperatureNumber/TemperatureLevel (VALIDATE_FEATURES_EXACT_ONE,
+ * esp_matter_cluster.cpp:2849), and TemperatureNumber must bring
+ * TemperatureStep along or the host library's Step write answers +MTERR:4.
+ * Variant 0 = number + step, 1 = level, matching the cabinet row.
+ *
+ * OnOff rides on top with the OffOnly feature: a controller may switch a
+ * surface off, never on (CookSurface.xml 1.5.1: OffOnly mandatoryConform
+ * inside the optional OnOff cluster requirement).
+ *
+ * 8.6 check, run against the pinned tree before writing this: CLEAN, no
+ * hand-fix needed. cluster::on_off::create() (esp_matter_cluster.cpp:
+ * 1233-1260) adds ONLY command::create_off(); On and Toggle are added per
+ * device type by esp_matter_endpoint.cpp (on_off_light's add() at :237-238
+ * and its siblings), never by the cluster create, so a direct cluster-level
+ * create yields an AcceptedCommandList of exactly {Off}, which is precisely
+ * the OffOnly command set. feature::off_only::add() (esp_matter_feature.cpp:
+ * 508-523) sets the feature-map bit and nothing else.
+ *
+ * v1.5.1's on_off::create() takes no feature parameter (endpoint_t*,
+ * config_t*, uint8_t flags; esp_matter_cluster.h:334) and its config_t has
+ * no feature_flags field either (just bool on_off, :326-332), so the feature
+ * is added after create(), the same after-create() shape every other
+ * hand-add in this file uses.
+ */
+static endpoint_t *mk_cook_surface(node_t *n, uint8_t variant)
+{
+    cook_surface::config_t c;
+    if (variant == 1) {
+        c.temperature_control.feature_flags =
+            cluster::temperature_control::feature::temperature_level::get_id();
+    } else {
+        c.temperature_control.feature_flags =
+            cluster::temperature_control::feature::temperature_number::get_id() |
+            cluster::temperature_control::feature::temperature_step::get_id();
+    }
+    endpoint_t *ep = cook_surface::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    /* OnOff, OffOnly feature: a controller may switch a surface off, never
+     * on (CookSurface.xml: OffOnly mandatoryConform inside optional OnOff) */
+    cluster::on_off::config_t oc;
+    cluster_t *oncl = cluster::on_off::create(ep, &oc, CLUSTER_FLAG_SERVER);
+    if (oncl == nullptr) {
+        return nullptr;
+    }
+    if (cluster::on_off::feature::off_only::add(oncl) != ESP_OK) {
+        return nullptr;
+    }
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -1270,6 +1327,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { microwave_oven::get_device_type_id(),           mk_microwave_oven,          "microwave_oven",          0 },
     { refrigerator::get_device_type_id(),             mk_refrigerator,            "refrigerator",            0 },
     { oven::get_device_type_id(),                     mk_oven,                    "oven",                    0 },
+    { cook_surface::get_device_type_id(),             mk_cook_surface,            "cook_surface",            1 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);
@@ -1299,19 +1357,21 @@ extern "C" bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant)
 }
 
 /*
- * Append-time parenting policy (design spec 2.3). Tasks 3 to 5 extend this
- * table with the refrigerator, oven, and cook-surface rows; task 4 adds the
- * oven row and swaps its arm off the temporary macro onto the namespace
- * accessor, so both arms now read their id the way this file requires
- * everywhere else.
- *
- * cook_surface is not referenced at all yet: it is not in s_devtypes, so
- * mt_devtype_is_known() rejects it before this function would ever see it,
- * and its arm lands with its row in Task 5.
+ * Append-time parenting policy (design spec 2.3). Tasks 3 to 5 grew this
+ * function arm by arm alongside the rows each task added, and every id is
+ * now read through its namespace accessor, the way this file requires
+ * everywhere else (the interim ESP_MATTER_*_DEVICE_TYPE_ID macros task 2
+ * started with are all retired).
  */
 extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
 {
     (void)variant;
+    if (devtype_id == cook_surface::get_device_type_id()) {
+        /* a cook surface is only meaningful under a cooktop, and MUST be
+         * parented (spec 2.3): parent_devtype 0 (the unparented form) is
+         * rejected here too, since no device type id is 0 */
+        return parent_devtype == cooktop::get_device_type_id();
+    }
     if (devtype_id == temperature_controlled_cabinet::get_device_type_id() &&
         parent_devtype != 0) {
         /* unparented cabinets stay legal (the standalone rows); a parented
