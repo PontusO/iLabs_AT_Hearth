@@ -2350,6 +2350,28 @@ class TestStep212(unittest.TestCase):
         failed_names = [n for n, ok, _ in ctx.suite.results if not ok]
         self.assertIn("cleanup composition restored", failed_names)
 
+    def test_five_field_parent_lines_restage_verbatim(self):
+        # Composed appliance round, task 6: the capture regex
+        # (\+MTEP:\d+,\d+,(\S+)) takes EVERYTHING after the endpoint id,
+        # so a five-field parented line's devtype, variant and parent
+        # index all ride the capture and restage verbatim through
+        # stage_composition's AT+MTEP=%s passthrough: parenting needed
+        # no helper change, and this pins that fact against a future
+        # "tidy-up" that narrows the capture to the devtype alone.
+        composition = ["+MTEP:0,1,0x0070", "+MTEP:1,2,0x0071,0,0"]
+        commands = self._commands(ep_readback=list(composition))
+        commands["AT+MTEP=0x0070"] = (0, [])
+        commands["AT+MTEP=0x0071,0,0"] = (0, [])
+        runner = FakeChipRunner([(1, "CHIP:TOO: Run command failure")])
+        ctx, _, _ = self._ctx(runner, commands=commands)
+        ctx.composition = list(composition)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_12_rig_restore(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertIn("AT+MTEP=0x0070", ctx.link.sent)
+        self.assertIn("AT+MTEP=0x0071,0,0", ctx.link.sent)
+
 
 from mt_regression import step_2_6_root_urc_sweep
 
@@ -2800,8 +2822,11 @@ from mt_regression import (
     step_3_9_opstate, step_3_10_smoke, step_3_11_power,
     step_3_12_lock_switch_levels, step_3_13_restore,
     step_3_14_root_urc_sweep, step_3_15_rvc, step_3_16_microwave,
+    step_3_17_composed_fridge, step_3_18_oven_cavity,
+    step_3_19_cook_surface, mtep_staging_negative,
     invoke_chip, parse_indexed_list, parse_mode_tag_values,
-    parse_change_to_mode_status, CmdResponder,
+    parse_change_to_mode_status, parse_parts_list, parse_notify_active,
+    CmdResponder,
 )
 
 
@@ -2842,11 +2867,16 @@ class TestPhase3Composition(unittest.TestCase):
     AT_MT_SPEC.md's device table in the task-4 report; this test pins the
     shape (slot order, count, the one deliberate duplicate id) rather
     than the ids themselves, which a doc diff cannot catch. Slots 12-13
-    (RVC + Microwave batch harness task) extend the same pin."""
+    (RVC + Microwave batch harness task) and 14-20 (composed appliance
+    round, task 6) extend the same pin."""
 
-    def test_thirteen_slots_sequential(self):
+    def test_twenty_slots_sequential(self):
+        # The composition-size gate: the composed trio grew the table to
+        # 20, within both MT_COMP_MAX_ENDPOINTS (24) and
+        # CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT (24, the setting
+        # CLAUDE.md warns silently refuses endpoints past its limit).
         slots = [slot for slot, _ in PHASE3_COMPOSITION]
-        self.assertEqual(slots, list(range(1, 14)))
+        self.assertEqual(slots, list(range(1, 21)))
 
     def test_slot_ten_and_eleven_are_the_two_cabinet_variants(self):
         # Slot 11 is not in the T5 design spec's 10-row table; it exists
@@ -2864,6 +2894,43 @@ class TestPhase3Composition(unittest.TestCase):
         by_slot = dict(PHASE3_COMPOSITION)
         self.assertEqual(by_slot[12], "0x0074")
         self.assertEqual(by_slot[13], "0x0079")
+
+    def test_composed_trio_slots_and_parent_indexes(self):
+        # Composed appliance round, task 6: the trio's entries carry
+        # parent STAGING INDEXES (index = endpoint id - 1 in this table),
+        # transcribed from the task brief; a wrong index here would
+        # compose a cabinet under the wrong appliance and invalidate
+        # every 3.17-3.19 assertion.
+        by_slot = dict(PHASE3_COMPOSITION)
+        self.assertEqual(by_slot[14], "0x0070")
+        self.assertEqual(by_slot[15], "0x0071,0,13")
+        self.assertEqual(by_slot[16], "0x0071,1,13")
+        self.assertEqual(by_slot[17], "0x007B")
+        self.assertEqual(by_slot[18], "0x0071,0,16")
+        self.assertEqual(by_slot[19], "0x0078")
+        self.assertEqual(by_slot[20], "0x0077,0,18")
+
+    def test_modebase_pool_budget_holds(self):
+        # MT_MB_MAX_LISTS is 8 and this composition must consume exactly
+        # 7 ModeBase delegate slots (RVC 2, microwave 1, fridge parent 1,
+        # two parented cabinets 2, oven cavity 1): a table edit that adds
+        # an eighth-plus consumer without raising the firmware pool would
+        # abort the boot rebuild on the bench. Consumers by construction:
+        # 0x0074 counts twice (RvcRunMode + RvcCleanMode), 0x0079 and
+        # 0x0070 once each, and every PARENTED 0x0071 cabinet once
+        # (Cooler or Heater conditional cluster); standalone cabinets
+        # carry no ModeBase cluster.
+        consumed = 0
+        for _slot, dt in PHASE3_COMPOSITION:
+            parts = dt.split(",")
+            base, parented = parts[0], len(parts) == 3
+            if base == "0x0074":
+                consumed += 2
+            elif base in ("0x0079", "0x0070"):
+                consumed += 1
+            elif base == "0x0071" and parented:
+                consumed += 1
+        self.assertEqual(consumed, 7)
 
     def test_no_accidental_duplicate_devtype(self):
         devtypes = [dt for _slot, dt in PHASE3_COMPOSITION]
@@ -2958,6 +3025,7 @@ def phase3_grammar_commands():
         "AT+MTOPSTATE=99,1": (2, []),
         "AT+MTOPSTATE=1,1": (3, []),
         "AT+MTOPSTATE=7,1": (0, []),
+        "AT+MTALARM=5,0,0": (1, []),
         "AT+MTALARM=5,1,3": (1, []),
         "AT+MTALARM=5,4,2": (1, []),
         "AT+MTALARM=5,5,2": (1, []),
@@ -2986,16 +3054,17 @@ def phase3_grammar_commands():
 
 class TestStep32Grammar(unittest.TestCase):
     """T5 task 4: 40 of Task 1's 41 deferred rows (the 41st needs a real
-    forward, Task 5's job); see the step's own docstring."""
+    forward, Task 5's job), plus the composed appliance round's
+    =<alarm ep>,0,0 migration row; see the step's own docstring."""
 
-    def test_forty_rows_all_pass(self):
+    def test_forty_one_rows_all_pass(self):
         link = FakeLink(phase3_grammar_commands())
         ctx = fresh_phase3_ctx(link)
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_2_grammar(ctx)
         self.assertEqual(ctx.suite.failed, 0,
                          msg=[n for n, ok, _ in ctx.suite.results if not ok])
-        self.assertEqual(len(ctx.suite.results), 40)
+        self.assertEqual(len(ctx.suite.results), 41)
 
     def test_a_wrong_code_fails_only_that_row(self):
         cmds = phase3_grammar_commands()
@@ -3174,7 +3243,7 @@ class TestRunPhase3(unittest.TestCase):
         # recover_after_abort's own AT+MTRESET)
         self.assertIn("AT+MTFRESET", link.sent)
 
-    def test_registered_steps_are_the_full_1_through_16_chain_plus_sweep(self):
+    def test_registered_steps_are_the_full_1_through_19_chain_plus_sweep(self):
         names = [s["name"] for s in PHASE3_STEPS]
         self.assertEqual(names, [
             "3.1 compose + boot-rebuild pin",
@@ -3191,6 +3260,9 @@ class TestRunPhase3(unittest.TestCase):
             "3.12 lock, switch, temp levels",
             "3.15 robotic vacuum cleaner",
             "3.16 microwave oven",
+            "3.17 composed refrigerator",
+            "3.18 oven cavity",
+            "3.19 cook surface",
             "3.14 root-endpoint URC sweep",
         ])
 
@@ -4004,6 +4076,316 @@ class TestStep316Microwave(unittest.TestCase):
         self.assertGreater(ctx.suite.failed, 0)
 
 
+def phase3_full_ep_readback():
+    """The complete AT+MTEP? readback for PHASE3_COMPOSITION, the same
+    expected-lines construction step_3_1_compose asserts against: a
+    parented entry string ("0x0071,0,13") renders as the wire's own
+    five-field line verbatim."""
+    return ["+MTEP:%d,%d,%s" % (i, slot, dt)
+            for i, (slot, dt) in enumerate(PHASE3_COMPOSITION)]
+
+
+class TestStep317ComposedFridge(unittest.TestCase):
+    """Composed appliance round, task 6: the composed refrigerator's
+    five-field +MTEP? lines, PartsList/ServerList reads, the Cooler
+    conditional cluster present-on-15/absent-on-11 pair, cluster-aware
+    AT+MTMODES on 0x52, ChangeToMode allow/deny (B196 different-mode
+    rule), and the AT+MTALARM fridge rows with the Notify event."""
+
+    PARTS14 = "\n".join([
+        "[TOO]   PartsList: 2 entries",
+        "[TOO]     [1]: 15",
+        "[TOO]     [2]: 16",
+    ])
+    SERVER15 = "\n".join([
+        "[TOO]   ServerList: 4 entries",
+        "[TOO]     [1]: 3 (Identify)",
+        "[TOO]     [2]: 29 (Descriptor)",
+        "[TOO]     [3]: 82 (RefrigeratorAndTemperatureControlledCabinetMode)",
+        "[TOO]     [4]: 86 (TemperatureControl)",
+    ])
+    SERVER11 = "\n".join([
+        "[TOO]   ServerList: 3 entries",
+        "[TOO]     [1]: 3 (Identify)",
+        "[TOO]     [2]: 29 (Descriptor)",
+        "[TOO]     [3]: 86 (TemperatureControl)",
+    ])
+    MODES15 = "\n".join([
+        "[TOO]   SupportedModes: 2 entries",
+        "[TOO]     [1]: {",
+        "[TOO]       Label: Auto",
+        "[TOO]       Mode: 0",
+        "[TOO]       ModeTags: 1 entries",
+        "[TOO]         [1]: {",
+        "[TOO]           Value: 0",
+        "[TOO]          }",
+        "[TOO]      }",
+        "[TOO]     [2]: {",
+        "[TOO]       Label: Rapid",
+        "[TOO]       Mode: 1",
+        "[TOO]       ModeTags: 1 entries",
+        "[TOO]         [1]: {",
+        "[TOO]           Value: 0",
+        "[TOO]          }",
+        "[TOO]      }",
+    ])
+    NOTIFY14 = "\n".join([
+        "[TOO] Endpoint: 14 Cluster: 0x0000_0057 Event 0x0000_0000",
+        "[TOO]   Notify: {",
+        "[TOO]     Active: 1",
+        "[TOO]     Inactive: 0",
+        "[TOO]     State: 1",
+        "[TOO]     Mask: 1",
+        "[TOO]    }",
+    ])
+
+    def _ctx(self, server11=None, notify=None, ctm_modes=None):
+        # ctm_modes: same argv-inspection seam TestStep315Rvc uses to pin
+        # the B196 different-mode rule against what the step actually
+        # sent, not just against scripted replies (FakeChipRunner has no
+        # CurrentMode model, so only the argv can betray a regression).
+        ctm_modes = [] if ctm_modes is None else ctm_modes
+        link = FakeLink({
+            "AT+MTEP?": (0, phase3_full_ep_readback()),
+            'AT+MTMODES=15,0x52,0,0,"Auto"': (0, []),
+            'AT+MTMODES=15,0x52,0,0,"Auto",1,0,"Rapid"': (0, []),
+            "AT+MTCMDRESP=1,1": (0, []),
+            "AT+MTCMDRESP=2,0": (0, []),
+            "AT+MTALARM=14,0,1": (0, []),
+            "AT+MTALARM=14,1,1": (1, []),
+            "AT+MTALARM=14,0,2": (1, []),
+            "AT+MTALARM=14,0,0": (0, []),
+        })
+        script = [
+            (0, self.PARTS14),
+            (0, self.SERVER15),
+            (0, server11 if server11 is not None else self.SERVER11),
+            (0, self.MODES15),
+            (0, fixture(os.path.join(
+                "rvc-microwave", "changetomode-response-allow-synthetic.txt"))),
+            (0, fixture(os.path.join(
+                "rvc-microwave", "changetomode-response-deny-synthetic.txt"))),
+            (0, "[TOO]   CurrentMode: 1"),
+            (0, "[TOO]   State: 1"),
+            (0, notify if notify is not None else self.NOTIFY14),
+        ]
+
+        def on_call(argv):
+            if ("refrigeratorandtemperaturecontrolledcabinetmode" in argv
+                    and "change-to-mode" in argv):
+                mode = argv[argv.index("change-to-mode") + 1]
+                ctm_modes.append(mode)
+                seq = len(ctm_modes)
+                link.push_urcs(["+MTCMD:%d,15,82,0,%s" % (seq, mode)])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_17_composed_fridge(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_standalone_cabinet_carrying_cooler_cluster_fails(self):
+        # The parent-conditional derivation pin: if the standalone
+        # cabinet ever grew cluster 82, the absence check must fail.
+        ctx = self._ctx(server11=self.SERVER15)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_17_composed_fridge(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_missing_notify_event_fails(self):
+        ctx = self._ctx(notify="[TOO] No events")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_17_composed_fridge(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_allow_then_deny_uses_a_different_mode(self):
+        # B196 (mode-base-server.cpp:401-410): a deny that repeats the
+        # allow's mode never reaches the delegate at all, so the pair
+        # must differ. Same argv-inspection reasoning as TestStep315Rvc's
+        # sibling test: scripted replies alone cannot catch a regression
+        # back to a same-mode pair.
+        modes = []
+        ctx = self._ctx(ctm_modes=modes)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_17_composed_fridge(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertEqual(modes, ["1", "0"])
+
+
+class TestStep318OvenCavity(unittest.TestCase):
+    """Composed appliance round, task 6: the oven cavity's conditional
+    cluster pair, OvenMode staging/read-back and ChangeToMode both ways,
+    the hand-rolled OvenCavityOperationalState Stop/Start entries
+    adjudicated both ways, the disallowConform Pause probe (0x81, no
+    forward), and the AT+MTOPSTATE membership rows."""
+
+    def _ctx(self, pause_reply=None, pause_leaks_forward=False):
+        link = FakeLink({
+            'AT+MTMODES=18,0x49,0,0,"Bake",1,16386,"Grill"': (0, []),
+            'AT+MTMODES=18,0x52,0,0,"Auto"': (3, []),
+            "AT+MTCMDRESP=1,1": (0, []),
+            "AT+MTCMDRESP=2,0": (0, []),
+            "AT+MTCMDRESP=3,1": (0, []),
+            "AT+MTCMDRESP=4,0": (0, []),
+            "AT+MTCMDRESP=5,1": (0, []),
+            "AT+MTCMDRESP=6,0": (0, []),
+            "AT+MTOPSTATE=18,0": (0, []),
+            "AT+MTOPSTATE=18,1": (0, []),
+            "AT+MTOPSTATE=18,0x40": (1, []),
+        })
+        script = [
+            (0, "[TOO]   PartsList: 1 entries\n[TOO]     [1]: 18"),
+            (0, "\n".join([
+                "[TOO]   ServerList: 4 entries",
+                "[TOO]     [1]: 29 (Descriptor)",
+                "[TOO]     [2]: 72 (OvenCavityOperationalState)",
+                "[TOO]     [3]: 73 (OvenMode)",
+                "[TOO]     [4]: 86 (TemperatureControl)",
+            ])),
+            (0, "\n".join([
+                "[TOO]   SupportedModes: 2 entries",
+                "[TOO]     [1]: {",
+                "[TOO]       Label: Bake",
+                "[TOO]       Mode: 0",
+                "[TOO]       ModeTags: 1 entries",
+                "[TOO]         [1]: {",
+                "[TOO]           Value: 16384",
+                "[TOO]          }",
+                "[TOO]      }",
+                "[TOO]     [2]: {",
+                "[TOO]       Label: Grill",
+                "[TOO]       Mode: 1",
+                "[TOO]       ModeTags: 1 entries",
+                "[TOO]         [1]: {",
+                "[TOO]           Value: 16386",
+                "[TOO]          }",
+                "[TOO]      }",
+            ])),
+            (0, fixture(os.path.join(
+                "rvc-microwave", "changetomode-response-allow-synthetic.txt"))),
+            (0, fixture(os.path.join(
+                "rvc-microwave", "changetomode-response-deny-synthetic.txt"))),
+            (0, "[TOO]   CurrentMode: 1"),
+            (0, "[TOO]       ErrorStateID: 0"),   # start allow
+            (0, "[TOO]       ErrorStateID: 2"),   # stop deny
+            (0, "[TOO]   OperationalState: 1"),   # unchanged by the deny
+            (0, "[TOO]       ErrorStateID: 0"),   # stop allow
+            (0, "[TOO]       ErrorStateID: 2"),   # start deny
+            pause_reply if pause_reply is not None else
+            (1, "[TOO]     status = 0x81 (UNSUPPORTED_COMMAND),\n"
+                "[TOO] Run command failure"),
+            (0, "[TOO]   OperationalState: 1"),   # membership row read-back
+        ]
+        counts = {"start": 0, "stop": 0, "ctm": 0}
+
+        def on_call(argv):
+            if "ovenmode" in argv and "change-to-mode" in argv:
+                mode = argv[argv.index("change-to-mode") + 1]
+                counts["ctm"] += 1
+                link.push_urcs(["+MTCMD:%d,18,73,0,%s"
+                                % (counts["ctm"], mode)])
+                return
+            if "ovencavityoperationalstate" not in argv or "read" in argv:
+                return
+            if "command-by-id" in argv:
+                if pause_leaks_forward:
+                    # Regression shape: a Pause entry sneaking into the
+                    # hand-rolled shell would dispatch and forward;
+                    # assert_no_urc must catch it.
+                    link.push_urcs(["+MTCMD:9,18,72,0"])
+                return
+            if "start" in argv:
+                counts["start"] += 1
+                seq = 3 if counts["start"] == 1 else 6
+                link.push_urcs(["+MTCMD:%d,18,72,2" % seq])
+            elif "stop" in argv:
+                counts["stop"] += 1
+                seq = 4 if counts["stop"] == 1 else 5
+                link.push_urcs(["+MTCMD:%d,18,72,1" % seq])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_18_oven_cavity(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_pause_answering_success_fails(self):
+        # The wire-only observability net (the 8.6 disease): if a Pause
+        # entry ever appeared in the shell's AcceptedCommandList, the
+        # invoke would stop answering 0x81; both pause checks must fail.
+        ctx = self._ctx(pause_reply=(0,
+                        "[TOO]     status = 0x00 (SUCCESS),"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_18_oven_cavity(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_pause_leaking_a_forward_fails(self):
+        ctx = self._ctx(pause_leaks_forward=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_18_oven_cavity(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep319CookSurface(unittest.TestCase):
+    """Composed appliance round, task 6: the cook surface's PartsList,
+    the OnOff OffOnly pair (off accepted with the AT-side read, on
+    rejected 0x81), and the temperature setpoint host-write/controller-
+    read round trip. No CmdResponder anywhere: nothing on this endpoint
+    forwards."""
+
+    def _ctx(self, on_reply=None):
+        link = FakeLink({
+            "AT+MTATTR=20,6,0": [(0, ["+MTATTR:20,6,0,0"]),
+                                 (0, ["+MTATTR:20,6,0,0"])],
+            "AT+MTATTR=20,86,0,2500": (0, ["+MTATTR:20,86,0,2500"]),
+        })
+        script = [
+            (0, "[TOO]   PartsList: 1 entries\n[TOO]     [1]: 20"),
+            (0, "[TOO]     status = 0x00 (SUCCESS),"),
+            on_reply if on_reply is not None else
+            (1, "[TOO]     status = 0x81 (UNSUPPORTED_COMMAND),\n"
+                "[TOO] Run command failure"),
+            (0, "[TOO]   TemperatureSetpoint: 2500"),
+        ]
+        runner = FakeChipRunner(script)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_phase3_ctx(link, chip=chip)
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_19_cook_surface(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_on_accepted_fails(self):
+        # OffOnly pin: if On ever stopped answering 0x81 (say a device
+        # type edit swapped the cluster create for the light's), both
+        # rejection checks must fail, not silently pass.
+        ctx = self._ctx(on_reply=(0, "[TOO]     status = 0x00 (SUCCESS),"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_19_cook_surface(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
 class TestStep313Restore(unittest.TestCase):
     """T5 task 5: step_3_13_restore is the named wrapper the brief and
     Task 4's report anticipated, delegating to the one shared restore
@@ -4088,6 +4470,131 @@ class TestParseIndexedList(unittest.TestCase):
         self.assertNotEqual(parse_indexed_list(raw), ["Low", "Medium, high"])
         self.assertEqual(parse_indexed_list(_strip_ansi(raw)),
                          ["Low", "Medium, high"])
+
+
+class TestComposedTrioParsers(unittest.TestCase):
+    """Composed appliance round, task 6: the two parsers added for the
+    trio's reads, both INFERENCE (derived from DataModelLogger source,
+    see their docstrings) until Tasks 11/12 confirm them on the wire.
+    Synthetic texts below carry the full real-output line prefix
+    ([ts] [pid:tid] [TOO]) on at least one case each, so the regexes are
+    proven immune to the bracketed prefixes a live capture carries."""
+
+    def test_parse_parts_list_reads_plain_int_entries(self):
+        text = "\n".join([
+            "[1786300000.100] [200000:200001] [TOO]   PartsList: 2 entries",
+            "[1786300000.100] [200000:200001] [TOO]     [1]: 15",
+            "[1786300000.100] [200000:200001] [TOO]     [2]: 16",
+        ])
+        self.assertEqual(parse_parts_list(text), [15, 16])
+
+    def test_parse_parts_list_ignores_struct_and_named_entries(self):
+        # A struct-open entry ("[1]: {", the SupportedModes shape) and a
+        # named entry ("[1]: 3 (Identify)", the ServerList shape) are NOT
+        # plain-int entries and must not match: ServerList reads go
+        # through parse_accepted_command_list instead.
+        text = "\n".join([
+            "[TOO]     [1]: {",
+            "[TOO]     [1]: 3 (Identify)",
+        ])
+        self.assertEqual(parse_parts_list(text), [])
+
+    def test_parse_parts_list_no_match_is_empty(self):
+        self.assertEqual(parse_parts_list("no such content"), [])
+
+    def test_server_list_shape_parses_via_accepted_command_list(self):
+        # The reuse pin: ServerList prints through LogClusterId
+        # ("<id> (<Name>)"), the exact shape parse_accepted_command_list
+        # was built for, so the steps reuse it rather than growing a
+        # third indexed-list parser.
+        text = "\n".join([
+            "[1786300001.200] [200000:200001] [TOO]   ServerList: 2 entries",
+            "[1786300001.200] [200000:200001] [TOO]     [1]: 29 (Descriptor)",
+            "[1786300001.200] [200000:200001] [TOO]     [2]: 82 "
+            "(RefrigeratorAndTemperatureControlledCabinetMode)",
+        ])
+        self.assertEqual(parse_accepted_command_list(text), [29, 82])
+
+    def test_parse_notify_active_skips_inactive(self):
+        text = "\n".join([
+            "[1786300002.300] [200000:200001] [TOO]   Notify: {",
+            "[1786300002.300] [200000:200001] [TOO]     Active: 1",
+            "[1786300002.300] [200000:200001] [TOO]     Inactive: 0",
+            "[1786300002.300] [200000:200001] [TOO]     State: 1",
+            "[1786300002.300] [200000:200001] [TOO]     Mask: 1",
+            "[1786300002.300] [200000:200001] [TOO]    }",
+        ])
+        self.assertEqual(parse_notify_active(text), [1])
+
+    def test_parse_notify_active_orders_multiple_events(self):
+        text = ("[TOO]   Notify: {\n[TOO]     Active: 1\n"
+                "[TOO]     Inactive: 0\n[TOO]    }\n"
+                "[TOO]   Notify: {\n[TOO]     Active: 0\n"
+                "[TOO]     Inactive: 1\n[TOO]    }\n")
+        self.assertEqual(parse_notify_active(text), [1, 0])
+
+    def test_parse_notify_active_no_match_is_empty(self):
+        self.assertEqual(parse_notify_active("no such content"), [])
+
+
+class TestPhase1T7Negative(unittest.TestCase):
+    """Composed appliance round, task 6: the Phase 1 registration for
+    the AT+MTEP parenting negatives and the AT+MTALARM field-0
+    migration. The staging-sequence helper is exercised against a real
+    ATLink over FakeTransport (expect_write scripting), so the +MTERR
+    parsing and the trailing-clear behaviour are the engine's own, not a
+    FakeLink shortcut."""
+
+    def _link(self):
+        ft = FakeTransport()
+        return ATLink(ft, default_timeout=0.2), ft
+
+    def test_wrong_parent_type_row_happy_path(self):
+        link, ft = self._link()
+        ft.expect_write(b"AT+MTEPCLEAR\r\n", ["OK"])
+        ft.expect_write(b"AT+MTEP=0x0100\r\n", ["OK"])
+        ft.expect_write(b"AT+MTEP=0x0071,0,0\r\n", ["+MTERR:1", "ERROR"])
+        ft.expect_write(b"AT+MTEPCLEAR\r\n", ["OK"])
+        fn = mtep_staging_negative(["AT+MTEPCLEAR", "AT+MTEP=0x0100"],
+                                   "AT+MTEP=0x0071,0,0")
+        self.assertTrue(fn(link))
+        # The trailing clear ran, so no staged entry leaks onward.
+        self.assertEqual(ft.writes[-1], b"AT+MTEPCLEAR\r\n")
+
+    def test_wrong_error_code_fails_the_row(self):
+        link, ft = self._link()
+        ft.expect_write(b"AT+MTEPCLEAR\r\n", ["OK"])
+        ft.expect_write(b"AT+MTEP=0x0077\r\n", ["+MTERR:6", "ERROR"])
+        ft.expect_write(b"AT+MTEPCLEAR\r\n", ["OK"])
+        fn = mtep_staging_negative(["AT+MTEPCLEAR"], "AT+MTEP=0x0077")
+        self.assertFalse(fn(link))
+
+    def test_failed_setup_is_reported_not_masked(self):
+        # A prelude command failing (session never opened) must fail the
+        # row rather than run the negative against unknown state.
+        link, ft = self._link()
+        ft.expect_write(b"AT+MTEPCLEAR\r\n", ["ERROR"])
+        fn = mtep_staging_negative(["AT+MTEPCLEAR"], "AT+MTEP=0x0077")
+        self.assertFalse(fn(link))
+        self.assertNotIn(b"AT+MTEP=0x0077\r\n", ft.writes)
+
+    def test_t7_rows_registered_and_t5_row_migrated(self):
+        phase1 = [n for p, n, _, _, _ in TESTS if p == 1]
+        for prefix in (
+                "MTEPCLEAR then MTEP=0x0100,0,0 -> +MTERR:1",
+                "MTEP=0x0100,0,zz -> +MTERR:1",
+                "MTEP=0x0071,0,0 under a light -> +MTERR:1",
+                "MTEP=0x0077 unparented -> +MTERR:1",
+                "MTEP=0x0077,0,0 under a light -> +MTERR:1",
+                "MTALARM=1,0,0 -> +MTERR:3",
+        ):
+            self.assertTrue(any(n.startswith(prefix) for n in phase1),
+                            msg="missing t7 row: %s" % prefix)
+        # The pre-migration t5 row is gone: field 0 is a legal
+        # RefrigeratorAlarm bit now, so its +MTERR:1 expectation would
+        # fail on current firmware.
+        self.assertFalse(any(n.startswith("MTALARM=1,0,0 -> +MTERR:1")
+                             for n in phase1))
 
 
 class TestMainPhase3Wiring(unittest.TestCase):

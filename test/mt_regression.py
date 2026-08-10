@@ -10,7 +10,8 @@ Phase 1 run: python3 test/mt_regression.py --port /dev/ttyACM0
 Phase 2 run: MT_SSID=... MT_PSK=... python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 2
 Phase 3 run (host-only segment plus the full controller matrix, including
-the RVC + Microwave batch's slots 12-13): python3 test/mt_regression.py \
+the RVC + Microwave batch's slots 12-13 and the composed appliance
+round's slots 14-20): python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 3
 (-k "3." scopes to Phase 3's own steps, since -k matches a literal
 substring, not a regex, and every step name starts with its own "3.N ")
@@ -412,6 +413,29 @@ PHASE3_COMPOSITION = [
                          # MicrowaveOvenControl, base OperationalState),
                          # RVC + Microwave batch, endpoint 13 to match
                          # AT_MT_SPEC.md 3.20.1's own worked example
+    # Composed appliance round (0.7.0), task 6: the composed trio. The
+    # third field in an entry string is the PARENT STAGING INDEX per spec
+    # 3.9's AT+MTEP=<devtype>[,<variant>[,<parent_idx>]] grammar, and
+    # endpoint ids are assigned sequentially from 1, so index = endpoint
+    # id - 1 throughout this table (index 13 = ep 14, and so on).
+    #
+    # ModeBase delegate pool budget (MT_MB_MAX_LISTS = 8, main.cpp): this
+    # composition consumes 7 slots: RVC 2 (RvcRunMode + RvcCleanMode, slot
+    # 12), microwave 1 (slot 13), fridge parent 1 (slot 14, its own
+    # RefrigeratorAndTCCMode), the two fridge cabinets 2 (slots 15-16,
+    # Cooler conditional cluster each), oven cavity 1 (slot 18, OvenMode).
+    # ONE slot remains: do not add another ModeBase-carrying slot here
+    # without raising MT_MB_MAX_LISTS first, or the boot rebuild aborts
+    # when the pool runs dry (mk_* thunks return null on exhaustion and a
+    # failed create aborts the whole composition, CLAUDE.md).
+    (14, "0x0070"),        # refrigerator parent (composed trio round)
+    (15, "0x0071,0,13"),   # number cabinet under the fridge (index 13 = ep 14)
+    (16, "0x0071,1,13"),   # levels cabinet under the fridge
+    (17, "0x007B"),        # oven parent
+    (18, "0x0071,0,16"),   # oven cavity (index 16 = ep 17); Heater cluster set
+    (19, "0x0078"),        # cooktop (parent for the surface; not previously
+                            # composed)
+    (20, "0x0077,0,18"),   # cook surface under the cooktop (index 18 = ep 19)
 ]
 
 
@@ -1031,7 +1055,10 @@ def step_3_2_grammar(ctx):
     rows land here. The 41st, AT+MTCMDRESP against an already-answered or
     expired seq, needs a real forwarded command, which needs a
     controller (CmdResponder), so it stays out of this host-only segment
-    and is Task 5's job.
+    and is Task 5's job. The composed appliance round's AT+MTALARM
+    migration adds a 41st row of its own here (=<alarm ep>,0,0, TESTING.md
+    6.2): it needs the real smoke/CO alarm slot, so it cannot ride Phase
+    1's half of the migration (register_phase1_t7_negative).
 
     MTALARM's SmokeState-Warning row is followed by an unscored clear so
     ep5 hands step_3_3 a clean ExpressedState, the same
@@ -1094,6 +1121,16 @@ def step_3_2_grammar(ctx):
     # SmokeCoAlarm instance (cmd_mtalarm's own comment: validated inside
     # mt_matter_alarm_set(), not the handler), so they are
     # composition-dependent despite the code.
+    # The composed appliance round's migration row (TESTING.md 6.2): field
+    # 0 now passes cmd_mtalarm()'s union gate (it is a legal
+    # RefrigeratorAlarm bit), and on an endpoint that DOES carry
+    # SmokeCoAlarm the ExpressedState-is-derived rejection lives in the
+    # bridge's smoke branch (mt_matter_alarm_set(), main.cpp), still
+    # +MTERR:1. Phase 1 carries the other half of the migration (=1,0,0
+    # -> +MTERR:3 on the single-light rig, register_phase1_t7_negative).
+    c("MTALARM=<alarm ep>,0,0 -> +MTERR:1 (ExpressedState derived, "
+      "rejected in the bridge's smoke branch)",
+      err("AT+MTALARM=5,0,0", 1))
     c("MTALARM=<alarm ep>,1,3 -> +MTERR:1 (SmokeState range 0..2)",
       err("AT+MTALARM=5,1,3", 1))
     c("MTALARM=<alarm ep>,4,2 -> +MTERR:1 (DeviceMuted range 0..1)",
@@ -2222,6 +2259,405 @@ def step_3_16_microwave(ctx):
             tag="P3")
 
 
+def step_3_17_composed_fridge(ctx):
+    """Composed appliance round, task 6: the composed refrigerator
+    (PHASE3_COMPOSITION slots 14-16: parent 0x0070 at ep 14, a
+    TemperatureNumber cabinet at ep 15 and a TemperatureLevel cabinet at
+    ep 16, both parented to staging index 13).
+
+    AT+MTEP? line shapes (spec 3.9): a parented entry prints five fields
+    (variant unconditionally shown once a parent is present, "never
+    without the fourth also present"), an unparented one stays
+    byte-identical to before parenting existed. step_3_1 already asserts
+    the whole 20-line readback; this step re-asserts the three fridge
+    lines verbatim and consecutive so the family's own report names them.
+
+    PartsList/ServerList reads: parse_parts_list (INFERENCE, see its
+    docstring) for the plain-integer PartsList; ServerList prints
+    `[n]: <id> (<Name>)` through DataModelLogger.h's LogClusterId
+    (:162-183, std::to_string(id) + " (" + ClusterIdToText(id) + ")"),
+    the same shape parse_accepted_command_list already parses
+    (INFERENCE for this new application until Tasks 11/12 confirm it on
+    the wire). The Cooler conditional cluster
+    (RefrigeratorAndTemperatureControlledCabinetMode, 82/0x52) must be
+    present on the parented cabinet 15 and ABSENT on the standalone
+    cabinet 11: the cluster set is derived from the parent's device type
+    at rebuild time, not encoded in the blob (mt_devtypes.cpp's
+    parent-conditional machinery), and this pair of reads is the direct
+    wire observation of that derivation.
+
+    Cluster-aware AT+MTMODES (spec 3.20.1; TESTING.md 6.2's <fridge ep>
+    row, verbatim first, hex cluster notation): tag 0 resolves to kAuto
+    (0x00) for EVERY mode on cluster 0x52, unlike RvcRunMode's
+    per-position rule. A second, two-mode staging follows so the
+    ChangeToMode round trip has a mode to move to and a different one to
+    deny: ModeBase answers a request for the mode already in CurrentMode
+    with Success itself, before the delegate is consulted
+    (mode-base-server.cpp:401-410, bug B196, found live in the RVC round,
+    TESTING.md 8.7), so the deny below MUST target a different mode from
+    the one the allow installed; the CurrentMode read-back after it pins
+    that the deny changed nothing.
+
+    AT+MTALARM fridge rows (TESTING.md 6.2's cluster-aware table):
+    =14,0,1 sets RefrigeratorAlarm (87/0x57) bit 0/DoorOpen and fires
+    Notify (SetStateValue writes the attribute AND emits the event,
+    refrigerator-alarm-server.cpp:115-149); the controller reads State
+    bit 0 set and the Notify event with becameActive bit 0
+    (parse_notify_active, INFERENCE). =14,1,1 answers +MTERR:1 (bit 1
+    passes the union gate but is not in Supported: the fridge thunk's
+    config is mask=1 state=0 supported=1, bit 0 only) and =14,0,2
+    answers +MTERR:1 (2 outside 0..1 for a bit value). DoorOpen is
+    cleared again at step end so no later step or the finally restore
+    inherits an active alarm."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    # --- AT+MTEP? five-field line shape (spec 3.9) ---
+    parent_line = "+MTEP:13,14,0x0070"
+    cab_lines = ["+MTEP:14,15,0x0071,0,13", "+MTEP:15,16,0x0071,1,13"]
+    res, lines = cmd_retry(link, "AT+MTEP?")
+    ok_parent = res == 0 and parent_line in lines
+    s.check("3.17 AT+MTEP? fridge parent line verbatim (three-field, "
+            "unparented shape)", ok_parent, tag="P3")
+    idx = lines.index(parent_line) if ok_parent else -1
+    s.check("3.17 AT+MTEP? cabinet lines verbatim and consecutive "
+            "(five-field: variant then parent index)",
+            ok_parent and lines[idx + 1:idx + 3] == cab_lines, tag="P3")
+
+    # --- PartsList: exactly the declared children ---
+    rc, out = chip.run(["descriptor", "read", "parts-list", node, "14"],
+                       timeout=30)
+    s.check("3.17 PartsList of ep 14 is exactly [15, 16]",
+            rc == 0 and parse_parts_list(out) == [15, 16], tag="P3")
+
+    # --- parent-conditional Cooler cluster: on 15, NOT on standalone 11 ---
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "15"],
+                       timeout=30)
+    s.check("3.17 cabinet 15 server list carries "
+            "RefrigeratorAndTCCMode (82)",
+            rc == 0 and 82 in parse_accepted_command_list(out), tag="P3")
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "11"],
+                       timeout=30)
+    servers11 = parse_accepted_command_list(out)
+    # bool(servers11) de-vacuouses the absence check: an empty parse
+    # (wrong shape, dead read) must fail, not pass by "82 not in []".
+    s.check("3.17 standalone cabinet 11 does NOT carry cluster 82",
+            rc == 0 and bool(servers11) and 82 not in servers11, tag="P3")
+
+    # --- cluster-aware AT+MTMODES on 0x52 (spec 3.20.1) ---
+    s.check('3.17 AT+MTMODES=15,0x52,0,0,"Auto" -> OK (TESTING.md row '
+            "verbatim, hex cluster notation)",
+            expect_ok('AT+MTMODES=15,0x52,0,0,"Auto"')(link), tag="P3")
+    res, _ = link.command('AT+MTMODES=15,0x52,0,0,"Auto",1,0,"Rapid"')
+    s.check("3.17 two-mode list staged for the ChangeToMode round trip "
+            "-> OK", res == 0, tag="P3")
+    rc, out = chip.run(["refrigeratorandtemperaturecontrolledcabinetmode",
+                        "read", "supported-modes", node, "15"], timeout=30)
+    s.check("3.17 SupportedModes labels verbatim",
+            rc == 0 and parse_string_list(out) == ["Auto", "Rapid"],
+            tag="P3")
+    s.check("3.17 ModeTags: tag-0 default kAuto (0) on every mode",
+            rc == 0 and parse_mode_tag_values(out) == [0, 0], tag="P3")
+
+    # --- ChangeToMode: allow and deny (B196: different modes) ---
+    handle = invoke_chip(ctx, ["refrigeratorandtemperaturecontrolledcabinetmode",
+                              "change-to-mode", "1", node, "15"], timeout=30)
+    fwd = responder.expect(cluster=82, command=0, verdict=1, payload=1,
+                           timeout=5.0)
+    s.check("3.17 ChangeToMode allow: forward answered, payload == mode 1",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.17 ChangeToMode allow: chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.17 ChangeToMode allow: status 0 (kSuccess)",
+            parse_change_to_mode_status(out) == 0, tag="P3")
+
+    # Deny mode 0, NOT mode 1: the allow just installed 1 as CurrentMode,
+    # and a same-mode request never reaches the delegate (B196, see the
+    # docstring above).
+    handle = invoke_chip(ctx, ["refrigeratorandtemperaturecontrolledcabinetmode",
+                              "change-to-mode", "0", node, "15"], timeout=30)
+    fwd = responder.expect(cluster=82, command=0, verdict=0, payload=0,
+                           timeout=5.0)
+    s.check("3.17 ChangeToMode deny: forward answered, payload == mode 0",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.17 ChangeToMode deny: chip-tool exits 0 (Success at the "
+            "StatusIB level; the verdict lives in the response struct)",
+            rc == 0, tag="P3")
+    s.check("3.17 ChangeToMode deny: status 2 (kGenericFailure)",
+            parse_change_to_mode_status(out) == 2, tag="P3")
+    rc, out = chip.run(["refrigeratorandtemperaturecontrolledcabinetmode",
+                        "read", "current-mode", node, "15"], timeout=30)
+    s.check("3.17 ChangeToMode deny: CurrentMode still 1 (deny changed "
+            "nothing)", rc == 0 and parse_int_attr(out) == 1, tag="P3")
+
+    # --- AT+MTALARM fridge rows (TESTING.md 6.2, cluster-aware table) ---
+    res, _ = link.command("AT+MTALARM=14,0,1")
+    s.check("3.17 AT+MTALARM=14,0,1 -> OK (DoorOpen set, Notify fired)",
+            res == 0, tag="P3")
+    rc, out = chip.run(["refrigeratoralarm", "read", "state", node, "14"],
+                       timeout=30)
+    s.check("3.17 controller reads State bit 0 set",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+    rc, out = chip.run(["refrigeratoralarm", "read-event", "notify", node,
+                        "14"], timeout=30)
+    active = parse_notify_active(out)
+    s.check("3.17 Notify event observed, becameActive bit 0 set",
+            rc == 0 and parse_event_count(out, "Notify") >= 1
+            and bool(active) and active[-1] & 1 == 1, tag="P3")
+    s.check("3.17 AT+MTALARM=14,1,1 -> +MTERR:1 (bit 1 not in Supported)",
+            expect_err("AT+MTALARM=14,1,1", 1)(link), tag="P3")
+    s.check("3.17 AT+MTALARM=14,0,2 -> +MTERR:1 (2 outside 0..1 for a "
+            "bit value)", expect_err("AT+MTALARM=14,0,2", 1)(link), tag="P3")
+
+    # --- restore ---
+    res, _ = link.command("AT+MTALARM=14,0,0")
+    s.check("3.17 restore: DoorOpen cleared at step end", res == 0,
+            tag="P3")
+
+
+def step_3_18_oven_cavity(ctx):
+    """Composed appliance round, task 6: the oven with one cavity
+    (PHASE3_COMPOSITION slots 17-18: parent 0x007B at ep 17, a
+    TemperatureNumber cabinet at ep 18 parented to staging index 16, so
+    the cabinet gets the HEATER conditional cluster set: OvenMode
+    (73/0x49) plus OvenCavityOperationalState (72/0x48),
+    mt_cabinet_add_heater(), mt_devtypes.cpp).
+
+    Both cavity clusters are HAND-ROLLED shells (esp-matter ships no
+    cluster::oven_mode or cluster::oven_cavity_operational_state
+    namespace at all, ARCHITECTURE.md 8.9, the 8.6 disease at its most
+    severe grade), so their command entries are observable ONLY on the
+    wire; builds and host suites cannot see a missing or extra command
+    entry. This step is the regression net for exactly that: Stop (0x01)
+    and Start (0x02) must reach the AT link as +MTCMD:<seq>,18,72,1 / ,2
+    and adjudicate both ways with the verdict-is-the-response shape
+    (ErrorStateID 0 kNoError / 2 kUnableToCompleteOperation, same as
+    step_3_9's washer), while Pause (0x00), which
+    OperationalState_Oven.xml revision 2 marks <disallowConform/> and the
+    shell therefore deliberately does NOT register, must answer StatusIB
+    0x81 UNSUPPORTED_COMMAND with NO +MTCMD raised. chip-tool's own
+    ovencavityoperationalstate verbs are stop/start only (the pinned
+    binary agrees with the XML), so the pause probe goes through
+    command-by-id 0 with an empty JSON payload.
+
+    OvenMode rows (TESTING.md 6.2): the <cavity ep> staging row verbatim
+    (tag 0 resolves to kBake, 0x4000, for every mode on cluster 0x49;
+    16386/0x4002 is kGrill given explicitly), read back with labels and
+    resolved tags; =18,0x52 answers +MTERR:3 (82 is a legal <cluster> id
+    but the cabinet's ModeBase cluster is derived from its PARENT, so
+    the same endpoint answers 0x49 and refuses 0x52). ChangeToMode is
+    adjudicated allow (mode 1) then deny (mode 0, the B196
+    different-mode rule, see step_3_17), with the CurrentMode read-back.
+
+    AT+MTOPSTATE membership rows (TESTING.md 6.2): =18,1 OK with a
+    controller read-back (the cavity's plain 0..2 state space is served
+    through the shared opstate delegate pool keyed by (ep, cluster));
+    =18,0x40 +MTERR:1 (OvenCavityOperationalState derives from
+    OperationalState but adds NO derived-number-space states, so 0x40 is
+    narrowed to MT_ATTR_ERR_VALUE in the bridge exactly as on the washer,
+    spec 3.21). State is restored to 0 (Stopped) at step end."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    # --- PartsList and the cavity's conditional server list ---
+    rc, out = chip.run(["descriptor", "read", "parts-list", node, "17"],
+                       timeout=30)
+    s.check("3.18 PartsList of ep 17 is exactly [18]",
+            rc == 0 and parse_parts_list(out) == [18], tag="P3")
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "18"],
+                       timeout=30)
+    servers = parse_accepted_command_list(out)
+    s.check("3.18 cavity server list carries OvenMode (73) and "
+            "OvenCavityOperationalState (72)",
+            rc == 0 and 73 in servers and 72 in servers, tag="P3")
+
+    # --- cluster-aware AT+MTMODES on 0x49 (spec 3.20.1) ---
+    s.check('3.18 AT+MTMODES=18,0x49 (tag-0 kBake + explicit kGrill) '
+            "-> OK",
+            expect_ok('AT+MTMODES=18,0x49,0,0,"Bake",1,16386,"Grill"')(link),
+            tag="P3")
+    s.check("3.18 AT+MTMODES=18,0x52 -> +MTERR:3 (cabinet's ModeBase "
+            "cluster is derived from its parent: oven cavity refuses the "
+            "fridge cluster)",
+            expect_err('AT+MTMODES=18,0x52,0,0,"Auto"', 3)(link), tag="P3")
+    rc, out = chip.run(["ovenmode", "read", "supported-modes", node, "18"],
+                       timeout=30)
+    s.check("3.18 OvenMode SupportedModes labels verbatim",
+            rc == 0 and parse_string_list(out) == ["Bake", "Grill"],
+            tag="P3")
+    s.check("3.18 ModeTags: defaulted kBake (0x4000), explicit kGrill "
+            "(0x4002)",
+            rc == 0 and parse_mode_tag_values(out) == [0x4000, 0x4002],
+            tag="P3")
+
+    # --- ChangeToMode: allow and deny (B196: different modes) ---
+    handle = invoke_chip(ctx, ["ovenmode", "change-to-mode", "1", node,
+                              "18"], timeout=30)
+    fwd = responder.expect(cluster=73, command=0, verdict=1, payload=1,
+                           timeout=5.0)
+    s.check("3.18 ChangeToMode allow: forward answered, payload == mode 1",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.18 ChangeToMode allow: chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.18 ChangeToMode allow: status 0 (kSuccess)",
+            parse_change_to_mode_status(out) == 0, tag="P3")
+    handle = invoke_chip(ctx, ["ovenmode", "change-to-mode", "0", node,
+                              "18"], timeout=30)
+    fwd = responder.expect(cluster=73, command=0, verdict=0, payload=0,
+                           timeout=5.0)
+    s.check("3.18 ChangeToMode deny: forward answered, payload == mode 0",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.18 ChangeToMode deny: chip-tool exits 0 (verdict lives in "
+            "the response struct)", rc == 0, tag="P3")
+    s.check("3.18 ChangeToMode deny: status 2 (kGenericFailure)",
+            parse_change_to_mode_status(out) == 2, tag="P3")
+    rc, out = chip.run(["ovenmode", "read", "current-mode", node, "18"],
+                       timeout=30)
+    s.check("3.18 ChangeToMode deny: CurrentMode still 1 (deny changed "
+            "nothing)", rc == 0 and parse_int_attr(out) == 1, tag="P3")
+
+    # --- OvenCavityOperationalState: Stop/Start, both verdicts ---
+    res, _ = link.command("AT+MTOPSTATE=18,0")
+    s.check("3.18 known start state: Stopped -> OK", res == 0, tag="P3")
+
+    handle = invoke_chip(ctx, ["ovencavityoperationalstate", "start", node,
+                              "18"], timeout=30)
+    fwd = responder.expect(cluster=72, command=2, verdict=1, timeout=5.0)
+    s.check("3.18 start +MTCMD:<seq>,18,72,2 forward answered allow",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.18 start chip-tool exits 0 (allow)", rc == 0, tag="P3")
+    s.check("3.18 start ErrorStateID 0 (kNoError) on allow",
+            parse_status(out) == 0, tag="P3")
+    res, _ = link.command("AT+MTOPSTATE=18,1")
+    s.check("3.18 host reports start transition -> OK", res == 0, tag="P3")
+
+    handle = invoke_chip(ctx, ["ovencavityoperationalstate", "stop", node,
+                              "18"], timeout=30)
+    fwd = responder.expect(cluster=72, command=1, verdict=0, timeout=5.0)
+    s.check("3.18 stop +MTCMD:<seq>,18,72,1 forward answered deny",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.18 stop chip-tool exits 0 (deny)", rc == 0, tag="P3")
+    s.check("3.18 stop ErrorStateID 2 (kUnableToCompleteOperation) on "
+            "deny", parse_status(out) == 2, tag="P3")
+    rc, out = chip.run(["ovencavityoperationalstate", "read",
+                        "operational-state", node, "18"], timeout=30)
+    s.check("3.18 state unchanged by the denied stop (still Running)",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+
+    handle = invoke_chip(ctx, ["ovencavityoperationalstate", "stop", node,
+                              "18"], timeout=30)
+    fwd = responder.expect(cluster=72, command=1, verdict=1, timeout=5.0)
+    s.check("3.18 stop forward answered allow", fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.18 stop chip-tool exits 0 (allow)", rc == 0, tag="P3")
+    s.check("3.18 stop ErrorStateID 0 (kNoError) on allow",
+            parse_status(out) == 0, tag="P3")
+    res, _ = link.command("AT+MTOPSTATE=18,0")
+    s.check("3.18 host reports stop transition -> OK", res == 0, tag="P3")
+
+    handle = invoke_chip(ctx, ["ovencavityoperationalstate", "start", node,
+                              "18"], timeout=30)
+    fwd = responder.expect(cluster=72, command=2, verdict=0, timeout=5.0)
+    s.check("3.18 start forward answered deny", fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.18 start chip-tool exits 0 (deny)", rc == 0, tag="P3")
+    s.check("3.18 start ErrorStateID 2 (kUnableToCompleteOperation) on "
+            "deny", parse_status(out) == 2, tag="P3")
+
+    # --- Pause: disallowConform, the wire-only observability net ---
+    link.drain(0.3)
+    rc, out = chip.run(["ovencavityoperationalstate", "command-by-id", "0",
+                        "{}", node, "18"], timeout=30)
+    s.check("3.18 pause: chip-tool reports failure (rc != 0)", rc != 0,
+            tag="P3")
+    s.check("3.18 pause answers 0x81 UNSUPPORTED_COMMAND "
+            "(disallowConform: the hand-rolled shell registers no Pause "
+            "entry)", parse_status(out) == 0x81, tag="P3")
+    s.check("3.18 pause: no +MTCMD raised (command never dispatched)",
+            link.assert_no_urc(r"\+MTCMD:", 2.0), tag="P3")
+
+    # --- AT+MTOPSTATE membership rows (TESTING.md 6.2) ---
+    s.check("3.18 AT+MTOPSTATE=18,1 -> OK (Running, plain 0..2 state "
+            "space served)", expect_ok("AT+MTOPSTATE=18,1")(link), tag="P3")
+    rc, out = chip.run(["ovencavityoperationalstate", "read",
+                        "operational-state", node, "18"], timeout=30)
+    s.check("3.18 controller reads OperationalState 1 (Running)",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+    s.check("3.18 AT+MTOPSTATE=18,0x40 -> +MTERR:1 (no derived-number-"
+            "space states on the cavity)",
+            expect_err("AT+MTOPSTATE=18,0x40", 1)(link), tag="P3")
+
+    # --- restore ---
+    res, _ = link.command("AT+MTOPSTATE=18,0")
+    s.check("3.18 state restored to 0 (Stopped) at step end", res == 0,
+            tag="P3")
+
+
+def step_3_19_cook_surface(ctx):
+    """Composed appliance round, task 6: the cook surface under the
+    cooktop (PHASE3_COMPOSITION slots 19-20: cooktop 0x0078 at ep 19,
+    cook surface 0x0077 variant 0 at ep 20, parented to staging index
+    18; the cook surface REQUIRES a parent, the one composition rule
+    mt_devtype_parent_ok() enforces unconditionally).
+
+    OnOff rides the surface with the OffOnly feature (CookSurface.xml
+    1.5.1: a controller may switch a surface off, never on):
+    cluster::on_off::create() adds ONLY command::create_off(), so the
+    AcceptedCommandList is exactly {Off} and an On invoke answers
+    StatusIB 0x81 UNSUPPORTED_COMMAND from the interaction model itself
+    (mk_cook_surface(), mt_devtypes.cpp; another entry in the same
+    only-observable-on-the-wire family as step_3_18's pause). Off is
+    asserted through both observation points: chip-tool exits 0 and
+    AT+MTATTR reads OnOff false (6/0x0006 attribute 0, ember-backed,
+    unlike the ModeBase/opstate attributes the RVC round proved
+    URC-less). The rejected On is followed by the same AT read to pin
+    that nothing changed.
+
+    The temperature setpoint (TemperatureControl 86/0x56 attribute 0,
+    TemperatureNumber variant, i16 in 0.01 C units) round-trips the
+    other direction: written host-side over AT+MTATTR, read back from
+    the controller. 2500 = 25.00 C."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+
+    rc, out = chip.run(["descriptor", "read", "parts-list", node, "19"],
+                       timeout=30)
+    s.check("3.19 PartsList of ep 19 is exactly [20]",
+            rc == 0 and parse_parts_list(out) == [20], tag="P3")
+
+    rc, out = chip.run(["onoff", "off", node, "20"], timeout=30)
+    s.check("3.19 chip-tool onoff off exits 0 (Off is the one accepted "
+            "command)", rc == 0, tag="P3")
+    res, lines = link.command("AT+MTATTR=20,6,0")
+    s.check("3.19 AT reads OnOff false after off",
+            res == 0 and lines == ["+MTATTR:20,6,0,0"], tag="P3")
+
+    link.drain(0.3)
+    rc, out = chip.run(["onoff", "on", node, "20"], timeout=30)
+    s.check("3.19 onoff on: chip-tool reports failure (rc != 0)", rc != 0,
+            tag="P3")
+    s.check("3.19 onoff on answers 0x81 UNSUPPORTED_COMMAND (OffOnly: "
+            "no On entry in the AcceptedCommandList)",
+            parse_status(out) == 0x81, tag="P3")
+    res, lines = link.command("AT+MTATTR=20,6,0")
+    s.check("3.19 OnOff still false after the rejected on",
+            res == 0 and lines == ["+MTATTR:20,6,0,0"], tag="P3")
+
+    res, lines = link.command("AT+MTATTR=20,86,0,2500")
+    s.check("3.19 AT+MTATTR TemperatureSetpoint write (25.00 C) -> OK",
+            res == 0 and lines == ["+MTATTR:20,86,0,2500"], tag="P3")
+    rc, out = chip.run(["temperaturecontrol", "read",
+                        "temperature-setpoint", node, "20"], timeout=30)
+    s.check("3.19 controller reads TemperatureSetpoint 2500",
+            rc == 0 and parse_int_attr(out) == 2500, tag="P3")
+
+
 def step_3_14_root_urc_sweep(ctx):
     """Design spec 4.3's standing-disciplines bullet ("no
     `+MTATTR:0,...` ever"), pinned by a dedicated sweep for the same
@@ -2387,6 +2823,12 @@ PHASE3_STEPS[:] = [
     {"name": "3.15 robotic vacuum cleaner", "fn": step_3_15_rvc,
      "requires": ["3.5 commission"]},
     {"name": "3.16 microwave oven", "fn": step_3_16_microwave,
+     "requires": ["3.5 commission"]},
+    {"name": "3.17 composed refrigerator", "fn": step_3_17_composed_fridge,
+     "requires": ["3.5 commission"]},
+    {"name": "3.18 oven cavity", "fn": step_3_18_oven_cavity,
+     "requires": ["3.5 commission"]},
+    {"name": "3.19 cook surface", "fn": step_3_19_cook_surface,
      "requires": ["3.5 commission"]},
     {"name": "3.14 root-endpoint URC sweep", "fn": step_3_14_root_urc_sweep},
 ]
@@ -2571,6 +3013,52 @@ def parse_indexed_list(text):
     on no match, never raises."""
     return [m.rstrip() for m in
             re.findall(r"\[\d+\]:\s*(.+)$", text, re.MULTILINE)]
+
+
+def parse_parts_list(text):
+    """Every entry in a chip-tool `[n]: <int>` list read where each
+    element is a PLAIN unsigned integer, as ints: the shape Descriptor's
+    `PartsList` (`list[endpoint-no]`) uses.
+
+    INFERENCE (composed appliance round, task 6): derived from the pinned
+    SDK's own print path the same way `parse_indexed_list` was, and not
+    yet matched against a live capture; Tasks 11/12's bench runs are the
+    validation. `DataModelLogger.cpp`'s `PartsList` case decodes a
+    `DecodableList<chip::EndpointId>` and hands it to the generic
+    `DecodableList<T>` template in `DataModelLogger.h` (:119-140), which
+    labels each entry `"[i]"`; `EndpointId` is an integral typedef
+    (uint16), so each element routes to the integral `LogValue` overload
+    (:92-99), which prints `std::to_string(value)`: plain decimal, no
+    `0x` prefix, no parenthesised name. `ServerList` is NOT this shape:
+    it goes through `LogClusterId` (`DataModelLogger.h`:162-183), which
+    appends `" (" + ClusterIdToText(id) + ")"`, i.e. exactly the
+    `[n]: <id> (Name)` form `parse_accepted_command_list` already parses,
+    so server-list reads reuse that parser instead. Kept separate from
+    `parse_indexed_list` (the list[string] sibling) so a non-numeric
+    entry in a numeric read is a parse miss (empty list, failed check)
+    rather than a silently-accepted string. Empty list on no match,
+    never raises."""
+    return [int(m) for m in
+            re.findall(r"\[\d+\]:\s*(\d+)\s*$", text, re.MULTILINE)]
+
+
+def parse_notify_active(text):
+    """Every `Active:` bitmap value chip-tool prints for a
+    `RefrigeratorAlarm` `Notify` event read, in event order, as ints:
+    the alarms that BECAME active in that event (the spec's
+    becameActive semantics for the `Active` field).
+
+    INFERENCE (composed appliance round, task 6): derived from the
+    pinned SDK's own print path, not yet matched against a live capture;
+    Tasks 11/12's bench runs are the validation. `DataModelLogger.cpp`'s
+    `RefrigeratorAlarm::Events::Notify` `LogValue` overload (:9713-9760)
+    prints the four fields with the labels `Active`, `Inactive`,
+    `State`, `Mask`; each is a `BitMask<AlarmBitmap>`, routed through
+    the `BitFlags` `LogValue` template (`DataModelLogger.h`), which
+    prints `value.Raw()` via the integral overload: plain decimal. The
+    regex is case-sensitive, so `Inactive:` (lowercase `a` after `In`)
+    can never match it. Empty list on no match, never raises."""
+    return [int(m) for m in re.findall(r"Active:\s*(\d+)", text)]
 
 
 def parse_mode_tag_values(text):
@@ -3489,9 +3977,12 @@ def register_phase1_t5_negative():
       expect_err("AT+MTALARM=zz,1,1", 1))
     n("MTALARM=1,zz,1 -> +MTERR:1 (field not numeric)",
       expect_err("AT+MTALARM=1,zz,1", 1))
-    n("MTALARM=1,0,0 -> +MTERR:1 (field 0/ExpressedState is derived)",
-      expect_err("AT+MTALARM=1,0,0", 1))
-    n("MTALARM=1,12,0 -> +MTERR:1 (field outside 1..11)",
+    # MTALARM=1,0,0 no longer lives here: the composed appliance round
+    # migrated field 0 (it is a legal RefrigeratorAlarm bit now, so it
+    # passes cmd_mtalarm()'s union gate and the rejection moved into the
+    # bridge), which also makes the row rig-dependent (+MTERR:3 on the
+    # single-light rig). See register_phase1_t7_negative.
+    n("MTALARM=1,12,0 -> +MTERR:1 (field outside the union bound 0..11)",
       expect_err("AT+MTALARM=1,12,0", 1))
     n("MTALARM=1,1,zz -> +MTERR:1 (value not numeric)",
       expect_err("AT+MTALARM=1,1,zz", 1))
@@ -3624,6 +4115,89 @@ def register_phase1_t6_negative():
 
 
 register_phase1_t6_negative()
+
+
+def mtep_staging_negative(setup_cmds, cmd, want=1):
+    """One AT+MTEP staging-time negative (composed appliance round, task
+    6; TESTING.md 6.2's parenting table): run the staging prelude (each
+    command must answer OK: AT+MTEPCLEAR opens the session, an optional
+    AT+MTEP=0x0100 gives wrong-parent-type rows a staged light at index
+    0), then the negative row itself, expecting +MTERR:<want>. Every row
+    opens its OWN session, so the rows stay order-independent the way
+    every other Phase 1 registration is.
+
+    cmd_mtep() validates <parent_idx> and mt_devtype_parent_ok() entirely
+    against s_staged, before any composition is applied (TESTING.md 6.2's
+    "pure-form/staging-time negatives" note), so nothing here touches the
+    live composition. A trailing AT+MTEPCLEAR (unscored, best-effort)
+    empties the session again so no staged entry leaks into a later
+    test's staging assumptions; staging is RAM-only, so even a skipped
+    trailer cannot survive a reset."""
+    def fn(link):
+        for c in setup_cmds:
+            if link.command(c)[0] != 0:
+                return False
+        res, _ = link.command(cmd)
+        ok = res == want
+        link.command("AT+MTEPCLEAR")  # unscored: leave the session empty
+        return ok
+    return fn
+
+
+def register_phase1_t7_negative():
+    """Composed appliance round, task 6: the state-safe rows TESTING.md
+    6.2 gained from firmware tasks 2-5 of that round (the AT+MTEP
+    parenting grammar, task 2 plus task 5's two Cook Surface rows; the
+    AT+MTALARM field-0 migration, task 3), transcribed from the tables,
+    not re-derived. The same order-independent-only split
+    register_phase1_t5_negative established, with one deliberate
+    stretch: the MTALARM migration row is not handler-internal any more
+    (the rejection moved into the bridge's cluster lookup), but
+    TESTING.md 6.2 pins its answer ON THE SINGLE-LIGHT RIG (+MTERR:3, ep
+    1 carries neither alarm cluster), which is exactly the bench
+    standard state every Phase 1 run starts from, so it stays a Phase 1
+    row by the table's own words. Its smoke-endpoint sibling
+    (=<alarm ep>,0,0 -> +MTERR:1) needs the real alarm slot and lands in
+    step_3_2_grammar.
+
+    A sibling of register_phase1_t5_negative/t6, not an addition to
+    either: this round's rows are their own project, same reasoning as
+    t6's docstring."""
+    n = lambda name, fn: add_test(1, name, fn, tag="AT-")
+
+    # AT+MTEP parenting grammar (TESTING.md 6.2, composed appliance round
+    # tasks 2 and 5): all five rows are staging-session negatives; see
+    # mtep_staging_negative's docstring. Rows 3 and 5 stage a light first
+    # so index 0 exists and is of the WRONG device type; rows 1, 2 and 4
+    # need only the empty session.
+    n("MTEPCLEAR then MTEP=0x0100,0,0 -> +MTERR:1 (parent index 0 out of "
+      "range: nothing staged yet)",
+      mtep_staging_negative(["AT+MTEPCLEAR"], "AT+MTEP=0x0100,0,0"))
+    n("MTEP=0x0100,0,zz -> +MTERR:1 (parent index not numeric)",
+      mtep_staging_negative(["AT+MTEPCLEAR"], "AT+MTEP=0x0100,0,zz"))
+    n("MTEP=0x0071,0,0 under a light -> +MTERR:1 (cabinet parent must be "
+      "a fridge or an oven)",
+      mtep_staging_negative(["AT+MTEPCLEAR", "AT+MTEP=0x0100"],
+                            "AT+MTEP=0x0071,0,0"))
+    n("MTEP=0x0077 unparented -> +MTERR:1 (cook surface REQUIRES a "
+      "cooktop parent)",
+      mtep_staging_negative(["AT+MTEPCLEAR"], "AT+MTEP=0x0077"))
+    n("MTEP=0x0077,0,0 under a light -> +MTERR:1 (cook surface parent "
+      "must be a cooktop)",
+      mtep_staging_negative(["AT+MTEPCLEAR", "AT+MTEP=0x0100"],
+                            "AT+MTEP=0x0077,0,0"))
+
+    # AT+MTALARM field-0 migration (TESTING.md 6.2, composed appliance
+    # round task 3): field 0 passes cmd_mtalarm()'s union gate now (a
+    # legal RefrigeratorAlarm bit), so on the single-light rig the
+    # rejection comes from the bridge's cluster lookup, +MTERR:3, where
+    # it used to be the handler's own +MTERR:1.
+    n("MTALARM=1,0,0 -> +MTERR:3 (migrated: field 0 passes the union "
+      "gate; the single-light rig's ep 1 carries neither alarm cluster)",
+      expect_err("AT+MTALARM=1,0,0", 3))
+
+
+register_phase1_t7_negative()
 
 
 PHASE2_STEPS[:] = [
