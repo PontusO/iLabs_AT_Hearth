@@ -25,10 +25,11 @@ static void check(const char *name, bool cond)
 static void test_roundtrip(void)
 {
     mt_composition_t in = { .count = 3, .devtype = { 0x0100, 0x0101, 0x0302 } };
+    in.parent[0] = in.parent[1] = in.parent[2] = MT_COMP_NO_PARENT;
     uint8_t buf[MT_COMP_BLOB_MAX];
 
     int n = mt_comp_encode(&in, buf, sizeof(buf));
-    check("encode of 3 endpoints writes 19 bytes (v2 header + 3*5)", n == 19);
+    check("encode of 3 endpoints writes 22 bytes (v3 header + 3*6)", n == 22);
 
     mt_composition_t out;
     memset(&out, 0xAA, sizeof(out));
@@ -52,19 +53,20 @@ static void test_empty(void)
 static void test_endianness(void)
 {
     /* Pinned byte-for-byte: a blob written by one build must read on
-     * another. v2 layout: sentinel, version, count LE u16, then per entry
-     * a u32 LE device type id followed by a single variant byte. */
+     * another. v3 layout: sentinel, version, count LE u16, then per entry
+     * a u32 LE device type id followed by variant and parent bytes. */
     mt_composition_t in = { .count = 1, .devtype = { 0x010C }, .variant = { 0x07 } };
     uint8_t buf[MT_COMP_BLOB_MAX];
     int n = mt_comp_encode(&in, buf, sizeof(buf));
 
-    const uint8_t expect[9] = {
-        0xFF, 0x02,             /* sentinel, version */
+    const uint8_t expect[10] = {
+        0xFF, 0x03,             /* sentinel, version */
         0x01, 0x00,             /* count = 1, LE */
         0x0C, 0x01, 0x00, 0x00, /* devtype 0x010C, LE u32 */
-        0x07                    /* variant */
+        0x07,                   /* variant */
+        0x00                    /* parent (zero-initialized) */
     };
-    check("encoding is little-endian and stable", n == 9 && memcmp(buf, expect, 9) == 0);
+    check("encoding is little-endian and stable", n == 10 && memcmp(buf, expect, 10) == 0);
 }
 
 static void test_full(void)
@@ -73,6 +75,7 @@ static void test_full(void)
     for (int i = 0; i < MT_COMP_MAX_ENDPOINTS; i++) {
         in.devtype[i] = 0x0100u + (uint32_t)i;
         in.variant[i] = (uint8_t)i;
+        in.parent[i] = MT_COMP_NO_PARENT;
     }
     uint8_t buf[MT_COMP_BLOB_MAX];
     int n = mt_comp_encode(&in, buf, sizeof(buf));
@@ -138,8 +141,8 @@ static void test_decode_rejects(void)
     const uint8_t oversize[4] = { 0xFF, 0x02, (uint8_t)(MT_COMP_MAX_ENDPOINTS + 1), 0x00 };
     check("decode rejects an over-long v2 count", mt_comp_decode(oversize, 4, &out) == -1);
 
-    /* v2 sentinel present but the version byte is not the one we speak. */
-    const uint8_t bad_version[4] = { 0xFF, 0x03, 0x00, 0x00 };
+    /* v2/v3 sentinel present but the version byte is not one we support. */
+    const uint8_t bad_version[4] = { 0xFF, 0x04, 0x00, 0x00 };
     check("decode rejects an unknown version byte after the sentinel",
           mt_comp_decode(bad_version, 4, &out) == -1);
 
@@ -203,32 +206,34 @@ static void test_v1_golden_blob_decodes_with_zero_variants(void)
           out.variant[0] == 0 && out.variant[1] == 0 && out.variant[2] == 0);
 }
 
-static void test_v2_roundtrip_with_mixed_variants(void)
+static void test_v3_roundtrip_with_mixed_variants(void)
 {
     mt_composition_t in = {
         .count = 3,
         .devtype = { 0x0100, 0x0101, 0x0302 },
         .variant = { 0, 5, 255 }
     };
+    in.parent[0] = in.parent[1] = in.parent[2] = MT_COMP_NO_PARENT;
     uint8_t buf[MT_COMP_BLOB_MAX];
 
     int n = mt_comp_encode(&in, buf, sizeof(buf));
-    check("v2 encode of 3 mixed-variant endpoints writes 19 bytes", n == 19);
+    check("v3 encode of 3 mixed-variant endpoints writes 22 bytes", n == 22);
 
     mt_composition_t out;
     memset(&out, 0, sizeof(out));
-    check("v2 decode succeeds", mt_comp_decode(buf, (size_t)n, &out) == 0);
-    check("v2 roundtrip preserves devtype and variant together", mt_comp_equal(&in, &out));
-    check("v2 roundtrip preserves each variant exactly",
+    check("v3 decode succeeds", mt_comp_decode(buf, (size_t)n, &out) == 0);
+    check("v3 roundtrip preserves devtype and variant together", mt_comp_equal(&in, &out));
+    check("v3 roundtrip preserves each variant exactly",
           out.variant[0] == 0 && out.variant[1] == 5 && out.variant[2] == 255);
 }
 
-static void test_v1_and_v2_equal_when_variants_are_zero(void)
+static void test_v1_and_v3_equal_when_variants_are_zero(void)
 {
     /* Same golden bytes as test_v1_golden_blob_decodes_with_zero_variants:
      * a device migrating from a v1-only build to this one must see its
-     * existing composition compare equal to a freshly-encoded v2 blob of
-     * the same devices with variants left at zero. */
+     * existing composition (with parents filled in) compare equal to a
+     * freshly-encoded v3 blob of the same devices with variants and
+     * parents at default. */
     const uint8_t v1_golden[14] = {
         0x03, 0x00,
         0x00, 0x01, 0x00, 0x00,
@@ -240,18 +245,58 @@ static void test_v1_and_v2_equal_when_variants_are_zero(void)
     check("v1 golden blob decodes for the equality check",
           mt_comp_decode(v1_golden, sizeof(v1_golden), &from_v1) == 0);
 
+    /* Build the same composition directly, filling in parent with
+     * MT_COMP_NO_PARENT to match what v1 decode fills in. */
     mt_composition_t built_directly = { .count = 3, .devtype = { 0x0100, 0x0101, 0x0302 } };
+    built_directly.parent[0] = built_directly.parent[1] = built_directly.parent[2] = MT_COMP_NO_PARENT;
 
-    check("a v1-decoded composition equals the same composition built directly (zero variants)",
+    check("a v1-decoded composition equals the same composition built directly (zero variants, no parents)",
           mt_comp_equal(&from_v1, &built_directly));
 
-    /* And round-tripping the directly-built composition through v2 encode
+    /* And round-tripping the directly-built composition through v3 encode
      * still compares equal to the v1 decode. */
     uint8_t buf[MT_COMP_BLOB_MAX];
     int n = mt_comp_encode(&built_directly, buf, sizeof(buf));
-    mt_composition_t from_v2;
-    check("re-encoding through v2 decodes back", mt_comp_decode(buf, (size_t)n, &from_v2) == 0);
-    check("v1 decode equals v2 roundtrip of the same composition", mt_comp_equal(&from_v1, &from_v2));
+    mt_composition_t from_v3;
+    check("re-encoding through v3 decodes back", mt_comp_decode(buf, (size_t)n, &from_v3) == 0);
+    check("v1 decode equals v3 roundtrip of the same composition", mt_comp_equal(&from_v1, &from_v3));
+}
+
+/* v3 round-trip with parents */
+static void test_v3_roundtrip_with_parents(void)
+{
+    mt_composition_t in = {0}, out = {0};
+    in.count = 3;
+    in.devtype[0] = 0x0070; in.variant[0] = 0; in.parent[0] = MT_COMP_NO_PARENT;
+    in.devtype[1] = 0x0071; in.variant[1] = 1; in.parent[1] = 0;
+    in.devtype[2] = 0x0071; in.variant[2] = 0; in.parent[2] = 0;
+    uint8_t buf[MT_COMP_BLOB_MAX];
+    int n = mt_comp_encode(&in, buf, sizeof(buf));
+    check("v3 encode of 3 endpoints writes 22 bytes (v3 header + 3*6)", n == 4 + 6 * 3);
+    check("v3 version byte is 0x03", buf[1] == 0x03);
+    check("v3 decode succeeds", mt_comp_decode(buf, (size_t)n, &out) == 0);
+    check("v3 roundtrip preserves the composition with parents", mt_comp_equal(&in, &out));
+}
+
+/* a v2 blob (hand-built, 5 bytes per entry, version 0x02) decodes with
+ * every parent set to MT_COMP_NO_PARENT */
+static void test_v2_decodes_with_no_parents(void)
+{
+    uint8_t v2[4 + 5] = { 0xFF, 0x02, 0x01, 0x00, 0x71, 0x00, 0x00, 0x00, 0x01 };
+    mt_composition_t out;
+    check("v2 blob decodes", mt_comp_decode(v2, sizeof(v2), &out) == 0);
+    check("v2 decode yields count 1, variant 1, parent NO_PARENT",
+          out.count == 1 && out.variant[0] == 1 && out.parent[0] == MT_COMP_NO_PARENT);
+}
+
+/* equality is parent-sensitive */
+static void test_equal_compares_parent(void)
+{
+    mt_composition_t a = {0}, b = {0};
+    a.count = b.count = 1;
+    a.devtype[0] = b.devtype[0] = 0x0071;
+    a.parent[0] = MT_COMP_NO_PARENT; b.parent[0] = 0;
+    check("equality fails when parent differs", !mt_comp_equal(&a, &b));
 }
 
 int main(void)
@@ -265,8 +310,11 @@ int main(void)
     test_decode_rejects();
     test_equal();
     test_v1_golden_blob_decodes_with_zero_variants();
-    test_v2_roundtrip_with_mixed_variants();
-    test_v1_and_v2_equal_when_variants_are_zero();
+    test_v3_roundtrip_with_mixed_variants();
+    test_v1_and_v3_equal_when_variants_are_zero();
+    test_v3_roundtrip_with_parents();
+    test_v2_decodes_with_no_parents();
+    test_equal_compares_parent();
     printf("\n===== RESULT: %d passed, %d failed =====\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
