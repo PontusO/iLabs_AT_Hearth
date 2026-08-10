@@ -1265,18 +1265,38 @@ static int cmd_mtepclear(at_type_t type, char *args)
 }
 
 /*
- * AT+MTEP?                    -> +MTEP:<index>,<endpoint_id>,<device_type>[,<variant>]
- *                                per endpoint; the 4th field appears only
- *                                when the variant is nonzero, so an existing
- *                                host that has never seen a variant reads
- *                                byte-identical output.
- * AT+MTEP=<devtype>[,<variant>] -> append one endpoint to the staged
- *                                composition. <variant> defaults to 0 and
- *                                must be legal for <devtype>
+ * AT+MTEP?                    -> +MTEP:<index>,<endpoint_id>,<device_type>[,<variant>[,<parent_idx>]]
+ *                                per endpoint. The 4th field (variant)
+ *                                appears only when the variant is nonzero;
+ *                                the 5th (parent_idx) appears only when the
+ *                                endpoint has a parent, and never without
+ *                                the 4th also present. An unparented
+ *                                endpoint's line is therefore byte-identical
+ *                                to before parenting existed, whatever its
+ *                                variant.
+ * AT+MTEP=<devtype>[,<variant>[,<parent_idx>]] -> append one endpoint to the
+ *                                staged composition. <variant> defaults to 0
+ *                                and must be legal for <devtype>
  *                                (mt_devtype_variant_ok()); an unknown
  *                                <devtype> answers +MTERR:6, a known
  *                                <devtype> with an illegal <variant>
- *                                answers +MTERR:1.
+ *                                answers +MTERR:1. <parent_idx> is the
+ *                                already-staged index of this endpoint's
+ *                                parent: it must name an earlier entry in
+ *                                THIS staging session (out of range, self,
+ *                                and forward references are all rejected
+ *                                with +MTERR:1, since only already-staged
+ *                                indexes exist and cycles are structurally
+ *                                impossible under that rule). Omitting
+ *                                <parent_idx> leaves the endpoint unparented;
+ *                                mt_devtype_parent_ok() is consulted either
+ *                                way, so a device type that REQUIRES a
+ *                                parent (the cook surface, spec 2.3) is
+ *                                rejected with +MTERR:1 when <parent_idx> is
+ *                                absent too, and a parent of the wrong
+ *                                device type (e.g. a cabinet under anything
+ *                                but a fridge or oven) is rejected the same
+ *                                way.
  *
  * The query always reports the LIVE composition, never the staged one.
  */
@@ -1288,8 +1308,13 @@ static int cmd_mtep(at_type_t type, char *args)
             uint32_t devtype;
             uint16_t ep_id;
             uint8_t  variant;
-            if (mt_matter_endpoint_info(i, &devtype, &ep_id, &variant) == 0) {
-                if (variant != 0) {
+            uint8_t  parent_idx;
+            if (mt_matter_endpoint_info(i, &devtype, &ep_id, &variant, &parent_idx) == 0) {
+                if (parent_idx != MT_COMP_NO_PARENT) {
+                    at_uart_write_line("+MTEP:%u,%u,0x%04lX,%u,%u", i, ep_id,
+                                       (unsigned long)devtype, (unsigned)variant,
+                                       (unsigned)parent_idx);
+                } else if (variant != 0) {
                     at_uart_write_line("+MTEP:%u,%u,0x%04lX,%u", i, ep_id,
                                        (unsigned long)devtype, (unsigned)variant);
                 } else {
@@ -1310,8 +1335,8 @@ static int cmd_mtep(at_type_t type, char *args)
         return MT_ERR_COMP_REJECT;
     }
 
-    char *f[2];
-    int n = at_split_args(args, f, 2);
+    char *f[3];
+    int n = at_split_args(args, f, 3);
     if (n < 1) {
         return MT_ERR_BAD_PARAM;
     }
@@ -1325,13 +1350,35 @@ static int cmd_mtep(at_type_t type, char *args)
     }
 
     unsigned long variant = 0;
-    if (n == 2 && !parse_u(f[1], &variant)) {
+    if (n >= 2 && !parse_u(f[1], &variant)) {
         return MT_ERR_BAD_PARAM;
     }
     if (variant > 0xFF || !mt_devtype_variant_ok((uint32_t)devtype, (uint8_t)variant)) {
         return MT_ERR_BAD_PARAM;
     }
 
+    unsigned long parent = MT_COMP_NO_PARENT;
+    if (n == 3) {
+        if (!parse_u(f[2], &parent)) {
+            return MT_ERR_BAD_PARAM;
+        }
+        if (parent >= s_staged.count) {
+            /* out of range, self and forward references all land here:
+             * only already-staged indexes exist */
+            return MT_ERR_BAD_PARAM;
+        }
+        if (!mt_devtype_parent_ok((uint32_t)devtype, (uint8_t)variant,
+                                  s_staged.devtype[parent])) {
+            return MT_ERR_BAD_PARAM;
+        }
+    } else {
+        /* no parent given: types that REQUIRE one reject here too */
+        if (!mt_devtype_parent_ok((uint32_t)devtype, (uint8_t)variant, 0)) {
+            return MT_ERR_BAD_PARAM;
+        }
+    }
+
+    s_staged.parent[s_staged.count] = (uint8_t)parent;
     s_staged.variant[s_staged.count] = (uint8_t)variant;
     s_staged.devtype[s_staged.count++] = (uint32_t)devtype;
     return AT_R_OK;

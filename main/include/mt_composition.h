@@ -12,7 +12,7 @@
  * readable by another:
  *
  *   v1 (legacy, decode-only): u16 count, then count * u32 device type IDs.
- *   No version byte at all. Every legal v1 composition has 0..16 endpoints,
+ *   No version byte at all. Every legal v1 composition has 0..24 endpoints,
  *   so byte0 (the low byte of count) is always <= MT_COMP_MAX_ENDPOINTS.
  *   That is the load-bearing fact that makes 0xFF safe as an unambiguous v2
  *   sentinel below: no legal v1 blob can ever start with it.
@@ -44,10 +44,10 @@ extern "C" {
  * CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT must be at least this, or
  * endpoint::create() refuses everything past the cap and the composition is
  * silently truncated. See sdkconfig.defaults. */
-#define MT_COMP_MAX_ENDPOINTS 16
+#define MT_COMP_MAX_ENDPOINTS 24
 
 /* v3 blob discriminator: see the encoding note above. A v1 blob's first
- * byte is a count (0..16), so 0xFF is free to mark v2/v3 unambiguously. */
+ * byte is a count (0..24), so 0xFF is free to mark v2/v3 unambiguously. */
 #define MT_COMP_BLOB_V2_SENTINEL 0xFF
 #define MT_COMP_BLOB_VERSION_V2  0x02
 #define MT_COMP_BLOB_VERSION     0x03
@@ -55,7 +55,7 @@ extern "C" {
 /* Parent index for root endpoints (not a child of any other endpoint). */
 #define MT_COMP_NO_PARENT        0xFF
 
-/* Maximum encoded blob size: sentinel + version + u16 count, then up to 16
+/* Maximum encoded blob size: sentinel + version + u16 count, then up to 24
  * entries of (u32 device type ID + u8 variant + u8 parent). */
 #define MT_COMP_BLOB_MAX (2 + 2 + 6 * MT_COMP_MAX_ENDPOINTS)
 

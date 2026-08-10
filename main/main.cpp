@@ -646,6 +646,7 @@ extern "C" int mt_matter_net_info(int *transport, int *enabled, int *connected)
 static uint32_t s_live_devtype[MT_COMP_MAX_ENDPOINTS];
 static uint16_t s_live_ep_id[MT_COMP_MAX_ENDPOINTS];
 static uint8_t  s_live_variant[MT_COMP_MAX_ENDPOINTS];
+static uint8_t  s_live_parent[MT_COMP_MAX_ENDPOINTS];
 static uint16_t s_live_count = 0;
 
 extern "C" uint16_t mt_matter_endpoint_count(void)
@@ -653,18 +654,20 @@ extern "C" uint16_t mt_matter_endpoint_count(void)
     return s_live_count;
 }
 
-extern "C" int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id, uint8_t *variant)
+extern "C" int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id, uint8_t *variant,
+                                       uint8_t *parent_idx)
 {
-    if (index >= s_live_count || !devtype || !ep_id || !variant) {
+    if (index >= s_live_count || !devtype || !ep_id || !variant || !parent_idx) {
         return -1;
     }
-    *devtype = s_live_devtype[index];
-    *ep_id   = s_live_ep_id[index];
-    *variant = s_live_variant[index];
+    *devtype    = s_live_devtype[index];
+    *ep_id      = s_live_ep_id[index];
+    *variant    = s_live_variant[index];
+    *parent_idx = s_live_parent[index];
     return 0;
 }
 
-extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant)
+extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant, uint8_t parent_idx)
 {
     if (s_live_count >= MT_COMP_MAX_ENDPOINTS) {
         return;
@@ -672,6 +675,7 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
     s_live_devtype[s_live_count] = devtype;
     s_live_ep_id[s_live_count]   = ep_id;
     s_live_variant[s_live_count] = variant;
+    s_live_parent[s_live_count]  = parent_idx;
     s_live_count++;
 }
 
@@ -3459,20 +3463,30 @@ extern "C" void app_main(void)
 
     for (uint16_t i = 0; i < comp.count; i++) {
         uint16_t ep_id = 0;
-        if (mt_devtype_create(comp.devtype[i], comp.variant[i], &ep_id) != 0) {
+        uint32_t parent_devtype = 0;
+        uint16_t parent_ep_id = 0;
+        if (comp.parent[i] != MT_COMP_NO_PARENT) {
+            parent_devtype = s_live_devtype[comp.parent[i]];
+            parent_ep_id   = s_live_ep_id[comp.parent[i]];
+        }
+        if (mt_devtype_create(comp.devtype[i], comp.variant[i], parent_devtype, parent_ep_id,
+                              &ep_id) != 0) {
             /*
              * Abort the whole rebuild rather than skipping the failed entry.
              * endpoint::create() increments the id counter only after every
              * failure path has returned, so a failed create consumes no id and
              * every endpoint after it shifts down by one, silently handing a
              * commissioned device the wrong data model. See design spec 12.1.
+             * The same abort covers a parenting failure (mt_devtype_create()
+             * returns -1 for that too): a live endpoint with the wrong parent
+             * is the identical kind of silently-wrong data model.
              */
             ESP_LOGE(TAG, "endpoint %u (0x%04X) failed, aborting rebuild",
                      i, (unsigned)comp.devtype[i]);
             comp.count = 0;
             break;
         }
-        mt_matter_record_endpoint(comp.devtype[i], ep_id, comp.variant[i]);
+        mt_matter_record_endpoint(comp.devtype[i], ep_id, comp.variant[i], comp.parent[i]);
     }
 
     ESP_LOGI(TAG, "composition rebuilt: %u endpoint(s)", mt_matter_endpoint_count());

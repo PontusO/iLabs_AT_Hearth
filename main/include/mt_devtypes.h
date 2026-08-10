@@ -32,17 +32,35 @@ bool mt_devtype_is_known(uint32_t devtype_id);
 bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant);
 
 /*
+ * True when parent_devtype is a legal parent for an endpoint of devtype_id
+ * (variant currently unused by any rule, carried for symmetry with the rest
+ * of the table). parent_devtype 0 means "no parent" (0 is not a Matter
+ * device type id), and every device type accepts that unless it specifically
+ * requires a parent. This is the append-time policy: mt_at.c's cmd_mtep()
+ * calls it both when a parent index is given and, with parent_devtype 0,
+ * when one is not, so a device type that REQUIRES a parent is rejected in
+ * the unparented case too.
+ */
+bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype);
+
+/*
  * Create one endpoint of the given device type and variant on the current
- * node and write its assigned endpoint ID to *out_ep_id.
+ * node and write its assigned endpoint ID to *out_ep_id. When parent_devtype
+ * is nonzero, parents the new endpoint under parent_ep_id (an already-created
+ * endpoint's id) via endpoint::set_parent_endpoint(); parent_devtype 0 means
+ * no parenting.
  *
  * Must be called after node::create() and before esp_matter::start(): esp_matter
  * persists its endpoint-id counter only for endpoints created after start, so
  * creating before start is what makes the ids reproducible across boots. See
  * the design spec sections 5.3 and 12.1.
  *
- * Returns 0 on success, -1 on an unknown device type or a creation failure.
+ * Returns 0 on success, -1 on an unknown device type, a creation failure, or
+ * a failure to set the parent (the caller aborts the whole rebuild in that
+ * case, same as any other creation failure: see main.cpp's rebuild loop).
  */
-int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint16_t *out_ep_id);
+int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype,
+                       uint16_t parent_ep_id, uint16_t *out_ep_id);
 
 #ifdef __cplusplus
 }

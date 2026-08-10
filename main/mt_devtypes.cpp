@@ -1018,7 +1018,35 @@ extern "C" bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant)
     return variant <= e->max_variant;
 }
 
-extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint16_t *out_ep_id)
+/*
+ * Append-time parenting policy (design spec 2.3). Tasks 3 to 5 extend this
+ * table with the refrigerator, oven, and cook-surface rows; this task lands
+ * only the cabinet arm and the permissive default.
+ *
+ * refrigerator and oven do not yet have their own esp_matter::endpoint
+ * namespaces in this file (Tasks 3 and 4 add them), so their device type ids
+ * are read from the SDK's raw macros here rather than transcribed as
+ * literals; swap each to <ns>::get_device_type_id() in the task that adds
+ * its namespace. cook_surface is not referenced at all yet: it is not in
+ * s_devtypes, so mt_devtype_is_known() rejects it before this function would
+ * ever see it, and its arm lands with its row in Task 5.
+ */
+extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
+{
+    (void)variant;
+    if (devtype_id == temperature_controlled_cabinet::get_device_type_id() &&
+        parent_devtype != 0) {
+        /* unparented cabinets stay legal (the standalone rows); a parented
+         * one only under the two appliances that give it a legal
+         * conditional cluster set */
+        return parent_devtype == ESP_MATTER_REFRIGERATOR_DEVICE_TYPE_ID ||
+               parent_devtype == ESP_MATTER_OVEN_DEVICE_TYPE_ID;
+    }
+    return true; /* generic parenting: PartsList reflects whatever the host declares */
+}
+
+extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype,
+                                  uint16_t parent_ep_id, uint16_t *out_ep_id)
 {
     const mt_devtype_entry_t *e = find(devtype_id);
     if (!e || !out_ep_id) {
@@ -1031,6 +1059,16 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint16_t 
         ESP_LOGE(TAG, "creating %s (0x%04X) variant %u failed", e->name, (unsigned)devtype_id,
                  (unsigned)variant);
         return -1;
+    }
+
+    if (parent_devtype != 0) {
+        endpoint_t *parent = endpoint::get(node::get(), parent_ep_id);
+        if (parent == nullptr ||
+            endpoint::set_parent_endpoint(ep, parent) != ESP_OK) {
+            ESP_LOGE(TAG, "parenting 0x%04X under ep %u failed",
+                     (unsigned)devtype_id, parent_ep_id);
+            return -1;
+        }
     }
 
     *out_ep_id = endpoint::get_id(ep);
