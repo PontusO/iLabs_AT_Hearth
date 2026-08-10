@@ -1227,12 +1227,29 @@ static bool mt_cabinet_add_heater(endpoint_t *ep)
 /*
  * Composed appliance round, task 5: Cook Surface (0x0077).
  * cook_surface::config_t (esp_matter_endpoint.h:832-841) carries a descriptor
- * and a temperature_control config, so the variant scheme is the cabinet's
- * exactly (mk_temperature_controlled_cabinet() above, same B119 trap): exactly
- * one of TemperatureNumber/TemperatureLevel (VALIDATE_FEATURES_EXACT_ONE,
- * esp_matter_cluster.cpp:2849), and TemperatureNumber must bring
- * TemperatureStep along or the host library's Step write answers +MTERR:4.
- * Variant 0 = number + step, 1 = level, matching the cabinet row.
+ * and a temperature_control config, which LOOKS like the cabinet's variant
+ * scheme (mk_temperature_controlled_cabinet() above) but is not: unlike
+ * temperature_controlled_cabinet::add(), which passes the caller's
+ * temperature_control config through untouched, cook_surface::add()
+ * (esp_matter_endpoint.cpp:1540) OVERWRITES
+ * config->temperature_control.feature_flags with TemperatureLevel before
+ * creating the cluster. Pre-set flags cannot survive an overwrite (the room
+ * air conditioner's |= trick works only because that add() ORs), so variant
+ * 0 shipped as a TemperatureLevel surface: on hardware, 86/0 and 86/3
+ * answered +MTERR:4 while 86/4 read fine and AT+MTTEMPLEVELS was accepted
+ * (bug B216, bench 2026-08-10; evidence in .superpowers/sdd/
+ * 2026-08-10-composed-appliance-round/task-11-evidence/). The thunk
+ * therefore does not trust cook_surface::add() for the temperature cluster:
+ * for variant 0 it destroys the forced TemperatureLevel cluster after
+ * create() and rebuilds temperature_control with TemperatureNumber +
+ * TemperatureStep (the B119 pairing: Step 0x0003 rides its own feature, TN
+ * alone answers +MTERR:4 to the host library's Step write). Destroy-after-
+ * create is the shape the dormant-diagnostics scrub in main.cpp already
+ * uses, and this all runs before esp_matter::start(), same as the whole
+ * rebuild, so there is no CHIP event loop to race. Variant 1 wants
+ * TemperatureLevel, which is exactly what the overwrite produces, so it
+ * stands as created. Both paths satisfy VALIDATE_FEATURES_EXACT_ONE on
+ * TN/TL (esp_matter_cluster.cpp:2849).
  *
  * OnOff rides on top with the OffOnly feature: a controller may switch a
  * surface off, never on (CookSurface.xml 1.5.1: OffOnly mandatoryConform
@@ -1256,6 +1273,10 @@ static bool mt_cabinet_add_heater(endpoint_t *ep)
 static endpoint_t *mk_cook_surface(node_t *n, uint8_t variant)
 {
     cook_surface::config_t c;
+    /* Dead under the pinned SDK (B216 overwrite, see above), but kept set:
+     * if an SDK bump makes add() pass the config through like the cabinet's,
+     * the variant-0 scrub below degrades to an idempotent rebuild instead of
+     * the empty flags tripping VALIDATE_FEATURES_EXACT_ONE. */
     if (variant == 1) {
         c.temperature_control.feature_flags =
             cluster::temperature_control::feature::temperature_level::get_id();
@@ -1267,6 +1288,24 @@ static endpoint_t *mk_cook_surface(node_t *n, uint8_t variant)
     endpoint_t *ep = cook_surface::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
     if (ep == nullptr) {
         return nullptr;
+    }
+    if (variant != 1) {
+        /* B216 scrub: remove the TemperatureLevel cluster the SDK forced and
+         * rebuild it with the features the spec's variant 0 asks for. */
+        cluster_t *tc = cluster::get(ep, chip::app::Clusters::TemperatureControl::Id);
+        if (tc == nullptr) {
+            return nullptr;
+        }
+        if (cluster::destroy(tc) != ESP_OK) {
+            return nullptr;
+        }
+        cluster::temperature_control::config_t tcfg;
+        tcfg.feature_flags =
+            cluster::temperature_control::feature::temperature_number::get_id() |
+            cluster::temperature_control::feature::temperature_step::get_id();
+        if (cluster::temperature_control::create(ep, &tcfg, CLUSTER_FLAG_SERVER) == nullptr) {
+            return nullptr;
+        }
     }
     /* OnOff, OffOnly feature: a controller may switch a surface off, never
      * on (CookSurface.xml: OffOnly mandatoryConform inside optional OnOff) */
