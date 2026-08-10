@@ -17,10 +17,9 @@
  *   That is the load-bearing fact that makes 0xFF safe as an unambiguous v2
  *   sentinel below: no legal v1 blob can ever start with it.
  *
- *   v2 (encode and decode): sentinel byte 0xFF, then a version byte 0x02,
- *   then u16 count, then per entry a u32 device type ID followed by one
- *   variant byte. mt_comp_encode() accepts v2 for decode (filling parent with
- *   MT_COMP_NO_PARENT).
+ *   v2 (decode-only): sentinel byte 0xFF, then a version byte 0x02, then u16
+ *   count, then per entry a u32 device type ID followed by one variant byte.
+ *   mt_comp_decode() accepts v2 (filling parent with MT_COMP_NO_PARENT).
  *
  *   v3 (current, encode and decode): sentinel byte 0xFF, then a version byte
  *   0x03, then u16 count, then per entry a u32 device type ID, one variant
@@ -81,7 +80,8 @@ int mt_comp_encode(const mt_composition_t *comp, uint8_t *buf, size_t buf_len);
  * is truncated, declares more endpoints than MT_COMP_MAX_ENDPOINTS, carries
  * trailing bytes beyond the declared count, names a version byte other than
  * MT_COMP_BLOB_VERSION_V2 or MT_COMP_BLOB_VERSION after the sentinel, or (v3
- * only) declares a parent index >= its own position or outside 0x00..0xFE.
+ * only) specifies a parent index that is neither MT_COMP_NO_PARENT nor an
+ * index strictly lower than the entry's own position.
  */
 int mt_comp_decode(const uint8_t *buf, size_t len, mt_composition_t *out);
 

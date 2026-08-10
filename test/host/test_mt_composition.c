@@ -299,6 +299,44 @@ static void test_equal_compares_parent(void)
     check("equality fails when parent differs", !mt_comp_equal(&a, &b));
 }
 
+/* v3 rejects self-referential parent at entry 0 */
+static void test_v3_rejects_self_parent_at_entry_0(void)
+{
+    /* Hand-built v3 blob: sentinel, version 0x03, count=1, then entry 0
+     * with devtype 0x0100, variant 0, parent 0 (self-reference, invalid). */
+    uint8_t bad_self[10] = {
+        0xFF, 0x03,             /* sentinel, v3 */
+        0x01, 0x00,             /* count = 1 */
+        0x00, 0x01, 0x00, 0x00, /* devtype 0x0100 */
+        0x00,                   /* variant */
+        0x00                    /* parent 0 (self-reference, INVALID) */
+    };
+    mt_composition_t out;
+    check("v3 rejects entry 0 with parent 0 (self-reference)",
+          mt_comp_decode(bad_self, sizeof(bad_self), &out) == -1);
+}
+
+/* v3 rejects forward parent reference */
+static void test_v3_rejects_forward_parent(void)
+{
+    /* Hand-built v3 blob: sentinel, version 0x03, count=2, then:
+     * entry 0 with devtype 0x0100, variant 0, parent 0xFF (OK)
+     * entry 1 with devtype 0x0101, variant 0, parent 2 (forward ref, INVALID) */
+    uint8_t bad_forward[16] = {
+        0xFF, 0x03,             /* sentinel, v3 */
+        0x02, 0x00,             /* count = 2 */
+        0x00, 0x01, 0x00, 0x00, /* devtype 0x0100 */
+        0x00,                   /* variant */
+        0xFF,                   /* parent 0xFF (NO_PARENT, OK) */
+        0x01, 0x01, 0x00, 0x00, /* devtype 0x0101 */
+        0x00,                   /* variant */
+        0x02                    /* parent 2 (forward ref >= i, INVALID) */
+    };
+    mt_composition_t out;
+    check("v3 rejects entry 1 with parent 2 (forward reference)",
+          mt_comp_decode(bad_forward, sizeof(bad_forward), &out) == -1);
+}
+
 int main(void)
 {
     printf("\n===== mt_composition codec tests =====\n");
@@ -315,6 +353,8 @@ int main(void)
     test_v3_roundtrip_with_parents();
     test_v2_decodes_with_no_parents();
     test_equal_compares_parent();
+    test_v3_rejects_self_parent_at_entry_0();
+    test_v3_rejects_forward_parent();
     printf("\n===== RESULT: %d passed, %d failed =====\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
