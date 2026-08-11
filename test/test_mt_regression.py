@@ -3057,10 +3057,11 @@ class TestPhase3Composition(unittest.TestCase):
     def test_twenty_four_slots_sequential(self):
         # The composition-size gate: energy round B grew the table to
         # 24 (round A had grown it to 22), hitting MT_COMP_MAX_ENDPOINTS
-        # (24) and CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT (24, the
-        # setting CLAUDE.md warns silently refuses endpoints past its
-        # limit) EXACTLY: the table is full, and any 25th slot needs
-        # both raised first.
+        # (24) EXACTLY: the table is full, and any 25th slot needs the
+        # caps raised first. CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT
+        # (the setting CLAUDE.md warns silently refuses endpoints past
+        # its limit) is 25, not 24: the SDK counts the root endpoint 0
+        # against it (B247), so it stays MT_COMP_MAX_ENDPOINTS + 1.
         slots = [slot for slot, _ in PHASE3_COMPOSITION]
         self.assertEqual(slots, list(range(1, 25)))
 

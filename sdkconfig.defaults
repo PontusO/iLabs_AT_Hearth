@@ -25,11 +25,16 @@ CONFIG_LWIP_HOOK_IP6_ROUTE_DEFAULT=y
 CONFIG_LWIP_HOOK_ND6_GET_GW_DEFAULT=y
 
 # Endpoint composition (C1): the host declares up to MT_COMP_MAX_ENDPOINTS (24)
-# endpoints over AT+MTEP, so the dynamic endpoint cap must be at least that.
+# endpoints over AT+MTEP, and the SDK counts the root endpoint 0 against this
+# cap too (endpoint::create()'s get_count() check walks the node's whole
+# endpoint list, esp_matter_data_model.cpp:1659; root_node::create goes through
+# the same path), so the cap must be MT_COMP_MAX_ENDPOINTS + 1 = 25 (B247: at
+# 24, a 24-slot composition aborted at entry 24 and read back 23 lines).
 # Was 2, inherited from the esp-matter light example this project started from,
 # which silently refused every endpoint past the first. Raised from 16 to 24
-# for the composed-appliance round (parent endpoints, spec 2.3).
-CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=24
+# for the composed-appliance round (parent endpoints, spec 2.3), then to 25
+# for the root-endpoint allowance, costing ~404 bytes of .bss for the slot.
+CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=25
 
 # Button
 CONFIG_BUTTON_PERIOD_TIME_MS=20
