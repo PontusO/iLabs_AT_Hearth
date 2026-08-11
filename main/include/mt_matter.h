@@ -768,16 +768,28 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep);
  *     does not mention keeps its previous stored value rather than being
  *     cleared to null.
  *
+ *   - WaterHeaterManagement (0x0094, energy round B): pull-model like EPM.
+ *     Each value is stored into the endpoint's HearthWhmDelegate (main.cpp),
+ *     where the cluster Instance's attribute reads find it, one
+ *     MatterReportingAttributeChangeCallback per applied field. Fields 3-5
+ *     are feature-gated bridge-side (see the MT_WHM_F_* note below), and the
+ *     firmware derives the cluster's events from BoostState transitions:
+ *     Inactive to Active emits BoostStarted with the cached parameters of
+ *     the last host-accepted Boost command (consumed on emission; duration 0
+ *     and no optionals when there is none), Active to Inactive emits
+ *     BoostEnded, and a push repeating the current state emits nothing.
+ *
  * Two-pass validate-then-apply, a hard contract: every pair is validated
  * before any pair is applied, so a bad third pair leaves the first two
  * unapplied and the device state untouched.
  *
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
- * MT_ATTR_ERR_CLUSTER when cluster is neither measurement id or ep does not
- * carry it, MT_ATTR_ERR_VALUE for a field unknown to that cluster or a value
- * outside that field's own XML range (see the field table above),
- * MT_ATTR_ERR_FAILED for an internal failure (no delegate/storage slot for
- * ep, or the event emission itself failing).
+ * MT_ATTR_ERR_CLUSTER when cluster is none of the three push-served ids, ep
+ * does not carry it, or (0x0094) a pushed field's backing feature is absent
+ * on that endpoint, MT_ATTR_ERR_VALUE for a field unknown to that cluster or
+ * a value outside that field's own XML range (see the field tables above and
+ * below), MT_ATTR_ERR_FAILED for an internal failure (no delegate/storage
+ * slot for ep, or the event emission itself failing).
  */
 int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
                        const int64_t *values, uint8_t count);
@@ -824,9 +836,9 @@ void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
 
 /*
  * AT+MTMEAS field ids for the WaterHeaterManagement cluster (0x0094), the
- * wire contract task 3 serves in mt_matter_meas_set()'s 0x94 branch,
- * task 5 documents in AT_MT_SPEC.md, and task 6 consumes in the host
- * library. Same family-selection rule as MT_MEAS_F_* / MT_ENERGY_F_* above:
+ * wire contract mt_matter_meas_set()'s 0x94 branch serves (mt_meas_whm_apply,
+ * main.cpp), AT_MT_SPEC.md 3.25 documents, and the host library consumes.
+ * Same family-selection rule as MT_MEAS_F_* / MT_ENERGY_F_* above:
  * the cluster id the host passes decides which table applies, so the spaces
  * may overlap numerically. Types and bounds follow the cluster XML exactly;
  * fields 3-4 exist only under the EnergyManagement feature and field 5 only

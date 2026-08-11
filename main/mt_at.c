@@ -1056,17 +1056,27 @@ static int cmd_mtalarm(at_type_t type, char *args)
 }
 
 /* Signedness per (cluster, field) for AT+MTMEAS value parsing, mirroring the
- * MT_MEAS_F_* / MT_ENERGY_F_* unit comments in mt_matter.h: every
- * ElectricalPowerMeasurement (0x0090) field is signed, both
- * ElectricalEnergyMeasurement (0x0091) cumulative counters are unsigned.
- * Unknown fields (and unknown clusters) default to signed: the accept set
- * only shapes the parse, and the bridge rejects an unknown field with
- * MT_ATTR_ERR_VALUE in its validate pass regardless of how the value was
- * parsed, so nothing wrongly admitted here is ever applied. */
+ * MT_MEAS_F_* / MT_ENERGY_F_* / MT_WHM_F_* unit comments in mt_matter.h:
+ * every ElectricalPowerMeasurement (0x0090) field is signed, both
+ * ElectricalEnergyMeasurement (0x0091) cumulative counters are unsigned, and
+ * of the WaterHeaterManagement (0x0094) fields only EstimatedHeatRequired
+ * (field 4, int64 mWh) is signed, kept signed for 64-bit pipeline symmetry
+ * even though the XML pins its minimum at 0: the min-0 range check is the
+ * bridge's business (feature gating likewise; this C side only classifies
+ * signedness), so "-1" on field 4 parses here and answers +MTERR:1 from the
+ * bridge's validate pass instead of the parse gate. Unknown fields (and
+ * unknown clusters) default to signed: the accept set only shapes the parse,
+ * and the bridge rejects an unknown field with MT_ATTR_ERR_VALUE in its
+ * validate pass regardless of how the value was parsed, so nothing wrongly
+ * admitted here is ever applied. */
 static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
 {
     if (cluster == 0x0091 &&
         (field == MT_ENERGY_F_IMPORTED || field == MT_ENERGY_F_EXPORTED)) {
+        return false;
+    }
+    if (cluster == 0x0094 && field <= MT_WHM_F_TANK_PERCENT &&
+        field != MT_WHM_F_EST_HEAT_REQ) {
         return false;
     }
     return true;
@@ -1074,12 +1084,13 @@ static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
 
 /*
  * AT+MTMEAS=<ep>,<cluster>,<field>,<value>[,<field>,<value>,...] -> push
- * 1..MT_MEAS_MAX_PAIRS (field, value) electrical measurement pairs onto
- * <ep>'s measurement cluster in one call (energy round A). <cluster> selects
- * the family, 0x0090 ElectricalPowerMeasurement or 0x0091
- * ElectricalEnergyMeasurement; the field ids (MT_MEAS_F_* / MT_ENERGY_F_*,
- * mt_matter.h) are per-cluster spaces that may overlap numerically. Set-only,
- * the AT+MTLOCK/AT+MTVALVE/AT+MTOPSTATE/AT+MTALARM convention: bare/query
+ * 1..MT_MEAS_MAX_PAIRS (field, value) measurement/state pairs onto <ep>'s
+ * push-served cluster in one call (energy round A; round B adds 0x0094).
+ * <cluster> selects the family, 0x0090 ElectricalPowerMeasurement, 0x0091
+ * ElectricalEnergyMeasurement or 0x0094 WaterHeaterManagement; the field ids
+ * (MT_MEAS_F_* / MT_ENERGY_F_* / MT_WHM_F_*, mt_matter.h) are per-cluster
+ * spaces that may overlap numerically. Set-only, the
+ * AT+MTLOCK/AT+MTVALVE/AT+MTOPSTATE/AT+MTALARM convention: bare/query
  * forms answer a plain ERROR.
  *
  * <value> is a full-width 64-bit integer (hex or decimal), signed per the
@@ -1093,8 +1104,10 @@ static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
  * pair leaves the first two unapplied.
  *
  * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
- * +MTERR:3 <cluster> is neither measurement cluster or <ep> does not carry
- * it. A bare ERROR covers an unclassified runtime failure, routed through
+ * +MTERR:3 <cluster> is not one of the three push-served ids, <ep> does not
+ * carry it, or (0x0094 only) a pushed field's backing feature is absent on
+ * that endpoint (the bridge-side gate; see mt_matter.h's MT_WHM_F_* note).
+ * A bare ERROR covers an unclassified runtime failure, routed through
  * attr_err_to_mterr() like every other bridge call in this file.
  */
 #define MT_MEAS_MAX_PAIRS 7
