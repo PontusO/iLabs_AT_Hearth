@@ -1055,6 +1055,86 @@ static int cmd_mtalarm(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/* Signedness per (cluster, field) for AT+MTMEAS value parsing, mirroring the
+ * MT_MEAS_F_* / MT_ENERGY_F_* unit comments in mt_matter.h: every
+ * ElectricalPowerMeasurement (0x0090) field is signed, both
+ * ElectricalEnergyMeasurement (0x0091) cumulative counters are unsigned.
+ * Unknown fields (and unknown clusters) default to signed: the accept set
+ * only shapes the parse, and the bridge rejects an unknown field with
+ * MT_ATTR_ERR_VALUE in its validate pass regardless of how the value was
+ * parsed, so nothing wrongly admitted here is ever applied. */
+static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
+{
+    if (cluster == 0x0091 &&
+        (field == MT_ENERGY_F_IMPORTED || field == MT_ENERGY_F_EXPORTED)) {
+        return false;
+    }
+    return true;
+}
+
+/*
+ * AT+MTMEAS=<ep>,<cluster>,<field>,<value>[,<field>,<value>,...] -> push
+ * 1..MT_MEAS_MAX_PAIRS (field, value) electrical measurement pairs onto
+ * <ep>'s measurement cluster in one call (energy round A). <cluster> selects
+ * the family, 0x0090 ElectricalPowerMeasurement or 0x0091
+ * ElectricalEnergyMeasurement; the field ids (MT_MEAS_F_* / MT_ENERGY_F_*,
+ * mt_matter.h) are per-cluster spaces that may overlap numerically. Set-only,
+ * the AT+MTLOCK/AT+MTVALVE/AT+MTOPSTATE/AT+MTALARM convention: bare/query
+ * forms answer a plain ERROR.
+ *
+ * <value> is a full-width 64-bit integer (hex or decimal), signed per the
+ * field's own signedness (mt_meas_field_signed() above): a leading minus is
+ * accepted only for the signed power fields and rejected at parse for the
+ * unsigned energy counters, the same signedness-first parse AT+MTATTR's
+ * write path uses. This handler only checks the wire shape (1..7 pairs, an
+ * even pair tail, numeric tokens, <field> in u8); the bridge
+ * (mt_matter_meas_set(), main.cpp) validates every field id and value
+ * against the cluster XML bounds BEFORE applying anything, so a bad third
+ * pair leaves the first two unapplied.
+ *
+ * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
+ * +MTERR:3 <cluster> is neither measurement cluster or <ep> does not carry
+ * it. A bare ERROR covers an unclassified runtime failure, routed through
+ * attr_err_to_mterr() like every other bridge call in this file.
+ */
+#define MT_MEAS_MAX_PAIRS 7
+static int cmd_mtmeas(at_type_t type, char *args)
+{
+    char *f[2 + 2 * MT_MEAS_MAX_PAIRS];
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    int n = at_split_args(args, f, 2 + 2 * MT_MEAS_MAX_PAIRS);
+    if (n < 4 || (n - 2) % 2 != 0) {
+        return MT_ERR_BAD_PARAM;
+    }
+    unsigned long ep, cluster;
+    if (!parse_u(f[0], &ep) || ep > 0xFFFF || !parse_u(f[1], &cluster)) {
+        return MT_ERR_BAD_PARAM;
+    }
+    uint8_t fields[MT_MEAS_MAX_PAIRS];
+    int64_t values[MT_MEAS_MAX_PAIRS];
+    uint8_t count = (uint8_t)((n - 2) / 2);
+    for (uint8_t i = 0; i < count; i++) {
+        unsigned long field;
+        if (!parse_u(f[2 + 2 * i], &field) || field > 0xFF) {
+            return MT_ERR_BAD_PARAM;
+        }
+        /* signedness per (cluster, field): energy fields are unsigned,
+         * power fields signed; the bridge re-validates, this parse only
+         * needs the right accept set */
+        if (!parse_i64(f[3 + 2 * i], mt_meas_field_signed((uint32_t)cluster, (uint8_t)field), &values[i])) {
+            return MT_ERR_BAD_PARAM;
+        }
+        fields[i] = (uint8_t)field;
+    }
+    int r = mt_matter_meas_set((uint16_t)ep, (uint32_t)cluster, fields, values, count);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
 /*
  * AT+MTCHIMESOUNDS=<ep>,<id>,"<name>"[,<id>,"<name>",...] -> replace ep's
  * Chime InstalledChimeSounds list, 1..MT_CHIME_MAX_SOUNDS id/name pairs. The
@@ -1895,6 +1975,7 @@ static const at_command_t s_cmds[] = {
     { "MTALARM",      cmd_mtalarm     },
     { "MTCHIMESOUNDS", cmd_mtchimesounds },
     { "MTCHIME",      cmd_mtchime     },
+    { "MTMEAS",       cmd_mtmeas      },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif
