@@ -122,6 +122,22 @@
  * mode-base-server.h just above - it needs its own explicit include. */
 #include <app/clusters/microwave-oven-control-server/microwave-oven-control-server.h>
 
+/* Energy round A, task 2: the three measurement clusters behind AT+MTMEAS.
+ * ElectricalPowerMeasurement::Delegate/Instance (pull-model, served from
+ * host-pushed values), PowerTopology::Delegate/Instance (NodeTopology), the
+ * ElectricalEnergyMeasurement free functions (push-model:
+ * NotifyCumulativeEnergyMeasured writes the attribute store AND emits the
+ * event), and ElectricalEnergyMeasurementAttrAccess, the wildcard attribute
+ * access object the EEM server declares but nothing in the SDK ever
+ * registers (the 8.6 disease in yet another organ; see the measurement
+ * block's own comment below). SystemClock.h for the EEM timestamp policy
+ * (GetClock_MatterEpochS when wall time is synced). */
+#include <app/clusters/electrical-power-measurement-server/electrical-power-measurement-server.h>
+#include <app/clusters/power-topology-server/power-topology-server.h>
+#include <app/clusters/electrical-energy-measurement-server/electrical-energy-measurement-server.h>
+#include <app/clusters/electrical-energy-measurement-server/ElectricalEnergyMeasurementCluster.h>
+#include <system/SystemClock.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -3080,6 +3096,554 @@ extern "C" void *mt_matter_mwoc_delegate_alloc(void)
 extern "C" void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
 {
     static_cast<HearthMwocDelegate *>(delegate)->set_endpoint(ep);
+}
+
+/*
+ * ---- electrical measurement: EPM, PowerTopology, EEM (energy round A, task 2) ----
+ *
+ * Three clusters, two models, one bridge (AT+MTMEAS, mt_matter_meas_set()
+ * below):
+ *
+ *   ElectricalPowerMeasurement (0x0090) is PULL-model: the CHIP Instance is
+ *   an AttributeAccessInterface that answers every read by calling the
+ *   Delegate's Get*() methods (electrical-power-measurement-server.h:63-75),
+ *   so the host's pushed values live in HearthEpmDelegate members and a
+ *   MatterReportingAttributeChangeCallback per applied field is what makes
+ *   subscriptions fire (the delegate setter precedent in the SDK's own
+ *   all_device_types_app ElectricalPowerMeasurementDelegate).
+ *
+ *   PowerTopology (0x009C) with the NodeTopology feature needs only a
+ *   constructible Delegate: its two pure virtuals are the endpoint-list
+ *   iterators backing the AvailableEndpoints/ActiveEndpoints attributes,
+ *   which exist only under the SET/TREE topology features
+ *   (power-topology-server.cpp gates both reads on the optional attributes,
+ *   which in turn require those features), so HearthPtopDelegate answers
+ *   both with PROVIDER_LIST_EXHAUSTED and is never actually consulted.
+ *
+ *   ElectricalEnergyMeasurement (0x0091) is PUSH-model free functions:
+ *   NotifyCumulativeEnergyMeasured() stores the structs into the server's
+ *   own per-endpoint MeasurementData AND emits the CumulativeEnergyMeasured
+ *   event in one call. That storage was verified to cover DYNAMIC endpoints
+ *   before this block was written (the round's one hard unknown):
+ *   gMeasurements is sized MATTER_DM_..._ENDPOINT_COUNT +
+ *   CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT
+ *   (ElectricalEnergyMeasurementCluster.cpp:42) and
+ *   emberAfGetClusterServerEndpointIndex() maps a dynamic endpoint to
+ *   fixed_count + its dynamic-table slot (attribute-storage.cpp:963), so
+ *   with CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT (24) above
+ *   MT_COMP_MAX_ENDPOINTS (16) every endpoint this firmware can create has
+ *   a slot.
+ *
+ * Init routes, per cluster (the report's "which CB" question):
+ *   - EPM and PowerTopology use the SDK's OWN init callbacks
+ *     (ElectricalPowerMeasurementDelegateInitCB / PowerTopologyDelegateInitCB,
+ *     esp_matter_delegate_callbacks.cpp:406/418): cluster::create() wires
+ *     them automatically when config.delegate is set, and they construct the
+ *     Instance from the endpoint's real FeatureMap attribute plus the set of
+ *     optional attributes actually created on the endpoint
+ *     (is_attribute_enabled), which keeps the Instance's feature answers and
+ *     the ember attribute agreeing by construction (the B139 lesson) instead
+ *     of by a second hardcoded list here. No custom CB exists for either.
+ *   - EEM has NO SDK init callback and, worse, its wildcard attribute-access
+ *     object is never registered by anything in the SDK:
+ *     ESPMatterElectricalEnergyMeasurementClusterServerInitCallback is
+ *     declared (ClusterCallbacks.h:124) with no implementation and no
+ *     caller, the section-8.6 disease in yet another organ, so without app
+ *     code every EEM attribute read would answer Failure while the ember
+ *     metadata happily advertises the attributes. HearthEemInitCB below is
+ *     that app code: the task-4 thunk hands it to
+ *     set_delegate_and_init_callback() itself (the HearthOvenModeInitCB
+ *     precedent; the delegate pointer is null and ignored, which is safe
+ *     because esp_matter invokes the callback whenever it is set,
+ *     esp_matter_data_model.cpp:264-266).
+ *
+ * Accuracy: both clusters must serve a MeasurementAccuracyStruct (EPM as the
+ * mandatory Accuracy list through the delegate, EEM as its Accuracy
+ * attribute via SetMeasurementAccuracy()). This firmware is a bridge; the
+ * real metering hardware sits behind the host, whose accuracy this firmware
+ * cannot know. The figures served (0.1% - 1%, 0.5% typical, one range
+ * covering the full XML value span) are the middle band of the SDK
+ * reference implementation's own table (all_device_types_app
+ * electrical_measurement.cpp), a documented assumption task 3 records in
+ * the AT spec rather than a measured fact.
+ */
+
+/* The XML value bounds mt_matter_meas_set() validates against
+ * (electrical-power-measurement-cluster.xml /
+ * electrical-energy-measurement-cluster.xml, pinned tree). Not available
+ * from any generated header, so cited literals rather than transcribed
+ * enum values. */
+static constexpr int64_t kMeasValueAbsMax = 4611686018427387904LL; /* +-2^62 */
+static constexpr int64_t kMeasFreqMax     = 1000000;   /* Frequency, mHz  */
+static constexpr int64_t kMeasPfAbsMax    = 10000;     /* PowerFactor, 1/100 % */
+
+static const chip::app::Clusters::ElectricalPowerMeasurement::Structs::MeasurementAccuracyRangeStruct::Type
+    s_meas_power_accuracy_ranges[] = {
+    {
+        .rangeMin       = -kMeasValueAbsMax,
+        .rangeMax       = kMeasValueAbsMax,
+        .percentMax     = chip::MakeOptional(static_cast<chip::Percent100ths>(1000)),
+        .percentMin     = chip::MakeOptional(static_cast<chip::Percent100ths>(100)),
+        .percentTypical = chip::MakeOptional(static_cast<chip::Percent100ths>(500)),
+    },
+};
+
+/* The one mandatory EPM accuracy entry: ActivePower, the cluster's one
+ * mandatory measured value. */
+static const chip::app::Clusters::ElectricalPowerMeasurement::Structs::MeasurementAccuracyStruct::Type
+    s_meas_epm_accuracy = {
+    .measurementType  = chip::app::Clusters::ElectricalPowerMeasurement::MeasurementTypeEnum::kActivePower,
+    .measured         = true,
+    .minMeasuredValue = -kMeasValueAbsMax,
+    .maxMeasuredValue = kMeasValueAbsMax,
+    .accuracyRanges   = chip::app::DataModel::List<
+        const chip::app::Clusters::ElectricalPowerMeasurement::Structs::MeasurementAccuracyRangeStruct::Type>(
+        s_meas_power_accuracy_ranges),
+};
+
+static const chip::app::Clusters::ElectricalEnergyMeasurement::Structs::MeasurementAccuracyRangeStruct::Type
+    s_meas_energy_accuracy_ranges[] = {
+    {
+        .rangeMin       = 0,
+        .rangeMax       = kMeasValueAbsMax,
+        .percentMax     = chip::MakeOptional(static_cast<chip::Percent100ths>(1000)),
+        .percentMin     = chip::MakeOptional(static_cast<chip::Percent100ths>(100)),
+        .percentTypical = chip::MakeOptional(static_cast<chip::Percent100ths>(500)),
+    },
+};
+
+/* Same tolerance figures as the EPM entry above, but typed kElectricalEnergy
+ * over the energy value span: EEM's Accuracy attribute describes the energy
+ * measurement itself, so serving the ActivePower-typed struct verbatim would
+ * satisfy the letter of "the same accuracy" while violating the attribute's
+ * meaning. */
+static const chip::app::Clusters::ElectricalEnergyMeasurement::Structs::MeasurementAccuracyStruct::Type
+    s_meas_eem_accuracy = {
+    .measurementType  = chip::app::Clusters::ElectricalEnergyMeasurement::MeasurementTypeEnum::kElectricalEnergy,
+    .measured         = true,
+    .minMeasuredValue = 0,
+    .maxMeasuredValue = kMeasValueAbsMax,
+    .accuracyRanges   = chip::app::DataModel::List<
+        const chip::app::Clusters::ElectricalEnergyMeasurement::Structs::MeasurementAccuracyRangeStruct::Type>(
+        s_meas_energy_accuracy_ranges),
+};
+
+/*
+ * The EPM delegate: a store for host-pushed values, all null until the host
+ * first pushes them, plus the fixed answers the pull-model server needs.
+ * Base-class SetEndpointId()/mEndpointId (electrical-power-measurement-
+ * server.h:36) carry the endpoint, set once by the thunk after create()
+ * returns the id and again (idempotently) by the Instance constructor at
+ * init-callback time.
+ */
+class HearthEpmDelegate : public chip::app::Clusters::ElectricalPowerMeasurement::Delegate
+{
+public:
+    /* Host-pushed values, written only by mt_matter_meas_set() below. */
+    chip::app::DataModel::Nullable<int64_t> m_voltage, m_active_current, m_active_power,
+        m_frequency, m_power_factor, m_rms_voltage, m_rms_current;
+
+    chip::EndpointId endpoint() const { return mEndpointId; }
+
+    chip::app::Clusters::ElectricalPowerMeasurement::PowerModeEnum GetPowerMode() override
+    {
+        return chip::app::Clusters::ElectricalPowerMeasurement::PowerModeEnum::kAc;
+    }
+    uint8_t GetNumberOfMeasurementTypes() override { return 1; }
+
+    /* Accuracy: exactly one entry (ActivePower, the mandatory one), backed
+     * by a static const table, so the Start/End read brackets have nothing
+     * to lock (the SDK reference delegate's own reasoning). */
+    CHIP_ERROR StartAccuracyRead() override { return CHIP_NO_ERROR; }
+    CHIP_ERROR GetAccuracyByIndex(
+        uint8_t index,
+        chip::app::Clusters::ElectricalPowerMeasurement::Structs::MeasurementAccuracyStruct::Type &accuracy) override
+    {
+        if (index > 0) {
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        accuracy = s_meas_epm_accuracy;
+        return CHIP_NO_ERROR;
+    }
+    CHIP_ERROR EndAccuracyRead() override { return CHIP_NO_ERROR; }
+
+    /* Ranges and harmonics: empty lists. */
+    CHIP_ERROR StartRangesRead() override { return CHIP_NO_ERROR; }
+    CHIP_ERROR GetRangeByIndex(
+        uint8_t,
+        chip::app::Clusters::ElectricalPowerMeasurement::Structs::MeasurementRangeStruct::Type &) override
+    {
+        return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+    }
+    CHIP_ERROR EndRangesRead() override { return CHIP_NO_ERROR; }
+
+    CHIP_ERROR StartHarmonicCurrentsRead() override { return CHIP_NO_ERROR; }
+    CHIP_ERROR GetHarmonicCurrentsByIndex(
+        uint8_t,
+        chip::app::Clusters::ElectricalPowerMeasurement::Structs::HarmonicMeasurementStruct::Type &) override
+    {
+        return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+    }
+    CHIP_ERROR EndHarmonicCurrentsRead() override { return CHIP_NO_ERROR; }
+
+    CHIP_ERROR StartHarmonicPhasesRead() override { return CHIP_NO_ERROR; }
+    CHIP_ERROR GetHarmonicPhasesByIndex(
+        uint8_t,
+        chip::app::Clusters::ElectricalPowerMeasurement::Structs::HarmonicMeasurementStruct::Type &) override
+    {
+        return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+    }
+    CHIP_ERROR EndHarmonicPhasesRead() override { return CHIP_NO_ERROR; }
+
+    /* The seven field-table attributes, served from the pushed store. */
+    chip::app::DataModel::Nullable<int64_t> GetVoltage() override { return m_voltage; }
+    chip::app::DataModel::Nullable<int64_t> GetActiveCurrent() override { return m_active_current; }
+    chip::app::DataModel::Nullable<int64_t> GetActivePower() override { return m_active_power; }
+    chip::app::DataModel::Nullable<int64_t> GetFrequency() override { return m_frequency; }
+    chip::app::DataModel::Nullable<int64_t> GetPowerFactor() override { return m_power_factor; }
+    chip::app::DataModel::Nullable<int64_t> GetRMSVoltage() override { return m_rms_voltage; }
+    chip::app::DataModel::Nullable<int64_t> GetRMSCurrent() override { return m_rms_current; }
+
+    /* Everything the field table does not carry: permanently null. These
+     * attributes are never created on the endpoint (task 4), so these
+     * answers exist only to satisfy the pure-virtual contract. */
+    chip::app::DataModel::Nullable<int64_t> GetReactiveCurrent() override { return {}; }
+    chip::app::DataModel::Nullable<int64_t> GetApparentCurrent() override { return {}; }
+    chip::app::DataModel::Nullable<int64_t> GetReactivePower() override { return {}; }
+    chip::app::DataModel::Nullable<int64_t> GetApparentPower() override { return {}; }
+    chip::app::DataModel::Nullable<int64_t> GetRMSPower() override { return {}; }
+    chip::app::DataModel::Nullable<int64_t> GetNeutralCurrent() override { return {}; }
+};
+
+/*
+ * The PowerTopology delegate: NodeTopology only, so both pure virtuals
+ * (the SET/TREE endpoint-list iterators, see the block comment above) answer
+ * "empty" and the object exists purely so the SDK init CB has something to
+ * construct the Instance around. The endpoint member mirrors the other
+ * pools' shape for debuggability; nothing reads it.
+ */
+class HearthPtopDelegate : public chip::app::Clusters::PowerTopology::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+
+    CHIP_ERROR GetAvailableEndpointAtIndex(size_t, chip::EndpointId &) override
+    {
+        return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+    }
+    CHIP_ERROR GetActiveEndpointAtIndex(size_t, chip::EndpointId &) override
+    {
+        return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+    }
+
+private:
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+};
+
+/*
+ * The two pools, MT_MEAS_MAX each (mt_matter.h documents the sizing), same
+ * alloc-before-create shape as every other pool in this file. One setter
+ * serves both pools: the void* the thunk hands back is matched against each
+ * pool's own objects, so mt_devtypes.cpp needs neither a second name nor
+ * any knowledge of which class it is holding.
+ */
+static HearthEpmDelegate  s_meas_epm_delegates[MT_MEAS_MAX];
+static size_t             s_meas_epm_next = 0;
+static HearthPtopDelegate s_meas_ptop_delegates[MT_MEAS_MAX];
+static size_t             s_meas_ptop_next = 0;
+
+extern "C" void *mt_matter_epm_delegate_alloc(void)
+{
+    if (s_meas_epm_next >= MT_MEAS_MAX) {
+        return nullptr;
+    }
+    return &s_meas_epm_delegates[s_meas_epm_next++];
+}
+
+extern "C" void *mt_matter_ptop_delegate_alloc(void)
+{
+    if (s_meas_ptop_next >= MT_MEAS_MAX) {
+        return nullptr;
+    }
+    return &s_meas_ptop_delegates[s_meas_ptop_next++];
+}
+
+extern "C" void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    for (auto &d : s_meas_epm_delegates) {
+        if (&d == delegate) {
+            d.SetEndpointId(ep);
+            return;
+        }
+    }
+    for (auto &d : s_meas_ptop_delegates) {
+        if (&d == delegate) {
+            d.set_endpoint(ep);
+            return;
+        }
+    }
+}
+
+/* The pool lookup mt_matter_meas_set() uses for the EPM branch. */
+static HearthEpmDelegate *meas_epm_for(chip::EndpointId ep)
+{
+    for (size_t i = 0; i < s_meas_epm_next; i++) {
+        if (s_meas_epm_delegates[i].endpoint() == ep) {
+            return &s_meas_epm_delegates[i];
+        }
+    }
+    return nullptr;
+}
+
+/*
+ * Per-EEM-endpoint init at the SDK's usual init-callback timing, handed to
+ * set_delegate_and_init_callback() by the task-4 thunk itself since no SDK
+ * callback exists for this cluster (see the block comment above; not
+ * extern "C" for the same signature reason HearthRvcOpStateInitCB
+ * documents). Two jobs:
+ *
+ *   1. Once, on the first EEM endpoint: register the server's wildcard
+ *      AttributeAccessInterface, without which every EEM attribute read
+ *      answers Failure (the never-called
+ *      ESPMatterElectricalEnergyMeasurementClusterServerInitCallback
+ *      disease). The features passed here are what the AttrAccess serves
+ *      for EVERY EEM endpoint's FeatureMap read, so the task-4 thunk must
+ *      create the cluster with exactly these three feature flags
+ *      (Imported + Exported + Cumulative) or FeatureMap would lie.
+ *   2. Per endpoint: serve the Accuracy attribute via
+ *      SetMeasurementAccuracy(), which needs the endpoint to exist in ember
+ *      first, which is exactly what init-callback timing guarantees (the
+ *      same ordering every Instance-constructing CB in this file relies
+ *      on).
+ */
+void HearthEemInitCB(void *delegate, uint16_t endpoint_id)
+{
+    (void)delegate; /* null by contract, see mt_matter.h */
+    using namespace chip::app::Clusters::ElectricalEnergyMeasurement;
+
+    static ElectricalEnergyMeasurementAttrAccess *s_eem_attr_access = nullptr;
+    if (s_eem_attr_access == nullptr) {
+        s_eem_attr_access = new ElectricalEnergyMeasurementAttrAccess(
+            chip::BitMask<Feature, uint32_t>(Feature::kImportedEnergy, Feature::kExportedEnergy,
+                                             Feature::kCumulativeEnergy),
+            chip::BitMask<OptionalAttributes, uint32_t>());
+        CHIP_ERROR err = s_eem_attr_access->Init();
+        if (err != CHIP_NO_ERROR) {
+            ESP_LOGE(TAG, "EEM AttrAccess registration failed: %" CHIP_ERROR_FORMAT, err.Format());
+        }
+    }
+
+    CHIP_ERROR err = SetMeasurementAccuracy(endpoint_id, s_meas_eem_accuracy);
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "EEM SetMeasurementAccuracy failed on ep %u: %" CHIP_ERROR_FORMAT,
+                 (unsigned)endpoint_id, err.Format());
+    }
+}
+
+/*
+ * The AT+MTMEAS bridge. Grammar (pair count bounds, integer parses) is
+ * mt_at.c's business (task 3); this bridge owns everything that needs the
+ * data model: endpoint and cluster lookup (the MTALARM dispatcher's shape),
+ * per-field range validation against the cluster XML bounds, and the
+ * atomic apply. Two passes, a hard contract from the task brief: every
+ * pair is validated before any pair is applied, so a bad third pair leaves
+ * the first two unapplied.
+ */
+extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
+                                  const int64_t *values, uint8_t count)
+{
+    using namespace chip::app::Clusters;
+    ChipStackLock lock;
+
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (cluster != ElectricalPowerMeasurement::Id && cluster != ElectricalEnergyMeasurement::Id) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (esp_matter::cluster::get(ep, cluster) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1) {
+        /* Defensive; mt_at.c never passes an empty list. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    if (cluster == ElectricalPowerMeasurement::Id) {
+        HearthEpmDelegate *d = meas_epm_for(ep);
+        if (d == nullptr) {
+            /* Cluster present but no pool slot serves this endpoint: cannot
+             * happen once the boot rebuild has run, kept as the same
+             * defensive answer the other pool bridges give. */
+            return MT_ATTR_ERR_FAILED;
+        }
+
+        /* Pass 1: validate everything. */
+        for (uint8_t i = 0; i < count; i++) {
+            switch (fields[i]) {
+            case MT_MEAS_F_VOLTAGE:
+            case MT_MEAS_F_ACTIVE_CURRENT:
+            case MT_MEAS_F_ACTIVE_POWER:
+            case MT_MEAS_F_RMS_VOLTAGE:
+            case MT_MEAS_F_RMS_CURRENT:
+                if (values[i] < -kMeasValueAbsMax || values[i] > kMeasValueAbsMax) {
+                    return MT_ATTR_ERR_VALUE;
+                }
+                break;
+            case MT_MEAS_F_FREQUENCY:
+                if (values[i] < 0 || values[i] > kMeasFreqMax) {
+                    return MT_ATTR_ERR_VALUE;
+                }
+                break;
+            case MT_MEAS_F_POWER_FACTOR:
+                if (values[i] < -kMeasPfAbsMax || values[i] > kMeasPfAbsMax) {
+                    return MT_ATTR_ERR_VALUE;
+                }
+                break;
+            default:
+                return MT_ATTR_ERR_VALUE;
+            }
+        }
+
+        /* Pass 2: apply, one subscription report per applied field. */
+        for (uint8_t i = 0; i < count; i++) {
+            chip::app::DataModel::Nullable<int64_t> v = chip::app::DataModel::MakeNullable(values[i]);
+            uint32_t attr_id;
+            switch (fields[i]) {
+            case MT_MEAS_F_VOLTAGE:
+                d->m_voltage = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::Voltage::Id;
+                break;
+            case MT_MEAS_F_ACTIVE_CURRENT:
+                d->m_active_current = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id;
+                break;
+            case MT_MEAS_F_ACTIVE_POWER:
+                d->m_active_power = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::ActivePower::Id;
+                break;
+            case MT_MEAS_F_FREQUENCY:
+                d->m_frequency = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::Frequency::Id;
+                break;
+            case MT_MEAS_F_POWER_FACTOR:
+                d->m_power_factor = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::PowerFactor::Id;
+                break;
+            case MT_MEAS_F_RMS_VOLTAGE:
+                d->m_rms_voltage = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::RMSVoltage::Id;
+                break;
+            default: /* MT_MEAS_F_RMS_CURRENT, pass 1 admits nothing else */
+                d->m_rms_current = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::RMSCurrent::Id;
+                break;
+            }
+            MatterReportingAttributeChangeCallback(ep, ElectricalPowerMeasurement::Id, attr_id);
+        }
+        return MT_ATTR_OK;
+    }
+
+    /* ---- ElectricalEnergyMeasurement ---- */
+
+    /* Pass 1: validate everything. Values are cumulative mWh counters,
+     * unsigned on the wire; anything negative here is either a negative
+     * input or a u64 pattern above INT64_MAX, both outside the XML's
+     * 0..2^62. */
+    for (uint8_t i = 0; i < count; i++) {
+        if (fields[i] != MT_ENERGY_F_IMPORTED && fields[i] != MT_ENERGY_F_EXPORTED) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        if (values[i] < 0 || values[i] > kMeasValueAbsMax) {
+            return MT_ATTR_ERR_VALUE;
+        }
+    }
+
+    ElectricalEnergyMeasurement::MeasurementData *data =
+        ElectricalEnergyMeasurement::MeasurementDataForEndpoint(ep);
+    if (data == nullptr) {
+        /* Cluster present in esp_matter's model but ember cannot map it:
+         * cannot happen once the endpoint is enabled (see the dynamic-
+         * endpoint verification in the block comment above). */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    bool    have_imp = false, have_exp = false;
+    int64_t imp_val = 0, exp_val = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        if (fields[i] == MT_ENERGY_F_IMPORTED) {
+            have_imp = true;
+            imp_val  = values[i]; /* duplicate fields: last one wins */
+        } else {
+            have_exp = true;
+            exp_val  = values[i];
+        }
+    }
+
+    /* Timestamp policy (task brief step 4): wall time when synced, else the
+     * systime fields; end = now, start = the previous push's end, carried
+     * per endpoint by the server's own stored structs (the EVSE reference
+     * implementation's exact shape, EVSEManufacturerImpl.cpp
+     * SendCumulativeEnergyReading). */
+    uint32_t now_ts = 0;
+    bool     wall   = (chip::System::Clock::GetClock_MatterEpochS(now_ts) == CHIP_NO_ERROR);
+    uint64_t now_ms = static_cast<uint64_t>(
+        chip::System::SystemClock().GetMonotonicMilliseconds64().count());
+
+    auto build = [&](int64_t energy,
+                     const chip::Optional<ElectricalEnergyMeasurement::Structs::EnergyMeasurementStruct::Type> &prev) {
+        ElectricalEnergyMeasurement::Structs::EnergyMeasurementStruct::Type s;
+        s.energy = energy;
+        if (prev.HasValue()) {
+            s.startTimestamp = prev.Value().endTimestamp;
+            s.startSystime   = prev.Value().endSystime;
+        }
+        if (wall) {
+            s.endTimestamp.SetValue(now_ts);
+        } else {
+            s.endSystime.SetValue(now_ms);
+        }
+        return s;
+    };
+
+    /* A side this call does not mention is carried forward unchanged:
+     * NotifyCumulativeEnergyMeasured() REPLACES both stored sides
+     * (ElectricalEnergyMeasurementCluster.cpp:197-198), so passing Missing
+     * for the un-pushed one would null its attribute out from under any
+     * subscriber. The cost is that the event restates the carried side's
+     * previous reading, which the spec's "imported, exported, or both"
+     * event wording tolerates. */
+    chip::Optional<ElectricalEnergyMeasurement::Structs::EnergyMeasurementStruct::Type> imported =
+        data->cumulativeImported;
+    chip::Optional<ElectricalEnergyMeasurement::Structs::EnergyMeasurementStruct::Type> exported =
+        data->cumulativeExported;
+    if (have_imp) {
+        imported.SetValue(build(imp_val, data->cumulativeImported));
+    }
+    if (have_exp) {
+        exported.SetValue(build(exp_val, data->cumulativeExported));
+    }
+
+    if (!ElectricalEnergyMeasurement::NotifyCumulativeEnergyMeasured(ep, imported, exported)) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    /* Notify writes the store and emits the event but reports no attribute
+     * change (ElectricalEnergyMeasurementCluster.cpp:191-218 has no
+     * MatterReportingAttributeChangeCallback), so subscriptions on the
+     * attributes themselves are fired here, one per pushed side, the same
+     * one-report-per-applied-field contract as the EPM branch. */
+    if (have_imp) {
+        MatterReportingAttributeChangeCallback(
+            ep, ElectricalEnergyMeasurement::Id,
+            ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported::Id);
+    }
+    if (have_exp) {
+        MatterReportingAttributeChangeCallback(
+            ep, ElectricalEnergyMeasurement::Id,
+            ElectricalEnergyMeasurement::Attributes::CumulativeEnergyExported::Id);
+    }
+    return MT_ATTR_OK;
 }
 
 /*

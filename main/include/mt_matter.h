@@ -712,6 +712,104 @@ int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value);
 void *mt_matter_mwoc_delegate_alloc(void);
 void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep);
 
+/* ---- electrical measurement (energy round A, task 2) -------------------- */
+
+/*
+ * How many measurement-capable endpoints one composition can carry. A
+ * deliberate step down from MT_COMP_MAX_ENDPOINTS (16): each slot pairs an
+ * ElectricalPowerMeasurement delegate (seven Nullable<int64_t> values plus
+ * vtable) with a PowerTopology delegate, and four electrical sensors or
+ * heavyweight plugs per composition is already beyond any host this firmware
+ * targets, the same sizing reasoning MT_MB_MAX_LISTS documents above.
+ */
+#define MT_MEAS_MAX 4  /* measurement-capable endpoints per composition */
+
+/*
+ * AT+MTMEAS field ids, the wire contract task 3 documents in AT_MT_SPEC.md
+ * and task 6 consumes in the host library. MT_MEAS_F_* select
+ * ElectricalPowerMeasurement attributes (cluster 0x0090), MT_ENERGY_F_*
+ * select ElectricalEnergyMeasurement cumulative counters (cluster 0x0091);
+ * which family applies is decided by the cluster id the host passed, so the
+ * two spaces may overlap numerically. Units follow the cluster XML exactly
+ * (voltage_mv / amperage_ma / power_mw; Frequency is mHz 0..1000000;
+ * PowerFactor is 1/100 of a percent, -10000..10000; energy is mWh,
+ * 0..2^62).
+ */
+#define MT_MEAS_F_VOLTAGE        0  /* mV,  signed */
+#define MT_MEAS_F_ACTIVE_CURRENT 1  /* mA,  signed */
+#define MT_MEAS_F_ACTIVE_POWER   2  /* mW,  signed */
+#define MT_MEAS_F_FREQUENCY      3  /* mHz, signed */
+#define MT_MEAS_F_POWER_FACTOR   4  /* 1/100 %, signed */
+#define MT_MEAS_F_RMS_VOLTAGE    5  /* mV,  signed */
+#define MT_MEAS_F_RMS_CURRENT    6  /* mA,  signed */
+#define MT_ENERGY_F_IMPORTED     0  /* mWh, unsigned */
+#define MT_ENERGY_F_EXPORTED     1  /* mWh, unsigned */
+
+/*
+ * AT+MTMEAS: push up to count (field, value) measurement pairs onto ep's
+ * measurement cluster in one atomic call. cluster selects the family:
+ *
+ *   - ElectricalPowerMeasurement (0x0090): pull-model on the Matter side.
+ *     Each value is stored into the endpoint's HearthEpmDelegate (main.cpp),
+ *     where the CHIP Instance's attribute reads find it, and one
+ *     MatterReportingAttributeChangeCallback per applied field makes
+ *     subscriptions fire. Values are Nullable<int64_t>, null until the host
+ *     first pushes them.
+ *
+ *   - ElectricalEnergyMeasurement (0x0091): push-model on the Matter side.
+ *     The pairs (cumulative imported / exported mWh) are wrapped in
+ *     EnergyMeasurementStruct with the timestamp policy the spec expects
+ *     (endTimestamp = Matter epoch seconds when wall time is synced, else
+ *     endSystime = milliseconds since boot; each push's start is the
+ *     previous push's end, carried per endpoint by the SDK's own
+ *     MeasurementDataForEndpoint storage) and handed to
+ *     NotifyCumulativeEnergyMeasured(), which writes the attributes AND
+ *     emits the CumulativeEnergyMeasured event in one call. A side the call
+ *     does not mention keeps its previous stored value rather than being
+ *     cleared to null.
+ *
+ * Two-pass validate-then-apply, a hard contract: every pair is validated
+ * before any pair is applied, so a bad third pair leaves the first two
+ * unapplied and the device state untouched.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_CLUSTER when cluster is neither measurement id or ep does not
+ * carry it, MT_ATTR_ERR_VALUE for a field unknown to that cluster or a value
+ * outside that field's own XML range (see the field table above),
+ * MT_ATTR_ERR_FAILED for an internal failure (no delegate/storage slot for
+ * ep, or the event emission itself failing).
+ */
+int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
+                       const int64_t *values, uint8_t count);
+
+/*
+ * The delegate-pool handout pattern (see mt_matter_valve_delegate_alloc()'s
+ * doc comment above, which this mirrors), doubled: a measurement-capable
+ * endpoint carries BOTH an ElectricalPowerMeasurement delegate and a
+ * PowerTopology delegate, so the thunk (mt_devtypes.cpp, task 4) allocates
+ * one of each, passes them through the two clusters' config.delegate fields
+ * (cluster::create() wires the SDK's own init callbacks,
+ * ElectricalPowerMeasurementDelegateInitCB / PowerTopologyDelegateInitCB,
+ * esp_matter_delegate_callbacks.cpp, which construct and Init() the CHIP
+ * Instances at the usual init-callback timing), calls create(), then fixes
+ * the real endpoint id on both with mt_matter_meas_delegate_set_endpoint()
+ * once it is known. The ElectricalEnergyMeasurement cluster needs no
+ * delegate at all (free-function server); its per-endpoint init
+ * (measurement accuracy, the one-time wildcard attribute-access
+ * registration) is HearthEemInitCB (main.cpp), which the thunk hands to
+ * esp_matter::cluster::set_delegate_and_init_callback() itself with a null
+ * delegate pointer, the HearthOvenModeInitCB precedent.
+ *
+ * mt_matter_meas_delegate_set_endpoint() accepts a pointer from EITHER pool
+ * (it recognises which pool the pointer came from), so the thunk needs no
+ * second setter name. Both allocs return nullptr once MT_MEAS_MAX slots are
+ * handed out, the same abort-the-boot-rebuild contract as every other pool
+ * in this file.
+ */
+void *mt_matter_epm_delegate_alloc(void);
+void *mt_matter_ptop_delegate_alloc(void);
+void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
+
 #ifdef __cplusplus
 }
 #endif
