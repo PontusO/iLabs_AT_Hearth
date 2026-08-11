@@ -865,16 +865,19 @@ void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
 /*
  * The WHM delegate-pool handout, task 2's thunk protocol. UNLIKE the
  * measurement pools above (alloc first, endpoint fixed later), this alloc
- * takes the endpoint id up front: nothing on the SDK side ever calls
- * SetEndpointId() for this cluster (WaterHeaterManagementDelegateInitCB,
- * esp_matter_delegate_callbacks.cpp:487-498, constructs the Instance around
- * the delegate without touching its endpoint member, and the Instance keeps
- * its own copy), so the pool sets it at handout and the thunk calls this
- * AFTER create() has returned the real id, attaching the delegate via
- * esp_matter::cluster::set_delegate_and_init_callback() with the SDK's own
- * WaterHeaterManagementDelegateInitCB (the HearthEemInitCB post-create
- * precedent: esp_matter invokes the callback whenever it is set,
- * esp_matter_data_model.cpp:264-266).
+ * takes the endpoint id up front. Two reasons, both honest: the round's
+ * task brief pins this alloc(ep) interface for tasks 2 and 3, and stamping
+ * the id at handout makes task 3's by-endpoint slot lookup independent of
+ * init-callback timing. The SDK does also set it, identically and later:
+ * the Instance constructor calls mDelegate.SetEndpointId(aEndpointId)
+ * (water-heater-management-server.h:142-148, the same as EPM) when
+ * WaterHeaterManagementDelegateInitCB
+ * (esp_matter_delegate_callbacks.cpp:487-498) news the Instance. The thunk
+ * calls this AFTER create() has returned the real id, attaching the
+ * delegate via esp_matter::cluster::set_delegate_and_init_callback() with
+ * the SDK's own WaterHeaterManagementDelegateInitCB (the HearthEemInitCB
+ * post-create precedent: esp_matter invokes the callback whenever it is
+ * set, esp_matter_data_model.cpp:264-266).
  *
  * Returns nullptr once MT_WHM_MAX slots are handed out, the same
  * abort-the-boot-rebuild contract as every other pool in this file. Task 3's

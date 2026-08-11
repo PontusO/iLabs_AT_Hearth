@@ -3700,11 +3700,15 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
  * endpoint, which leaks nothing this firmware does twice: endpoints are
  * built once per boot.
  *
- * Endpoint id: the init CB never calls SetEndpointId() on the delegate (the
- * Instance keeps its own copy), so, unlike the measurement pools above whose
- * Instance constructor sets it, this pool takes the endpoint id at alloc
- * time; see mt_matter_whm_delegate_alloc() below and its mt_matter.h doc
- * comment for the handout protocol.
+ * Endpoint id: the Instance constructor calls mDelegate.SetEndpointId()
+ * (water-heater-management-server.h:142-148), the same as EPM, so the SDK
+ * does eventually stamp it at init-callback time. This pool still takes the
+ * endpoint id at alloc time, for two honest reasons: the task brief pins the
+ * alloc(ep) interface for tasks 2/3, and setting it at handout makes task
+ * 3's by-endpoint slot lookup independent of init-CB timing; the Instance
+ * ctor later overwrites it with the identical value. See
+ * mt_matter_whm_delegate_alloc() below and its mt_matter.h doc comment for
+ * the handout protocol.
  *
  * Command forwarding: HandleBoost/HandleCancelBoost run on the CHIP event
  * loop task (the Instance's CommandHandlerInterface calls them synchronously
@@ -3830,15 +3834,22 @@ public:
     }
 
     /*
-     * CancelBoost: in-state guard FIRST, the opstate precedent (design spec
-     * 2.4): cancelling a boost that is not running is answered here with
-     * InvalidInState, the IM status for a command received in a state it
-     * cannot apply to, WITHOUT waking the host, since there is nothing for
-     * the host to adjudicate. The guard reads the host-pushed BoostState
-     * cache, the same value a controller reads. Otherwise forward command 1
-     * payload-less (NULL fields reproduces mt_cmd_forward()'s exact
-     * four-field +MTCMD line) and pass the verdict through raw, same as
-     * Boost above.
+     * CancelBoost: in-state guard FIRST, without waking the host, since
+     * there is nothing for the host to adjudicate. The guarded answer is
+     * SUCCESS-and-silence, not a failure: the cluster test plan's
+     * TC_EWATERHTR_2_2 step 26 (python_testing/TC_EWATERHTR_2_2.py:199-200)
+     * sends CancelBoost immediately after verifying BoostState Inactive and
+     * requires "status SUCCESS(0x00) and no event sent", and the SDK's own
+     * reference delegate does the same (WhmDelegateImpl::HandleCancelBoost,
+     * examples/energy-management-app/.../WhmDelegateImpl.cpp:264-295, skips
+     * the whole cancel body when not Active and returns Status::Success).
+     * The "no event" half holds by construction here: no forward means no
+     * host actuation, no BoostState push, no Active-to-Inactive transition,
+     * so task 3's derivation never emits BoostEnded. The guard reads the
+     * host-pushed BoostState cache, the same value a controller reads.
+     * Otherwise forward command 1 payload-less (NULL fields reproduces
+     * mt_cmd_forward()'s exact four-field +MTCMD line) and pass the verdict
+     * through raw, same as Boost above.
      */
     chip::Protocols::InteractionModel::Status HandleCancelBoost() override
     {
@@ -3846,7 +3857,7 @@ public:
         using chip::app::Clusters::WaterHeaterManagement::BoostStateEnum;
 
         if (m_boost_state == BoostStateEnum::kInactive) {
-            return Status::InvalidInState;
+            return Status::Success;
         }
         bool allow = mt_cmd_forward_fields(mEndpointId, chip::app::Clusters::WaterHeaterManagement::Id,
                                             chip::app::Clusters::WaterHeaterManagement::Commands::CancelBoost::Id,
@@ -3872,10 +3883,13 @@ public:
 /*
  * The pool, MT_WHM_MAX slots (mt_matter.h documents the sizing), same
  * array-plus-next-counter shape as s_meas_epm_delegates above. The one
- * difference from the measurement handout is deliberate and documented in
- * mt_matter.h: the endpoint id is a parameter of the alloc itself, because
- * no SDK path ever sets it on this delegate class and task 2's thunk calls
- * this after create() has returned the real id.
+ * difference from the measurement handout is that the endpoint id is a
+ * parameter of the alloc itself: the task brief pins this interface for
+ * tasks 2/3, and stamping the id at handout keeps task 3's by-endpoint
+ * lookup independent of init-CB timing. The Instance constructor later
+ * calls SetEndpointId() with the identical value (see the class comment
+ * above); task 2's thunk calls this after create() has returned the real
+ * id.
  */
 static HearthWhmDelegate s_whm_delegates[MT_WHM_MAX];
 static size_t            s_whm_next = 0;
