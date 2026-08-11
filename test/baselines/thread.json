@@ -1,14 +1,14 @@
 {
   "header": {
     "at_core_repo_head": "11c9935ea392b62c0a9c84c5197483aa1fee41ef",
-    "cgmr": "0.8.0",
-    "fw_repo_head": "3c3e15dc5b9029d15037e926c41c47044707e1a7",
+    "cgmr": "0.9.0",
+    "fw_repo_head": "f1322de4e78ec8c0dd628c374530e3a3e9d93605",
     "manual_code": "34970112332",
     "net": "+MTNET:THREAD,1,0,0",
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-08-11T11:42:34+00:00",
+    "timestamp": "2026-08-11T17:58:36+00:00",
     "transport": "THREAD"
   },
   "results": {
@@ -113,11 +113,14 @@
     "MTLOCK? -> ERROR (query form)": "PASS",
     "MTMEAS eight pairs -> +MTERR:1 (18 tokens overflow at_split_args' 2 + 2 * MT_MEAS_MAX_PAIRS bound)": "PASS",
     "MTMEAS no args -> ERROR (exec form)": "PASS",
+    "MTMEAS staged variant-1 water heater: gate rows (+MTERR:3, gate outranks range), unknown field, then restore": "PASS",
     "MTMEAS=1,144 -> +MTERR:1 (no pairs: fewer than 4 parameters)": "PASS",
     "MTMEAS=1,144,0 -> +MTERR:1 (odd tail: field 0 has no value)": "PASS",
     "MTMEAS=1,144,0,zz -> +MTERR:1 (value not numeric)": "PASS",
     "MTMEAS=1,144,zz,5 -> +MTERR:1 (field not numeric)": "PASS",
     "MTMEAS=1,145,0,-1 -> +MTERR:1 (minus on an unsigned energy counter: rejected at parse, before any endpoint lookup)": "PASS",
+    "MTMEAS=1,148,0 -> +MTERR:1 (0x94 odd tail: field 0 has no value, the cluster-independent pair gate)": "PASS",
+    "MTMEAS=1,148,0,-1 -> +MTERR:1 (minus on an unsigned 0x94 field: only field 4 is signed, rejected at parse before any endpoint lookup)": "PASS",
     "MTMEAS? -> ERROR (query form on a set-only command)": "PASS",
     "MTMODES 9 pairs -> +MTERR:1 (over the 1..8 limit)": "PASS",
     "MTMODES label over 32 bytes -> +MTERR:1": "PASS",
