@@ -14,6 +14,10 @@
 #include <esp_log.h>
 #include <esp_matter.h>
 #include <esp_matter_endpoint.h>
+/* For the SDK's own WaterHeaterManagementDelegateInitCB
+ * (esp_matter::cluster::delegate_cb), which mk_water_heater() attaches
+ * post-create because the WHM pool alloc needs the real endpoint id. */
+#include <esp_matter_delegate_callbacks.h>
 
 #include "mt_devtypes.h"
 #include "mt_matter.h"
@@ -1525,6 +1529,343 @@ static endpoint_t *mk_electrical_meter(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * ---- Water Heater and Heat Pump (energy round B, task 3) ----------------
+ *
+ * Two device types on the Round A measurement machinery plus task 1's WHM
+ * delegate pool. Both thunks carry a boot-panic trap the SDK's own endpoint
+ * add() either creates or fails to defuse, and the water heater additionally
+ * works around two broken SDK feature helpers. Design record:
+ * ARCHITECTURE.md 8.11; fact base: the Round B SDK survey (A.1, A.2, B.1,
+ * B.2), every citation below re-read at source while writing this.
+ *
+ * Water Heater (0x050F): water_heater::add() (esp_matter_endpoint.cpp:
+ * 1870-1880) builds Descriptor, Thermostat (:1875), WaterHeaterManagement
+ * (:1876) and WaterHeaterMode. No Identify, no measurement clusters, no
+ * tag_list.
+ *
+ * PANIC TRAP ONE: thermostat::create() runs VALIDATE_FEATURES_AT_LEAST_ONE
+ * ("Heat,Cool", esp_matter_cluster.cpp:1445), water_heater::config_t seeds
+ * thermostat.feature_flags 0, and assertions are on, so a default-config
+ * create is a boot panic, boot-loop grade because the composition rebuild
+ * runs every boot. Pre-seed Heating BEFORE create(), the
+ * mk_room_air_conditioner() precedent above (same trap, same fix). Heating
+ * alone matches the device type XML: WaterHeater.xml mandates
+ * Thermostat(HEAT), and HEAT mandates only OccupiedHeatingSetpoint
+ * (Thermostat.xml:752-757), all ember-served and AT+MTATTR-reachable, so no
+ * new AT surface rides on this cluster (design spec 3.5).
+ *
+ * WHM delegate: the cluster is FULLY delegate-served (all six attributes
+ * MANAGED_INTERNALLY, esp_matter_attribute.cpp:4485-4519); without a
+ * delegate every read answers Failure while metadata advertises the
+ * attributes (the EEM 8.10 disease, but here the fix is a real delegate:
+ * the Instance IS the AttributeAccessInterface,
+ * water-heater-management-server.cpp:94-100). The pool's alloc takes the
+ * real endpoint id (mt_matter.h's documented protocol), which create() has
+ * not assigned yet, so unlike the valve/opstate pools the slot is handed
+ * out AFTER create() and attached via set_delegate_and_init_callback()
+ * with the SDK's own WaterHeaterManagementDelegateInitCB
+ * (esp_matter::cluster::delegate_cb, esp_matter_delegate_callbacks.h:51).
+ * Attaching post-create loses nothing: every delegate init callback runs
+ * at endpoint enable (invoke_init_callbacks_internal,
+ * esp_matter_data_model.cpp:259-266, called during esp_matter::start()'s
+ * enable pass), long after this thunk returns.
+ *
+ * Variant 0 hand-sets the WHM feature map to EnergyManagement|TankPercent
+ * and creates the three gated attribute shells, because create() HARDCODES
+ * FeatureMap 0 (esp_matter_cluster.cpp:3746; config_t has no feature_flags
+ * field, esp_matter_cluster.h:1184-1197) and BOTH SDK feature helpers are
+ * broken and must not be called:
+ *   - energy_management::add(cluster_t *) as declared
+ *     (esp_matter_feature.h:1537) has no implementation; the impl signature
+ *     is add(cluster_t *, config_t *) (esp_matter_feature.cpp:3315), so a
+ *     call per the header is a link failure.
+ *   - tank_percent::get_id() returns Feature::kEnergyManagement, not
+ *     kTankPercent (esp_matter_feature.cpp:3335 against
+ *     WaterHeaterManagement/Enums.h:44-48: kEnergyManagement 0x1,
+ *     kTankPercent 0x2), so tank_percent::add() sets the WRONG bit. Never
+ *     use either; read the bits from CHIP's own Feature enum and set them
+ *     by hand on the returned cluster handle.
+ * The hand-set writes the FeatureMap attribute directly (get + set_val,
+ * callbacks off), mirroring the SDK's own private update_feature_map()
+ * (esp_matter_feature.cpp:31-46: FeatureMap is ATTRIBUTE_FLAG_NONE, so
+ * set_val() routes to the pre-start-safe esp-matter store); since create()
+ * just wrote the hardcoded 0 (:3746), writing the full mask IS the OR.
+ * Timing is load-bearing: WaterHeaterManagementDelegateInitCB
+ * (esp_matter_delegate_callbacks.cpp:487-498) snapshots the endpoint's
+ * FeatureMap when it news the Instance at endpoint enable, so the hand-set
+ * here in the thunk (before esp_matter::start()) is what the Instance
+ * serves and what mt_meas_whm_apply()'s feature gate reads (main.cpp): one
+ * source, no disagreement. The three shells mirror what the two helpers
+ * would have created (feature.cpp:3323-3325, :3346): TankVolume u16,
+ * EstimatedHeatRequired int64, TankPercentage u8
+ * (esp_matter_attribute.cpp:4497-4513), values delegate-served regardless.
+ *
+ * Variant 0 also grafts the Electrical Sensor composition the device type
+ * XML mandates (WaterHeater.xml:84-95, composedDeviceTypes: an Electrical
+ * Sensor 0x0510 with EPM and EEM; the SDK's add() provides none of it):
+ * device type 0x0510 on the SAME endpoint plus PowerTopology and EPM via
+ * electrical_sensor::add() (the exact call heat_pump::add() uses,
+ * esp_matter_endpoint.cpp:2007-2008), then the six field attributes and
+ * the EEM cluster with HearthEemInitCB, verbatim the
+ * mk_electrical_sensor() variant-0 sequence above, drawing one EPM and one
+ * PT slot from the Round A pools.
+ *
+ * Variant 1 is the SDK-bare build: WHM feature map 0 (HeaterTypes,
+ * HeatDemand, BoostState only, which WHM's own feature conformance
+ * permits: EM and TP are both optional), no sensor graft. DISCLOSED
+ * SUB-CONFORMANT: the device type XML's composedDeviceTypes block mandates
+ * the Electrical Sensor regardless, so variant 1 exists as the
+ * minimal/staging declaration (the variant-1 electrical meter precedent
+ * above), disclosed in the design spec, here, and ARCHITECTURE.md 8.11.
+ *
+ * Commands and events need no hand-adds, for once: WHM create() wires
+ * Boost/CancelBoost and both Boost events unconditionally
+ * (esp_matter_cluster.cpp:3755-3759), and water_heater_mode::create() is
+ * the clean rvc_run_mode shape (ChangeToMode + response wired,
+ * :3797-3798). The 8.6 check came back clean on both clusters.
+ */
+static endpoint_t *mk_water_heater(node_t *n, uint8_t variant)
+{
+    void *mode_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::WaterHeaterMode::Id);
+    if (mode_delegate == nullptr) {
+        ESP_LOGE(TAG, "modebase delegate pool exhausted (water heater mode)");
+        return nullptr;
+    }
+
+    water_heater::config_t c;
+    /* Panic trap one (see above): VALIDATE_FEATURES_AT_LEAST_ONE Heat,Cool,
+     * esp_matter_cluster.cpp:1445; the config's default 0 panics at boot.
+     * Heating only, per WaterHeater.xml's Thermostat(HEAT) mandate. */
+    c.thermostat.feature_flags = cluster::thermostat::feature::heating::get_id();
+    c.water_heater_mode.delegate = mode_delegate;
+    /* c.water_heater_management.delegate stays null: the WHM pool alloc
+     * needs the real endpoint id, so the delegate is attached after
+     * create() below (see the class comment; init CBs run at enable). */
+
+    endpoint_t *ep = water_heater::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    uint16_t ep_id = endpoint::get_id(ep);
+    mt_matter_modebase_delegate_set_endpoint(mode_delegate, ep_id);
+
+    void *whm_delegate = mt_matter_whm_delegate_alloc(ep_id);
+    if (whm_delegate == nullptr) {
+        ESP_LOGE(TAG, "WHM delegate pool exhausted (water heater)");
+        return nullptr;
+    }
+    cluster_t *whm_cl = cluster::get(ep, chip::app::Clusters::WaterHeaterManagement::Id);
+    if (whm_cl == nullptr) {
+        ESP_LOGE(TAG, "WaterHeaterManagement cluster missing after create");
+        return nullptr;
+    }
+    esp_matter::cluster::set_delegate_and_init_callback(
+        whm_cl, esp_matter::cluster::delegate_cb::WaterHeaterManagementDelegateInitCB, whm_delegate);
+
+    if (variant == 0) {
+        /* WHM feature map hand-set, EnergyManagement|TankPercent. BOTH SDK
+         * helpers are broken (see above): energy_management::add() as
+         * declared does not link (esp_matter_feature.h:1537 vs
+         * esp_matter_feature.cpp:3315), and tank_percent::get_id() returns
+         * the EnergyManagement bit (esp_matter_feature.cpp:3335). The bits
+         * come from CHIP's own enum, never transcribed; create() hardcoded
+         * FeatureMap 0 one call ago (esp_matter_cluster.cpp:3746), so this
+         * whole-mask write is the OR update_feature_map() would do. Must
+         * happen in the thunk: WaterHeaterManagementDelegateInitCB
+         * snapshots FeatureMap at endpoint enable
+         * (esp_matter_delegate_callbacks.cpp:487-498). */
+        attribute_t *fm = esp_matter::attribute::get(
+            whm_cl, chip::app::Clusters::Globals::Attributes::FeatureMap::Id);
+        if (fm == nullptr) {
+            ESP_LOGE(TAG, "WaterHeaterManagement FeatureMap attribute missing");
+            return nullptr;
+        }
+        esp_matter_attr_val_t fm_val = esp_matter_bitmap32(
+            static_cast<uint32_t>(chip::app::Clusters::WaterHeaterManagement::Feature::kEnergyManagement) |
+            static_cast<uint32_t>(chip::app::Clusters::WaterHeaterManagement::Feature::kTankPercent));
+        if (esp_matter::attribute::set_val(fm, &fm_val, false) != ESP_OK) {
+            ESP_LOGE(TAG, "hand-setting WaterHeaterManagement feature map failed");
+            return nullptr;
+        }
+        /* The three gated attribute shells the broken helpers would have
+         * created (feature.cpp:3323-3325, :3346; creators at
+         * esp_matter_attribute.cpp:4497-4513). MANAGED_INTERNALLY: the
+         * Instance serves the delegate's cached values, these entries only
+         * make the attributes exist in the metadata. */
+        cluster::water_heater_management::attribute::create_tank_volume(whm_cl, 0);
+        cluster::water_heater_management::attribute::create_estimated_heat_required(whm_cl, 0);
+        cluster::water_heater_management::attribute::create_tank_percentage(whm_cl, 0);
+
+        /* The Electrical Sensor graft (WaterHeater.xml:84-95), the
+         * mk_electrical_sensor() variant-0 sequence on this endpoint. */
+        void *epm_delegate = mt_matter_epm_delegate_alloc();
+        if (epm_delegate == nullptr) {
+            ESP_LOGE(TAG, "EPM delegate pool exhausted (water heater)");
+            return nullptr;
+        }
+        void *ptop_delegate = mt_matter_ptop_delegate_alloc();
+        if (ptop_delegate == nullptr) {
+            ESP_LOGE(TAG, "PowerTopology delegate pool exhausted (water heater)");
+            return nullptr;
+        }
+        electrical_sensor::config_t es;
+        es.power_topology.feature_flags = cluster::power_topology::feature::node_topology::get_id();
+        es.power_topology.delegate = ptop_delegate;
+        es.electrical_power_measurement.feature_flags =
+            cluster::electrical_power_measurement::feature::alternating_current::get_id();
+        es.electrical_power_measurement.delegate = epm_delegate;
+        if (electrical_sensor::add(ep, &es) != ESP_OK) {
+            ESP_LOGE(TAG, "electrical sensor graft failed (water heater)");
+            return nullptr;
+        }
+        if (!mt_epm_add_field_attributes(ep)) {
+            return nullptr;
+        }
+        cluster::electrical_energy_measurement::config_t ec;
+        ec.feature_flags = mt_eem_feature_flags();
+        cluster_t *eem_cl =
+            cluster::electrical_energy_measurement::create(ep, &ec, CLUSTER_FLAG_SERVER);
+        if (eem_cl == nullptr) {
+            ESP_LOGE(TAG, "creating ElectricalEnergyMeasurement cluster failed (water heater)");
+            return nullptr;
+        }
+        esp_matter::cluster::set_delegate_and_init_callback(eem_cl, HearthEemInitCB, nullptr);
+        mt_matter_meas_delegate_set_endpoint(epm_delegate, ep_id);
+        mt_matter_meas_delegate_set_endpoint(ptop_delegate, ep_id);
+    }
+    return ep;
+}
+
+/*
+ * Heat Pump (0x0309): hand-built stack mirroring heat_pump::add()
+ * (esp_matter_endpoint.cpp:1996-2021) minus DEM, read side by side while
+ * writing, the oven-shell discipline.
+ *
+ * PANIC TRAP TWO, and why this thunk cannot call heat_pump::create() at
+ * all: add() calls electrical_energy_measurement::create() with the
+ * config's default feature_flags 0 (esp_matter_endpoint.cpp:2015; the
+ * config_t constructor seeds nothing), and EEM create() runs two
+ * VALIDATE_FEATURES_AT_LEAST_ONE checks
+ * (ImportedEnergy/ExportedEnergy and CumulativeEnergy/PeriodicEnergy,
+ * esp_matter_cluster.cpp:3301-3304): boot panic on default config.
+ * solar_power::add() (:1913) and battery_storage::add() (:1966) receive
+ * pre-seeded configs from their own callers' conventions; heat_pump's
+ * forgot (survey B.2). A caller COULD pre-seed
+ * config.electrical_energy_measurement.feature_flags and survive, but
+ * add() would then also bolt on the full DEM pair
+ * (DeviceEnergyManagement + power_adjustment, :2017-2020), which this
+ * round defers whole (DE235: the 1.5.1 HeatPump.xml mandates no DEM, and
+ * the 16-virtual delegate with two owned struct stores gets built once,
+ * in Round C, where EVSE and the DEM device type need it for real; both
+ * DEM Kconfigs stay =n, so the server directory is not even linked).
+ * Hand-building the add() body minus those two calls is smaller than
+ * destroying what add() forced (the B216 destroy-after-create precedent
+ * stays reserved for when the SDK leaves no seam; here every piece of
+ * add() is a public call).
+ *
+ * The stack, in add()'s own order: device type 0x0309, descriptor
+ * tag_list feature (SDK-build parity), Power Source device type 0x0011
+ * with the wired feature (endpoint::power_source::add, the same
+ * endpoint-namespace add() the SDK calls at :2005-2006), then the
+ * Electrical Sensor 0x0510 machinery exactly as the variant-0 water
+ * heater graft above: electrical_sensor::add(), the six EPM field
+ * attributes (a superset of the SDK build's hand-created Voltage and
+ * ActiveCurrent, :2010-2013; duplicate creates warn and return existing,
+ * esp_matter_data_model.cpp:567, so the overlap is harmless), and the
+ * EEM cluster with mt_eem_feature_flags() pre-seeded BEFORE create(),
+ * defusing the trap, plus HearthEemInitCB for the 8.10 serving-path fix.
+ * One EPM slot and one PT slot from the Round A pools; AT+MTMEAS serves
+ * both push families unchanged.
+ *
+ * DISCLOSED CONFORMANCE GAP: HeatPump.xml mandates no server clusters
+ * beyond Descriptor, but its composedDeviceTypes block mandates a
+ * composed Thermostat DEVICE TYPE 0x0301 with User Label alongside the
+ * Electrical Sensor. This endpoint carries neither, MATCHING the SDK's
+ * own omission (heat_pump::config_t has no thermostat member at all); the
+ * sensor half is over-delivered, the thermostat half is a disclosed gap
+ * and a possible follow-up (design spec 2.3, ARCHITECTURE.md 8.11), not
+ * this round.
+ */
+static endpoint_t *mk_heat_pump(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    void *epm_delegate = mt_matter_epm_delegate_alloc();
+    if (epm_delegate == nullptr) {
+        ESP_LOGE(TAG, "EPM delegate pool exhausted (heat pump)");
+        return nullptr;
+    }
+    void *ptop_delegate = mt_matter_ptop_delegate_alloc();
+    if (ptop_delegate == nullptr) {
+        ESP_LOGE(TAG, "PowerTopology delegate pool exhausted (heat pump)");
+        return nullptr;
+    }
+
+    /* Raw endpoint plus descriptor, the two things common::create() does
+     * before any add() body runs (esp_matter_endpoint.cpp:29-45). */
+    endpoint_t *ep = endpoint::create(n, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    cluster::descriptor::config_t dc;
+    cluster_t *desc_cl = cluster::descriptor::create(ep, &dc, CLUSTER_FLAG_SERVER);
+    if (desc_cl == nullptr) {
+        ESP_LOGE(TAG, "creating descriptor cluster failed (heat pump)");
+        return nullptr;
+    }
+    if (endpoint::add_device_type(ep, heat_pump::get_device_type_id(),
+                                  heat_pump::get_device_type_version()) != ESP_OK) {
+        ESP_LOGE(TAG, "adding heat pump device type failed");
+        return nullptr;
+    }
+    /* tag_list for parity with the SDK build (endpoint.cpp:2003-2004). */
+    cluster::descriptor::feature::tag_list::add(desc_cl);
+
+    /* Power Source device type 0x0011, wired (endpoint.cpp:2005-2006).
+     * power_source::create() runs VALIDATE_FEATURES_EXACT_ONE on
+     * Wired/Battery (esp_matter_cluster.cpp:982, the mk_power_source()
+     * trap above); wired is the SDK build's own choice. */
+    power_source::config_t pc;
+    pc.power_source.feature_flags = cluster::power_source::feature::wired::get_id();
+    if (power_source::add(ep, &pc) != ESP_OK) {
+        ESP_LOGE(TAG, "power source add failed (heat pump)");
+        return nullptr;
+    }
+
+    /* Electrical Sensor 0x0510, the variant-0 water heater graft verbatim. */
+    electrical_sensor::config_t es;
+    es.power_topology.feature_flags = cluster::power_topology::feature::node_topology::get_id();
+    es.power_topology.delegate = ptop_delegate;
+    es.electrical_power_measurement.feature_flags =
+        cluster::electrical_power_measurement::feature::alternating_current::get_id();
+    es.electrical_power_measurement.delegate = epm_delegate;
+    if (electrical_sensor::add(ep, &es) != ESP_OK) {
+        ESP_LOGE(TAG, "electrical sensor graft failed (heat pump)");
+        return nullptr;
+    }
+    if (!mt_epm_add_field_attributes(ep)) {
+        return nullptr;
+    }
+
+    /* EEM with the feature flags pre-seeded BEFORE create(): panic trap
+     * two defused (heat_pump::add() forgot this at endpoint.cpp:2015;
+     * the checks are esp_matter_cluster.cpp:3301-3304). */
+    cluster::electrical_energy_measurement::config_t ec;
+    ec.feature_flags = mt_eem_feature_flags();
+    cluster_t *eem_cl =
+        cluster::electrical_energy_measurement::create(ep, &ec, CLUSTER_FLAG_SERVER);
+    if (eem_cl == nullptr) {
+        ESP_LOGE(TAG, "creating ElectricalEnergyMeasurement cluster failed (heat pump)");
+        return nullptr;
+    }
+    esp_matter::cluster::set_delegate_and_init_callback(eem_cl, HearthEemInitCB, nullptr);
+
+    uint16_t ep_id = endpoint::get_id(ep);
+    mt_matter_meas_delegate_set_endpoint(epm_delegate, ep_id);
+    mt_matter_meas_delegate_set_endpoint(ptop_delegate, ep_id);
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -1574,6 +1915,8 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { cook_surface::get_device_type_id(),             mk_cook_surface,            "cook_surface",            1 },
     { electrical_sensor::get_device_type_id(),        mk_electrical_sensor,       "electrical_sensor",       1 },
     { electrical_meter::get_device_type_id(),         mk_electrical_meter,        "electrical_meter",        1 },
+    { water_heater::get_device_type_id(),             mk_water_heater,            "water_heater",            1 },
+    { heat_pump::get_device_type_id(),                mk_heat_pump,               "heat_pump",               0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);
