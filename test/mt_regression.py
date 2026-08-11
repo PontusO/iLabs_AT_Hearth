@@ -11,7 +11,8 @@ Phase 2 run: MT_SSID=... MT_PSK=... python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 2
 Phase 3 run (host-only segment plus the full controller matrix, including
 the RVC + Microwave batch's slots 12-13, the composed appliance
-round's slots 14-20 and energy round A's slots 21-22):
+round's slots 14-20, energy round A's slots 21-22 and energy round B's
+slots 23-24):
 python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 3
 (-k "3." scopes to Phase 3's own steps, since -k matches a literal
@@ -191,11 +192,15 @@ class CmdResponder:
     """Answers a forwarded +MTCMD URC the way a host MCU would.
 
     Wire form (spec 3.17): +MTCMD:<seq>,<ep>,<cluster>,<command>[,<p1>[,
-    <p2>[,<p3>[,<p4>]]]], all decimal, up to four trailing payload fields
-    (widened from the single optional field by the RVC + Microwave batch's
-    mt_cmd_forward_fields(): chime's PlayChimeSound chimeID and ModeBase's
-    ChangeToMode newMode still send one, MicrowaveOvenControl's
-    SetCookingParameters sends four). A field a given invoke did not carry
+    <p2>[,<p3>[,<p4>[,<p5>]]]]], all decimal, up to five trailing payload
+    fields (widened from the single optional field to four by the RVC +
+    Microwave batch's mt_cmd_forward_fields(), then to five by energy
+    round B: chime's PlayChimeSound chimeID and ModeBase's ChangeToMode
+    newMode still send one, MicrowaveOvenControl's SetCookingParameters
+    sends four, and WaterHeaterManagement's Boost is the first five-field
+    consumer: duration, the packed presence/bool-value mask, then the
+    numeric optionals whose presence bits are set, spec 3.17's worked
+    example being "3600,265,80"). A field a given invoke did not carry
     renders as an empty position, not an omitted one, so the tail can hold
     interior gaps (e.g. ",,80,1" for p1/p2 absent, p3=80, p4=1); _RX and
     _match() below parse every position, not just the first.
@@ -219,14 +224,19 @@ class CmdResponder:
     silently and irrecoverably drop any forward it was not the intended
     recipient of."""
 
-    # Group 5 captures the WHOLE tail after <command> (0 to 4 repetitions
-    # of ",<digits-or-empty>"), not just one field: _match() below strips
-    # the tail's own leading comma and splits the remainder on "," to
-    # recover each position, empty string -> None. A bare four-field
-    # forward with no payload at all still matches (0 repetitions, group 5
-    # ""), the identical backward-compatible shape the old single-field
-    # regex accepted.
-    _RX = re.compile(r"\+MTCMD:(\d+),(\d+),(\d+),(\d+)((?:,\d*){0,4})$")
+    # Group 5 captures the WHOLE tail after <command> (0 to 5 repetitions
+    # of ",<digits-or-empty>"; 4 until energy round B widened the
+    # documented arity for Boost, spec 3.17), not just one field: _match()
+    # below strips the tail's own leading comma and splits the remainder
+    # on "," to recover each position, empty string -> None. A bare
+    # four-field forward with no payload at all still matches (0
+    # repetitions, group 5 ""), the identical backward-compatible shape
+    # the old single-field regex accepted. Boost's own tail never carries
+    # the empty-position form (its mask says which fields follow, so
+    # absent optionals append nothing, spec 3.17), but the "\d*"
+    # alternative stays: this regex serves every consumer, and
+    # SetCookingParameters' interior gaps are real.
+    _RX = re.compile(r"\+MTCMD:(\d+),(\d+),(\d+),(\d+)((?:,\d*){0,5})$")
 
     def __init__(self, link):
         self.link = link
@@ -421,14 +431,15 @@ PHASE3_COMPOSITION = [
     # id - 1 throughout this table (index 13 = ep 14, and so on).
     #
     # ModeBase delegate pool budget (MT_MB_MAX_LISTS = 8, main.cpp): this
-    # composition consumes 7 slots: RVC 2 (RvcRunMode + RvcCleanMode, slot
-    # 12), microwave 1 (slot 13), fridge parent 1 (slot 14, its own
+    # composition consumes ALL 8 slots: RVC 2 (RvcRunMode + RvcCleanMode,
+    # slot 12), microwave 1 (slot 13), fridge parent 1 (slot 14, its own
     # RefrigeratorAndTCCMode), the two fridge cabinets 2 (slots 15-16,
-    # Cooler conditional cluster each), oven cavity 1 (slot 18, OvenMode).
-    # ONE slot remains: do not add another ModeBase-carrying slot here
-    # without raising MT_MB_MAX_LISTS first, or the boot rebuild aborts
-    # when the pool runs dry (mk_* thunks return null on exhaustion and a
-    # failed create aborts the whole composition, CLAUDE.md).
+    # Cooler conditional cluster each), oven cavity 1 (slot 18, OvenMode),
+    # water heater 1 (slot 23, WaterHeaterMode, energy round B). The pool
+    # is FULL: any further ModeBase-carrying slot needs MT_MB_MAX_LISTS
+    # raised first, or the boot rebuild aborts when the pool runs dry
+    # (mk_* thunks return null on exhaustion and a failed create aborts
+    # the whole composition, CLAUDE.md).
     (14, "0x0070"),        # refrigerator parent (composed trio round)
     (15, "0x0071,0,13"),   # number cabinet under the fridge (index 13 = ep 14)
     (16, "0x0071,1,13"),   # levels cabinet under the fridge
@@ -456,6 +467,26 @@ PHASE3_COMPOSITION = [
     (22, "0x0514"),        # electrical meter, variant 0 power + energy
                             # (full measurement surface; energy/event
                             # checks target this slot)
+    # Energy round B (0.9.0), task 4: the water heater and heat pump
+    # behind the 0x94 push table, the Boost/CancelBoost forwards and the
+    # derived boost events (spec 3.17/3.25). The water heater is variant
+    # 0 (FULL: EnergyManagement + TankPercent features, the three gated
+    # attribute shells, and the composed Electrical Sensor graft the
+    # device type XML mandates); the minimal variant 1 is NOT in this
+    # table: its feature-gate refusals are exercised by Phase 1's staged
+    # scratch composition (t_meas_staged_wh_min), which restores the
+    # single-light standard state after itself. Measurement pool budget
+    # (MT_MEAS_MAX = 4, mt_matter.h): slots 21-24 are the four EPM/PT
+    # consumers, hitting the pool EXACTLY (design spec section 5's
+    # deliberate exhaustion-boundary coverage); a future
+    # measurement-bearing slot needs the pool raised first, same rule as
+    # the ModeBase budget above.
+    (23, "0x050F"),        # water heater, variant 0 FULL (WHM + Thermostat
+                            # + WaterHeaterMode + the 0x0510 sensor graft)
+    (24, "0x0309"),        # heat pump (0x0309 + 0x0011 power source +
+                            # 0x0510 sensor identity on one endpoint; no
+                            # WHM, no Thermostat: the disclosed SDK-parity
+                            # gap, mt_devtypes.cpp)
 ]
 
 
@@ -2942,6 +2973,365 @@ def step_3_21_electrical_meter(ctx):
             rc == 0 and 1500000 in vals and 1600000 in vals, tag="P3")
 
 
+def step_3_22_water_heater(ctx):
+    """Energy round B (0.9.0), task 4: the Water Heater slot
+    (PHASE3_COMPOSITION 23, endpoint 23, 0x050F variant 0 FULL: WHM
+    feature map EnergyManagement|TankPercent, the three gated attribute
+    shells, and the composed Electrical Sensor graft the device type XML
+    mandates; mt_devtypes.cpp's mk_water_heater()).
+
+    Server list: WHM (148), Thermostat (513) and WaterHeaterMode (158)
+    from the SDK's water_heater::create(), plus the graft's EPM (144),
+    EEM (145) and PowerTopology (156). The 6.2 full-variant negative
+    rows land here: field 9 unknown to 0x94 (+MTERR:1, the bridge's
+    validate pass) and field 4 negative (+MTERR:1: on the FULL variant
+    the EnergyManagement gate passes and the XML's min-0 range check
+    answers; the minimal variant's +MTERR:3 sibling, gate outranks
+    range, is Phase 1's t_meas_staged_wh_min). The 0x94 pushes are
+    Instance-owned like every AT+MTMEAS value (no +MTATTR URC ever,
+    spec 3.25, pinned with assert_no_urc), so controller reads are the
+    only read-back; EstimatedHeatRequired is pushed above 2^32
+    (4294967297) as the family's 64-bit width proof, the step_3_21
+    ActivePower reasoning on the round B cluster.
+
+    Boost chain (spec 3.17): the in-state guard runs FIRST, while
+    BoostState is still Inactive from boot: CancelBoost answers
+    Status::Success on the wire (chip-tool exits 0) WITHOUT raising any
+    +MTCMD and without a BoostEnded event, the cluster test plan's
+    TC_EWATERHTR_2_2 step 26 contract (HandleCancelBoost()'s guard runs
+    before mt_cmd_forward_fields(), main.cpp), proven synchronously the
+    step_3_9 in-state-guard way since nothing blocks on a verdict that
+    is never asked for. Then the adjudicated chain: chip-tool's boost
+    with duration 3600, oneShot true, targetPercentage 80 must forward
+    the design spec's canonical vector VERBATIM (tail "3600,265,80",
+    mask = bit0|bit3|bit8: presence oneShot + targetPercentage, value
+    oneShot true), answered allow; BoostState stays 0 after the allow
+    (the host decided, it has not DONE it yet, the valve split), starts
+    only on the host's own AT+MTMEAS BoostState push, whose
+    Inactive-to-Active transition derives exactly one BoostStarted
+    event carrying the accepted command's cached parameters; a
+    same-state repeat push emits NO second event (the ledger's
+    same-state rule; the attribute is still reported dirty, invisible
+    here without a subscription); CancelBoost while Active forwards
+    payload-less and, after the host pushes Inactive, exactly one
+    BoostEnded follows. The BoostStarted boostInfo assertion (Duration/
+    TargetPercentage labels) is derived from the pinned generated
+    DataModelLogger.cpp (WaterHeaterBoostInfoStruct's LogValue prints
+    "Duration"/"OneShot"/"TargetPercentage" through the integral/bool
+    overloads): INFERENCE until the bench, parse_energy_values'
+    confidence class.
+
+    Thermostat, both directions (spec 3.5's no-new-surface claim made
+    observable): these attributes are EMBER-served, the deliberate
+    contrast with everything above, so a controller write to
+    OccupiedHeatingSetpoint (513/0x12) DOES raise an unprompted +MTATTR
+    URC (the design-spec rule the host library's setpoint callbacks
+    rest on), and the host's LocalTemperature push over plain AT+MTATTR
+    echoes its response line in normalized decimal and reads back from
+    the controller.
+
+    WaterHeaterMode (spec 3.20.1/3.4): staged over the cluster-aware
+    AT+MTMODES with one tag-0 default, which must resolve to kManual
+    (0x4001, main.cpp's pinned default for this cluster, unlike
+    RvcRunMode's per-position rule) and one explicit kTimed (0x4002);
+    ChangeToMode is adjudicated allow (cluster 158 command 0, one-field
+    payload), and the B196 same-mode short-circuit is pinned the RVC
+    round's way: a second ChangeToMode to the now-current mode answers
+    kSuccess from mode-base-server.cpp itself with NO +MTCMD raised."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    # --- server list: SDK trio plus the variant-0 sensor graft ---
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "23"],
+                       timeout=30)
+    servers = parse_accepted_command_list(out)
+    s.check("3.22 water heater server list carries WHM (148), Thermostat "
+            "(513) and WaterHeaterMode (158)",
+            rc == 0 and 148 in servers and 513 in servers
+            and 158 in servers, tag="P3")
+    s.check("3.22 variant-0 sensor graft present: EPM (144), EEM (145), "
+            "PowerTopology (156)",
+            rc == 0 and 144 in servers and 145 in servers
+            and 156 in servers, tag="P3")
+
+    # --- TESTING.md 6.2 full-variant 0x94 negative rows ---
+    s.check("3.22 AT+MTMEAS=23,148,9,1 -> +MTERR:1 (field 9 unknown to "
+            "0x94: the bridge's validate pass)",
+            expect_err("AT+MTMEAS=23,148,9,1", 1)(link), tag="P3")
+    s.check("3.22 AT+MTMEAS=23,148,4,-5 -> +MTERR:1 (FULL variant: the "
+            "gate passes and the XML min-0 range check answers)",
+            expect_err("AT+MTMEAS=23,148,4,-5", 1)(link), tag="P3")
+
+    # --- 0x94 pushes, controller read-back only ---
+    res, lines = link.command("AT+MTMEAS=23,148,0,4,1,4")
+    s.check("3.22 HeaterTypes/HeatDemand push (both HeatPump, 4) -> OK",
+            res == 0 and lines == [], tag="P3")
+    res, lines = link.command("AT+MTMEAS=23,148,3,300,4,4294967297,5,60")
+    s.check("3.22 tank trio push (EstimatedHeatRequired 2^32 + 1) -> OK",
+            res == 0 and lines == [], tag="P3")
+    s.check("3.22 no +MTATTR URC from the pushes (Instance-owned values, "
+            "spec 3.25)", link.assert_no_urc(r"\+MTATTR:23,", 1.5),
+            tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read", "heater-types",
+                        node, "23"], timeout=30)
+    s.check("3.22 controller reads HeaterTypes 4",
+            rc == 0 and parse_int_attr(out) == 4, tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read", "heat-demand",
+                        node, "23"], timeout=30)
+    s.check("3.22 controller reads HeatDemand 4",
+            rc == 0 and parse_int_attr(out) == 4, tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read", "tank-volume",
+                        node, "23"], timeout=30)
+    s.check("3.22 controller reads TankVolume 300",
+            rc == 0 and parse_int_attr(out) == 300, tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read",
+                        "estimated-heat-required", node, "23"], timeout=30)
+    s.check("3.22 controller reads EstimatedHeatRequired 4294967297 "
+            "(64-bit, not truncated)",
+            rc == 0 and parse_int_attr(out) == 4294967297, tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read", "tank-percentage",
+                        node, "23"], timeout=30)
+    s.check("3.22 controller reads TankPercentage 60",
+            rc == 0 and parse_int_attr(out) == 60, tag="P3")
+
+    # --- in-state guard, BEFORE any boost (BoostState Inactive) ---
+    link.drain(0.3)
+    rc, out = chip.run(["waterheatermanagement", "cancel-boost", node,
+                        "23"], timeout=30)
+    s.check("3.22 in-state guard: CancelBoost while Inactive exits 0 "
+            "(Status::Success, TC_EWATERHTR_2_2 step 26)", rc == 0,
+            tag="P3")
+    s.check("3.22 in-state guard: no +MTCMD raised (the firmware answers "
+            "without waking the host)",
+            link.assert_no_urc(r"\+MTCMD:", 2.0), tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read-event",
+                        "boost-ended", node, "23"], timeout=30)
+    s.check("3.22 in-state guard: no BoostEnded event",
+            rc == 0 and parse_event_count(out, "BoostEnded") == 0,
+            tag="P3")
+
+    # --- Boost: the canonical vector, adjudicated allow ---
+    handle = invoke_chip(ctx, ["waterheatermanagement", "boost",
+                              '{"duration": 3600, "oneShot": true, '
+                              '"targetPercentage": 80}', node, "23"],
+                         timeout=30)
+    fwd = responder.expect(cluster=148, command=0, verdict=1,
+                           payload=[3600, 265, 80], timeout=5.0)
+    s.check("3.22 Boost forward answered allow with the canonical tail "
+            "3600,265,80 (mask bit0|bit3|bit8 = 265)", fwd is not None,
+            tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.22 Boost chip-tool exits 0 (allow -> Status::Success)",
+            rc == 0, tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read", "boost-state",
+                        node, "23"], timeout=30)
+    s.check("3.22 BoostState still 0 after the allow (the host decided; "
+            "the boost starts on the host's own push)",
+            rc == 0 and parse_int_attr(out) == 0, tag="P3")
+    res, _ = link.command("AT+MTMEAS=23,148,2,1")
+    s.check("3.22 BoostState Active push -> OK", res == 0, tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read", "boost-state",
+                        node, "23"], timeout=30)
+    s.check("3.22 controller reads BoostState 1 (Active)",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read-event",
+                        "boost-started", node, "23"], timeout=30)
+    s.check("3.22 exactly one BoostStarted event",
+            rc == 0 and parse_event_count(out, "BoostStarted") == 1,
+            tag="P3")
+    s.check("3.22 BoostStarted carries the accepted Boost's parameters "
+            "(Duration 3600, TargetPercentage 80)",
+            rc == 0 and re.search(r"Duration:\s*3600\b", out) is not None
+            and re.search(r"TargetPercentage:\s*80\b", out) is not None,
+            tag="P3")
+    res, _ = link.command("AT+MTMEAS=23,148,2,1")
+    s.check("3.22 same-state BoostState push -> OK", res == 0, tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read-event",
+                        "boost-started", node, "23"], timeout=30)
+    s.check("3.22 still exactly one BoostStarted (same-state push emits "
+            "no event)",
+            rc == 0 and parse_event_count(out, "BoostStarted") == 1,
+            tag="P3")
+
+    # --- CancelBoost while Active: adjudicated, then BoostEnded ---
+    handle = invoke_chip(ctx, ["waterheatermanagement", "cancel-boost",
+                              node, "23"], timeout=30)
+    fwd = responder.expect(cluster=148, command=1, verdict=1, timeout=5.0)
+    s.check("3.22 CancelBoost forward answered allow (payload-less)",
+            fwd is not None and fwd["fields"] == [], tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.22 CancelBoost chip-tool exits 0", rc == 0, tag="P3")
+    res, _ = link.command("AT+MTMEAS=23,148,2,0")
+    s.check("3.22 BoostState Inactive push -> OK", res == 0, tag="P3")
+    rc, out = chip.run(["waterheatermanagement", "read-event",
+                        "boost-ended", node, "23"], timeout=30)
+    s.check("3.22 exactly one BoostEnded event",
+            rc == 0 and parse_event_count(out, "BoostEnded") == 1,
+            tag="P3")
+
+    # --- Thermostat: ember-served, both directions ---
+    link.drain(0.3)
+    rc, out = chip.run(["thermostat", "write", "occupied-heating-setpoint",
+                        "2200", node, "23"], timeout=30)
+    s.check("3.22 controller writes OccupiedHeatingSetpoint 2200: "
+            "chip-tool exits 0", rc == 0, tag="P3")
+    s.check("3.22 unprompted +MTATTR URC for the setpoint write "
+            "(ember-served, NOT Instance-owned: the 0.6.0 rule's "
+            "deliberate contrast)",
+            link.await_urc(r"\+MTATTR:23,513,18,2200$",
+                           timeout=5.0) is not None, tag="P3")
+    res, lines = link.command("AT+MTATTR=23,513,18")
+    s.check("3.22 AT read agrees (OccupiedHeatingSetpoint 2200)",
+            res == 0 and lines == ["+MTATTR:23,513,18,2200"], tag="P3")
+    res, lines = link.command("AT+MTATTR=23,0x0201,0,2150")
+    s.check("3.22 LocalTemperature push over AT+MTATTR -> OK, echo line "
+            "in normalized decimal",
+            res == 0 and lines == ["+MTATTR:23,513,0,2150"], tag="P3")
+    rc, out = chip.run(["thermostat", "read", "local-temperature", node,
+                        "23"], timeout=30)
+    s.check("3.22 controller reads LocalTemperature 2150",
+            rc == 0 and parse_int_attr(out) == 2150, tag="P3")
+
+    # --- WaterHeaterMode: list, ChangeToMode, B196 short-circuit ---
+    res, _ = link.command('AT+MTMODES=23,158,0,0,"Manual",1,16386,"Timed"')
+    s.check("3.22 WaterHeaterMode staged (tag-0 default + explicit "
+            "kTimed) -> OK", res == 0, tag="P3")
+    rc, out = chip.run(["waterheatermode", "read", "supported-modes",
+                        node, "23"], timeout=30)
+    s.check("3.22 SupportedModes labels verbatim",
+            rc == 0 and parse_string_list(out) == ["Manual", "Timed"],
+            tag="P3")
+    s.check("3.22 ModeTags: defaulted kManual (0x4001), explicit kTimed "
+            "(0x4002)",
+            rc == 0 and parse_mode_tag_values(out) == [0x4001, 0x4002],
+            tag="P3")
+    handle = invoke_chip(ctx, ["waterheatermode", "change-to-mode", "1",
+                              node, "23"], timeout=30)
+    fwd = responder.expect(cluster=158, command=0, verdict=1, payload=1,
+                           timeout=5.0)
+    s.check("3.22 ChangeToMode allow: forward answered, payload == mode 1",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.22 ChangeToMode allow: chip-tool exits 0", rc == 0,
+            tag="P3")
+    s.check("3.22 ChangeToMode allow: status 0 (kSuccess)",
+            parse_change_to_mode_status(out) == 0, tag="P3")
+    rc, out = chip.run(["waterheatermode", "read", "current-mode", node,
+                        "23"], timeout=30)
+    s.check("3.22 CurrentMode is 1 (the short-circuit's precondition, "
+            "observed, not assumed)",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+    link.drain(0.3)
+    rc, out = chip.run(["waterheatermode", "change-to-mode", "1", node,
+                        "23"], timeout=30)
+    s.check("3.22 same-mode short-circuit: chip-tool exits 0 (B196: the "
+            "SDK answers before the delegate)", rc == 0, tag="P3")
+    s.check("3.22 same-mode short-circuit: status 0 (kSuccess from "
+            "mode-base-server.cpp itself)",
+            parse_change_to_mode_status(out) == 0, tag="P3")
+    s.check("3.22 same-mode short-circuit: no +MTCMD raised",
+            link.assert_no_urc(r"\+MTCMD:", 2.0), tag="P3")
+
+
+def step_3_23_heat_pump(ctx):
+    """Energy round B (0.9.0), task 4: the Heat Pump slot
+    (PHASE3_COMPOSITION 24, endpoint 24, 0x0309; mt_devtypes.cpp's
+    mk_heat_pump(), the hand-built heat_pump::add() body minus DEM).
+
+    Identity is the step's distinguishing check: ONE endpoint carrying
+    three device types (0x0309 Heat Pump, 0x0011 Power Source wired,
+    0x0510 Electrical Sensor), the composedDeviceTypes flattening the
+    thunk builds, read from the descriptor's DeviceTypeList
+    (parse_device_types). Server list: PowerSource (47) plus the full
+    sensor surface EPM (144), EEM (145), PowerTopology (156); no WHM
+    (148) and no Thermostat (513), the disclosed SDK-parity gap
+    (heat_pump::config_t has no thermostat member at all), pinned as an
+    absence so a future thunk change surfaces here. A 0x94 push on this
+    endpoint answers +MTERR:3 (no WHM cluster), the same
+    endpoint-does-not-serve-that-data code as everywhere else.
+
+    The power push carries a NEGATIVE ActivePower (-1500000 mW): EPM's
+    power fields are signed (spec 3.25's table), the heat pump is the
+    device type whose sign actually MEANS something (heating vs cooling
+    draw in the round's own FullAPI example), and no earlier step pushes
+    any negative measurement, so this is the sign path's only wire
+    coverage. Energy is pushed once and confirmed via the attribute
+    struct and the CumulativeEnergyMeasured event, the step_3_21 shapes
+    (parse_energy_values / parse_event_count).
+
+    Pool boundary, by construction: with slots 21-23's pushes already
+    OK, this step's pushes prove the FOURTH and last MT_MEAS_MAX pool
+    pair serves its endpoint, the design spec section 5's deliberate
+    exhaustion-boundary coverage. No command traffic exists on this
+    endpoint (none of its clusters declares an accepted command), the
+    step_3_20/3_21 rule, so this step scripts none."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+
+    # --- identity: three device types on one endpoint ---
+    rc, out = chip.run(["descriptor", "read", "device-type-list", node,
+                        "24"], timeout=30)
+    types = parse_device_types(out)
+    s.check("3.23 device type list carries 0x0309 (777), 0x0011 (17) and "
+            "the composed 0x0510 sensor (1296)",
+            rc == 0 and 777 in types and 17 in types and 1296 in types,
+            tag="P3")
+
+    # --- server list: sensor surface + power source, no WHM/Thermostat ---
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "24"],
+                       timeout=30)
+    servers = parse_accepted_command_list(out)
+    s.check("3.23 server list carries PowerSource (47), EPM (144), EEM "
+            "(145) and PowerTopology (156)",
+            rc == 0 and 47 in servers and 144 in servers
+            and 145 in servers and 156 in servers, tag="P3")
+    s.check("3.23 no WHM (148) and no Thermostat (513) on the heat pump "
+            "(the disclosed SDK-parity gap, pinned)",
+            rc == 0 and bool(servers) and 148 not in servers
+            and 513 not in servers, tag="P3")
+
+    # --- 0x94 on a measurement endpoint without the WHM cluster ---
+    s.check("3.23 AT+MTMEAS=24,148,0,1 -> +MTERR:3 (heat pump carries no "
+            "WaterHeaterManagement cluster)",
+            expect_err("AT+MTMEAS=24,148,0,1", 3)(link), tag="P3")
+
+    # --- power push with a negative ActivePower ---
+    res, lines = link.command("AT+MTMEAS=24,144,0,230000,1,433,2,-1500000")
+    s.check("3.23 power push with NEGATIVE ActivePower (-1500000 mW, the "
+            "signed EPM field) -> OK", res == 0 and lines == [], tag="P3")
+    s.check("3.23 no +MTATTR URC from the push (Instance-owned values, "
+            "spec 3.25)", link.assert_no_urc(r"\+MTATTR:24,", 1.5),
+            tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read", "voltage",
+                        node, "24"], timeout=30)
+    s.check("3.23 controller reads Voltage 230000",
+            rc == 0 and parse_int_attr(out) == 230000, tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read",
+                        "active-power", node, "24"], timeout=30)
+    s.check("3.23 controller reads ActivePower -1500000 (sign preserved "
+            "through the whole pipeline)",
+            rc == 0 and parse_int_attr(out) == -1500000, tag="P3")
+
+    # --- energy push, attribute read-back, the event ---
+    res, lines = link.command("AT+MTMEAS=24,145,0,2500000")
+    s.check("3.23 energy push (imported 2500000) -> OK",
+            res == 0 and lines == [], tag="P3")
+    rc, out = chip.run(["electricalenergymeasurement", "read",
+                        "cumulative-energy-imported", node, "24"],
+                       timeout=30)
+    s.check("3.23 CumulativeEnergyImported struct carries energy 2500000",
+            rc == 0 and 2500000 in parse_energy_values(out), tag="P3")
+    rc, out = chip.run(["electricalenergymeasurement", "read-event",
+                        "cumulative-energy-measured", node, "24"],
+                       timeout=30)
+    s.check("3.23 CumulativeEnergyMeasured event observed with the "
+            "pushed energy",
+            rc == 0
+            and parse_event_count(out, "CumulativeEnergyMeasured") >= 1
+            and 2500000 in parse_energy_values(out), tag="P3")
+
+
 def step_3_14_root_urc_sweep(ctx):
     """Design spec 4.3's standing-disciplines bullet ("no
     `+MTATTR:0,...` ever"), pinned by a dedicated sweep for the same
@@ -3117,6 +3507,10 @@ PHASE3_STEPS[:] = [
     {"name": "3.20 electrical sensor", "fn": step_3_20_electrical_sensor,
      "requires": ["3.5 commission"]},
     {"name": "3.21 electrical meter", "fn": step_3_21_electrical_meter,
+     "requires": ["3.5 commission"]},
+    {"name": "3.22 water heater", "fn": step_3_22_water_heater,
+     "requires": ["3.5 commission"]},
+    {"name": "3.23 heat pump", "fn": step_3_23_heat_pump,
      "requires": ["3.5 commission"]},
     {"name": "3.14 root-endpoint URC sweep", "fn": step_3_14_root_urc_sweep},
 ]
@@ -3330,6 +3724,25 @@ def parse_parts_list(text):
     never raises."""
     return [int(m) for m in
             re.findall(r"\[\d+\]:\s*(\d+)\s*$", text, re.MULTILINE)]
+
+
+def parse_device_types(text):
+    """Every device type id in a Descriptor `DeviceTypeList` chip-tool
+    read, in order, as ints: step_3_23's triple-identity check (heat
+    pump + power source + composed electrical sensor on one endpoint).
+
+    INFERENCE (energy round B, awaiting the bench): derived from the
+    pinned generated DataModelLogger.cpp's `DeviceTypeStruct` LogValue
+    overload, which prints each entry's deviceType as
+    `std::to_string(value.deviceType) + " (" + DeviceTypeIdToText(...) +
+    ")"` under the label `DeviceType`, i.e. `DeviceType: 777 (Heat
+    Pump)`, then a separate `Revision:` line this regex cannot match
+    (no opening parenthesis follows its value). The `\\(` requirement is
+    parse_accepted_command_list's shape discipline: a numeric that is
+    not followed by a parenthesised name is a parse miss, not a silent
+    acceptance. Empty list on no match, never raises."""
+    return [int(m) for m in
+            re.findall(r"DeviceType:\s*(\d+)\s*\(", text)]
 
 
 def parse_notify_active(text):
@@ -4618,6 +5031,136 @@ def register_phase1_t8_negative():
 
 
 register_phase1_t8_negative()
+
+
+def t_meas_staged_wh_min(link):
+    """Energy round B: the 0x94 feature-gate rows need a real VARIANT-1
+    (minimal) water heater endpoint, which the Phase 3 composition
+    deliberately does not carry (its slot 23 is the FULL variant, and
+    the two variants are one device type, so both cannot ride one
+    composition without burning a second slot for three rows). Staged
+    here instead, the design spec section 5's Phase 1 assignment:
+    declare a scratch composition of the standard light plus a minimal
+    water heater (AT+MTEP=0x050F,1 -> endpoint 2), AT+MTEPAPPLY (which
+    persists and REBOOTS, spec 3.9), verify the composition actually
+    took effect via AT+MTEP? (the known-start-state rule: a check that
+    cannot observe its variable is not a check; without this read a
+    failed apply would still answer +MTERR:2/3 and fake a pass), run
+    the three rows, and restore the single-light standard state in a
+    finally block so the rest of Phase 1's single-light contract holds
+    no matter which stage failed. Restore is by re-stage + re-apply,
+    NOT AT+MTFRESET: Phase 1 must not destroy fabric state that is none
+    of its business.
+
+    The three rows (TESTING.md 6.2, AT_MT_SPEC.md 3.25):
+      - field 3 (TankVolume) push -> +MTERR:3: the minimal variant has
+        no EnergyManagement feature, so the field is not served, the
+        same data-model code as a missing cluster.
+      - field 4 (EstimatedHeatRequired) with a NEGATIVE value ->
+        +MTERR:3, not +MTERR:1: the ledger's precedence pin. The gate
+        check runs before the range check in mt_meas_whm_apply()'s
+        validate pass, so "this endpoint does not serve that data"
+        outranks "that value is out of range". A regression that
+        reordered them would answer 1 here and this row would catch it.
+      - field 9 -> +MTERR:1: unknown to 0x94 even on an endpoint that
+        DOES carry the cluster (the bridge's validate pass), the
+        gate-independent control row.
+
+    One composite Phase 1 row rather than three: each row needs the
+    same two reboots (apply + restore), and Phase 1 rows are
+    order-independent by contract, so three separate rows would each
+    have to stage and restore on their own, six reboots for no added
+    coverage. Sub-stage failures print a diagnosis line so the single
+    FAIL is attributable."""
+    def diag(msg):
+        print("    (staged wh-min: %s)" % msg)
+
+    def apply_and_wait():
+        link.drain(0.3)
+        if link.command("AT+MTEPAPPLY", timeout=5.0)[0] != 0:
+            return False
+        return link.await_urc(r"\+MTREADY$", timeout=15.0) is not None
+
+    ok = True
+    try:
+        if not stage_composition(link, ["0x0100", "0x050F,1"]):
+            diag("staging the scratch composition failed")
+            return False
+        if not apply_and_wait():
+            diag("AT+MTEPAPPLY or the +MTREADY wait failed")
+            return False
+        res, lines = cmd_retry(link, "AT+MTEP?")
+        if res != 0 or lines != ["+MTEP:0,1,0x0100",
+                                 "+MTEP:1,2,0x050F,1"]:
+            diag("composition readback wrong: %r" % lines)
+            ok = False
+        else:
+            for cmd, want in (("AT+MTMEAS=2,148,3,200", 3),
+                              ("AT+MTMEAS=2,148,4,-5", 3),
+                              ("AT+MTMEAS=2,148,9,1", 1)):
+                res, _ = link.command(cmd)
+                if res != want:
+                    diag("%s answered %d, wanted +MTERR:%d"
+                         % (cmd, res, want))
+                    ok = False
+    finally:
+        restored = (stage_composition(link, ["0x0100"])
+                    and apply_and_wait())
+        if restored:
+            res, lines = cmd_retry(link, "AT+MTEP?")
+            restored = res == 0 and lines == ["+MTEP:0,1,0x0100"]
+        if not restored:
+            diag("RESTORE FAILED: bench is not in the single-light "
+                 "standard state")
+            ok = False
+    return ok
+
+
+def register_phase1_t9_negative():
+    """Energy round B (0.9.0), task 4: the state-safe rows TESTING.md
+    6.2 gained from the round's firmware tasks (the AT+MTMEAS 0x94
+    family, tasks 1-2), transcribed from the tables, not re-derived,
+    the same order-independent split register_phase1_t5/t6/t7/t8
+    established.
+
+    The two pure-form rows are rejected inside cmd_mtmeas()'s own shape
+    and parse gates before any endpoint lookup runs: the odd-tail row
+    by the pair-count gate (cluster-independent, so 148 rides the same
+    gate 144 already proved) and the leading-minus row by the
+    signedness table, which needs only the <cluster> token (of the 0x94
+    family only field 4 is signed, so a minus on field 0 dies at parse,
+    TESTING.md's own row note). ep 1 stands in for "any endpoint"
+    exactly as t8's MTMEAS rows use it.
+
+    The staged variant-1 water heater row (t_meas_staged_wh_min) is the
+    deliberate exception to "state-safe only", with the exception
+    CONTAINED: it reboots the device twice (apply + restore) but
+    restores the single-light standard state in a finally block, so
+    every other Phase 1 row's contract survives it; see its docstring
+    for why its three checks cannot live anywhere else (the Phase 3
+    composition carries the FULL variant at slot 23, and the +MTERR:3
+    gate rows need the MINIMAL one). The full-variant siblings of its
+    rows (+MTERR:1 on field 9 and on a negative field 4, where the gate
+    passes and the range check answers) live in Phase 3's
+    step_3_22_water_heater, where TESTING.md 6.2 sends them.
+
+    A sibling of t5/t6/t7/t8, not an addition to any of them: this
+    round's rows are their own project, same reasoning as t6's
+    docstring."""
+    n = lambda name, fn: add_test(1, name, fn, tag="AT-")
+
+    n("MTMEAS=1,148,0 -> +MTERR:1 (0x94 odd tail: field 0 has no value, "
+      "the cluster-independent pair gate)",
+      expect_err("AT+MTMEAS=1,148,0", 1))
+    n("MTMEAS=1,148,0,-1 -> +MTERR:1 (minus on an unsigned 0x94 field: "
+      "only field 4 is signed, rejected at parse before any endpoint "
+      "lookup)", expect_err("AT+MTMEAS=1,148,0,-1", 1))
+    n("MTMEAS staged variant-1 water heater: gate rows (+MTERR:3, gate "
+      "outranks range), unknown field, then restore",
+      t_meas_staged_wh_min)
+
+
+register_phase1_t9_negative()
 
 
 PHASE2_STEPS[:] = [

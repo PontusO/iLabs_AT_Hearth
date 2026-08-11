@@ -2712,6 +2712,66 @@ class TestCmdResponder(unittest.TestCase):
         self.assertEqual(fwd["fields"], [1])
         self.assertEqual(fwd["payload"], 1)
 
+    # -- Energy round B: _RX widened from four trailing fields to five,
+    # per Boost's documented arity (AT_MT_SPEC.md 3.17: duration, the
+    # packed mask, then up to three numeric optionals). The canonical
+    # vector is the design spec's own worked example.
+
+    def test_boost_canonical_vector_matched_exactly(self):
+        """The design spec's worked example verbatim: duration 3600,
+        oneShot true, targetPercentage 80 -> mask bit0|bit3|bit8 = 265,
+        tail "3600,265,80". step_3_22 asserts this with a full-list
+        payload=, so a firmware that packed the mask wrong would leave
+        the forward unanswered rather than being silently accepted."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:5,23,148,0,3600,265,80")
+        tr.expect_write("AT+MTCMDRESP=5,1\r\n", then_lines=["OK"])
+        fwd = CmdResponder(link).expect(cluster=148, command=0, verdict=1,
+                                        payload=[3600, 265, 80])
+        self.assertIsNotNone(fwd)
+        self.assertEqual(fwd["fields"], [3600, 265, 80])
+
+    def test_boost_wrong_mask_returns_none_and_never_answers(self):
+        """A mask of 9 (presence bits only, bit 8 lost: the exact shape
+        of a firmware that forgot the bool-VALUE bits) must not satisfy
+        the canonical payload= vector, and a mismatch is never
+        answered."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:5,23,148,0,3600,9,80")
+        fwd = CmdResponder(link).expect(cluster=148, command=0, verdict=1,
+                                        payload=[3600, 265, 80],
+                                        timeout=0.2)
+        self.assertIsNone(fwd)
+        self.assertEqual(tr.writes, [])
+
+    def test_five_field_boost_tail_parsed(self):
+        """All five optionals present (mask 31 | bits 8-9 = 799):
+        duration, mask, temporarySetpoint, targetPercentage,
+        targetReheat. Four-capped _RX (the pre-round-B regex) would
+        fail to match this line at all; the widening is what this test
+        pins."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:6,23,148,0,3600,799,2100,80,50")
+        tr.expect_write("AT+MTCMDRESP=6,1\r\n", then_lines=["OK"])
+        fwd = CmdResponder(link).expect(cluster=148, command=0, verdict=1)
+        self.assertEqual(fwd["fields"], [3600, 799, 2100, 80, 50])
+        self.assertEqual(fwd["payload"], 3600)  # fields[0], legacy alias
+
+    def test_cancel_boost_bare_form_parses_payloadless(self):
+        """CancelBoost forwards payload-less (spec 3.17); the bare form
+        must still come back fields=[] after the widening, the same
+        backward-compatibility pin the four-field round carried."""
+        tr = FakeTransport()
+        link = ATLink(tr)
+        tr.feed_line("+MTCMD:7,23,148,1")
+        tr.expect_write("AT+MTCMDRESP=7,1\r\n", then_lines=["OK"])
+        fwd = CmdResponder(link).expect(cluster=148, command=1, verdict=1)
+        self.assertEqual(fwd["fields"], [])
+        self.assertIsNone(fwd["payload"])
+
 
 from mt_regression import (parse_int_attr, parse_status,
                            parse_accepted_command_list, parse_event_count,
@@ -2945,10 +3005,11 @@ from mt_regression import (
     step_3_14_root_urc_sweep, step_3_15_rvc, step_3_16_microwave,
     step_3_17_composed_fridge, step_3_18_oven_cavity,
     step_3_19_cook_surface, step_3_20_electrical_sensor,
-    step_3_21_electrical_meter, mtep_staging_negative,
+    step_3_21_electrical_meter, step_3_22_water_heater,
+    step_3_23_heat_pump, t_meas_staged_wh_min, mtep_staging_negative,
     invoke_chip, parse_indexed_list, parse_mode_tag_values,
     parse_change_to_mode_status, parse_parts_list, parse_notify_active,
-    parse_active_power_reports, parse_energy_values,
+    parse_active_power_reports, parse_energy_values, parse_device_types,
     CmdResponder,
 )
 
@@ -2993,14 +3054,15 @@ class TestPhase3Composition(unittest.TestCase):
     (RVC + Microwave batch harness task) and 14-20 (composed appliance
     round, task 6) extend the same pin."""
 
-    def test_twenty_two_slots_sequential(self):
-        # The composition-size gate: energy round A grew the table to
-        # 22 (the composed trio had grown it to 20), still within both
-        # MT_COMP_MAX_ENDPOINTS (24) and
-        # CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT (24, the setting
-        # CLAUDE.md warns silently refuses endpoints past its limit).
+    def test_twenty_four_slots_sequential(self):
+        # The composition-size gate: energy round B grew the table to
+        # 24 (round A had grown it to 22), hitting MT_COMP_MAX_ENDPOINTS
+        # (24) and CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT (24, the
+        # setting CLAUDE.md warns silently refuses endpoints past its
+        # limit) EXACTLY: the table is full, and any 25th slot needs
+        # both raised first.
         slots = [slot for slot, _ in PHASE3_COMPOSITION]
-        self.assertEqual(slots, list(range(1, 23)))
+        self.assertEqual(slots, list(range(1, 25)))
 
     def test_slot_ten_and_eleven_are_the_two_cabinet_variants(self):
         # Slot 11 is not in the T5 design spec's 10-row table; it exists
@@ -3036,25 +3098,48 @@ class TestPhase3Composition(unittest.TestCase):
 
     def test_modebase_pool_budget_holds(self):
         # MT_MB_MAX_LISTS is 8 and this composition must consume exactly
-        # 7 ModeBase delegate slots (RVC 2, microwave 1, fridge parent 1,
-        # two parented cabinets 2, oven cavity 1): a table edit that adds
-        # an eighth-plus consumer without raising the firmware pool would
-        # abort the boot rebuild on the bench. Consumers by construction:
-        # 0x0074 counts twice (RvcRunMode + RvcCleanMode), 0x0079 and
-        # 0x0070 once each, and every PARENTED 0x0071 cabinet once
-        # (Cooler or Heater conditional cluster); standalone cabinets
-        # carry no ModeBase cluster.
+        # 8 ModeBase delegate slots (RVC 2, microwave 1, fridge parent 1,
+        # two parented cabinets 2, oven cavity 1, water heater 1): the
+        # pool is FULL as of energy round B, and a table edit that adds
+        # another consumer without raising the firmware pool would abort
+        # the boot rebuild on the bench. Consumers by construction:
+        # 0x0074 counts twice (RvcRunMode + RvcCleanMode), 0x0079,
+        # 0x0070 and 0x050F (WaterHeaterMode, either variant) once each,
+        # and every PARENTED 0x0071 cabinet once (Cooler or Heater
+        # conditional cluster); standalone cabinets carry no ModeBase
+        # cluster.
         consumed = 0
         for _slot, dt in PHASE3_COMPOSITION:
             parts = dt.split(",")
             base, parented = parts[0], len(parts) == 3
             if base == "0x0074":
                 consumed += 2
-            elif base in ("0x0079", "0x0070"):
+            elif base in ("0x0079", "0x0070", "0x050F"):
                 consumed += 1
             elif base == "0x0071" and parented:
                 consumed += 1
-        self.assertEqual(consumed, 7)
+        self.assertEqual(consumed, 8)
+
+    def test_measurement_pool_budget_holds(self):
+        # MT_MEAS_MAX is 4 and this composition must consume exactly 4
+        # EPM/PowerTopology pool pairs: the sensor (21, variant 1 still
+        # draws its EPM slot), the meter (22), the FULL water heater
+        # (23, the sensor graft) and the heat pump (24). Deliberately
+        # exact (design spec section 5): the boundary is coverage, and
+        # a fifth measurement-bearing slot needs the pool raised first
+        # or the boot rebuild aborts, the ModeBase rule's sibling. A
+        # variant-1 water heater would consume nothing, which is part
+        # of why Phase 1 stages it instead of this table carrying it.
+        consumed = 0
+        for _slot, dt in PHASE3_COMPOSITION:
+            parts = dt.split(",")
+            base = parts[0]
+            variant = parts[1] if len(parts) > 1 else "0"
+            if base in ("0x0510", "0x0514", "0x0309"):
+                consumed += 1
+            elif base == "0x050F" and variant == "0":
+                consumed += 1
+        self.assertEqual(consumed, 4)
 
     def test_slot_twentyone_and_twentytwo_are_the_electrical_pair(self):
         # Energy round A, task 5: the variant assignment is deliberately
@@ -3070,6 +3155,19 @@ class TestPhase3Composition(unittest.TestCase):
         by_slot = dict(PHASE3_COMPOSITION)
         self.assertEqual(by_slot[21], "0x0510,1")
         self.assertEqual(by_slot[22], "0x0514")
+
+    def test_slot_twentythree_and_twentyfour_are_the_energy_b_pair(self):
+        # Energy round B, task 4: the water heater is the FULL variant
+        # (0x050F variant 0: WHM feature map EnergyManagement|TankPercent
+        # plus the composed 0x0510 sensor graft the device type XML
+        # mandates). A table edit that made it variant 1 would silently
+        # invalidate every 3.22 tank-trio and graft assertion AND turn
+        # Phase 1's staged-variant division (t_meas_staged_wh_min owns
+        # the minimal variant) into double coverage of one variant with
+        # zero coverage of the other.
+        by_slot = dict(PHASE3_COMPOSITION)
+        self.assertEqual(by_slot[23], "0x050F")
+        self.assertEqual(by_slot[24], "0x0309")
 
     def test_no_accidental_duplicate_devtype(self):
         devtypes = [dt for _slot, dt in PHASE3_COMPOSITION]
@@ -3382,7 +3480,7 @@ class TestRunPhase3(unittest.TestCase):
         # recover_after_abort's own AT+MTRESET)
         self.assertIn("AT+MTFRESET", link.sent)
 
-    def test_registered_steps_are_the_full_1_through_21_chain_plus_sweep(self):
+    def test_registered_steps_are_the_full_1_through_23_chain_plus_sweep(self):
         names = [s["name"] for s in PHASE3_STEPS]
         self.assertEqual(names, [
             "3.1 compose + boot-rebuild pin",
@@ -3404,6 +3502,8 @@ class TestRunPhase3(unittest.TestCase):
             "3.19 cook surface",
             "3.20 electrical sensor",
             "3.21 electrical meter",
+            "3.22 water heater",
+            "3.23 heat pump",
             "3.14 root-endpoint URC sweep",
         ])
 
@@ -4756,23 +4856,429 @@ class TestStep321ElectricalMeter(unittest.TestCase):
 
 
 class TestMeasurementStepsScriptNoCommandTraffic(unittest.TestCase):
-    """Energy round A, task 5: the two measurement clusters and
-    PowerTopology declare NO accepted commands (spec 3.25/3.9), so
-    neither step may script any command-forward traffic. The transcript
-    half of this pin lives in the two happy-path tests above (no
-    AT+MTCMDRESP ever sent); this is the source half, so a future edit
-    that reaches for the forward machinery on these endpoints trips a
-    named test instead of quietly acquiring an adjudication path the
-    device would never exercise."""
+    """Energy round A, task 5 (extended by round B's heat pump): the two
+    measurement clusters and PowerTopology declare NO accepted commands
+    (spec 3.25/3.9), and the heat pump endpoint carries nothing but them
+    plus PowerSource (also command-less), so none of these steps may
+    script any command-forward traffic. The transcript half of this pin
+    lives in the happy-path tests (no AT+MTCMDRESP ever sent); this is
+    the source half, so a future edit that reaches for the forward
+    machinery on these endpoints trips a named test instead of quietly
+    acquiring an adjudication path the device would never exercise. The
+    water heater step is deliberately NOT here: its endpoint carries
+    Boost/CancelBoost and ChangeToMode, real forwards."""
 
     def test_step_sources_use_no_forward_machinery(self):
         import inspect
         for fn in (step_3_20_electrical_sensor,
-                   step_3_21_electrical_meter):
+                   step_3_21_electrical_meter,
+                   step_3_23_heat_pump):
             src = inspect.getsource(fn)
             self.assertNotIn("CmdResponder", src)
             self.assertNotIn("invoke_chip", src)
             self.assertNotIn("MTCMDRESP", src)
+
+
+SERVER23_WH = "\n".join([
+    "[TOO]   ServerList: 7 entries",
+    "[TOO]     [1]: 29 (Descriptor)",
+    "[TOO]     [2]: 513 (Thermostat)",
+    "[TOO]     [3]: 148 (WaterHeaterManagement)",
+    "[TOO]     [4]: 158 (WaterHeaterMode)",
+    "[TOO]     [5]: 156 (PowerTopology)",
+    "[TOO]     [6]: 144 (ElectricalPowerMeasurement)",
+    "[TOO]     [7]: 145 (ElectricalEnergyMeasurement)",
+])
+SERVER24_HP = "\n".join([
+    "[TOO]   ServerList: 5 entries",
+    "[TOO]     [1]: 29 (Descriptor)",
+    "[TOO]     [2]: 47 (PowerSource)",
+    "[TOO]     [3]: 156 (PowerTopology)",
+    "[TOO]     [4]: 144 (ElectricalPowerMeasurement)",
+    "[TOO]     [5]: 145 (ElectricalEnergyMeasurement)",
+])
+DEVTYPES24_HP = "\n".join([
+    "[TOO]   DeviceTypeList: 3 entries",
+    "[TOO]     [1]: {",
+    "[TOO]       DeviceType: 777 (Heat Pump)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+    "[TOO]     [2]: {",
+    "[TOO]       DeviceType: 17 (Power Source)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+    "[TOO]     [3]: {",
+    "[TOO]       DeviceType: 1296 (Electrical Sensor)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+])
+BOOST_STARTED_ONE = "\n".join([
+    "[TOO]   BoostStarted: {",
+    "[TOO]     BoostInfo: {",
+    "[TOO]       Duration: 3600",
+    "[TOO]       OneShot: TRUE",
+    "[TOO]       TargetPercentage: 80",
+    "[TOO]      }",
+    "[TOO]    }",
+])
+BOOST_ENDED_ONE = "\n".join([
+    "[TOO]   BoostEnded: {",
+    "[TOO]    }",
+])
+WHM_MODES = "\n".join([
+    "[TOO]   SupportedModes: 2 entries",
+    "[TOO]     [1]: {",
+    "[TOO]       Label: Manual",
+    "[TOO]       Mode: 0",
+    "[TOO]       ModeTags: 1 entries",
+    "[TOO]         [1]: {",
+    "[TOO]           Value: 16385",
+    "[TOO]          }",
+    "[TOO]      }",
+    "[TOO]     [2]: {",
+    "[TOO]       Label: Timed",
+    "[TOO]       Mode: 1",
+    "[TOO]       ModeTags: 1 entries",
+    "[TOO]         [1]: {",
+    "[TOO]           Value: 16386",
+    "[TOO]          }",
+    "[TOO]      }",
+])
+CTM_STATUS_0 = "[TOO]     status: 0\n[TOO]     statusText: "
+
+
+class TestStep322WaterHeater(unittest.TestCase):
+    """Energy round B, task 4: the FULL water heater's server list (SDK
+    trio plus the sensor graft), the 6.2 full-variant 0x94 negatives,
+    the pushes with controller read-back (EstimatedHeatRequired above
+    2^32), the in-state guard (Success, no forward, no event), the
+    canonical Boost vector adjudicated through CmdResponder, the
+    derived-event chain (one BoostStarted, same-state silence, one
+    BoostEnded), Thermostat both directions, and WaterHeaterMode with
+    the B196 same-mode short-circuit."""
+
+    def _ctx(self, boost_urc="+MTCMD:1,23,148,0,3600,265,80",
+             guard_leaks_forward=False, shortcircuit_leaks_forward=False,
+             thermostat_urc=True, second_boost_started=None,
+             boost_started_first=None):
+        link = FakeLink({
+            "AT+MTMEAS=23,148,9,1": (1, []),
+            "AT+MTMEAS=23,148,4,-5": (1, []),
+            "AT+MTMEAS=23,148,0,4,1,4": (0, []),
+            "AT+MTMEAS=23,148,3,300,4,4294967297,5,60": (0, []),
+            "AT+MTMEAS=23,148,2,1": (0, []),
+            "AT+MTMEAS=23,148,2,0": (0, []),
+            "AT+MTCMDRESP=1,1": (0, []),
+            "AT+MTCMDRESP=2,1": (0, []),
+            "AT+MTCMDRESP=3,1": (0, []),
+            "AT+MTATTR=23,513,18": (0, ["+MTATTR:23,513,18,2200"]),
+            "AT+MTATTR=23,0x0201,0,2150": (0, ["+MTATTR:23,513,0,2150"]),
+            'AT+MTMODES=23,158,0,0,"Manual",1,16386,"Timed"': (0, []),
+        })
+        first_started = (boost_started_first if boost_started_first
+                         is not None else BOOST_STARTED_ONE)
+        second_started = (second_boost_started if second_boost_started
+                          is not None else first_started)
+        script = [
+            (0, SERVER23_WH),
+            (0, "[TOO]   HeaterTypes: 4"),
+            (0, "[TOO]   HeatDemand: 4"),
+            (0, "[TOO]   TankVolume: 300"),
+            (0, "[TOO]   EstimatedHeatRequired: 4294967297"),
+            (0, "[TOO]   TankPercentage: 60"),
+            (0, ""),                              # cancel-boost, guard
+            (0, ""),                              # boost-ended read: none
+            (0, ""),                              # boost invoke
+            (0, "[TOO]   BoostState: 0"),
+            (0, "[TOO]   BoostState: 1"),
+            (0, first_started),                   # boost-started, first
+            (0, second_started),                  # boost-started, repeat
+            (0, ""),                              # cancel-boost, invoke
+            (0, BOOST_ENDED_ONE),
+            (0, ""),                              # thermostat write
+            (0, "[TOO]   LocalTemperature: 2150"),
+            (0, WHM_MODES),
+            (0, CTM_STATUS_0),                    # change-to-mode allow
+            (0, "[TOO]   CurrentMode: 1"),
+            (0, CTM_STATUS_0),                    # same-mode short-circuit
+        ]
+        counts = {"cancel": 0, "ctm": 0}
+
+        def on_call(argv):
+            if "boost" in argv:
+                link.push_urcs([boost_urc])
+            elif "cancel-boost" in argv:
+                counts["cancel"] += 1
+                if counts["cancel"] == 2:
+                    link.push_urcs(["+MTCMD:2,23,148,1"])
+                elif guard_leaks_forward:
+                    # Regression shape: an in-state guard that regressed
+                    # into forwarding anyway must trip assert_no_urc.
+                    link.push_urcs(["+MTCMD:9,23,148,1"])
+            elif "occupied-heating-setpoint" in argv:
+                if thermostat_urc:
+                    link.push_urcs(["+MTATTR:23,513,18,2200"])
+            elif "change-to-mode" in argv:
+                counts["ctm"] += 1
+                if counts["ctm"] == 1:
+                    link.push_urcs(["+MTCMD:3,23,158,0,1"])
+                elif shortcircuit_leaks_forward:
+                    # Regression shape: a same-mode ChangeToMode reaching
+                    # the delegate (B196 undone) must trip assert_no_urc.
+                    link.push_urcs(["+MTCMD:9,23,158,0,1"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_22_water_heater(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_wrong_boost_mask_fails(self):
+        # The canonical-vector pin: a firmware that lost the bool-VALUE
+        # bits (mask 9 instead of 265) must fail the forward check, not
+        # be silently answered.
+        ctx = self._ctx(boost_urc="+MTCMD:1,23,148,0,3600,9,80")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_22_water_heater(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_guard_leaking_a_forward_fails(self):
+        ctx = self._ctx(guard_leaks_forward=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_22_water_heater(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_same_state_push_emitting_an_event_fails(self):
+        # The ledger's same-state rule: a repeat BoostState push emits
+        # nothing. A second BoostStarted appearing in the re-read is
+        # exactly the regression the "still exactly one" check is for.
+        ctx = self._ctx(second_boost_started="\n".join(
+            [BOOST_STARTED_ONE, BOOST_STARTED_ONE]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_22_water_heater(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_boost_started_without_cached_params_fails(self):
+        # Consume-on-emit gone wrong the other way: an event whose
+        # boostInfo lost the accepted command's parameters (duration 0,
+        # no optionals: the no-prior-accept shape) must fail the
+        # parameter check even though the event COUNT is right.
+        bare = "\n".join([
+            "[TOO]   BoostStarted: {",
+            "[TOO]     BoostInfo: {",
+            "[TOO]       Duration: 0",
+            "[TOO]      }",
+            "[TOO]    }",
+        ])
+        ctx = self._ctx(boost_started_first=bare)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_22_water_heater(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_same_mode_shortcircuit_leaking_a_forward_fails(self):
+        ctx = self._ctx(shortcircuit_leaks_forward=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_22_water_heater(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_missing_thermostat_urc_fails(self):
+        # The ember-served contrast pin: a controller setpoint write
+        # MUST raise +MTATTR (spec 3.5); its absence is the regression
+        # the host library's setpoint callbacks would suffer from.
+        ctx = self._ctx(thermostat_urc=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_22_water_heater(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep323HeatPump(unittest.TestCase):
+    """Energy round B, task 4: the heat pump's triple device type
+    identity, the server list with the WHM/Thermostat absences pinned,
+    the 0x94 +MTERR:3 row, the negative-ActivePower push (the sign
+    path's only wire coverage), and the energy push with struct and
+    event read-back."""
+
+    def _ctx(self, server24=None, active_power=None):
+        link = FakeLink({
+            "AT+MTMEAS=24,148,0,1": (3, []),
+            "AT+MTMEAS=24,144,0,230000,1,433,2,-1500000": (0, []),
+            "AT+MTMEAS=24,145,0,2500000": (0, []),
+        })
+        energy_attr = "\n".join([
+            "[TOO]   CumulativeEnergyImported: {",
+            "[TOO]     Energy: 2500000",
+            "[TOO]     EndSystime: 100000",
+            "[TOO]    }",
+        ])
+        energy_event = "\n".join([
+            "[TOO]   CumulativeEnergyMeasured: {",
+            "[TOO]     EnergyImported: {",
+            "[TOO]       Energy: 2500000",
+            "[TOO]       EndSystime: 100000",
+            "[TOO]      }",
+            "[TOO]    }",
+        ])
+        script = [
+            (0, DEVTYPES24_HP),
+            (0, server24 if server24 is not None else SERVER24_HP),
+            (0, "[TOO]   Voltage: 230000"),
+            (0, active_power if active_power is not None
+             else "[TOO]   ActivePower: -1500000"),
+            (0, energy_attr),
+            (0, energy_event),
+        ]
+        runner = FakeChipRunner(script)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_phase3_ctx(link, chip=chip)
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_23_heat_pump(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        # The no-command-traffic pin, transcript half.
+        self.assertFalse(any("MTCMDRESP" in c for c in ctx.link.sent))
+
+    def test_whm_on_the_heat_pump_fails(self):
+        # The disclosed-gap pin: a thunk change that grew WHM (or
+        # Thermostat) onto the heat pump endpoint must fail the absence
+        # check loudly, not be silently absorbed.
+        with_whm = SERVER24_HP + "\n[TOO]     [6]: 148 (WaterHeaterManagement)"
+        ctx = self._ctx(server24=with_whm)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_23_heat_pump(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_sign_lost_on_active_power_fails(self):
+        # A pipeline that dropped the sign reads 1500000: exactly the
+        # regression the negative push exists to catch.
+        ctx = self._ctx(active_power="[TOO]   ActivePower: 1500000")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_23_heat_pump(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class ApplyLink(FakeLink):
+    """FakeLink whose AT+MTEPAPPLY releases +MTREADY every time it is
+    sent, not only the first (urcs_on_command's one-shot semantics):
+    t_meas_staged_wh_min applies twice, scratch then restore, and both
+    reboots must produce the marker for the happy path to be honest."""
+
+    def command(self, cmd, expect=None, timeout=None):
+        v = super().command(cmd, expect, timeout)
+        if cmd == "AT+MTEPAPPLY" and v[0] == 0:
+            self.push_urcs(["+MTREADY"])
+        return v
+
+
+class TestStagedWhMin(unittest.TestCase):
+    """Energy round B, task 4: the Phase 1 staged variant-1 water
+    heater row (t_meas_staged_wh_min): scratch composition applied and
+    VERIFIED (the known-start-state rule), the two +MTERR:3 gate rows
+    (including gate-outranks-range on a negative field 4), the
+    +MTERR:1 unknown-field control row, and the finally-block restore
+    of the single-light standard state on every exit path."""
+
+    RESTORE_TAIL = ["AT+MTEPCLEAR", "AT+MTEP=0x0100", "AT+MTEPAPPLY",
+                    "AT+MTEP?"]
+
+    def _link(self, overrides=None):
+        cmds = {
+            "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []),
+            "AT+MTEP=0x050F,1": (0, []),
+            "AT+MTEPAPPLY": (0, []),
+            "AT+MTEP?": [(0, ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x050F,1"]),
+                         (0, ["+MTEP:0,1,0x0100"])],
+            "AT+MTMEAS=2,148,3,200": (3, []),
+            "AT+MTMEAS=2,148,4,-5": (3, []),
+            "AT+MTMEAS=2,148,9,1": (1, []),
+        }
+        cmds.update(overrides or {})
+        return ApplyLink(cmds)
+
+    def test_happy_path(self):
+        link = self._link()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(t_meas_staged_wh_min(link))
+        # The restore actually ran, and ran LAST: the single-light
+        # standard state is the bench contract every later Phase 1 row
+        # depends on.
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_gate_answering_range_code_fails(self):
+        # The precedence pin (ledger: gate outranks range): a firmware
+        # that answered +MTERR:1 for a negative field 4 on the MINIMAL
+        # variant would have run the range check before the feature
+        # gate, and this row must fail on it.
+        link = self._link({"AT+MTMEAS=2,148,4,-5": (1, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_meas_staged_wh_min(link))
+
+    def test_restore_runs_even_when_a_row_fails(self):
+        link = self._link({"AT+MTMEAS=2,148,3,200": (1, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_meas_staged_wh_min(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_wrong_composition_readback_fails_but_still_restores(self):
+        # The known-start-state rule made executable: if the scratch
+        # composition did not actually take effect, the gate rows were
+        # never observed against their variable and the row must fail,
+        # while the restore still runs.
+        link = self._link({"AT+MTEP?": [
+            (0, ["+MTEP:0,1,0x0100"]),      # wh-min entry missing
+            (0, ["+MTEP:0,1,0x0100"]),      # restore readback, correct
+        ]})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_meas_staged_wh_min(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_apply_failure_fails_and_attempts_restore(self):
+        link = self._link({"AT+MTEPAPPLY": (-1, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_meas_staged_wh_min(link))
+        # Both the scratch apply and the restore apply were attempted.
+        self.assertEqual(link.sent.count("AT+MTEPAPPLY"), 2)
+
+    def test_restore_failure_alone_fails_the_row(self):
+        # A row whose exercise half passed but whose restore did not
+        # must NOT pass: a green report over a bench left in a
+        # non-standard state would poison every later Phase 1 row.
+        link = self._link({"AT+MTEP?": [
+            (0, ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x050F,1"]),
+            (0, ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x050F,1"]),  # restore
+        ]})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_meas_staged_wh_min(link))
+
+
+class TestParseDeviceTypes(unittest.TestCase):
+    """Energy round B, task 4: the DeviceTypeList parser for
+    step_3_23's triple-identity check (shape derived from the pinned
+    generated DataModelLogger.cpp, INFERENCE until the bench)."""
+
+    def test_parses_all_three_entries_in_order(self):
+        self.assertEqual(parse_device_types(DEVTYPES24_HP),
+                         [777, 17, 1296])
+
+    def test_revision_lines_cannot_match(self):
+        # Revision prints without a parenthesised name; the \( anchor
+        # keeps it (and any other bare numeric) out.
+        self.assertEqual(parse_device_types("[TOO]   Revision: 1"), [])
+
+    def test_empty_on_no_match(self):
+        self.assertEqual(parse_device_types(""), [])
 
 
 class TestStep313Restore(unittest.TestCase):
