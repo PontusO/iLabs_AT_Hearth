@@ -1320,6 +1320,211 @@ static endpoint_t *mk_cook_surface(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * HearthEemInitCB is defined in main.cpp, next to the EEM accuracy table and
+ * the one-time wildcard AttributeAccess registration it performs. Plain
+ * forward declaration rather than mt_matter.h's extern "C" bridge pattern,
+ * for the delegate_init_callback_t linkage reason HearthRvcOpStateInitCB's
+ * own declaration above explains in full.
+ */
+void HearthEemInitCB(void *delegate, uint16_t endpoint_id);
+
+/*
+ * ---- Electrical measurement types (energy round A, task 4) --------------
+ *
+ * Two flat types on the Task 2 measurement foundation: Electrical Sensor
+ * (0x0510, PowerTopology + ElectricalPowerMeasurement, plus
+ * ElectricalEnergyMeasurement at variant 0) and Electrical Meter (0x0514,
+ * the same minus PowerTopology). Variant 0 = power + energy, variant 1 =
+ * power only (the current-clamp case). Neither device type XML requires
+ * Identify (1.5.1 ElectricalSensor.xml / ElectricalMeter.xml list only the
+ * measurement clusters and, for the sensor, PowerTopology), so unlike the
+ * refrigerator/oven there is no hand-added identify here.
+ *
+ * EPM feature and optional-attribute choices are BOUND to Task 2's
+ * HearthEpmDelegate (main.cpp): the SDK's own init callback
+ * (ElectricalPowerMeasurementDelegateInitCB,
+ * esp_matter_delegate_callbacks.cpp:418-428) constructs the Instance from
+ * the endpoint's real FeatureMap attribute plus whichever optional
+ * attributes actually exist on the endpoint
+ * (get_electrical_power_measurement_enabled_optional_attributes, :116-174,
+ * is_attribute_enabled per attribute), so what this file creates IS the
+ * served surface. The cluster's create() body
+ * (esp_matter_cluster.cpp:3220-3275) makes only PowerMode,
+ * NumberOfMeasurementTypes, Accuracy and ActivePower; the other six
+ * field-table attributes the delegate stores (mt_matter.h's MT_MEAS_F_*
+ * table) are hand-added below, null until the host first pushes them.
+ * AlternatingCurrent satisfies VALIDATE_FEATURES_AT_LEAST_ONE (DC/AC,
+ * esp_matter_cluster.cpp:3251) and admits the AC-conformant fields
+ * (Frequency, PowerFactor, RMSVoltage, RMSCurrent).
+ *
+ * The EEM cluster must carry exactly Imported + Exported + Cumulative:
+ * HearthEemInitCB's one-time wildcard AttrAccess registration serves that
+ * fixed feature set for EVERY EEM endpoint's FeatureMap read (Task 2's
+ * binding contract, main.cpp), so a different mask here would make
+ * FeatureMap lie. The three bits also satisfy both of the create() body's
+ * VALIDATE_FEATURES_AT_LEAST_ONE checks (Imported/Exported and
+ * Cumulative/Periodic, esp_matter_cluster.cpp:3301-3304).
+ *
+ * 8.6 check, EVENT metadata flavour (run against the pinned tree before
+ * writing these thunks): CLEAN, no hand-add needed. This round's specific
+ * fear was the disease's event variant (attributes present, event metadata
+ * never registered, invisible until a controller subscribes), but
+ * electrical_energy_measurement::create() reaches
+ * feature::cumulative_energy::add() whenever the CumulativeEnergy bit is
+ * set (esp_matter_cluster.cpp:3312-3314), and that add() ends with
+ * event::create_cumulative_energy_measured(cluster)
+ * (esp_matter_feature.cpp:2486, wrapping esp_matter::event::create() with
+ * the generated event id, esp_matter_event.cpp:724-727). The SDK gap in
+ * this cluster is elsewhere: its AttributeAccess is declared but never
+ * registered, which is Task 2's finding and HearthEemInitCB's job
+ * (ARCHITECTURE.md 8.10); the thunks below only hand that callback to
+ * set_delegate_and_init_callback() themselves (null delegate by contract,
+ * the HearthOvenModeInitCB precedent), since cluster create() wires no
+ * init callback for this cluster at all.
+ */
+static bool mt_epm_add_field_attributes(endpoint_t *ep)
+{
+    cluster_t *cl = cluster::get(ep, chip::app::Clusters::ElectricalPowerMeasurement::Id);
+    if (cl == nullptr) {
+        ESP_LOGE(TAG, "ElectricalPowerMeasurement cluster missing after create");
+        return false;
+    }
+    /* Null defaults: the AT_MT_SPEC.md 3.25 contract is that every field
+     * answers null until the host first pushes it. The values are
+     * Instance-served from HearthEpmDelegate's store either way; these
+     * ember entries exist so the init CB's is_attribute_enabled scan admits
+     * the attributes into the Instance's served set. */
+    cluster::electrical_power_measurement::attribute::create_voltage(cl, nullable<int64_t>());
+    cluster::electrical_power_measurement::attribute::create_active_current(cl, nullable<int64_t>());
+    cluster::electrical_power_measurement::attribute::create_frequency(cl, nullable<int64_t>());
+    cluster::electrical_power_measurement::attribute::create_power_factor(cl, nullable<int64_t>());
+    cluster::electrical_power_measurement::attribute::create_rms_voltage(cl, nullable<int64_t>());
+    cluster::electrical_power_measurement::attribute::create_rms_current(cl, nullable<int64_t>());
+    return true;
+}
+
+static uint32_t mt_eem_feature_flags(void)
+{
+    return cluster::electrical_energy_measurement::feature::imported_energy::get_id() |
+           cluster::electrical_energy_measurement::feature::exported_energy::get_id() |
+           cluster::electrical_energy_measurement::feature::cumulative_energy::get_id();
+}
+
+static endpoint_t *mk_electrical_sensor(node_t *n, uint8_t variant)
+{
+    void *epm_delegate = mt_matter_epm_delegate_alloc();
+    if (epm_delegate == nullptr) {
+        ESP_LOGE(TAG, "EPM delegate pool exhausted (electrical sensor)");
+        return nullptr;
+    }
+    void *ptop_delegate = mt_matter_ptop_delegate_alloc();
+    if (ptop_delegate == nullptr) {
+        ESP_LOGE(TAG, "PowerTopology delegate pool exhausted (electrical sensor)");
+        return nullptr;
+    }
+
+    electrical_sensor::config_t c;
+    /* NodeTopology alone (Task 2's binding contract: HearthPtopDelegate's
+     * endpoint-list iterators only answer under SET/TREE, which are not
+     * enabled). electrical_sensor::add() ORs this same bit in
+     * unconditionally (esp_matter_endpoint.cpp:1510), so the explicit set
+     * documents the choice rather than creating it; the |= keeps the
+     * feature map at exactly one topology bit either way
+     * (VALIDATE_FEATURES_EXACT_ONE, esp_matter_cluster.cpp:3199). */
+    c.power_topology.feature_flags = cluster::power_topology::feature::node_topology::get_id();
+    c.power_topology.delegate = ptop_delegate;
+    c.electrical_power_measurement.feature_flags =
+        cluster::electrical_power_measurement::feature::alternating_current::get_id();
+    c.electrical_power_measurement.delegate = epm_delegate;
+
+    endpoint_t *ep = electrical_sensor::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    if (!mt_epm_add_field_attributes(ep)) {
+        return nullptr;
+    }
+
+    if (variant == 0) {
+        /* The sensor's device type XML lists the energy cluster optional
+         * (choice "a" with the power cluster, min 1), and
+         * electrical_sensor::config_t carries no EEM member at all, so
+         * variant 0 adds the cluster by hand, the same after-create()
+         * shape as every other hand-added cluster in this file. */
+        cluster::electrical_energy_measurement::config_t ec;
+        ec.feature_flags = mt_eem_feature_flags();
+        cluster_t *eem_cl =
+            cluster::electrical_energy_measurement::create(ep, &ec, CLUSTER_FLAG_SERVER);
+        if (eem_cl == nullptr) {
+            ESP_LOGE(TAG, "creating ElectricalEnergyMeasurement cluster failed");
+            return nullptr;
+        }
+        esp_matter::cluster::set_delegate_and_init_callback(eem_cl, HearthEemInitCB, nullptr);
+    }
+
+    uint16_t ep_id = endpoint::get_id(ep);
+    mt_matter_meas_delegate_set_endpoint(epm_delegate, ep_id);
+    mt_matter_meas_delegate_set_endpoint(ptop_delegate, ep_id);
+    return ep;
+}
+
+static endpoint_t *mk_electrical_meter(node_t *n, uint8_t variant)
+{
+    void *epm_delegate = mt_matter_epm_delegate_alloc();
+    if (epm_delegate == nullptr) {
+        ESP_LOGE(TAG, "EPM delegate pool exhausted (electrical meter)");
+        return nullptr;
+    }
+
+    electrical_meter::config_t c;
+    c.electrical_power_measurement.feature_flags =
+        cluster::electrical_power_measurement::feature::alternating_current::get_id();
+    c.electrical_power_measurement.delegate = epm_delegate;
+    /* electrical_meter::add() (esp_matter_endpoint.cpp:2275-2282) creates
+     * the EEM cluster unconditionally from this config, so the feature
+     * flags are set for BOTH variants: left at 0 for variant 1, create()
+     * would trip its feature validation and abort the cluster mid-add()
+     * (with add() ignoring the failure), a messier path than building the
+     * cluster whole and destroying it below, the B216
+     * destroy-after-create precedent. */
+    c.electrical_energy_measurement.feature_flags = mt_eem_feature_flags();
+
+    endpoint_t *ep = electrical_meter::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    if (!mt_epm_add_field_attributes(ep)) {
+        return nullptr;
+    }
+
+    cluster_t *eem_cl = cluster::get(ep, chip::app::Clusters::ElectricalEnergyMeasurement::Id);
+    if (eem_cl == nullptr) {
+        ESP_LOGE(TAG, "ElectricalEnergyMeasurement cluster missing after create");
+        return nullptr;
+    }
+    if (variant == 0) {
+        esp_matter::cluster::set_delegate_and_init_callback(eem_cl, HearthEemInitCB, nullptr);
+    } else {
+        /* Power-only meter: destroy the cluster add() forced, before
+         * esp_matter::start() the same as the whole rebuild, so there is
+         * no CHIP event loop to race (the mk_cook_surface() precedent).
+         * Note the 1.5.1 device type XML marks EEM mandatoryConform on
+         * this device type (unlike the sensor's choice conformance), so
+         * variant 1 here departs from strict conformance; it exists for
+         * variant-scheme symmetry with the sensor (design spec 3.3), and
+         * the conformant current-clamp declaration is the variant-1
+         * SENSOR. */
+        if (cluster::destroy(eem_cl) != ESP_OK) {
+            ESP_LOGE(TAG, "destroying ElectricalEnergyMeasurement cluster failed");
+            return nullptr;
+        }
+    }
+
+    mt_matter_meas_delegate_set_endpoint(epm_delegate, endpoint::get_id(ep));
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -1367,6 +1572,8 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { refrigerator::get_device_type_id(),             mk_refrigerator,            "refrigerator",            0 },
     { oven::get_device_type_id(),                     mk_oven,                    "oven",                    0 },
     { cook_surface::get_device_type_id(),             mk_cook_surface,            "cook_surface",            1 },
+    { electrical_sensor::get_device_type_id(),        mk_electrical_sensor,       "electrical_sensor",       1 },
+    { electrical_meter::get_device_type_id(),         mk_electrical_meter,        "electrical_meter",        1 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);
