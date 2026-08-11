@@ -14,6 +14,7 @@
  *   MT_R_ERROR - engine prints plain "ERROR"
  */
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -248,6 +249,44 @@ static bool parse_u(const char *s, unsigned long *out)
     return true;
 }
 
+/* 64-bit value parse: optional leading minus only when the target
+ * attribute's type is signed (B-round-A: the pipeline was silently
+ * truncating i64/u64 through 32-bit long). Rejects empty, sign-only,
+ * trailing garbage and out-of-range exactly like parse_u does. */
+static bool parse_i64(const char *s, bool allow_negative, int64_t *out)
+{
+    char *end;
+    errno = 0;
+    if (s[0] == '-' && !allow_negative) {
+        return false;
+    }
+    long long v = strtoll(s, &end, 0);
+    if (end == s || *end != '\0' || errno == ERANGE) {
+        return false;
+    }
+    *out = (int64_t)v;
+    return true;
+}
+
+/* Unsigned companion: strtoull so a u64 attribute carries values above
+ * INT64_MAX (18446744073709551615 round-trips). The leading minus is
+ * rejected up front because strtoull negates it silently instead of
+ * failing, which is exactly the class of accident this pair replaces. */
+static bool parse_u64(const char *s, uint64_t *out)
+{
+    char *end;
+    errno = 0;
+    if (s[0] == '-') {
+        return false;
+    }
+    unsigned long long v = strtoull(s, &end, 0);
+    if (end == s || *end != '\0' || errno == ERANGE) {
+        return false;
+    }
+    *out = (uint64_t)v;
+    return true;
+}
+
 /* Map a bridge attribute result onto this personality's +MTERR code space. */
 static int attr_err_to_mterr(int r)
 {
@@ -268,7 +307,13 @@ static int attr_err_to_mterr(int r)
  *     -> +MTATTR:<ep>,<cluster>,<attr>,<val>
  * AT+MTATTR=<ep>,<cluster>,<attr>,<val>[,<mode>] -> write -> OK
  *
- * <cluster>/<attr> accept hex (0x0006) or decimal; <val> is an integer.
+ * <cluster>/<attr> accept hex (0x0006) or decimal; <val> is a full-width
+ * 64-bit integer (hex or decimal), signed per the attribute's own type: a
+ * leading minus is accepted only for signed attributes, and an unsigned
+ * attribute carries 0 up to its type's maximum (a u64 takes
+ * 18446744073709551615). The signedness is fetched from the bridge before
+ * <val> is parsed, which is also why a write's lookup errors (+MTERR:2..5)
+ * are decided before a bad <val> (+MTERR:1).
  *
  * <mode> selects how the write is published, default 1:
  *   1  attribute::update() - subscribers and bound devices see the change
@@ -295,19 +340,48 @@ static int cmd_mtattr(at_type_t type, char *args)
         return MT_ERR_BAD_PARAM;
     }
 
+    /* Read first in both directions: for a read it is the answer itself, and
+     * a write needs the attribute's signedness before parsing <val> (a
+     * leading minus is only legal on a signed attribute, and a u64 value
+     * above INT64_MAX needs the unsigned parse). */
+    int64_t v;
+    bool is_unsigned = false;
+    int r = mt_matter_attr_read((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr,
+                                &v, &is_unsigned);
+
     if (n == 3) {
-        long v;
-        int r = mt_matter_attr_read((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr, &v);
         if (r != MT_ATTR_OK) {
             return attr_err_to_mterr(r);
         }
-        at_uart_write_line("+MTATTR:%lu,%lu,%lu,%ld", ep, cluster, attr, v);
+        if (is_unsigned) {
+            at_uart_write_line("+MTATTR:%lu,%lu,%lu,%llu", ep, cluster, attr,
+                               (unsigned long long)(uint64_t)v);
+        } else {
+            at_uart_write_line("+MTATTR:%lu,%lu,%lu,%lld", ep, cluster, attr,
+                               (long long)v);
+        }
         return AT_R_OK;
     }
 
-    unsigned long val;
-    if (!parse_u(f[3], &val)) {
-        return MT_ERR_BAD_PARAM;
+    /* MT_ATTR_ERR_TYPE passes through to the write: the signedness flag is
+     * valid for it (a null nullable reads as ERR_TYPE yet writes fine), and
+     * a genuinely non-integer attribute fails the write below with the same
+     * +MTERR:5 it always answered. */
+    if (r != MT_ATTR_OK && r != MT_ATTR_ERR_TYPE) {
+        return attr_err_to_mterr(r);
+    }
+
+    int64_t val;
+    if (is_unsigned) {
+        uint64_t u;
+        if (!parse_u64(f[3], &u)) {
+            return MT_ERR_BAD_PARAM;
+        }
+        val = (int64_t)u;  /* raw pattern; the bridge stores it per type */
+    } else {
+        if (!parse_i64(f[3], true, &val)) {
+            return MT_ERR_BAD_PARAM;
+        }
     }
 
     unsigned long mode = 1;
@@ -315,10 +389,10 @@ static int cmd_mtattr(at_type_t type, char *args)
         return MT_ERR_BAD_PARAM;
     }
 
-    int r = mt_matter_attr_write((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr,
-                                 (long)val, mode != 0);
-    if (r != MT_ATTR_OK) {
-        return attr_err_to_mterr(r);
+    int rw = mt_matter_attr_write((uint16_t)ep, (uint32_t)cluster, (uint32_t)attr,
+                                  val, mode != 0);
+    if (rw != MT_ATTR_OK) {
+        return attr_err_to_mterr(rw);
     }
     return AT_R_OK;
 }

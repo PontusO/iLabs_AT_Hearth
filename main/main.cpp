@@ -195,8 +195,72 @@ using namespace esp_matter;
 using namespace esp_matter::endpoint;
 
 /*
- * Map an esp_matter attribute value to/from a plain integer for the AT+MTATTR
+ * Signedness of the AT+MTATTR integer family, keyed on the val type. Shared by
+ * the +MTATTR URC formatter, the read bridge (which hands the flag to mt_at.c
+ * so the handler formats a u64 above INT64_MAX with %llu instead of %lld) and
+ * the write bridge (whose caller selects the unsigned parse on the same flag,
+ * and which uses the pair to tell an out-of-width value from an unsupported
+ * type). Boolean counts as unsigned: it has no negative literal.
+ */
+static bool attr_val_is_unsigned(esp_matter_val_type_t type)
+{
+    switch (type) {
+    case ESP_MATTER_VAL_TYPE_BOOLEAN:
+    case ESP_MATTER_VAL_TYPE_UINT8:
+    case ESP_MATTER_VAL_TYPE_ENUM8:
+    case ESP_MATTER_VAL_TYPE_BITMAP8:
+    case ESP_MATTER_VAL_TYPE_UINT16:
+    case ESP_MATTER_VAL_TYPE_ENUM16:
+    case ESP_MATTER_VAL_TYPE_BITMAP16:
+    case ESP_MATTER_VAL_TYPE_UINT32:
+    case ESP_MATTER_VAL_TYPE_BITMAP32:
+    case ESP_MATTER_VAL_TYPE_UINT64:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BOOLEAN:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT8:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM8:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP8:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT16:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM16:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP16:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT32:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP32:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT64:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* The signed half of the same family. A type in neither set is one AT+MTATTR
+ * cannot carry at all (string/array/float), which is what lets the write
+ * bridge keep +MTERR:5 for those while a bad width answers +MTERR:1. */
+static bool attr_val_is_signed_int(esp_matter_val_type_t type)
+{
+    switch (type) {
+    case ESP_MATTER_VAL_TYPE_INTEGER:
+    case ESP_MATTER_VAL_TYPE_INT8:
+    case ESP_MATTER_VAL_TYPE_INT16:
+    case ESP_MATTER_VAL_TYPE_INT32:
+    case ESP_MATTER_VAL_TYPE_INT64:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INTEGER:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT8:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT16:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT32:
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT64:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * Map an esp_matter attribute value to/from a 64-bit integer for the AT+MTATTR
  * command (host sends/receives integers; strings/floats/arrays are unsupported).
+ * int64_t is the carrier for both families: an unsigned attribute's value
+ * travels as the raw 64-bit pattern and the attr_val_is_unsigned() flag says
+ * which reading applies, so a u64 above INT64_MAX survives the trip. The pair
+ * used to go through 32-bit C long, which silently truncated i64/u64 values
+ * (energy round A).
  *
  * Nullable numeric attributes (ESP_MATTER_VAL_TYPE_NULLABLE_*, esp-matter's
  * disjoint second family for every integer/bool/enum/bitmap type, offset by
@@ -206,11 +270,11 @@ using namespace esp_matter::endpoint;
  * and the host library's access pattern (begin() always writes an attribute
  * before any read of it) never reads a never-written nullable in practice.
  * So a null read answers exactly what an unsupported type answers today:
- * attr_val_to_long() returns false and the caller reports +MTERR:5. Adding a
+ * attr_val_to_i64() returns false and the caller reports +MTERR:5. Adding a
  * way to WRITE null over AT is a separate, out-of-scope feature; see
- * long_to_attr_val() below.
+ * i64_to_attr_val() below.
  */
-static bool attr_val_to_long(const esp_matter_attr_val_t *v, long *out)
+static bool attr_val_to_i64(const esp_matter_attr_val_t *v, int64_t *out)
 {
     switch (v->type) {
     case ESP_MATTER_VAL_TYPE_BOOLEAN:  *out = v->val.b;   return true;
@@ -225,9 +289,10 @@ static bool attr_val_to_long(const esp_matter_attr_val_t *v, long *out)
     case ESP_MATTER_VAL_TYPE_BITMAP16: *out = v->val.u16; return true;
     case ESP_MATTER_VAL_TYPE_INT32:    *out = v->val.i32; return true;
     case ESP_MATTER_VAL_TYPE_UINT32:
-    case ESP_MATTER_VAL_TYPE_BITMAP32: *out = (long)v->val.u32; return true;
-    case ESP_MATTER_VAL_TYPE_INT64:    *out = (long)v->val.i64; return true;
-    case ESP_MATTER_VAL_TYPE_UINT64:   *out = (long)v->val.u64; return true;
+    case ESP_MATTER_VAL_TYPE_BITMAP32: *out = v->val.u32; return true;
+    case ESP_MATTER_VAL_TYPE_INT64:    *out = v->val.i64; return true;
+    /* Raw bit pattern above INT64_MAX; attr_val_is_unsigned() flags it. */
+    case ESP_MATTER_VAL_TYPE_UINT64:   *out = (int64_t)v->val.u64; return true;
 
     /* Nullable siblings. Same union field and cast as the plain arm above;
      * chip::app::NumericAttributeTraits<T>::IsNullValue() is CHIP's own null
@@ -261,13 +326,13 @@ static bool attr_val_to_long(const esp_matter_attr_val_t *v, long *out)
     case ESP_MATTER_VAL_TYPE_NULLABLE_UINT32:
     case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP32:
         if (chip::app::NumericAttributeTraits<uint32_t>::IsNullValue(v->val.u32)) return false;
-        *out = (long)v->val.u32; return true;
+        *out = v->val.u32; return true;
     case ESP_MATTER_VAL_TYPE_NULLABLE_INT64:
         if (chip::app::NumericAttributeTraits<int64_t>::IsNullValue(v->val.i64)) return false;
-        *out = (long)v->val.i64; return true;
+        *out = v->val.i64; return true;
     case ESP_MATTER_VAL_TYPE_NULLABLE_UINT64:
         if (chip::app::NumericAttributeTraits<uint64_t>::IsNullValue(v->val.u64)) return false;
-        *out = (long)v->val.u64; return true;
+        *out = (int64_t)v->val.u64; return true;
 
     default: return false;
     }
@@ -276,8 +341,18 @@ static bool attr_val_to_long(const esp_matter_attr_val_t *v, long *out)
 /*
  * Same integer<->attr_val bridge, write direction. `v` arrives pre-populated
  * by attribute::get_val() with the located attribute's real type (including
- * NULLABLE_*), so this switches on that type exactly as attr_val_to_long()
+ * NULLABLE_*), so this switches on that type exactly as attr_val_to_i64()
  * does; it never decides on its own whether an attribute is nullable.
+ *
+ * Each arm gates `in` on its own width before storing: `in` carries a full
+ * 64-bit value (for an unsigned attribute, the raw bit pattern of the
+ * unsigned parse, so the unsigned arms compare through uint64_t), and a
+ * value that does not fit returns false instead of truncating. The 32-bit
+ * predecessor of this function cast unconditionally, so 300 into a u8 wrote
+ * 44 with an OK; energy round A closed that. mt_matter_attr_write() turns
+ * the false into MT_ATTR_ERR_VALUE (+MTERR:1) when the type is
+ * integer-carrying, and MT_ATTR_ERR_TYPE (+MTERR:5) when it is not carried
+ * at all.
  *
  * A nullable arm builds the val with its esp_matter_nullable_*() constructor
  * rather than writing the union field directly, so the type tag it leaves
@@ -290,40 +365,88 @@ static bool attr_val_to_long(const esp_matter_attr_val_t *v, long *out)
  * treats a value equal to that sentinel as null on construction, same as it
  * would for a value CHIP itself produced.
  */
-static bool long_to_attr_val(esp_matter_attr_val_t *v, long in)
+static bool i64_to_attr_val(esp_matter_attr_val_t *v, int64_t in)
 {
+    const uint64_t u = (uint64_t)in;  /* unsigned reading of the pattern */
+
     switch (v->type) {
-    case ESP_MATTER_VAL_TYPE_BOOLEAN:  v->val.b   = (bool)in;     return true;
-    case ESP_MATTER_VAL_TYPE_INTEGER:  v->val.i   = (int)in;      return true;
-    case ESP_MATTER_VAL_TYPE_INT8:     v->val.i8  = (int8_t)in;   return true;
+    case ESP_MATTER_VAL_TYPE_BOOLEAN:
+        if (u > 1) return false;
+        v->val.b = (bool)in; return true;
+    case ESP_MATTER_VAL_TYPE_INTEGER:
+        if (in < INT32_MIN || in > INT32_MAX) return false;
+        v->val.i = (int)in; return true;
+    case ESP_MATTER_VAL_TYPE_INT8:
+        if (in < INT8_MIN || in > INT8_MAX) return false;
+        v->val.i8 = (int8_t)in; return true;
     case ESP_MATTER_VAL_TYPE_UINT8:
     case ESP_MATTER_VAL_TYPE_ENUM8:
-    case ESP_MATTER_VAL_TYPE_BITMAP8:  v->val.u8  = (uint8_t)in;  return true;
-    case ESP_MATTER_VAL_TYPE_INT16:    v->val.i16 = (int16_t)in;  return true;
+    case ESP_MATTER_VAL_TYPE_BITMAP8:
+        if (u > UINT8_MAX) return false;
+        v->val.u8 = (uint8_t)in; return true;
+    case ESP_MATTER_VAL_TYPE_INT16:
+        if (in < INT16_MIN || in > INT16_MAX) return false;
+        v->val.i16 = (int16_t)in; return true;
     case ESP_MATTER_VAL_TYPE_UINT16:
     case ESP_MATTER_VAL_TYPE_ENUM16:
-    case ESP_MATTER_VAL_TYPE_BITMAP16: v->val.u16 = (uint16_t)in; return true;
-    case ESP_MATTER_VAL_TYPE_INT32:    v->val.i32 = (int32_t)in;  return true;
+    case ESP_MATTER_VAL_TYPE_BITMAP16:
+        if (u > UINT16_MAX) return false;
+        v->val.u16 = (uint16_t)in; return true;
+    case ESP_MATTER_VAL_TYPE_INT32:
+        if (in < INT32_MIN || in > INT32_MAX) return false;
+        v->val.i32 = (int32_t)in; return true;
     case ESP_MATTER_VAL_TYPE_UINT32:
-    case ESP_MATTER_VAL_TYPE_BITMAP32: v->val.u32 = (uint32_t)in; return true;
-    case ESP_MATTER_VAL_TYPE_INT64:    v->val.i64 = (int64_t)in;  return true;
-    case ESP_MATTER_VAL_TYPE_UINT64:   v->val.u64 = (uint64_t)in; return true;
+    case ESP_MATTER_VAL_TYPE_BITMAP32:
+        if (u > UINT32_MAX) return false;
+        v->val.u32 = (uint32_t)in; return true;
+    case ESP_MATTER_VAL_TYPE_INT64:
+        v->val.i64 = in; return true;
+    case ESP_MATTER_VAL_TYPE_UINT64:
+        v->val.u64 = u; return true;
 
-    case ESP_MATTER_VAL_TYPE_NULLABLE_BOOLEAN:  *v = esp_matter_nullable_bool((bool)in);          return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_INTEGER:  *v = esp_matter_nullable_int((int)in);            return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_INT8:     *v = esp_matter_nullable_int8((int8_t)in);        return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT8:    *v = esp_matter_nullable_uint8((uint8_t)in);      return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM8:    *v = esp_matter_nullable_enum8((uint8_t)in);      return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP8:  *v = esp_matter_nullable_bitmap8((uint8_t)in);    return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_INT16:    *v = esp_matter_nullable_int16((int16_t)in);      return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT16:   *v = esp_matter_nullable_uint16((uint16_t)in);    return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM16:   *v = esp_matter_nullable_enum16((uint16_t)in);    return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP16: *v = esp_matter_nullable_bitmap16((uint16_t)in);  return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_INT32:    *v = esp_matter_nullable_int32((int32_t)in);      return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT32:   *v = esp_matter_nullable_uint32((uint32_t)in);    return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP32: *v = esp_matter_nullable_bitmap32((uint32_t)in);  return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_INT64:    *v = esp_matter_nullable_int64((int64_t)in);      return true;
-    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT64:   *v = esp_matter_nullable_uint64((uint64_t)in);    return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BOOLEAN:
+        if (u > 1) return false;
+        *v = esp_matter_nullable_bool((bool)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INTEGER:
+        if (in < INT32_MIN || in > INT32_MAX) return false;
+        *v = esp_matter_nullable_int((int)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT8:
+        if (in < INT8_MIN || in > INT8_MAX) return false;
+        *v = esp_matter_nullable_int8((int8_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT8:
+        if (u > UINT8_MAX) return false;
+        *v = esp_matter_nullable_uint8((uint8_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM8:
+        if (u > UINT8_MAX) return false;
+        *v = esp_matter_nullable_enum8((uint8_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP8:
+        if (u > UINT8_MAX) return false;
+        *v = esp_matter_nullable_bitmap8((uint8_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT16:
+        if (in < INT16_MIN || in > INT16_MAX) return false;
+        *v = esp_matter_nullable_int16((int16_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT16:
+        if (u > UINT16_MAX) return false;
+        *v = esp_matter_nullable_uint16((uint16_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_ENUM16:
+        if (u > UINT16_MAX) return false;
+        *v = esp_matter_nullable_enum16((uint16_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP16:
+        if (u > UINT16_MAX) return false;
+        *v = esp_matter_nullable_bitmap16((uint16_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT32:
+        if (in < INT32_MIN || in > INT32_MAX) return false;
+        *v = esp_matter_nullable_int32((int32_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT32:
+        if (u > UINT32_MAX) return false;
+        *v = esp_matter_nullable_uint32((uint32_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_BITMAP32:
+        if (u > UINT32_MAX) return false;
+        *v = esp_matter_nullable_bitmap32((uint32_t)in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_INT64:
+        *v = esp_matter_nullable_int64(in); return true;
+    case ESP_MATTER_VAL_TYPE_NULLABLE_UINT64:
+        *v = esp_matter_nullable_uint64(u); return true;
 
     default: return false;
     }
@@ -514,11 +637,20 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
      * +MTATTR URC (so a controller-driven toggle is visible over AT). The
      * root endpoint (0) is skipped to keep boot-time init noise off the link. */
     if (type == attribute::POST_UPDATE && endpoint_id != 0) {
-        long v;
-        if (attr_val_to_long(val, &v)) {
+        int64_t v;
+        if (attr_val_to_i64(val, &v)) {
+            /* Worst case fits: "+MTATTR:" + 5 + 10 + 10 + 20 digits + commas
+             * + NUL = 57 bytes. */
             char line[64];
-            snprintf(line, sizeof(line), "+MTATTR:%u,%lu,%lu,%ld", endpoint_id,
-                     (unsigned long)cluster_id, (unsigned long)attribute_id, v);
+            if (attr_val_is_unsigned(val->type)) {
+                snprintf(line, sizeof(line), "+MTATTR:%u,%lu,%lu,%llu", endpoint_id,
+                         (unsigned long)cluster_id, (unsigned long)attribute_id,
+                         (unsigned long long)(uint64_t)v);
+            } else {
+                snprintf(line, sizeof(line), "+MTATTR:%u,%lu,%lu,%lld", endpoint_id,
+                         (unsigned long)cluster_id, (unsigned long)attribute_id,
+                         (long long)v);
+            }
             mt_at_urc(line);
         }
     }
@@ -834,7 +966,8 @@ static mt_attr_result_t attr_locate(uint16_t ep, uint32_t cluster, uint32_t attr
     return MT_ATTR_OK;
 }
 
-extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out)
+extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
+                                   bool *is_unsigned)
 {
     /* Same reasoning as the bridge functions above, and the same lock. These
      * two never crashed on hardware, which made them look safe and is exactly
@@ -860,7 +993,10 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
              * endpoint carrying this cluster at boot. Defensive only. */
             return MT_ATTR_ERR_FAILED;
         }
-        *out = static_cast<long>(e->instance->GetAirQuality());
+        if (is_unsigned != NULL) {
+            *is_unsigned = true;  /* AirQualityEnum is an enum8 */
+        }
+        *out = static_cast<int64_t>(e->instance->GetAirQuality());
         return MT_ATTR_OK;
     }
 
@@ -874,10 +1010,17 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
     if (esp_matter::attribute::get_val(a, &val) != ESP_OK) {
         return MT_ATTR_ERR_FAILED;
     }
-    return attr_val_to_long(&val, out) ? MT_ATTR_OK : MT_ATTR_ERR_TYPE;
+    /* Set before the conversion, so the flag is valid even on
+     * MT_ATTR_ERR_TYPE: the write handler fetches the signedness through
+     * this function BEFORE parsing its value, and a null nullable converts
+     * to nothing while still having a definite signedness. */
+    if (is_unsigned != NULL) {
+        *is_unsigned = attr_val_is_unsigned(val.type);
+    }
+    return attr_val_to_i64(&val, out) ? MT_ATTR_OK : MT_ATTR_ERR_TYPE;
 }
 
-extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long in, bool notify)
+extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t in, bool notify)
 {
     ChipStackLock lock;
 
@@ -938,8 +1081,13 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
     if (esp_matter::attribute::get_val(a, &val) != ESP_OK) {
         return MT_ATTR_ERR_FAILED;
     }
-    if (!long_to_attr_val(&val, in)) {
-        return MT_ATTR_ERR_TYPE;
+    if (!i64_to_attr_val(&val, in)) {
+        /* Two failures share the false: a value outside the width of an
+         * integer-carrying attribute is a bad parameter (+MTERR:1 via
+         * MT_ATTR_ERR_VALUE), a type this command cannot carry at all keeps
+         * its historical +MTERR:5 (MT_ATTR_ERR_TYPE). */
+        return (attr_val_is_unsigned(val.type) || attr_val_is_signed_int(val.type))
+                   ? MT_ATTR_ERR_VALUE : MT_ATTR_ERR_TYPE;
     }
 
     esp_err_t err = notify ? esp_matter::attribute::update(ep, cluster, attr, &val)

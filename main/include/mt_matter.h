@@ -110,12 +110,30 @@ typedef enum {
     MT_ATTR_ERR_VALUE,
 } mt_attr_result_t;
 
-/* Read an integer-valued attribute into *out. Returns an mt_attr_result_t. */
-int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out);
+/*
+ * Read an integer-valued attribute into *out. Returns an mt_attr_result_t.
+ *
+ * *out carries the value full-width: for a signed attribute it is the value
+ * itself, for an unsigned attribute it is the raw 64-bit pattern (a u64
+ * above INT64_MAX arrives bit-exact; reinterpret through uint64_t).
+ * *is_unsigned (may be NULL) reports which reading applies, taken from the
+ * attribute's own type. The flag is also valid when the result is
+ * MT_ATTR_ERR_TYPE, so a caller about to WRITE can fetch the signedness
+ * first and select its parse: a null nullable reads as MT_ATTR_ERR_TYPE
+ * (the AT grammar has no null literal) yet still has a definite signedness
+ * and remains writable. On the other error codes the flag is untouched.
+ */
+int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
+                        bool *is_unsigned);
 
 /*
  * Write an integer-valued attribute (interpreted per the attribute's current
  * type). Returns an mt_attr_result_t.
+ *
+ * val is full-width, mirroring the read: for an unsigned attribute it is the
+ * raw 64-bit pattern of the unsigned parse. A value outside the attribute's
+ * own width returns MT_ATTR_ERR_VALUE (+MTERR:1) instead of truncating; the
+ * pre-round-A pipeline cast through 32-bit long and truncated silently.
  *
  * notify=true  uses attribute::update(): subscribers and bound devices see the
  *              change, which is what a host-driven change should normally do.
@@ -123,7 +141,7 @@ int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, long *out)
  *              report. Used when reflecting a change that came FROM a
  *              controller, so echoing it back does not loop.
  */
-int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, long val, bool notify);
+int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t val, bool notify);
 
 /*
  * Emit the Switch cluster's InitialPress event (position 1) on ep, i.e. the
