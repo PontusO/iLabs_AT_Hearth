@@ -810,6 +810,79 @@ void *mt_matter_epm_delegate_alloc(void);
 void *mt_matter_ptop_delegate_alloc(void);
 void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
 
+/* ---- water heater management (energy round B, task 1) ------------------- */
+
+/*
+ * How many WaterHeaterManagement-bearing endpoints one composition can
+ * carry. Same deliberate step down from MT_COMP_MAX_ENDPOINTS as MT_MEAS_MAX
+ * above, and the same reasoning: each slot is a HearthWhmDelegate (six cached
+ * attribute values plus the cached Boost parameters plus vtable), and four
+ * water heaters per composition is already beyond any host this firmware
+ * targets.
+ */
+#define MT_WHM_MAX 4  /* WaterHeaterManagement endpoints per composition */
+
+/*
+ * AT+MTMEAS field ids for the WaterHeaterManagement cluster (0x0094), the
+ * wire contract task 3 serves in mt_matter_meas_set()'s 0x94 branch,
+ * task 5 documents in AT_MT_SPEC.md, and task 6 consumes in the host
+ * library. Same family-selection rule as MT_MEAS_F_* / MT_ENERGY_F_* above:
+ * the cluster id the host passes decides which table applies, so the spaces
+ * may overlap numerically. Types and bounds follow the cluster XML exactly;
+ * fields 3-4 exist only under the EnergyManagement feature and field 5 only
+ * under TankPercent (a push to a field whose feature is absent answers the
+ * same data-model code the energy fields answer on a power-only electrical
+ * endpoint). Field 4 is int64 for 64-bit pipeline symmetry, but the XML
+ * pins its minimum at 0, so a negative value is rejected as +MTERR:1.
+ */
+#define MT_WHM_F_HEATER_TYPES   0  /* bitmap8, unsigned */
+#define MT_WHM_F_HEAT_DEMAND    1  /* bitmap8, unsigned */
+#define MT_WHM_F_BOOST_STATE    2  /* enum8 0/1, unsigned */
+#define MT_WHM_F_TANK_VOLUME    3  /* u16, unsigned, EM feature */
+#define MT_WHM_F_EST_HEAT_REQ   4  /* int64 mWh, signed, min 0, EM feature */
+#define MT_WHM_F_TANK_PERCENT   5  /* u8 0-100, unsigned, TP feature */
+
+/*
+ * The Boost forward's <mask> field (design spec 3.2): the +MTCMD line for
+ * cluster 0x94 command 0 is "<duration>,<mask>[,<v1>[,<v2>[,<v3>]]]".
+ * MT_BOOST_P_* are presence flags for the five optional Boost parameters in
+ * canonical order; MT_BOOST_V_* carry the VALUES of the two bools when their
+ * presence bit is set (a present bool needs no appended value field), and
+ * are 0 when it is clear. The appended values are only the present NUMERIC
+ * optionals, canonical order: temporarySetpoint (int16, temperature
+ * hundredths), targetPercentage (u8), targetReheat (u8). Task 5 documents
+ * this in AT_MT_SPEC.md 3.17; task 6's library unpacks with these same
+ * names.
+ */
+#define MT_BOOST_P_ONESHOT    0x0001  /* oneShot present */
+#define MT_BOOST_P_EMERGENCY  0x0002  /* emergencyBoost present */
+#define MT_BOOST_P_SETPOINT   0x0004  /* temporarySetpoint present + appended */
+#define MT_BOOST_P_TARGET_PCT 0x0008  /* targetPercentage present + appended */
+#define MT_BOOST_P_REHEAT     0x0010  /* targetReheat present + appended */
+#define MT_BOOST_V_ONESHOT    0x0100  /* oneShot's value when present */
+#define MT_BOOST_V_EMERGENCY  0x0200  /* emergencyBoost's value when present */
+
+/*
+ * The WHM delegate-pool handout, task 2's thunk protocol. UNLIKE the
+ * measurement pools above (alloc first, endpoint fixed later), this alloc
+ * takes the endpoint id up front: nothing on the SDK side ever calls
+ * SetEndpointId() for this cluster (WaterHeaterManagementDelegateInitCB,
+ * esp_matter_delegate_callbacks.cpp:487-498, constructs the Instance around
+ * the delegate without touching its endpoint member, and the Instance keeps
+ * its own copy), so the pool sets it at handout and the thunk calls this
+ * AFTER create() has returned the real id, attaching the delegate via
+ * esp_matter::cluster::set_delegate_and_init_callback() with the SDK's own
+ * WaterHeaterManagementDelegateInitCB (the HearthEemInitCB post-create
+ * precedent: esp_matter invokes the callback whenever it is set,
+ * esp_matter_data_model.cpp:264-266).
+ *
+ * Returns nullptr once MT_WHM_MAX slots are handed out, the same
+ * abort-the-boot-rebuild contract as every other pool in this file. Task 3's
+ * push bridge finds the slot again by endpoint id; task 2 consumes only this
+ * alloc.
+ */
+void *mt_matter_whm_delegate_alloc(uint16_t ep);
+
 #ifdef __cplusplus
 }
 #endif

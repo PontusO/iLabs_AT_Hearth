@@ -138,6 +138,14 @@
 #include <app/clusters/electrical-energy-measurement-server/ElectricalEnergyMeasurementCluster.h>
 #include <system/SystemClock.h>
 
+/* Energy round B, task 1: WaterHeaterManagement::Delegate/Instance behind
+ * HearthWhmDelegate (Boost/CancelBoost forwarding plus the six
+ * delegate-served WHM attributes). Dedicated header in the dedicated
+ * water-heater-management-server directory
+ * (CONFIG_SUPPORT_WATER_HEATER_MANAGEMENT_CLUSTER, sdkconfig.defaults);
+ * nothing this file already includes pulls it in transitively. */
+#include <app/clusters/water-heater-management-server/water-heater-management-server.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -3644,6 +3652,242 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
             ElectricalEnergyMeasurement::Attributes::CumulativeEnergyExported::Id);
     }
     return MT_ATTR_OK;
+}
+
+/*
+ * ---- water heater management (energy round B, task 1) ----------------------
+ *
+ * WaterHeaterManagement (0x0094) is FULLY delegate-served: the Instance IS
+ * the cluster's AttributeAccessInterface (water-heater-management-server.
+ * cpp:94-100 registers it as both command handler and attribute access), so
+ * all six attributes answer from the Delegate's getters and, without a
+ * delegate, every read would answer Failure while the ember metadata happily
+ * advertises them (the EEM 8.10 disease; here the fix is a real delegate).
+ * The delegate contract, verbatim from water-heater-management-server.h
+ * (lines 93-113, the eight pure virtuals):
+ *
+ *   virtual Protocols::InteractionModel::Status HandleBoost(uint32_t duration, Optional<bool> oneShot,
+ *                                                           Optional<bool> emergencyBoost, Optional<int16_t> temporarySetpoint,
+ *                                                           Optional<Percent> targetPercentage, Optional<Percent> targetReheat) = 0;
+ *   virtual Protocols::InteractionModel::Status HandleCancelBoost() = 0;
+ *   virtual BitMask<WaterHeaterHeatSourceBitmap> GetHeaterTypes() = 0;
+ *   virtual BitMask<WaterHeaterHeatSourceBitmap> GetHeatDemand()  = 0;
+ *   virtual uint16_t GetTankVolume()                              = 0;
+ *   virtual Energy_mWh GetEstimatedHeatRequired()                 = 0;
+ *   virtual Percent GetTankPercentage()                           = 0;
+ *   virtual BoostStateEnum GetBoostState()                        = 0;
+ *
+ * plus the two non-virtual event helpers (header lines 124-133), the
+ * NotifyCumulativeEnergyMeasured one-call shape, which task 3's BoostState
+ * transition derivation calls:
+ *
+ *   CHIP_ERROR GenerateBoostStartedEvent(uint32_t durationSecs, Optional<bool> oneShot, Optional<bool> emergencyBoost,
+ *                                        Optional<int16_t> temporarySetpoint, Optional<Percent> targetPercentage,
+ *                                        Optional<Percent> targetReheat);
+ *   CHIP_ERROR GenerateBoostEndedEvent();
+ *
+ * and the Instance constructor (header line 142):
+ *
+ *   Instance(EndpointId aEndpointId, Delegate & aDelegate, Feature aFeature)
+ *
+ * which WaterHeaterManagementDelegateInitCB
+ * (esp_matter_delegate_callbacks.cpp:487-498) news around the delegate with
+ * a feature bitmask SNAPSHOTTED from the endpoint's FeatureMap attribute at
+ * delegate-init time (get_feature_map_value(), then Init()): the thunk must
+ * therefore have hand-set the WHM feature bits on the cluster BEFORE the
+ * init callback runs (task 2; both SDK feature helpers are broken, survey
+ * A.2). The CB keeps a static single-Instance pointer overwritten per
+ * endpoint, which leaks nothing this firmware does twice: endpoints are
+ * built once per boot.
+ *
+ * Endpoint id: the init CB never calls SetEndpointId() on the delegate (the
+ * Instance keeps its own copy), so, unlike the measurement pools above whose
+ * Instance constructor sets it, this pool takes the endpoint id at alloc
+ * time; see mt_matter_whm_delegate_alloc() below and its mt_matter.h doc
+ * comment for the handout protocol.
+ *
+ * Command forwarding: HandleBoost/HandleCancelBoost run on the CHIP event
+ * loop task (the Instance's CommandHandlerInterface calls them synchronously
+ * from the invoke path), so NO ChipStackLock is taken here, the same
+ * reasoning as the door lock block above (main.cpp's own rule: delegate
+ * methods invoked BY CHIP already hold the stack) and the same shape as
+ * HearthMwocDelegate's two Handle*Callback forwards. The verdict is a raw
+ * passthrough: Instance::HandleBoost()/HandleCancelBoost()
+ * (water-heater-management-server.cpp:224-241) copy whatever Status the
+ * delegate returns straight into the command response via AddStatus(), no
+ * remapping, so a deny genuinely fails the command on the wire (the
+ * opstate/microwave side of the valve-vs-opstate split, AT_MT_SPEC.md 3.19
+ * vs 3.21).
+ *
+ * Split ownership, the AT+MTLOCK/AT+MTVALVE reasoning: an allowed Boost does
+ * NOT touch m_boost_state here. The host decides when the boost is really
+ * running and pushes BoostState Active over AT+MTMEAS (task 3), whose
+ * Inactive-to-Active transition derives the BoostStarted event from m_boost
+ * below; "the host decided" and "the host actually did it" are different
+ * moments.
+ */
+class HearthWhmDelegate : public chip::app::Clusters::WaterHeaterManagement::Delegate
+{
+public:
+    /* Host-pushed cached state, written only by task 3's
+     * mt_matter_meas_set() 0x94 branch. The defaults are the pre-first-push
+     * answers the design spec 2.4 pins: everything 0, BoostState Inactive. */
+    uint8_t  m_heater_types = 0;
+    uint8_t  m_heat_demand  = 0;
+    chip::app::Clusters::WaterHeaterManagement::BoostStateEnum m_boost_state =
+        chip::app::Clusters::WaterHeaterManagement::BoostStateEnum::kInactive;
+    uint16_t m_tank_volume  = 0;
+    int64_t  m_est_heat_req = 0;
+    uint8_t  m_tank_percent = 0;
+
+    /* The parameters of the last host-ACCEPTED Boost command, cached for the
+     * derived BoostStarted event (design spec 3.3: task 3 hands these to
+     * GenerateBoostStartedEvent() on the Inactive-to-Active push). valid
+     * false with duration 0 means none: a host-initiated boost with no prior
+     * controller command (physical button) emits duration 0, no optionals. */
+    struct BoostParams {
+        uint32_t                      duration = 0;
+        chip::Optional<bool>          one_shot;
+        chip::Optional<bool>          emergency;
+        chip::Optional<int16_t>       setpoint;
+        chip::Optional<chip::Percent> target_pct;
+        chip::Optional<chip::Percent> reheat;
+        bool                          valid = false;
+    } m_boost;
+
+    chip::EndpointId endpoint() const { return mEndpointId; }
+
+    /*
+     * Boost: pack the five Optionals into the design spec 3.2 wire form,
+     * "<duration>,<mask>[,<v1>[,<v2>[,<v3>]]]": MT_BOOST_P_* presence bits
+     * in canonical order, MT_BOOST_V_* carrying the two bools' values when
+     * present, then ONLY the present numeric optionals appended in canonical
+     * order (worked example: duration 3600, oneShot true, targetPercentage
+     * 80 forwards as "3600,265,80"). The Instance has already range-checked
+     * targetPercentage/targetReheat and their feature conformance before
+     * calling this (water-heater-management-server.cpp:171-221), so the
+     * packing needs no validation of its own. Accepted parameters are cached
+     * on allow only: a denied Boost never started, so there is nothing for a
+     * later BoostStarted event to describe.
+     */
+    chip::Protocols::InteractionModel::Status HandleBoost(
+        uint32_t duration, chip::Optional<bool> oneShot, chip::Optional<bool> emergencyBoost,
+        chip::Optional<int16_t> temporarySetpoint, chip::Optional<chip::Percent> targetPercentage,
+        chip::Optional<chip::Percent> targetReheat) override
+    {
+        using chip::Protocols::InteractionModel::Status;
+
+        unsigned mask = 0;
+        if (oneShot.HasValue()) {
+            mask |= MT_BOOST_P_ONESHOT;
+            if (oneShot.Value()) {
+                mask |= MT_BOOST_V_ONESHOT;
+            }
+        }
+        if (emergencyBoost.HasValue()) {
+            mask |= MT_BOOST_P_EMERGENCY;
+            if (emergencyBoost.Value()) {
+                mask |= MT_BOOST_V_EMERGENCY;
+            }
+        }
+        if (temporarySetpoint.HasValue()) {
+            mask |= MT_BOOST_P_SETPOINT;
+        }
+        if (targetPercentage.HasValue()) {
+            mask |= MT_BOOST_P_TARGET_PCT;
+        }
+        if (targetReheat.HasValue()) {
+            mask |= MT_BOOST_P_REHEAT;
+        }
+
+        char fields[48];
+        int n = snprintf(fields, sizeof(fields), "%lu,%u", (unsigned long)duration, mask);
+        if (temporarySetpoint.HasValue()) {
+            n += snprintf(fields + n, sizeof(fields) - n, ",%d", (int)temporarySetpoint.Value());
+        }
+        if (targetPercentage.HasValue()) {
+            n += snprintf(fields + n, sizeof(fields) - n, ",%u", (unsigned)targetPercentage.Value());
+        }
+        if (targetReheat.HasValue()) {
+            n += snprintf(fields + n, sizeof(fields) - n, ",%u", (unsigned)targetReheat.Value());
+        }
+        (void)n;
+
+        bool allow = mt_cmd_forward_fields(mEndpointId, chip::app::Clusters::WaterHeaterManagement::Id,
+                                            chip::app::Clusters::WaterHeaterManagement::Commands::Boost::Id,
+                                            fields);
+        if (!allow) {
+            return Status::Failure;
+        }
+        m_boost.duration   = duration;
+        m_boost.one_shot   = oneShot;
+        m_boost.emergency  = emergencyBoost;
+        m_boost.setpoint   = temporarySetpoint;
+        m_boost.target_pct = targetPercentage;
+        m_boost.reheat     = targetReheat;
+        m_boost.valid      = true;
+        return Status::Success;
+    }
+
+    /*
+     * CancelBoost: in-state guard FIRST, the opstate precedent (design spec
+     * 2.4): cancelling a boost that is not running is answered here with
+     * InvalidInState, the IM status for a command received in a state it
+     * cannot apply to, WITHOUT waking the host, since there is nothing for
+     * the host to adjudicate. The guard reads the host-pushed BoostState
+     * cache, the same value a controller reads. Otherwise forward command 1
+     * payload-less (NULL fields reproduces mt_cmd_forward()'s exact
+     * four-field +MTCMD line) and pass the verdict through raw, same as
+     * Boost above.
+     */
+    chip::Protocols::InteractionModel::Status HandleCancelBoost() override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        using chip::app::Clusters::WaterHeaterManagement::BoostStateEnum;
+
+        if (m_boost_state == BoostStateEnum::kInactive) {
+            return Status::InvalidInState;
+        }
+        bool allow = mt_cmd_forward_fields(mEndpointId, chip::app::Clusters::WaterHeaterManagement::Id,
+                                            chip::app::Clusters::WaterHeaterManagement::Commands::CancelBoost::Id,
+                                            NULL);
+        return allow ? Status::Success : Status::Failure;
+    }
+
+    /* The six getters, serving the host-pushed cache. */
+    chip::BitMask<chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap> GetHeaterTypes() override
+    {
+        return chip::BitMask<chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>(m_heater_types);
+    }
+    chip::BitMask<chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap> GetHeatDemand() override
+    {
+        return chip::BitMask<chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>(m_heat_demand);
+    }
+    uint16_t GetTankVolume() override { return m_tank_volume; }
+    chip::Energy_mWh GetEstimatedHeatRequired() override { return m_est_heat_req; }
+    chip::Percent GetTankPercentage() override { return m_tank_percent; }
+    chip::app::Clusters::WaterHeaterManagement::BoostStateEnum GetBoostState() override { return m_boost_state; }
+};
+
+/*
+ * The pool, MT_WHM_MAX slots (mt_matter.h documents the sizing), same
+ * array-plus-next-counter shape as s_meas_epm_delegates above. The one
+ * difference from the measurement handout is deliberate and documented in
+ * mt_matter.h: the endpoint id is a parameter of the alloc itself, because
+ * no SDK path ever sets it on this delegate class and task 2's thunk calls
+ * this after create() has returned the real id.
+ */
+static HearthWhmDelegate s_whm_delegates[MT_WHM_MAX];
+static size_t            s_whm_next = 0;
+
+extern "C" void *mt_matter_whm_delegate_alloc(uint16_t ep)
+{
+    if (s_whm_next >= MT_WHM_MAX) {
+        return nullptr;
+    }
+    HearthWhmDelegate *d = &s_whm_delegates[s_whm_next++];
+    d->SetEndpointId(ep);
+    return d;
 }
 
 /*
