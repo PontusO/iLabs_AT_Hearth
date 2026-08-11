@@ -10,8 +10,9 @@ Phase 1 run: python3 test/mt_regression.py --port /dev/ttyACM0
 Phase 2 run: MT_SSID=... MT_PSK=... python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 2
 Phase 3 run (host-only segment plus the full controller matrix, including
-the RVC + Microwave batch's slots 12-13 and the composed appliance
-round's slots 14-20): python3 test/mt_regression.py \
+the RVC + Microwave batch's slots 12-13, the composed appliance
+round's slots 14-20 and energy round A's slots 21-22):
+python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 3
 (-k "3." scopes to Phase 3's own steps, since -k matches a literal
 substring, not a regex, and every step name starts with its own "3.N ")
@@ -436,6 +437,25 @@ PHASE3_COMPOSITION = [
     (19, "0x0078"),        # cooktop (parent for the surface; not previously
                             # composed)
     (20, "0x0077,0,18"),   # cook surface under the cooktop (index 18 = ep 19)
+    # Energy round A (0.8.0), task 5: the two measurement-push types
+    # behind AT+MTMEAS (spec 3.25, variant scheme spec 3.9). The variant
+    # assignment is deliberately FLIPPED relative to the round's
+    # plan-time table (sensor full, meter power-only): the 1.5.1 device
+    # library marks ElectricalEnergyMeasurement MANDATORY on the meter
+    # type while the sensor's XML lists its measurement clusters as a
+    # pick-at-least-one choice, so a variant-1 meter would be a
+    # non-conformant composition; flipping keeps both variants exercised
+    # on conformant endpoints (spec 3.9's own conformance note: "the
+    # strictly conformant current-clamp declaration is the variant-1
+    # sensor"). Every check keeps its meaning with the targets swapped:
+    # the EEM-absence and energy-push +MTERR:3 checks target slot 21,
+    # the full power/energy/event/subscription checks slot 22.
+    (21, "0x0510,1"),      # electrical sensor, variant 1 power-only (the
+                            # conformant current-clamp case; EEM-absence
+                            # checks target this slot)
+    (22, "0x0514"),        # electrical meter, variant 0 power + energy
+                            # (full measurement surface; energy/event
+                            # checks target this slot)
 ]
 
 
@@ -456,6 +476,9 @@ class Phase3Context:
                                     # recover_after_abort tolerates None
         self.node_id = getattr(opts, "node_id", 0x4845)
         self.composition = list(PHASE3_COMPOSITION)
+        self.subscriber_factory = None  # test seam; None means real
+                                        # Subscriber (step_3_21's
+                                        # ActivePower subscription)
         self.transport = "WIFI"    # set from phase3_gate's detection
         self.dataset = None        # Thread active dataset hex, if any
         self.qr = None             # captured by step_3_5_commission
@@ -2661,6 +2684,264 @@ def step_3_19_cook_surface(ctx):
             rc == 0 and parse_int_attr(out) == 2500, tag="P3")
 
 
+def step_3_20_electrical_sensor(ctx):
+    """Energy round A (0.8.0), task 5: the Electrical Sensor slot
+    (PHASE3_COMPOSITION 21, endpoint 21, 0x0510 variant 1 power-only:
+    the strictly conformant current-clamp declaration, spec 3.9's own
+    conformance note, which is why the EEM-absence checks live HERE and
+    the full-surface checks on the meter at 22; see the composition
+    table's flip comment).
+
+    Server-list membership is the wire-only observability net for the
+    variant scheme: ElectricalPowerMeasurement (144) and PowerTopology
+    (156, the sensor-only NodeTopology declaration, spec 3.9) present,
+    ElectricalEnergyMeasurement (145) ABSENT, and therefore an energy
+    push on this endpoint answers +MTERR:3 (TESTING.md 6.2's MTMEAS
+    table read with this composition's variant flip: the energy push is
+    the cluster-not-carried case on the sensor). The remaining 6.2
+    endpoint-dependent MTMEAS rows land here too: unknown endpoint
+    (+MTERR:2), the light ep and the non-measurement cluster
+    (+MTERR:3), the unknown-field and Frequency-range rows (+MTERR:1,
+    the bridge's validate pass answering before anything is applied).
+    The three-pair power push is confirmed by controller read-back
+    only: every measurement value is Instance-owned, no AT+MTATTR path
+    and no +MTATTR URC ever (spec 3.25's rule, pinned here with
+    assert_no_urc). Voltage/ActiveCurrent/ActivePower read via
+    parse_int_attr's CONFIRMED `]  <Label>: <int>` shape; the pinned
+    DataModelLogger decodes each as Nullable<int64_t> and prints
+    through the integral overload's std::to_string, the same print
+    path parse_parts_list documents.
+
+    Breadcrumb rows (TESTING.md 6.2's 64-bit boundary table, the u64
+    Phase 3 rows; brief step 1's verification, resolved YES):
+    GeneralCommissioning Breadcrumb (cluster 0x30, attribute 0x00,
+    endpoint 0) IS reachable through the AT+MTATTR pipeline in the
+    pinned SDK. esp-matter's root node creates it ATTRIBUTE_FLAG_WRITABLE
+    | ATTRIBUTE_FLAG_MANAGED_INTERNALLY (esp_matter_cluster.cpp:492,
+    esp_matter_attribute.cpp create_breadcrumb, esp_matter_uint64), so
+    attribute::get_val()/set_val() route through the DataModel
+    provider's ReadAttribute/WriteAttribute (kInternal) into the pinned
+    CHIP's code-driven GeneralCommissioningCluster
+    (general-commissioning-cluster.cpp: ReadAttribute encodes
+    mBreadCrumb, WriteAttribute decodes a u64 and calls SetBreadCrumb),
+    which is exactly the path mt_matter_attr_read/_write take. Two
+    shape consequences, both asserted: the WRITE answers a plain OK
+    with NO +MTATTR echo line (managed-internally attributes bypass
+    esp-matter's attribute update callback, main.cpp's AirQuality
+    precedent, and endpoint 0 never raises +MTATTR URCs by design,
+    spec 4), so the proof is the explicit read-back; and the response
+    line prints the PARSED ids in decimal (%lu, mt_at.c), so a read
+    commanded with 0x30 answers +MTATTR:0,48,0,<val>, the same
+    normalization TESTING.md 6.1's hex-parsing row pins. The 2^32
+    write/read pair is the brief's >32-bit width proof; the UINT64_MAX
+    pair is the boundary table's own u64 row verbatim (the value a
+    signed carrier cannot represent); Breadcrumb is restored to 0 at
+    step end (its commissioning-complete reset value). The table's
+    sibling <i64 attr> row has NO reachable target in this composition
+    (the round's only i64 attributes are the Instance-owned measurement
+    values, spec 3.25); see TESTING.md's note under the boundary table,
+    and the signed full-width wire proof in step_3_21's ActivePower
+    4294967297 push."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+
+    # --- server list: the variant-1 sensor's cluster set ---
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "21"],
+                       timeout=30)
+    servers = parse_accepted_command_list(out)
+    s.check("3.20 sensor server list carries EPM (144) and "
+            "PowerTopology (156)",
+            rc == 0 and 144 in servers and 156 in servers, tag="P3")
+    s.check("3.20 sensor server list: EEM (145) ABSENT (variant 1 "
+            "power-only)", rc == 0 and 145 not in servers, tag="P3")
+
+    # --- TESTING.md 6.2 endpoint-dependent MTMEAS rows ---
+    s.check("3.20 AT+MTMEAS=99,144,0,5 -> +MTERR:2 (unknown endpoint)",
+            expect_err("AT+MTMEAS=99,144,0,5", 2)(link), tag="P3")
+    s.check("3.20 AT+MTMEAS=1,144,0,5 -> +MTERR:3 (light ep carries no "
+            "measurement cluster)",
+            expect_err("AT+MTMEAS=1,144,0,5", 3)(link), tag="P3")
+    s.check("3.20 AT+MTMEAS=21,6,0,5 -> +MTERR:3 (cluster 6/OnOff is "
+            "not a measurement cluster, even here)",
+            expect_err("AT+MTMEAS=21,6,0,5", 3)(link), tag="P3")
+    s.check("3.20 AT+MTMEAS=21,144,99,5 -> +MTERR:1 (field 99 unknown "
+            "to 0x0090: the bridge's validate pass)",
+            expect_err("AT+MTMEAS=21,144,99,5", 1)(link), tag="P3")
+    s.check("3.20 AT+MTMEAS=21,144,3,-50 -> +MTERR:1 (Frequency signed "
+            "at parse but its XML range is 0..1000000)",
+            expect_err("AT+MTMEAS=21,144,3,-50", 1)(link), tag="P3")
+    s.check("3.20 AT+MTMEAS=21,145,0,1500000 -> +MTERR:3 (variant-1 "
+            "sensor does not carry EEM: the energy push is refused)",
+            expect_err("AT+MTMEAS=21,145,0,1500000", 3)(link), tag="P3")
+
+    # --- three-pair power push, controller read-back only ---
+    res, lines = link.command("AT+MTMEAS=21,144,0,230000,1,433,2,99590")
+    s.check("3.20 three-pair power push -> OK", res == 0 and lines == [],
+            tag="P3")
+    s.check("3.20 no +MTATTR URC from the push (Instance-owned values, "
+            "spec 3.25)", link.assert_no_urc(r"\+MTATTR:21,", 1.5),
+            tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read", "voltage",
+                        node, "21"], timeout=30)
+    s.check("3.20 controller reads Voltage 230000",
+            rc == 0 and parse_int_attr(out) == 230000, tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read",
+                        "active-current", node, "21"], timeout=30)
+    s.check("3.20 controller reads ActiveCurrent 433",
+            rc == 0 and parse_int_attr(out) == 433, tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read",
+                        "active-power", node, "21"], timeout=30)
+    s.check("3.20 controller reads ActivePower 99590",
+            rc == 0 and parse_int_attr(out) == 99590, tag="P3")
+
+    # --- Breadcrumb: the u64 ember round trip (see the docstring) ---
+    res, lines = link.command("AT+MTATTR=0,0x30,0,4294967296")
+    s.check("3.20 Breadcrumb write 2^32 -> OK, no echo line "
+            "(managed-internally: the callback path is bypassed)",
+            res == 0 and lines == [], tag="P3")
+    res, lines = link.command("AT+MTATTR=0,0x30,0")
+    s.check("3.20 Breadcrumb reads back 4294967296 (not truncated to a "
+            "32-bit 0)",
+            res == 0 and lines == ["+MTATTR:0,48,0,4294967296"], tag="P3")
+    res, lines = link.command("AT+MTATTR=0,0x30,0,18446744073709551615")
+    s.check("3.20 Breadcrumb write UINT64_MAX -> OK",
+            res == 0 and lines == [], tag="P3")
+    res, lines = link.command("AT+MTATTR=0,0x30,0")
+    s.check("3.20 Breadcrumb reads back 18446744073709551615 (u64 full "
+            "width: the value a signed carrier cannot represent)",
+            res == 0
+            and lines == ["+MTATTR:0,48,0,18446744073709551615"],
+            tag="P3")
+    res, _ = link.command("AT+MTATTR=0,0x30,0,0")
+    s.check("3.20 Breadcrumb restore write 0 -> OK", res == 0, tag="P3")
+    res, lines = link.command("AT+MTATTR=0,0x30,0")
+    s.check("3.20 Breadcrumb reads back 0 after restore",
+            res == 0 and lines == ["+MTATTR:0,48,0,0"], tag="P3")
+
+
+def step_3_21_electrical_meter(ctx):
+    """Energy round A (0.8.0), task 5: the Electrical Meter slot
+    (PHASE3_COMPOSITION 22, endpoint 22, 0x0514 variant 0, power PLUS
+    energy: both measurement clusters are mandatory on the meter's own
+    device type XML, the conformance reason this slot is the variant-0
+    one; see the composition table's flip comment).
+
+    Server list: EPM (144) and EEM (145) present, PowerTopology (156)
+    ABSENT (the meter has no topology cluster at all, spec 3.9). The
+    power push includes an ActivePower of 4294967297 mW (2^32 + 1),
+    the signed-64-bit wire proof: parse-side i64, delegate store,
+    controller decode as Nullable<int64_t>, printed full width through
+    the integral overload (see step_3_20's docstring; also the stand-in
+    for the boundary table's un-automatable <i64 attr> row, TESTING.md's
+    note under that table). A subscription (the Subscriber machinery,
+    parameterized to electricalpowermeasurement/active-power) must see
+    a subsequent ActivePower push land as a change report: sequencing
+    per the Subscriber contract, no ChipTool.run() while it lives, so
+    all one-shot reads happen before start() or after stop(). The
+    subscription report shape (parse_active_power_reports) is
+    INFERENCE until the bench; derivation in that parser's docstring.
+
+    Energy: two pushes (imported only, then imported + exported in one
+    push), confirmed by a CumulativeEnergyImported read whose struct
+    carries the LAST pushed energy (parse_energy_values, INFERENCE,
+    derivation in its docstring) and by read-event
+    cumulative-energy-measured observing BOTH events (the SDK's
+    NotifyCumulativeEnergyMeasured writes attributes and emits the
+    event in one call, spec 3.25), with both pushed energies present
+    across the event structs. Event-name block shape is
+    parse_event_count's CONFIRMED `<EventName>: {` form; the event's
+    field layout (EnergyImported/EnergyExported wrapping
+    EnergyMeasurementStruct) is the INFERENCE part, carried by
+    parse_energy_values. No command traffic exists on this endpoint by
+    construction: neither measurement cluster nor PowerTopology
+    declares a single accepted command (spec 3.25/3.9), so this step
+    scripts none, and a self-test pins that."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+
+    # --- server list: full measurement surface, no topology ---
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "22"],
+                       timeout=30)
+    servers = parse_accepted_command_list(out)
+    s.check("3.21 meter server list carries EPM (144) and EEM (145)",
+            rc == 0 and 144 in servers and 145 in servers, tag="P3")
+    s.check("3.21 meter server list: PowerTopology (156) ABSENT (the "
+            "meter has no topology cluster)",
+            rc == 0 and 156 not in servers, tag="P3")
+
+    # --- power push with ActivePower above 2^32 ---
+    res, lines = link.command("AT+MTMEAS=22,144,0,230000,1,433,2,4294967297")
+    s.check("3.21 power push (ActivePower 2^32 + 1) -> OK",
+            res == 0 and lines == [], tag="P3")
+    s.check("3.21 no +MTATTR URC from the push (Instance-owned values, "
+            "spec 3.25)", link.assert_no_urc(r"\+MTATTR:22,", 1.5),
+            tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read", "voltage",
+                        node, "22"], timeout=30)
+    s.check("3.21 controller reads Voltage 230000",
+            rc == 0 and parse_int_attr(out) == 230000, tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read",
+                        "active-current", node, "22"], timeout=30)
+    s.check("3.21 controller reads ActiveCurrent 433",
+            rc == 0 and parse_int_attr(out) == 433, tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read",
+                        "active-power", node, "22"], timeout=30)
+    s.check("3.21 controller reads ActivePower 4294967297 (64-bit, not "
+            "truncated)", rc == 0 and parse_int_attr(out) == 4294967297,
+            tag="P3")
+
+    # --- subscription: an ActivePower push lands as a report ---
+    factory = ctx.subscriber_factory or (
+        lambda: Subscriber(chip, ctx.node_id, endpoint=22,
+                           cluster="electricalpowermeasurement",
+                           attribute="active-power",
+                           parser=parse_active_power_reports))
+    sub = factory()
+    started = s.check("3.21 ActivePower subscriber starts (priming "
+                      "report)", sub.start(), tag="P3")
+    try:
+        base = len(sub.reports()) if started else 0
+        res, _ = link.command("AT+MTMEAS=22,144,2,99590")
+        s.check("3.21 ActivePower push under subscription -> OK",
+                res == 0, tag="P3")
+        s.check("3.21 subscription reports the ActivePower update",
+                started and sub.wait_new_report(base, 5.0), tag="P3")
+    finally:
+        sub.stop()
+
+    # --- energy: two pushes, attribute read-backs, the event ---
+    res, lines = link.command("AT+MTMEAS=22,145,0,1500000")
+    s.check("3.21 energy push 1 (imported 1500000) -> OK",
+            res == 0 and lines == [], tag="P3")
+    rc, out = chip.run(["electricalenergymeasurement", "read",
+                        "cumulative-energy-imported", node, "22"],
+                       timeout=30)
+    s.check("3.21 CumulativeEnergyImported struct carries energy "
+            "1500000 (the 6.2 OK row's read-back, verbatim)",
+            rc == 0 and 1500000 in parse_energy_values(out), tag="P3")
+    res, lines = link.command("AT+MTMEAS=22,145,0,1600000,1,20000")
+    s.check("3.21 energy push 2 (imported 1600000, exported 20000 in "
+            "one push) -> OK", res == 0 and lines == [], tag="P3")
+    rc, out = chip.run(["electricalenergymeasurement", "read",
+                        "cumulative-energy-imported", node, "22"],
+                       timeout=30)
+    s.check("3.21 CumulativeEnergyImported struct carries energy "
+            "1600000 after push 2 (the newest push serves the read)",
+            rc == 0 and 1600000 in parse_energy_values(out), tag="P3")
+    rc, out = chip.run(["electricalenergymeasurement", "read-event",
+                        "cumulative-energy-measured", node, "22"],
+                       timeout=30)
+    s.check("3.21 both CumulativeEnergyMeasured events observed (one "
+            "per push)",
+            rc == 0
+            and parse_event_count(out, "CumulativeEnergyMeasured") >= 2,
+            tag="P3")
+    vals = parse_energy_values(out)
+    s.check("3.21 events carry the pushed energies (1500000 and "
+            "1600000)",
+            rc == 0 and 1500000 in vals and 1600000 in vals, tag="P3")
+
+
 def step_3_14_root_urc_sweep(ctx):
     """Design spec 4.3's standing-disciplines bullet ("no
     `+MTATTR:0,...` ever"), pinned by a dedicated sweep for the same
@@ -2832,6 +3113,10 @@ PHASE3_STEPS[:] = [
     {"name": "3.18 oven cavity", "fn": step_3_18_oven_cavity,
      "requires": ["3.5 commission"]},
     {"name": "3.19 cook surface", "fn": step_3_19_cook_surface,
+     "requires": ["3.5 commission"]},
+    {"name": "3.20 electrical sensor", "fn": step_3_20_electrical_sensor,
+     "requires": ["3.5 commission"]},
+    {"name": "3.21 electrical meter", "fn": step_3_21_electrical_meter,
      "requires": ["3.5 commission"]},
     {"name": "3.14 root-endpoint URC sweep", "fn": step_3_14_root_urc_sweep},
 ]
@@ -3094,6 +3379,53 @@ def parse_mode_tag_values(text):
     return [int(m) for m in re.findall(r"\bValue:\s*(\d+)", text)]
 
 
+def parse_active_power_reports(text):
+    """Every ActivePower value chip-tool prints, in order, as ints:
+    step_3_21's subscription report stream (and any one-shot read).
+
+    INFERENCE (energy round A, awaiting the bench): derived from the
+    pinned SDK's own print path the same way parse_indexed_list was.
+    The generated DataModelLogger.cpp's ElectricalPowerMeasurement
+    ActivePower case decodes DataModel::Nullable<int64_t> and prints it
+    with the label "ActivePower" through the Nullable LogValue template
+    (DataModelLogger.h), which prints the literal "null" for a null
+    value (no digits: a null report is invisible here, the same
+    invisibility parse_onoff_reports gives heartbeat reports) and
+    otherwise routes to the integral overload's std::to_string(value):
+    plain decimal, full 64-bit width, minus sign included. The regex is
+    case-sensitive and neither "ReactivePower:" nor "ApparentPower:"
+    contains the "ActivePower:" substring, so the sibling attributes
+    can never match. Deliberately NOT end-anchored: Subscriber output
+    bypasses the central ANSI strip (reports()'s F1 note), and an
+    end-anchored regex would break on a trailing SGR escape. Empty list
+    on no match, never raises."""
+    return [int(m) for m in re.findall(r"ActivePower:\s*(-?\d+)", text)]
+
+
+def parse_energy_values(text):
+    """Every EnergyMeasurementStruct `Energy:` field chip-tool prints,
+    in order, as ints. One parser serves both shapes step_3_21 reads:
+    a CumulativeEnergyImported/-Exported attribute read (the struct
+    directly) and a CumulativeEnergyMeasured event read (the struct
+    nested under the event's EnergyImported/EnergyExported fields).
+
+    INFERENCE (energy round A, awaiting the bench): derived from the
+    pinned generated DataModelLogger.cpp's EnergyMeasurementStruct
+    LogValue overload, which prints "Energy: <i64>" via the integral
+    overload (plain decimal, std::to_string), then StartTimestamp/
+    EndTimestamp/StartSystime/EndSystime and ApparentEnergy/
+    ReactiveEnergy; every one of those trailing fields is an
+    Optional<T>, and the generic Optional LogValue template emits NO
+    line for an absent value (the same silence parse_mode_tag_values
+    relies on for mfgCode), so only the fields the firmware actually
+    sets can print, and none of them is named Energy. \\bEnergy: cannot
+    match the sibling labels: "ApparentEnergy:"/"ReactiveEnergy:" have
+    a word character before the E (no \\b boundary there), and
+    "EnergyImported:"/"EnergyExported:" continue past "Energy" before
+    their colon. Empty list on no match, never raises."""
+    return [int(m) for m in re.findall(r"\bEnergy:\s*(-?\d+)", text)]
+
+
 def parse_change_to_mode_status(text):
     """The `status` field chip-tool prints for a `ModeBase`
     `ChangeToModeResponse` (`RvcRunMode`/`RvcCleanMode`'s `ChangeToMode`
@@ -3134,15 +3466,27 @@ class Subscriber:
     chip-tool's ini storage is not safe for two processes. Its stdout
     goes to a file; parsing reads the file, so report observation works
     the same whether the process is live (hardware) or the file is
-    written by a test."""
+    written by a test.
+
+    cluster/attribute/parser (energy round A, task 5) parameterize the
+    subscription target: step_3_21 subscribes to
+    electricalpowermeasurement/active-power with
+    parse_active_power_reports. The defaults keep the original OnOff
+    shape byte-identical, so Phase 2's 2.4 and every existing consumer
+    are unchanged. A parser passed here must not be end-anchored (see
+    reports()'s F1 note: this output bypasses the central ANSI
+    strip)."""
 
     def __init__(self, chip, node_id, endpoint=1, min_s=0, max_s=5,
-                 popen=None):
+                 popen=None, cluster="onoff", attribute="on-off",
+                 parser=None):
         self.chip = chip
         self.argv = [chip.binary, "interactive", "start",
                      "--storage-directory", chip.storage_dir]
-        self.subscribe_cmd = ("onoff subscribe on-off %d %d 0x%X %d"
-                              % (min_s, max_s, node_id, endpoint))
+        self.subscribe_cmd = ("%s subscribe %s %d %d 0x%X %d"
+                              % (cluster, attribute, min_s, max_s,
+                                 node_id, endpoint))
+        self.parser = parser or parse_onoff_reports
         self.out_path = os.path.join(chip.storage_dir, "subscribe.log")
         self._popen = popen or subprocess.Popen
         self._proc = None
@@ -3186,7 +3530,7 @@ class Subscriber:
         # Subscriber output must strip first.
         try:
             with open(self.out_path, "r", errors="replace") as f:
-                return parse_onoff_reports(f.read())
+                return self.parser(f.read())
         except OSError:
             return []
 
@@ -4205,6 +4549,75 @@ def register_phase1_t7_negative():
 
 
 register_phase1_t7_negative()
+
+
+def register_phase1_t8_negative():
+    """Energy round A (0.8.0), task 5: the state-safe rows TESTING.md
+    6.2 gained from the round's firmware tasks (the AT+MTMEAS table's
+    pure-form negatives, tasks 1/3; the AT+MTATTR 64-bit boundary
+    table's Phase-1 rows, task 1), transcribed from the tables, not
+    re-derived, the same order-independent split
+    register_phase1_t5/t6/t7 established.
+
+    The MTMEAS rows through the leading-minus row are rejected inside
+    cmd_mtmeas()'s own shape and parse gates before any endpoint lookup
+    runs (the signedness table needs only the <cluster> token,
+    TESTING.md's own "first eight negative rows are order-independent"
+    callout), so ep 1 stands in for "any endpoint" exactly as t6's
+    MTMODES rows use it. The three MTATTR rows are the boundary table's
+    Phase-1 column, pinned by the table ON THE SINGLE-LIGHT RIG (ep 1 =
+    OnOff light): Task 1's watch item (=1,... rows depend on ep 1
+    existing) is honoured by the same rig-precondition reading
+    register_phase1_t7's MTALARM row documents, since Phase 1's
+    contract IS the standard single-0x0100 bench state
+    (restore_standard_state's own target). All three are state-safe:
+    each is refused before any write happens (the round's deliberate
+    precedence change makes lookup errors precede bad-value, which is
+    why the signedness fetch on ep 1 must succeed first).
+
+    A sibling of t5/t6/t7, not an addition to any of them: this round's
+    rows are their own project, same reasoning as t6's docstring."""
+    n = lambda name, fn: add_test(1, name, fn, tag="AT-")
+
+    # AT+MTMEAS pure-form rows (TESTING.md 6.2, energy round A; spec
+    # 3.25). The +MTERR:2/3 lookups, the unknown-field and
+    # Frequency-range rows, and the two OK push rows all need the
+    # measurement slots (21-22): Phase 3 (step_3_20_electrical_sensor /
+    # step_3_21_electrical_meter), where TESTING.md itself sends them.
+    n("MTMEAS? -> ERROR (query form on a set-only command)",
+      expect_err("AT+MTMEAS?", -1))
+    n("MTMEAS no args -> ERROR (exec form)", expect_err("AT+MTMEAS", -1))
+    n("MTMEAS=1,144 -> +MTERR:1 (no pairs: fewer than 4 parameters)",
+      expect_err("AT+MTMEAS=1,144", 1))
+    n("MTMEAS=1,144,0 -> +MTERR:1 (odd tail: field 0 has no value)",
+      expect_err("AT+MTMEAS=1,144,0", 1))
+    n("MTMEAS=1,144,zz,5 -> +MTERR:1 (field not numeric)",
+      expect_err("AT+MTMEAS=1,144,zz,5", 1))
+    n("MTMEAS=1,144,0,zz -> +MTERR:1 (value not numeric)",
+      expect_err("AT+MTMEAS=1,144,0,zz", 1))
+    n("MTMEAS eight pairs -> +MTERR:1 (18 tokens overflow "
+      "at_split_args' 2 + 2 * MT_MEAS_MAX_PAIRS bound)",
+      expect_err("AT+MTMEAS=1,144,0,1,1,1,2,1,3,1,4,1,5,1,6,1,0,1", 1))
+    n("MTMEAS=1,145,0,-1 -> +MTERR:1 (minus on an unsigned energy "
+      "counter: rejected at parse, before any endpoint lookup)",
+      expect_err("AT+MTMEAS=1,145,0,-1", 1))
+
+    # AT+MTATTR 64-bit boundary rows (TESTING.md 6.2's boundary table,
+    # Phase-1 column; spec 3.8). The two full-width OK rows are Phase 3
+    # (step_3_20's Breadcrumb pair; the i64 row has no reachable target,
+    # see TESTING.md's note under the table).
+    n("MTATTR=1,6,0,-1 -> +MTERR:1 (minus on an unsigned attribute: "
+      "pre-round-A this wrapped through strtoul and wrote true)",
+      expect_err("AT+MTATTR=1,6,0,-1", 1))
+    n("MTATTR=1,6,0,92233720368547758080 -> +MTERR:1 (literal "
+      "overflows 64 bits: rejected at parse, ERANGE)",
+      expect_err("AT+MTATTR=1,6,0,92233720368547758080", 1))
+    n("MTATTR=1,6,0xFFFC,4294967296 -> +MTERR:1 (2^32 into the u32 "
+      "FeatureMap: the width gate, not silent truncation to 0)",
+      expect_err("AT+MTATTR=1,6,0xFFFC,4294967296", 1))
+
+
+register_phase1_t8_negative()
 
 
 PHASE2_STEPS[:] = [

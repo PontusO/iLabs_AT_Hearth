@@ -680,6 +680,36 @@ class TestSubscriber(unittest.TestCase):
         self.assertEqual(sub.subscribe_cmd,
                          "onoff subscribe on-off 0 5 0x4845 1")
 
+    def test_parameterized_target_shape(self):
+        # Energy round A, task 5: step_3_21's ActivePower subscription.
+        # The cluster/attribute verbs are the pinned binary's own
+        # (chip-tool electricalpowermeasurement subscribe lists
+        # active-power); defaults above stay byte-identical.
+        with tempfile.TemporaryDirectory() as d:
+            sub = Subscriber(self._chip(d), 0x4845, endpoint=22,
+                             cluster="electricalpowermeasurement",
+                             attribute="active-power",
+                             parser=parse_active_power_reports)
+        self.assertEqual(
+            sub.subscribe_cmd,
+            "electricalpowermeasurement subscribe active-power "
+            "0 5 0x4845 22")
+
+    def test_parameterized_parser_reads_reports(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = Subscriber(self._chip(d), 0x4845, endpoint=22,
+                             cluster="electricalpowermeasurement",
+                             attribute="active-power",
+                             parser=parse_active_power_reports)
+            with open(sub.out_path, "w") as f:
+                f.write("CHIP:TOO:   ActivePower: 4294967297\n")
+            self.assertEqual(sub.reports(), [4294967297])
+            base = 1
+            self.assertFalse(sub.wait_new_report(base, 0.3))
+            with open(sub.out_path, "a") as f:
+                f.write("CHIP:TOO:   ActivePower: 99590\n")
+            self.assertTrue(sub.wait_new_report(base, 0.5))
+
     def test_start_sends_subscribe_line(self):
         with tempfile.TemporaryDirectory() as d:
             sub = Subscriber(self._chip(d), 0x4845)
@@ -2814,6 +2844,97 @@ class TestRvcMicrowaveParsers(unittest.TestCase):
         self.assertIsNone(parse_change_to_mode_status("no such content"))
 
 
+class TestParseActivePowerReports(unittest.TestCase):
+    """Energy round A, task 5: the meter subscription's report parser
+    (INFERENCE shape, derivation in the parser docstring). Synthetic
+    text modelled on the pinned DataModelLogger print path."""
+
+    def test_values_in_order_including_beyond_32_bits(self):
+        text = ("[TOO]   ActivePower: 99590\n"
+                "[TOO]   ActivePower: 4294967297\n")
+        self.assertEqual(parse_active_power_reports(text),
+                         [99590, 4294967297])
+
+    def test_negative_value(self):
+        self.assertEqual(
+            parse_active_power_reports("[TOO]   ActivePower: -500"),
+            [-500])
+
+    def test_null_report_is_invisible(self):
+        # The Nullable template prints the literal "null": no digits,
+        # so a null report never counts, the same invisibility
+        # parse_onoff_reports gives heartbeat reports.
+        self.assertEqual(
+            parse_active_power_reports("[TOO]   ActivePower: null"), [])
+
+    def test_sibling_power_attributes_never_match(self):
+        text = ("[TOO]   ReactivePower: 7\n"
+                "[TOO]   ApparentPower: 8\n")
+        self.assertEqual(parse_active_power_reports(text), [])
+
+    def test_trailing_ansi_escape_tolerated(self):
+        # Subscriber output bypasses the central ANSI strip (F1), so
+        # the parser must not be end-anchored.
+        self.assertEqual(
+            parse_active_power_reports(
+                "[TOO]   ActivePower: 99590\x1b[0m\n"), [99590])
+
+
+class TestParseEnergyValues(unittest.TestCase):
+    """Energy round A, task 5: the EnergyMeasurementStruct parser
+    (INFERENCE shape, derivation in the parser docstring), serving both
+    the attribute read and the event's nested structs."""
+
+    ATTR_READ = "\n".join([
+        "[TOO]   CumulativeEnergyImported: {",
+        "[TOO]     Energy: 1600000",
+        "[TOO]     EndSystime: 123456",
+        "[TOO]    }",
+    ])
+    EVENT_READ = "\n".join([
+        "[TOO]   CumulativeEnergyMeasured: {",
+        "[TOO]     EnergyImported: {",
+        "[TOO]       Energy: 1500000",
+        "[TOO]       EndSystime: 100000",
+        "[TOO]      }",
+        "[TOO]    }",
+        "[TOO]   CumulativeEnergyMeasured: {",
+        "[TOO]     EnergyImported: {",
+        "[TOO]       Energy: 1600000",
+        "[TOO]       EndSystime: 123456",
+        "[TOO]      }",
+        "[TOO]     EnergyExported: {",
+        "[TOO]       Energy: 20000",
+        "[TOO]       EndSystime: 123456",
+        "[TOO]      }",
+        "[TOO]    }",
+    ])
+
+    def test_attribute_read_struct(self):
+        # EndSystime must NOT leak in: parse_int_attr's last-match rule
+        # would have returned 123456 here, which is exactly why this
+        # dedicated parser exists.
+        self.assertEqual(parse_energy_values(self.ATTR_READ), [1600000])
+
+    def test_event_read_both_events_in_order(self):
+        self.assertEqual(parse_energy_values(self.EVENT_READ),
+                         [1500000, 1600000, 20000])
+
+    def test_event_count_shape_agrees(self):
+        # The event-name block shape parse_event_count reads is the
+        # CONFIRMED half of the pair (same `<EventName>: {` form as
+        # SelfTestComplete); pin that the two parsers agree on one text.
+        self.assertEqual(
+            parse_event_count(self.EVENT_READ, "CumulativeEnergyMeasured"),
+            2)
+
+    def test_sibling_energy_labels_never_match(self):
+        text = ("[TOO]   ApparentEnergy: 7\n"
+                "[TOO]   ReactiveEnergy: 8\n"
+                "[TOO]   EnergyImported: 9\n")
+        self.assertEqual(parse_energy_values(text), [])
+
+
 from mt_regression import (
     PHASE3_COMPOSITION, Phase3Context, stage_composition,
     restore_standard_state, step_3_1_compose, step_3_2_grammar,
@@ -2823,9 +2944,11 @@ from mt_regression import (
     step_3_12_lock_switch_levels, step_3_13_restore,
     step_3_14_root_urc_sweep, step_3_15_rvc, step_3_16_microwave,
     step_3_17_composed_fridge, step_3_18_oven_cavity,
-    step_3_19_cook_surface, mtep_staging_negative,
+    step_3_19_cook_surface, step_3_20_electrical_sensor,
+    step_3_21_electrical_meter, mtep_staging_negative,
     invoke_chip, parse_indexed_list, parse_mode_tag_values,
     parse_change_to_mode_status, parse_parts_list, parse_notify_active,
+    parse_active_power_reports, parse_energy_values,
     CmdResponder,
 )
 
@@ -2870,13 +2993,14 @@ class TestPhase3Composition(unittest.TestCase):
     (RVC + Microwave batch harness task) and 14-20 (composed appliance
     round, task 6) extend the same pin."""
 
-    def test_twenty_slots_sequential(self):
-        # The composition-size gate: the composed trio grew the table to
-        # 20, within both MT_COMP_MAX_ENDPOINTS (24) and
+    def test_twenty_two_slots_sequential(self):
+        # The composition-size gate: energy round A grew the table to
+        # 22 (the composed trio had grown it to 20), still within both
+        # MT_COMP_MAX_ENDPOINTS (24) and
         # CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT (24, the setting
         # CLAUDE.md warns silently refuses endpoints past its limit).
         slots = [slot for slot, _ in PHASE3_COMPOSITION]
-        self.assertEqual(slots, list(range(1, 21)))
+        self.assertEqual(slots, list(range(1, 23)))
 
     def test_slot_ten_and_eleven_are_the_two_cabinet_variants(self):
         # Slot 11 is not in the T5 design spec's 10-row table; it exists
@@ -2931,6 +3055,21 @@ class TestPhase3Composition(unittest.TestCase):
             elif base == "0x0071" and parented:
                 consumed += 1
         self.assertEqual(consumed, 7)
+
+    def test_slot_twentyone_and_twentytwo_are_the_electrical_pair(self):
+        # Energy round A, task 5: the variant assignment is deliberately
+        # FLIPPED from the round's plan-time table (sensor full, meter
+        # power-only). The 1.5.1 device library marks EEM MANDATORY on
+        # the meter type, so a variant-1 meter would be a non-conformant
+        # composition; the sensor's XML lists its measurement clusters
+        # as a pick-at-least-one choice, so the variant-1 SENSOR is the
+        # strictly conformant current-clamp declaration (spec 3.9's own
+        # conformance note). A table edit that swapped these back would
+        # silently turn slot 22 non-conformant AND invalidate every
+        # 3.20/3.21 presence/absence assertion.
+        by_slot = dict(PHASE3_COMPOSITION)
+        self.assertEqual(by_slot[21], "0x0510,1")
+        self.assertEqual(by_slot[22], "0x0514")
 
     def test_no_accidental_duplicate_devtype(self):
         devtypes = [dt for _slot, dt in PHASE3_COMPOSITION]
@@ -3243,7 +3382,7 @@ class TestRunPhase3(unittest.TestCase):
         # recover_after_abort's own AT+MTRESET)
         self.assertIn("AT+MTFRESET", link.sent)
 
-    def test_registered_steps_are_the_full_1_through_19_chain_plus_sweep(self):
+    def test_registered_steps_are_the_full_1_through_21_chain_plus_sweep(self):
         names = [s["name"] for s in PHASE3_STEPS]
         self.assertEqual(names, [
             "3.1 compose + boot-rebuild pin",
@@ -3263,6 +3402,8 @@ class TestRunPhase3(unittest.TestCase):
             "3.17 composed refrigerator",
             "3.18 oven cavity",
             "3.19 cook surface",
+            "3.20 electrical sensor",
+            "3.21 electrical meter",
             "3.14 root-endpoint URC sweep",
         ])
 
@@ -4384,6 +4525,254 @@ class TestStep319CookSurface(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_19_cook_surface(ctx)
         self.assertGreater(ctx.suite.failed, 0)
+
+
+SERVER21_SENSOR = "\n".join([
+    "[TOO]   ServerList: 4 entries",
+    "[TOO]     [1]: 3 (Identify)",
+    "[TOO]     [2]: 29 (Descriptor)",
+    "[TOO]     [3]: 144 (ElectricalPowerMeasurement)",
+    "[TOO]     [4]: 156 (PowerTopology)",
+])
+SERVER22_METER = "\n".join([
+    "[TOO]   ServerList: 4 entries",
+    "[TOO]     [1]: 3 (Identify)",
+    "[TOO]     [2]: 29 (Descriptor)",
+    "[TOO]     [3]: 144 (ElectricalPowerMeasurement)",
+    "[TOO]     [4]: 145 (ElectricalEnergyMeasurement)",
+])
+
+
+class TestStep320ElectricalSensor(unittest.TestCase):
+    """Energy round A, task 5: the variant-1 sensor's cluster-set
+    presence/absence pair, the 6.2 endpoint-dependent MTMEAS rows, the
+    power push with controller read-back, and the Breadcrumb u64 ember
+    round trip (write echo-less, explicit read-back, UINT64_MAX, restore
+    0)."""
+
+    def _ctx(self, server21=None, breadcrumb_reads=None):
+        link = FakeLink({
+            "AT+MTMEAS=99,144,0,5": (2, []),
+            "AT+MTMEAS=1,144,0,5": (3, []),
+            "AT+MTMEAS=21,6,0,5": (3, []),
+            "AT+MTMEAS=21,144,99,5": (1, []),
+            "AT+MTMEAS=21,144,3,-50": (1, []),
+            "AT+MTMEAS=21,145,0,1500000": (3, []),
+            "AT+MTMEAS=21,144,0,230000,1,433,2,99590": (0, []),
+            "AT+MTATTR=0,0x30,0,4294967296": (0, []),
+            "AT+MTATTR=0,0x30,0,18446744073709551615": (0, []),
+            "AT+MTATTR=0,0x30,0,0": (0, []),
+            "AT+MTATTR=0,0x30,0": breadcrumb_reads if breadcrumb_reads
+            is not None else [
+                (0, ["+MTATTR:0,48,0,4294967296"]),
+                (0, ["+MTATTR:0,48,0,18446744073709551615"]),
+                (0, ["+MTATTR:0,48,0,0"]),
+            ],
+        })
+        script = [
+            (0, server21 if server21 is not None else SERVER21_SENSOR),
+            (0, "[TOO]   Voltage: 230000"),
+            (0, "[TOO]   ActiveCurrent: 433"),
+            (0, "[TOO]   ActivePower: 99590"),
+        ]
+        runner = FakeChipRunner(script)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_phase3_ctx(link, chip=chip)
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_20_electrical_sensor(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        # The no-command-traffic pin, transcript half: nothing this step
+        # sent adjudicates a forward (the clusters carry no commands).
+        self.assertFalse(
+            any("MTCMDRESP" in c for c in ctx.link.sent))
+
+    def test_eem_present_on_the_sensor_fails(self):
+        # The variant pin: a variant-0 sensor sneaking into slot 21
+        # would carry EEM and quietly absorb the energy-push +MTERR:3
+        # row's meaning; the absence check must fail loudly instead.
+        ctx = self._ctx(server21=SERVER22_METER)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_20_electrical_sensor(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_breadcrumb_truncated_readback_fails(self):
+        # The 64-bit regression shape the row exists for: a pipeline
+        # that silently truncated 2^32 to 32 bits reads back 0.
+        ctx = self._ctx(breadcrumb_reads=[
+            (0, ["+MTATTR:0,48,0,0"]),
+            (0, ["+MTATTR:0,48,0,18446744073709551615"]),
+            (0, ["+MTATTR:0,48,0,0"]),
+        ])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_20_electrical_sensor(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_breadcrumb_write_echo_line_fails(self):
+        # Managed-internally attributes bypass the update callback, so
+        # a write must answer a bare OK. An echo line appearing would
+        # mean the ember/esp-matter storage split changed under us:
+        # surface it.
+        ctx = self._ctx()
+        ctx.link.commands["AT+MTATTR=0,0x30,0,4294967296"] = (
+            0, ["+MTATTR:0,48,0,4294967296"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_20_electrical_sensor(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep321ElectricalMeter(unittest.TestCase):
+    """Energy round A, task 5: the variant-0 meter's full surface: the
+    presence pair with the no-topology absence, the beyond-32-bit
+    ActivePower push/read, the ActivePower subscription report, and the
+    two energy pushes with attribute read-back and both events."""
+
+    ENERGY_ATTR_1 = "\n".join([
+        "[TOO]   CumulativeEnergyImported: {",
+        "[TOO]     Energy: 1500000",
+        "[TOO]     EndSystime: 100000",
+        "[TOO]    }",
+    ])
+    ENERGY_ATTR_2 = "\n".join([
+        "[TOO]   CumulativeEnergyImported: {",
+        "[TOO]     Energy: 1600000",
+        "[TOO]     EndSystime: 123456",
+        "[TOO]    }",
+    ])
+    ENERGY_EVENTS = "\n".join([
+        "[TOO]   CumulativeEnergyMeasured: {",
+        "[TOO]     EnergyImported: {",
+        "[TOO]       Energy: 1500000",
+        "[TOO]       EndSystime: 100000",
+        "[TOO]      }",
+        "[TOO]    }",
+        "[TOO]   CumulativeEnergyMeasured: {",
+        "[TOO]     EnergyImported: {",
+        "[TOO]       Energy: 1600000",
+        "[TOO]       EndSystime: 123456",
+        "[TOO]      }",
+        "[TOO]     EnergyExported: {",
+        "[TOO]       Energy: 20000",
+        "[TOO]       EndSystime: 123456",
+        "[TOO]      }",
+        "[TOO]    }",
+    ])
+
+    def _ctx(self, sub=None, server22=None, active_power=None,
+             events=None):
+        link = FakeLink({
+            "AT+MTMEAS=22,144,0,230000,1,433,2,4294967297": (0, []),
+            "AT+MTMEAS=22,144,2,99590": (0, []),
+            "AT+MTMEAS=22,145,0,1500000": (0, []),
+            "AT+MTMEAS=22,145,0,1600000,1,20000": (0, []),
+        })
+        script = [
+            (0, server22 if server22 is not None else SERVER22_METER),
+            (0, "[TOO]   Voltage: 230000"),
+            (0, "[TOO]   ActiveCurrent: 433"),
+            (0, active_power if active_power is not None
+             else "[TOO]   ActivePower: 4294967297"),
+            (0, self.ENERGY_ATTR_1),
+            (0, self.ENERGY_ATTR_2),
+            (0, events if events is not None else self.ENERGY_EVENTS),
+        ]
+        runner = FakeChipRunner(script)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        sub = sub if sub is not None else FakeSubscriber(counts=[1, 2])
+        ctx.subscriber_factory = lambda: sub
+        ctx._sub = sub
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_21_electrical_meter(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertTrue(ctx._sub.stopped)
+        # The no-command-traffic pin, transcript half.
+        self.assertFalse(
+            any("MTCMDRESP" in c for c in ctx.link.sent))
+
+    def test_topology_present_on_the_meter_fails(self):
+        # The other half of the flip pin: the meter has no topology
+        # cluster at all (spec 3.9); a sensor build in slot 22 would
+        # carry 156 and must fail the absence check.
+        ctx = self._ctx(server22=SERVER21_SENSOR)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_21_electrical_meter(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_active_power_truncated_fails(self):
+        # 4294967297 truncated to 32 bits is 1: the exact regression
+        # shape the beyond-2^32 value exists to catch.
+        ctx = self._ctx(active_power="[TOO]   ActivePower: 1")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_21_electrical_meter(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_missing_change_report_fails(self):
+        # Subscription sees no new report after the push: the report
+        # check must fail (and the subscriber still be stopped).
+        ctx = self._ctx(sub=FakeSubscriber(counts=[1, 1]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_21_electrical_meter(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+        self.assertTrue(ctx._sub.stopped)
+
+    def test_subscriber_start_failure_scores_but_continues(self):
+        # Unlike step_2_4 (whose whole later chain needs the fabric),
+        # a dead subscription invalidates nothing after sub.stop():
+        # the energy half must still run and pass, with the start and
+        # report checks failed and the check COUNT unchanged (baseline
+        # comparability).
+        ctx = self._ctx(sub=FakeSubscriber(counts=[0], start_ok=False))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_21_electrical_meter(ctx)
+        self.assertEqual(ctx.suite.failed, 2)
+        self.assertTrue(ctx._sub.stopped)
+
+    def test_single_event_fails(self):
+        # NotifyCumulativeEnergyMeasured emits one event per push (spec
+        # 3.25's "one call, both effects"); a second push whose event
+        # vanished is exactly what the >= 2 pin is for.
+        one_event = "\n".join([
+            "[TOO]   CumulativeEnergyMeasured: {",
+            "[TOO]     EnergyImported: {",
+            "[TOO]       Energy: 1500000",
+            "[TOO]      }",
+            "[TOO]    }",
+        ])
+        ctx = self._ctx(events=one_event)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_21_electrical_meter(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestMeasurementStepsScriptNoCommandTraffic(unittest.TestCase):
+    """Energy round A, task 5: the two measurement clusters and
+    PowerTopology declare NO accepted commands (spec 3.25/3.9), so
+    neither step may script any command-forward traffic. The transcript
+    half of this pin lives in the two happy-path tests above (no
+    AT+MTCMDRESP ever sent); this is the source half, so a future edit
+    that reaches for the forward machinery on these endpoints trips a
+    named test instead of quietly acquiring an adjudication path the
+    device would never exercise."""
+
+    def test_step_sources_use_no_forward_machinery(self):
+        import inspect
+        for fn in (step_3_20_electrical_sensor,
+                   step_3_21_electrical_meter):
+            src = inspect.getsource(fn)
+            self.assertNotIn("CmdResponder", src)
+            self.assertNotIn("invoke_chip", src)
+            self.assertNotIn("MTCMDRESP", src)
 
 
 class TestStep313Restore(unittest.TestCase):
