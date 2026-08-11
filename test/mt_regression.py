@@ -1056,8 +1056,10 @@ def step_3_1_compose(ctx):
     pin the boot-rebuild trio CLAUDE.md's "Things that will bite you"
     warns about (endpoint composition must be built before
     esp_matter::start() for ids to be reproducible; a failed
-    endpoint::create() aborts the whole composition rather than skipping
-    an entry; CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT must cover
+    endpoint::create() stops the rebuild there, nothing after it gets
+    built, and the already-created prefix stays live for that boot
+    (B247), so no entry is skipped and endpoint ids never slide;
+    CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT must cover
     every declared slot). AT+MTFRESET clears any prior state, the spec
     3.9 staging grammar (stage_composition) declares the composition and
     AT+MTEPAPPLY persists + reboots it, and a SECOND, plain AT+MTRESET
