@@ -1173,9 +1173,10 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
      * ESP_FAIL (esp_matter_data_model.cpp's set_val_via_write_attribute()),
      * or returns ESP_ERR_NOT_SUPPORTED when it is not writable at all
      * (esp_matter_data_model.cpp:1103). Neither of those is
-     * ESP_ERR_INVALID_ARG, so an Instance-owned attribute keeps answering a
-     * bare ERROR through the default arm below, unchanged by this fix. A
-     * second SDK source of ESP_ERR_INVALID_ARG exists on the notify=true leg
+     * ESP_ERR_INVALID_ARG, so an Instance-owned attribute is unaffected by
+     * this bounds fix; the ESP_ERR_NOT_SUPPORTED case is mapped separately,
+     * below, to MT_ATTR_ERR_READONLY (+MTERR:11, DE270). A second SDK
+     * source of ESP_ERR_INVALID_ARG exists on the notify=true leg
      * only, update_or_report()'s own attribute-handle lookup
      * (esp_matter_attribute_utils.cpp:637-638); it is unreachable here
      * because attr_locate() above already resolved this exact ep/cluster/
@@ -1190,6 +1191,46 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
      * on such an attribute wrongly answer +MTERR:1. */
     if (err == ESP_ERR_INVALID_ARG) {
         return MT_ATTR_ERR_VALUE;
+    }
+    /* DE270: an Instance-served (managed-internally) attribute that is not
+     * itself writable. set_val() at esp_matter_data_model.cpp:1075-1103
+     * (line numbers as of esp-matter release/v1.5.1, this checkout's pin)
+     * has exactly two textual ESP_ERR_NOT_SUPPORTED sources reachable from
+     * a call with a live attribute handle, plus one more inside the
+     * function it can delegate to; all but one are proven unreachable here:
+     *   - :1083 `val->type != ESP_MATTER_VAL_TYPE_ARRAY`: unreachable,
+     *     because i64_to_attr_val() above already returned false (and this
+     *     function already returned) for ESP_MATTER_VAL_TYPE_ARRAY and every
+     *     other type its switch does not enumerate (its `default: return
+     *     false;`). set_val() is called only after i64_to_attr_val()
+     *     returned true, so val->type here is always one of its concrete
+     *     numeric/boolean/nullable arms, never ARRAY.
+     *   - set_val_internal()'s own guard (esp_matter_data_model.cpp:721,
+     *     `!(flags & ATTRIBUTE_FLAG_MANAGED_INTERNALLY)`): unreachable,
+     *     because set_val() only calls set_val_internal() from its own
+     *     `if (!(flags & ATTRIBUTE_FLAG_MANAGED_INTERNALLY))` branch
+     *     (:1091), using the same `flags` read moments earlier under the
+     *     same ChipStackLock. The guard inside set_val_internal() repeats a
+     *     condition its only caller already proved true; it can never fire
+     *     on this path.
+     *   - :1103 `return ESP_ERR_NOT_SUPPORTED;` (the branch's final line,
+     *     reached when `flags & ATTRIBUTE_FLAG_MANAGED_INTERNALLY` is set
+     *     and `flags & ATTRIBUTE_FLAG_WRITABLE` is not): REACHABLE, and the
+     *     only reachable source. This is the Instance-served, not-writable
+     *     case the C1 bench found (DEM 0x0098 ESAState, ModeBase
+     *     CurrentMode): attr_locate() proved the attribute exists,
+     *     i64_to_attr_val() proved the value is in range and the right
+     *     type, and the attribute is simply not ours to write.
+     * set_val_via_write_attribute() (the WRITABLE sibling branch, taken
+     * when MANAGED_INTERNALLY is set together with WRITABLE) returns only
+     * ESP_OK, ESP_FAIL or ESP_ERR_NO_MEM, never ESP_ERR_NOT_SUPPORTED; no
+     * device type this firmware creates today ships such an attribute
+     * (comment above), so that branch's own bare-ERROR collapse is not
+     * disturbed by this change. If one ever ships, the fix is to call
+     * provider::WriteAttribute from this bridge directly rather than fork
+     * the SDK (DE270). */
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        return MT_ATTR_ERR_READONLY;
     }
     return MT_ATTR_ERR_FAILED;
 }

@@ -66,6 +66,9 @@
 #define MT_ERR_UNSUPPORTED  8   /* unknown/unsupported command            */
 #define MT_ERR_NOT_READY    9   /* no composition, or stack not started   */
 #define MT_ERR_COMP_REJECT  10  /* nothing staged, or endpoint cap hit    */
+#define MT_ERR_ATTR_READONLY 11 /* attribute exists but is served by a
+                                  * cluster Instance and is not writable
+                                  * over AT (DE270)                        */
 #define MT_ERR_GENERIC      100 /* plain ERROR, no +MTERR line            */
 #define MT_R_ERROR          MT_ERR_GENERIC
 
@@ -298,6 +301,11 @@ static int attr_err_to_mterr(int r)
     /* C1b/B139 fix round 1: an out-of-range value on a valid, existing
      * integer attribute is a bad parameter, not a type/lookup failure. */
     case MT_ATTR_ERR_VALUE:     return MT_ERR_BAD_PARAM;
+    /* DE270: the attribute exists and the value is fine, but it is served
+     * by a cluster Instance and cannot be written over AT. Distinct from
+     * MT_ERR_BAD_PARAM (the value was rejected) and MT_ERR_NO_ATTRIBUTE (no
+     * such attribute). */
+    case MT_ATTR_ERR_READONLY:  return MT_ERR_ATTR_READONLY;
     default:                    return MT_R_ERROR;
     }
 }

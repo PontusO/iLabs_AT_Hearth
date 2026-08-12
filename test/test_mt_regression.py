@@ -5932,6 +5932,9 @@ class TestStep326Dem(unittest.TestCase):
             "AT+MTMEAS=27,152,0,14": (1, []),
             "AT+MTMEAS=27,152,2,9": (1, []),
             "AT+MTMEAS=27,152,5,4": (1, []),
+            "AT+MTATTR=27,152,2,1": (11, []),
+            "AT+MTATTR=27,152,2,9": (11, []),
+            "AT+MTATTR=27,152,6,1": (4, []),
             "AT+MTMEAS=27,152,0,255,3,-5000000000,4,5000000000": (0, []),
             "AT+MTDEMCAP=27,1,2,1000000000,10000000000,30,3600,500,2000,"
             "30,600": (0, []),
@@ -6026,6 +6029,39 @@ class TestStep326Dem(unittest.TestCase):
         self.assertEqual(ctx.suite.failed, 0,
                          msg=[n for n, ok, _ in ctx.suite.results if not ok])
         self.assertTrue(ctx._sub.stopped)
+
+    def test_instance_served_write_bare_error_fails(self):
+        # DE270 falsifiability: a firmware that regressed to the pre-fix
+        # bare ERROR on a write to ESAState (Instance-served) instead of
+        # +MTERR:11 must be caught, not waved through as "some kind of
+        # error happened".
+        ctx = self._ctx()
+        ctx.link.commands["AT+MTATTR=27,152,2,1"] = (-1, [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_instance_served_write_wrong_code_fails(self):
+        # A firmware that mislabelled the write as a bad VALUE
+        # (+MTERR:1, the alternative DE270 rejected: "would widen 'wrong
+        # type' to mean two unrelated things") must also be caught: the
+        # check pins the exact code, not just "some +MTERR fired".
+        ctx = self._ctx()
+        ctx.link.commands["AT+MTATTR=27,152,2,1"] = (1, [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_control_row_collapsed_to_readonly_fails(self):
+        # The CONTROL row must itself be falsifiable: if a genuinely
+        # absent attribute (Forecast, id 6) wrongly answered +MTERR:11
+        # instead of +MTERR:4, the two codes would no longer be
+        # distinguishable and the check must fail.
+        ctx = self._ctx()
+        ctx.link.commands["AT+MTATTR=27,152,6,1"] = (11, [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
 
     def test_guard_answering_success_fails(self):
         # The guard is the CHIP SERVER's, and its status is specific: a

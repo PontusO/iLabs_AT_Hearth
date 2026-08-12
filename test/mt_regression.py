@@ -3797,6 +3797,15 @@ def step_3_26_dem(ctx):
     assert_no_urc on the push, and by the value surfacing only in
     PowerAdjustEnd's EnergyUse field.
 
+    DE270: a direct AT+MTATTR write to ESAState (attribute 2, Instance-
+    served) answers +MTERR:11, not a bare ERROR, for BOTH an in-range
+    value (1/Online) and one AT+MTMEAS's own validate pass would reject
+    (9, outside ESAStateEnum) -- the code is about writability, not the
+    value. A control row against Forecast (attribute 6, genuinely absent
+    from this thunk, the PFR/SFR gap above) still answers +MTERR:4, so
+    the two codes are distinguishable: 11 means "exists but not
+    writable", 4 means "no such attribute".
+
     Server-side in-state guard, run FIRST while ESAState is still Online
     from boot: CancelPowerAdjustRequest answers InvalidInState (0xCB)
     FROM THE CHIP SERVER (device-energy-management-server.cpp checks
@@ -3943,6 +3952,24 @@ def step_3_26_dem(ctx):
     s.check("3.26 AT+MTMEAS=27,152,5,4 -> +MTERR:1 (4 is outside "
             "OptOutStateEnum 0..3)",
             expect_err("AT+MTMEAS=27,152,5,4", 1)(link), tag="P3")
+
+    # --- DE270: AT+MTATTR write to an Instance-served attribute answers
+    # +MTERR:11, not a bare ERROR, and the code is not about the value ---
+    s.check("3.26 AT+MTATTR=27,152,2,1 -> +MTERR:11 (ESAState is "
+            "Instance-served: exists and 1/Online is a legal "
+            "ESAStateEnum value, but this path cannot write it, DE270)",
+            expect_err("AT+MTATTR=27,152,2,1", 11)(link), tag="P3")
+    s.check("3.26 AT+MTATTR=27,152,2,9 -> +MTERR:11 too (the generic "
+            "AT+MTATTR path never reaches enum validation for a "
+            "managed-internally attribute, unlike AT+MTMEAS's own "
+            "validate pass above, which answers +MTERR:1 for this exact "
+            "value: DE270's failure is not about the value at all)",
+            expect_err("AT+MTATTR=27,152,2,9", 11)(link), tag="P3")
+    s.check("3.26 CONTROL: AT+MTATTR=27,152,6,1 -> +MTERR:4 (Forecast, "
+            "id 6, is genuinely absent from this thunk's AttributeList, "
+            "the PFR/SFR gap pinned above; distinguishes +MTERR:11's "
+            "\"exists but not writable\" from a lookup failure)",
+            expect_err("AT+MTATTR=27,152,6,1", 4)(link), tag="P3")
 
     # --- identity pushes, including kOther and the +-5 GmW envelope ---
     res, lines = link.command(

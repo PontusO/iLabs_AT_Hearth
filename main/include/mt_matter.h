@@ -108,6 +108,16 @@ typedef enum {
      * here rather than overloading MT_ATTR_ERR_TYPE, which would have
      * mapped an out-of-range value to the wrong +MTERR class. */
     MT_ATTR_ERR_VALUE,
+    /* DE270/B264 follow-up: the attribute exists, IS integer-valued, and the
+     * value offered is in range, but the attribute is served by a cluster
+     * Instance (ATTRIBUTE_FLAG_MANAGED_INTERNALLY without
+     * ATTRIBUTE_FLAG_WRITABLE, esp_matter_data_model.cpp) and so cannot be
+     * written over AT at all. Distinct from both MT_ATTR_ERR_VALUE (the
+     * value itself was rejected) and MT_ATTR_ERR_ATTRIBUTE (no such
+     * attribute exists here): this attribute exists and the value would be
+     * fine, but this path cannot write it. Mapped to MT_ERR_ATTR_READONLY
+     * (+MTERR:11) in mt_at.c. */
+    MT_ATTR_ERR_READONLY,
 } mt_attr_result_t;
 
 /*
