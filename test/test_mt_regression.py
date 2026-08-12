@@ -5687,11 +5687,17 @@ class TestStep325BatteryStorage(unittest.TestCase):
         self.assertGreater(ctx.suite.failed, 0)
 
     def test_bat_capacity_regressed_to_old_cap_fails(self):
-        # B263 pin's failure shape: a mt_devtypes.cpp regression back to
-        # the SDK example's 0x00..0xFFFF bound would clamp the ember
-        # attribute at 65535, so a firmware that reintroduced the cap
-        # reads back 65535 here instead of 13500000, and the check must
-        # catch it rather than pass on the earlier 5000-scale row alone.
+        # B263 pin's failure shape. The real pre-fix path REJECTS the
+        # write rather than clamping it: with the SDK example's
+        # 0x00..0xFFFF bound restored, ember refuses 13500000 outright
+        # and the AT write answers a bare ERROR (B264: no +MTERR code
+        # on an ember min/max refusal), so BatCapacity keeps whatever
+        # the earlier 5000-scale row left and the controller reads that
+        # back, not 13500000. Hardware-confirmed both ways, round C1
+        # tasks 7 and 8. The 65535 fixture below stands in for "any
+        # stale value that is not 13500000", which is the whole class
+        # this check has to catch; the earlier 5000-scale row alone
+        # cannot tell a correct bound from a too-narrow one.
         ctx = self._ctx(wide_capacity="[TOO]   BatCapacity: 65535")
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_25_battery_storage(ctx)

@@ -4342,7 +4342,7 @@ public:
      * PowerAdjustReasonEnum at source) and reports the attribute dirty,
      * asserted by TC_DEM_2_2 steps 13a/14b (lines 288-289/302-305) and
      * mirrored from the reference impl
-     * (DeviceEnergyManagementDelegateImpl.cpp:125-138, setter at 928-938).
+     * (DeviceEnergyManagementDelegateImpl.cpp:125-138, setter at 929-939).
      * Every PowerAdjustEnd restores the host-pushed baseline cause; see
      * EmitPowerAdjustEnd() below.
      */
@@ -4595,7 +4595,7 @@ private:
     /* F2's live-cause write: stamp the owned capability struct's cause and
      * report PowerAdjustmentCapability dirty, the reference impl's
      * SetPowerAdjustmentCapabilityPowerAdjustReason shape
-     * (DeviceEnergyManagementDelegateImpl.cpp:928-938). A null capability
+     * (DeviceEnergyManagementDelegateImpl.cpp:929-939). A null capability
      * (AT+MTDEMCAP never sent) has no cause to stamp; that state cannot
      * carry a running adjustment anyway, since the server refuses
      * PowerAdjustRequest on a null capability (class comment above), so

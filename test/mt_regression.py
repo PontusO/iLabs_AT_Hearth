@@ -3507,11 +3507,13 @@ def step_3_25_battery_storage(ctx):
     B263 pin against mt_devtypes.cpp regressing back to the SDK's
     example-derived cap instead of the cluster XML's real uint32 range.
 
-    DEM triple: this endpoint takes the SECOND HearthDemDelegate pool
-    slot (2 of MT_DEM_MAX 4), so a capability install here plus a
-    controller read-back is the proof the pool serves more than its
-    first endpoint; the full PowerAdjust protocol lives on the
-    standalone ESA at slot 27 (step_3_26) rather than being run twice.
+    DEM triple: this endpoint is the composition's FIRST DEM-bearing
+    one, so it takes the FIRST HearthDemDelegate pool slot (1 of
+    MT_DEM_MAX 4) and a capability install here plus a controller
+    read-back proves the pool serves at all. The proof that it serves
+    more than its first endpoint belongs to the standalone ESA at slot
+    27 (step_3_26), which takes the second slot and where the full
+    PowerAdjust protocol lives rather than being run twice.
     DeviceEnergyManagementMode (159/0x9F) is staged over the
     cluster-aware AT+MTMODES with one tag-0 default, which must resolve
     to kNoOptimization (0x4000, main.cpp's pinned default for this
@@ -3591,12 +3593,14 @@ def step_3_25_battery_storage(ctx):
 
     # --- B263 pin: BatCapacity at a realistic home-battery scale ---
     # mt_devtypes.cpp used to mirror the SDK example's 0x00..0xFFFF bound
-    # (esp_matter_endpoint.cpp:1958), which cannot hold a real capacity:
-    # 13.5 kWh is 13,500,000 in either mWh or mAh. PowerSourceCluster.xml
-    # types BatCapacity uint32 with no <constraint>, so the fix widens the
+    # (esp_matter_endpoint.cpp:1958), which cannot hold a home-scale pack
+    # nameplate under any plausible unit: 13.5 kWh is 13,500,000 mWh, or
+    # about 281,250 mAh at 48 V, and 65535 reaches neither.
+    # PowerSourceCluster.xml types BatCapacity uint32 with no
+    # <constraint> (and carries no unit at all), so the fix widens the
     # bound to the full uint32 domain; this row writes past the old cap
     # and reads the same value back, which is exactly the write the B263
-    # bug report could not make.
+    # bug report could not make. 13500000 is the value, not a unit claim.
     res, lines = link.command("AT+MTATTR=26,47,24,13500000")
     s.check("3.25 BatCapacity write past the old 0xFFFF cap (13.5 kWh, "
             "13500000) -> OK, echo line (B263)",
@@ -3619,7 +3623,7 @@ def step_3_25_battery_storage(ctx):
     s.check("3.25 controller reads ActivePower -2200000",
             rc == 0 and parse_int_attr(out) == -2200000, tag="P3")
 
-    # --- DEM: the second pool slot serves this endpoint ---
+    # --- DEM: the first pool slot serves this endpoint ---
     res, lines = link.command("AT+MTMEAS=26,152,0,5,1,1")
     s.check("3.25 ESA identity push (ESAType BatteryStorage 5, "
             "ESACanGenerate true) -> OK", res == 0 and lines == [],
@@ -3736,6 +3740,14 @@ def step_3_26_dem(ctx):
     ESAState before calling the delegate), so unlike round B's
     CancelBoost the firmware has nothing to guard and NO +MTCMD is ever
     raised. Both halves are asserted.
+
+    Pool position: this endpoint takes the SECOND HearthDemDelegate slot
+    (2 of MT_DEM_MAX 4), the battery at slot 26 having taken the first,
+    so the AT+MTDEMCAP round trip below is also the proof the pool
+    serves more than its first endpoint. Nothing here reads the slot
+    index directly; the evidence is that step 3.25's install reads back
+    on endpoint 26 and this step's install reads back on endpoint 27, so
+    two slots are demonstrably routed to two endpoints.
 
     The PowerAdjust chain, in order:
       - AT+MTDEMCAP installs two entries, cause 1
@@ -6170,9 +6182,10 @@ def t_staged_variant1_energy_c1(link):
 
 def register_phase1_t10_negative():
     """Energy round C1 (0.10.0), task 4: the state-safe rows TESTING.md
-    6.2/6.4 gained from the round's firmware tasks (the AT+MTMEAS 0x0098
-    family, task 2; the whole AT+MTDEMCAP grammar, task 2), transcribed
-    from the tables, not re-derived, the same order-independent split
+    6.2 gained from the round's firmware tasks (the AT+MTMEAS 0x0098
+    family and the whole AT+MTDEMCAP grammar, both task 2; both tables
+    live in 6.2, there is no 6.4), transcribed from the tables, not
+    re-derived, the same order-independent split
     register_phase1_t5/t6/t7/t8/t9 established.
 
     Why every row below is safe on the single-light bench:
@@ -6222,7 +6235,7 @@ def register_phase1_t10_negative():
       "signedness table's positive control)",
       expect_err("AT+MTMEAS=1,152,3,-5000000000", 3))
 
-    # AT+MTDEMCAP grammar rows (TESTING.md 6.4, energy round C1; spec
+    # AT+MTDEMCAP grammar rows (TESTING.md 6.2, energy round C1; spec
     # 3.26). The +MTERR:2/3/4 lookups, the cause-range and interval-order
     # rows and the OK pushes all need a real DEM endpoint: Phase 3
     # (step_3_26_dem) and the staged variant-1 row below.
