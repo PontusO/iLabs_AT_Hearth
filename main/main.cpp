@@ -1135,20 +1135,27 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
     }
     /* Same-value fix: ESP_ERR_NOT_FINISHED is set_val_internal()'s ONLY
      * return for it (esp_matter_data_model.cpp:741-742, val_compare()
-     * against the attribute's own current value); nothing else in the SDK
-     * generates it on a path reachable from here (the two other call sites
-     * that check for it, esp_matter_data_model_provider.cpp and
-     * esp_matter_ember_stubs.cpp, are the controller-side WriteAttribute /
-     * ember IM paths, not this bridge's set_val()/update() calls). The
-     * attribute already holds exactly the value the host asked for, so by
-     * any definition that matters to a host this write succeeded: answer
-     * MT_ATTR_OK rather than falling through to the default bare ERROR.
-     * This is also why notify=true never showed the bug: update_or_report()
-     * (esp_matter_attribute_utils.cpp:649) already absorbs the identical
-     * ESP_ERR_NOT_FINISHED into ESP_OK before returning, on the theory that
-     * there is nothing to report; notify=false calls set_val() directly
-     * with no such absorption, so the two modes disagreed on the exact same
-     * no-op until now. */
+     * against the attribute's own current value). It IS reachable from a
+     * second place on this call's own path, esp_matter_data_model_provider.
+     * cpp's WriteAttribute() (for a MANAGED_INTERNALLY+WRITABLE attribute,
+     * via set_val()'s branch at esp_matter_data_model.cpp:1097-1098 into
+     * set_val_via_write_attribute()), but that place is harmless: it treats
+     * ESP_ERR_NOT_FINISHED as Status::Success internally
+     * (esp_matter_data_model_provider.cpp:419-429) rather than propagating
+     * the raw code, so set_val_via_write_attribute() only ever returns
+     * ESP_OK or ESP_FAIL to its caller, never ESP_ERR_NOT_FINISHED itself.
+     * esp_matter_ember_stubs.cpp's equivalent (the ember IM write path CHIP
+     * itself uses for a controller-driven write) is a genuinely separate
+     * code path, not reachable from this bridge's set_val()/update() calls
+     * at all. Either way, the attribute already holds exactly the value the
+     * host asked for, so by any definition that matters to a host this
+     * write succeeded: answer MT_ATTR_OK rather than falling through to the
+     * default bare ERROR. This is also why notify=true never showed the
+     * bug: update_or_report() (esp_matter_attribute_utils.cpp:649) already
+     * absorbs the identical ESP_ERR_NOT_FINISHED into ESP_OK before
+     * returning, on the theory that there is nothing to report; notify=false
+     * calls set_val() directly with no such absorption, so the two modes
+     * disagreed on the exact same no-op until now. */
     if (err == ESP_ERR_NOT_FINISHED) {
         return MT_ATTR_OK;
     }
@@ -1167,7 +1174,20 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
      * or returns ESP_ERR_NOT_SUPPORTED when it is not writable at all
      * (esp_matter_data_model.cpp:1103). Neither of those is
      * ESP_ERR_INVALID_ARG, so an Instance-owned attribute keeps answering a
-     * bare ERROR through the default arm below, unchanged by this fix. */
+     * bare ERROR through the default arm below, unchanged by this fix. A
+     * second SDK source of ESP_ERR_INVALID_ARG exists on the notify=true leg
+     * only, update_or_report()'s own attribute-handle lookup
+     * (esp_matter_attribute_utils.cpp:637-638); it is unreachable here
+     * because attr_locate() above already resolved this exact ep/cluster/
+     * attr triple under the same ChipStackLock, so the identical lookup
+     * inside update_or_report() cannot fail. Also note:
+     * compare_attr_val_with_bounds()'s default arm (an attribute value type
+     * the bounds comparison does not special-case) also returns a nonzero
+     * comparison, i.e. ESP_ERR_INVALID_ARG here, for ESP_MATTER_VAL_TYPE_
+     * INTEGER/NULLABLE_INTEGER/NULLABLE_BOOLEAN specifically; this firmware
+     * never creates a MIN_MAX-bounded attribute of any of those types
+     * today, but a future device type that did would see an in-range value
+     * on such an attribute wrongly answer +MTERR:1. */
     if (err == ESP_ERR_INVALID_ARG) {
         return MT_ATTR_ERR_VALUE;
     }

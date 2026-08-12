@@ -703,12 +703,27 @@ def step_2_4_host_to_controller(ctx):
         s.check("2.4 mode 0 produces no report",
                 sub.no_new_report(base, 5.0), tag="P2")
 
+        # "No report" (above) is the fabric side only. POST_UPDATE, the
+        # +MTATTR URC's source, runs on any ACTUAL value change regardless
+        # of mode (both notify=true and notify=false call set_val_internal()
+        # with call_callbacks=true), so the 1->0 write just made really does
+        # raise +MTATTR:1,6,0,0 on the AT link. Assert and drain it here, by
+        # its exact text per the suite's own convention (TESTING.md 6.3):
+        # otherwise it would sit in the URC queue and the same-value check
+        # below could pass by matching this leftover instead of correctly
+        # finding nothing.
+        got = link.await_urc(r"\+MTATTR:1,6,0", 3.0)
+        s.check("2.4 mode 0 write still raises a +MTATTR URC on an actual "
+                "value change", got == "+MTATTR:1,6,0,0", tag="P2")
+
         # A same-value re-push (the value already equals what mode 0 just
         # set) used to fall through esp_matter's ESP_ERR_NOT_FINISHED to a
         # bare ERROR here: the attribute already held exactly the value
         # asked for, so the write succeeded by any definition that matters
         # to a host, and now answers OK. No POST_UPDATE callback runs for
-        # an unchanged value in either mode, so no +MTATTR URC either.
+        # an unchanged value in either mode (set_val_internal() returns
+        # before reaching it), so no +MTATTR URC either, in contrast with
+        # the real value-change write just drained above.
         res, _ = link.command("AT+MTATTR=1,6,0,0,0")
         s.check("2.4 same-value mode-0 re-push -> OK, not a bare ERROR",
                 res == 0, tag="P2")

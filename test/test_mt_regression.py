@@ -1787,6 +1787,21 @@ class FakeSubscriber:
         self.stopped = True
 
 
+class RewriteLeakLink(FakeLink):
+    """FakeLink that raises +MTATTR:1,6,0,0 every time AT+MTATTR=1,6,0,0,0
+    succeeds, not only the first (mirrors ApplyLink's one-shot-vs-every-time
+    contrast below): pins the regression where a same-value mode-0 re-push
+    wrongly still ran the POST_UPDATE callback (the +MTATTR URC's source)
+    the way a real 1->0 change legitimately does, so the second
+    (same-value) send leaks a URC the step's own check must catch."""
+
+    def command(self, cmd, expect=None, timeout=None):
+        v = super().command(cmd, expect, timeout)
+        if cmd == "AT+MTATTR=1,6,0,0,0" and v[0] == 0:
+            self.push_urcs(["+MTATTR:1,6,0,0"])
+        return v
+
+
 class TestStep24(unittest.TestCase):
     def _ctx(self, runner, sub, same_value_rewrite=None):
         # AT+MTATTR=1,6,0,0,0 is sent TWICE by the step: once to establish
@@ -1804,6 +1819,13 @@ class TestStep24(unittest.TestCase):
             "AT+MTATTR=1,6,0,1,1": (0, []),
             "AT+MTATTR=1,6,0,0,0": rewrite_calls,
             "AT+MTATTR=1,6,0": (0, ["+MTATTR:1,6,0,0"]),
+        }, urcs_on_command={
+            # The step's first AT+MTATTR=1,6,0,0,0 is a real 1->0 change:
+            # POST_UPDATE (the +MTATTR URC's source) runs regardless of
+            # mode, so this fires once. urcs_on_command's one-shot release
+            # means the second (same-value) send of the identical string
+            # gets none, matching the happy path this class pins.
+            "AT+MTATTR=1,6,0,0,0": ["+MTATTR:1,6,0,0"],
         })
         d = tempfile.mkdtemp()
         chip = ChipTool("/bin/chip-tool", d, runner=runner)
@@ -1866,6 +1888,39 @@ class TestStep24(unittest.TestCase):
         ])
         sub = FakeSubscriber(counts=[1, 2, 2])
         ctx = self._ctx(runner, sub, same_value_rewrite=(-1, []))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_4_host_to_controller(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+        self.assertTrue(sub.stopped)
+
+    def test_same_value_mode0_rewrite_urc_leak_fails(self):
+        # The fix's other failure-shape pin (the write result and the URC
+        # are two independent regressions, and the suite asserts both
+        # independently, TESTING.md 6.3's convention). RewriteLeakLink
+        # leaks a +MTATTR URC on every successful AT+MTATTR=1,6,0,0,0, not
+        # only the legitimate first one, so the step's own "raises no
+        # +MTATTR URC" check on the same-value re-push must catch the
+        # leak. Without RewriteLeakLink this check is unpinned: the
+        # default _ctx() link only ever queues the one legitimate URC, so
+        # assert_no_urc on the re-push could only ever find nothing and
+        # pass, regression or not.
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_onoff_read_true.txt")),
+            (0, fixture("chiptool_onoff_read_false.txt")),
+            (0, fixture("chiptool_onoff_read_false.txt")),
+        ])
+        sub = FakeSubscriber(counts=[1, 2, 2])
+        link = RewriteLeakLink({
+            "AT+MTATTR=1,6,0,1": (0, []),
+            "AT+MTATTR=1,6,0,0": (0, []),
+            "AT+MTATTR=1,6,0,1,1": (0, []),
+            "AT+MTATTR=1,6,0,0,0": (0, []),
+            "AT+MTATTR=1,6,0": (0, ["+MTATTR:1,6,0,0"]),
+        })
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_ctx(link, chip=chip)
+        ctx.subscriber_factory = lambda: sub
         with contextlib.redirect_stdout(io.StringIO()):
             step_2_4_host_to_controller(ctx)
         self.assertGreater(ctx.suite.failed, 0)
