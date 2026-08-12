@@ -316,6 +316,7 @@ class Suite:
     def __init__(self):
         self.results = []
         self.skipped = []
+        self.na = []
         self.gated = []
 
     def check(self, name, ok, tag="AT+"):
@@ -325,17 +326,36 @@ class Suite:
         return ok
 
     def skip(self, name, reason):
-        """A step not run, either because an earlier step broke its
-        preconditions (run_phase2's own generic use, "requires step that
-        did not run") or because the step itself determined it does not
-        apply to the current run at all (a step calling this on itself,
-        e.g. step_2_13_thread_role_event on a WiFi transport: there is no
-        Thread role to observe, not a broken precondition). Counted
-        separately from failures, and never silently: a truncated OR an
-        inapplicable run must not read as a clean one (design spec
-        section 3)."""
+        """A step not run because an earlier step broke its preconditions
+        (run_phase2's generic "requires step that did not run" use).
+        Counted separately from failures, but a truncated run must not
+        read as a clean one (design spec section 3), so this DOES tip
+        exit_code() nonzero. For a step that is not a precondition
+        failure but architecturally does not apply to this run at all
+        (a capability the current transport lacks), use not_applicable()
+        instead: bench defect C found that conflating the two made every
+        clean WiFi Phase 2 run exit 1 with zero failures, because
+        step_2_13's WiFi self-skip landed here and this bucket fails the
+        run on purpose."""
         self.skipped.append((name, reason))
         print("  [SKIP] %s: %s" % (name, reason))
+
+    def not_applicable(self, name, reason):
+        """A step whose architecture does not apply to this run at all,
+        decided by the step itself rather than inherited from a broken
+        precondition: step_2_13_thread_reboot_reattach on a WiFi
+        transport is the motivating case, since a WiFi image has no
+        Thread mesh to reattach to and the row is unreachable, not
+        broken. Recorded and printed so it is never silently absent from
+        a report (the same never-silent rule skip() follows), but
+        exit_code() does NOT tip on it: a fact about the run's
+        environment must not read as a failure the way a truncated chain
+        does. Bench defect C's controller ruling: keep both buckets
+        visible in the printed summary and the baseline, distinguished by
+        name and by status string ("SKIP" vs "N/A"), and change only what
+        the EXIT CODE means, never what gets recorded."""
+        self.na.append((name, reason))
+        print("  [SKIP] %s (not applicable: %s)" % (name, reason))
 
     def gate_skip(self, name, flag):
         """A step deliberately gated out (--include-slow, --include-manual,
@@ -360,6 +380,8 @@ class Suite:
         parts = ["%d passed" % passed, "%d failed" % self.failed]
         if self.skipped:
             parts.append("%d skipped" % len(self.skipped))
+        if self.na:
+            parts.append("%d n/a" % len(self.na))
         if self.gated:
             parts.append("%d gated" % len(self.gated))
         print("===== RESULT: %s =====" % ", ".join(parts))
@@ -636,38 +658,93 @@ def step_2_3_commission(ctx):
     """TESTING.md 2.3 plus the DE24 window-event contract: the AT-side
     and controller-side views must agree, and exactly one +MTEVT:4 must
     follow +MTEVT:3 (order proven by timestamps, because a queue scan
-    alone would let the old pre-8711123 leak pass)."""
+    alone would let the old pre-8711123 leak pass).
+
+    0.11.0 task 3, bench defect C: on a Thread run this is ALSO where the
+    role-change event gets observed, moved here from a dedicated
+    post-reboot row (step_2_13_thread_reboot_reattach used to try it)
+    because the reboot path turns out to have no observable window at
+    all: the event mask is RAM-only (AT_MT_SPEC.md 3.11) and resets to
+    the default on every boot, and even setting it right after +MTREADY
+    is too late, since the Thread stack reattaches during
+    esp_matter::start(), before mt_at_start() brings the AT link up.
+    Measured on the rig: mask set 0.05 s after +MTREADY, first
+    AT+MTTHREAD? at 0.09 s already read REED, attached=1. There is no
+    reboot between here and the device's last boot, so a mask set right
+    here, before chip-tool's pairing call begins, HOLDS for the whole
+    join. Bench evidence the window really exists here: +MTEVT:28
+    observed carrying UNASSIGNED then REED as the device joined.
+
+    Bit 28 is now double-gated (a real CHIP RoleChanged transition AND a
+    token different from the last one emitted, design spec 2.2 as
+    amended by the bench-A/B fix), so this asserts at least one +MTEVT:28
+    arrives, never an exact count: the bench's own three-events-in-10ms
+    case (UNASSIGNED, REED, REED) collapses to two distinct-token events
+    under the current firmware, and a host-visible count that drops
+    further under different join timing must not read as a regression.
+    +MTEVT:25 is NOT gated on a token change and is asserted to still
+    fire, unchanged.
+
+    The mask enable/observe/restore all live inside `if thread_mask:`,
+    so a WiFi run's code path is untouched (no new check even appears in
+    that report; TESTING.md documents this as the established
+    per-transport-content pattern, not a new mechanism); the restore
+    runs in a `finally` block so it happens even if pairing itself
+    fails and this step raises StepAbort."""
     link, s, chip = ctx.link, ctx.suite, ctx.chip
-    rc, out = chip.run(["payload", "parse-setup-payload", ctx.qr],
-                       timeout=15)
-    parsed = parse_setup_payload(out) if rc == 0 else None
-    if not s.check("2.3 QR payload parses", parsed is not None, tag="P2"):
-        raise StepAbort("onboarding QR not machine-usable")
-    passcode, discriminator = parsed
-    ctx.passcode, ctx.discriminator = passcode, discriminator
-    rc, out = chip.run(pairing_argv(ctx), timeout=120)
-    paired = s.check("2.3 chip-tool pairing exits 0", rc == 0, tag="P2")
-    if not paired:
-        print("    (chip-tool tail: %s)"
-              % _pairing_tail(out, getattr(ctx.opts, "psk", None)))
-    s.check("2.3 +MTEVT:1 session started",
-            link.await_urc(r"\+MTEVT:1$", timeout=90.0) is not None,
-            tag="P2")
-    got3 = link.await_urc_ts(r"\+MTEVT:3$", timeout=90.0)
-    s.check("2.3 +MTEVT:3 commissioning complete", got3 is not None,
-            tag="P2")
-    got4 = link.await_urc_ts(r"\+MTEVT:4$", timeout=15.0)
-    s.check("2.3 exactly one +MTEVT:4, after complete",
-            got3 is not None and got4 is not None and got4[0] > got3[0]
-            and link.assert_no_urc(r"\+MTEVT:4$", 10.0), tag="P2")
-    if not (paired and got3 is not None):
-        raise StepAbort("commissioning failed")
-    res, lines = link.command("AT+MTFABRICS?")
-    s.check("2.3 fabrics 1", res == 0 and lines == ["+MTFABRICS:1"],
-            tag="P2")
-    res, lines = link.command("AT+MTSTATE?")
-    s.check("2.3 state 2 (operational)",
-            res == 0 and lines == ["+MTSTATE:2,1"], tag="P2")
+    thread_mask = ctx.transport == "THREAD"
+    mask = "0x%08X" % (0x0800003F | (1 << 25) | (1 << 28))  # 0x1A00003F
+    try:
+        if thread_mask:
+            res, _ = link.command("AT+MTEVT=%s" % mask)
+            s.check("2.3 MTEVT mask enable bits 25+28 -> OK (Thread role "
+                    "observation window)", res == 0, tag="P2")
+        rc, out = chip.run(["payload", "parse-setup-payload", ctx.qr],
+                           timeout=15)
+        parsed = parse_setup_payload(out) if rc == 0 else None
+        if not s.check("2.3 QR payload parses", parsed is not None, tag="P2"):
+            raise StepAbort("onboarding QR not machine-usable")
+        passcode, discriminator = parsed
+        ctx.passcode, ctx.discriminator = passcode, discriminator
+        rc, out = chip.run(pairing_argv(ctx), timeout=120)
+        paired = s.check("2.3 chip-tool pairing exits 0", rc == 0, tag="P2")
+        if not paired:
+            print("    (chip-tool tail: %s)"
+                  % _pairing_tail(out, getattr(ctx.opts, "psk", None)))
+        s.check("2.3 +MTEVT:1 session started",
+                link.await_urc(r"\+MTEVT:1$", timeout=90.0) is not None,
+                tag="P2")
+        got3 = link.await_urc_ts(r"\+MTEVT:3$", timeout=90.0)
+        s.check("2.3 +MTEVT:3 commissioning complete", got3 is not None,
+                tag="P2")
+        got4 = link.await_urc_ts(r"\+MTEVT:4$", timeout=15.0)
+        s.check("2.3 exactly one +MTEVT:4, after complete",
+                got3 is not None and got4 is not None and got4[0] > got3[0]
+                and link.assert_no_urc(r"\+MTEVT:4$", 10.0), tag="P2")
+        if not (paired and got3 is not None):
+            raise StepAbort("commissioning failed")
+        if thread_mask:
+            got28 = link.await_urc(r"\+MTEVT:28,", timeout=5.0)
+            role_ok = False
+            if got28 is not None:
+                m = re.fullmatch(r"\+MTEVT:28,(.+)", got28)
+                role_ok = (m is not None and
+                          MT_THREAD_ROLE_TOKEN_RE.fullmatch(m.group(1))
+                          is not None)
+            s.check("2.3 MTEVT:28 arrives with a legal role token during "
+                    "the join", role_ok, tag="P2")
+            evt25 = link.await_urc(r"\+MTEVT:25$", timeout=5.0)
+            s.check("2.3 MTEVT:25 fires during the join",
+                    evt25 is not None, tag="P2")
+        res, lines = link.command("AT+MTFABRICS?")
+        s.check("2.3 fabrics 1", res == 0 and lines == ["+MTFABRICS:1"],
+                tag="P2")
+        res, lines = link.command("AT+MTSTATE?")
+        s.check("2.3 state 2 (operational)",
+                res == 0 and lines == ["+MTSTATE:2,1"], tag="P2")
+    finally:
+        if thread_mask:
+            link.command("AT+MTEVT=0x0800003F")
 
 
 def step_2_4_host_to_controller(ctx):
@@ -1054,124 +1131,85 @@ def step_2_12_rig_restore(ctx):
             tag="P2")
 
 
-def step_2_13_thread_role_event(ctx):
-    """0.11.0 task 3, design spec 2026-08-12 section 4's Phase 2 row: with
-    bit 28 enabled, a Thread reattach cycle drives the device's
-    RoutingRole from `UNASSIGNED` back to its attached role, so at least
-    one `+MTEVT:28` must arrive carrying a legal token (the
-    `MT_THREAD_ROLE_TOKEN_RE` grammar, defined next to
-    `t_mtthread_query_shape` since AT_MT_SPEC.md 3.11 states the payload
-    is "the identical decoded token" `AT+MTTHREAD?` reports, one grammar
-    for both), `+MTEVT:25` (bit 25, Thread state change, unchanged by this
-    round) must still fire, and the device must actually FINISH the
-    reattach: `AT+MTTHREAD?` must read back an attached role once the dust
-    settles, not merely a transition event.
+def step_2_13_thread_reboot_reattach(ctx):
+    """0.11.0 task 3, reworked TWICE: F1 moved the reboot off
+    `AT+MTRESET` (which factory-resets and erases the Thread dataset)
+    onto the SWD path step 2.8 uses; the bench then found this row's own
+    premise about observing an EVENT here was unreachable at all (bench
+    defect C). The event mask is RAM-only and resets to the default on
+    every boot (`AT_MT_SPEC.md` 3.11), so a mask set before an SWD reset
+    is gone when the device reappears, and setting it right after
+    `+MTREADY` is STILL too late: the Thread stack reattaches during
+    `esp_matter::start()`, before `mt_at_start()` brings the AT link up
+    at all, so every reattach transition on a reboot is over before a
+    host could ever subscribe. Measured on the rig: mask set 0.05 s after
+    `+MTREADY`, and the very first `AT+MTTHREAD?` at 0.09 s already read
+    `REED`, `attached`=`1`. (The one post-reboot role event that DOES
+    exist, a delayed REED-to-ROUTER promotion, was measured at +86.6 s:
+    real, but not a contract-timed transition any row can wait on. The
+    actual event OBSERVATION for this round now lives in
+    `step_2_3_commission` instead, during the live commissioning window,
+    where the bench found the transitions really do happen:
+    `+MTEVT:28` carrying `UNASSIGNED` then `REED`.)
 
-    **`AT+MTRESET` is NOT usable as the reattach trigger, and review
-    finding F1 is why this comment exists.** `cmd_mtreset` (`mt_at.c`)
-    calls `mt_matter_factory_reset()`, which is `esp_matter::factory_reset()`
-    -> `ConfigurationMgr().InitiateFactoryReset()` -> `DoFactoryReset()`,
-    and that erases fabrics, credentials AND the Thread operational
-    dataset (`ThreadStackMgr().ErasePersistentInfo()`) before rebooting
-    (`AT_MT_SPEC.md` §3.7: "erases all Matter data: fabrics, credentials,
-    attribute persistence"). CLAUDE.md's "the composition survives
-    `AT+MTRESET`" note is about the ENDPOINT COMPOSITION only (a separate
-    NVS namespace, `mt_ep`); its own next sentence names `AT+MTRESET` as
-    exactly this `factory_reset()` call. A row built on `AT+MTRESET` would
-    erase the Thread dataset before observing anything, so at best it
-    watches a bring-up to `UNASSIGNED` with no mesh to join and proves
-    nothing; a real regression where the device cannot rejoin its
-    previously-provisioned mesh would sail through such a row undetected.
+    So this row keeps only what the bench proved DOES hold across a
+    non-factory reboot, with no event-mask dependency at all: the SWD
+    reset (`ctx.relink(lambda: swd_reset(ctx.swd_runner))`, the exact
+    mechanism step 2.8 uses, never touching Matter's factory-reset path,
+    HARDWARE-VERIFIED), the fabric-survived guard (`AT+MTFABRICS?` reads
+    `1` straight after the reboot: F1's self-validating guard,
+    HARDWARE-VERIFIED), and the ends-attached assertion (`AT+MTTHREAD?`
+    reads back a role in `MT_THREAD_ATTACHED_ROLES` with `<attached>` =
+    `1`, HARDWARE-VERIFIED). The ends-attached read is a short bounded
+    poll (up to 5 attempts, 1 s apart) rather than one immediate read:
+    the sub-100-ms reattach speed measured on the rig means one read
+    would very likely already be enough, but polling costs nothing and
+    buys headroom against bench timing variance this round has already
+    been burned by twice.
 
-    The reboot instead goes through `ctx.relink(lambda:
-    swd_reset(ctx.swd_runner))`, the exact mechanism step 2.8 uses for
-    precisely this reason: an RP2350-driven SWD reset never touches
-    Matter's factory-reset path, so both the fabric and the Thread
-    dataset survive, and step 2.8's own `AT+MTFABRICS?` check is the
-    proof pattern this step copies. `AT+MTFABRICS?` reading back `1`
-    straight after the reboot is this step's own self-validating guard:
-    if the reboot mechanism is ever swapped back to something that
-    factory-resets, that assertion fails loudly instead of the row
-    quietly degrading into the bring-up test F1 found. The final
-    `AT+MTTHREAD?` read, asserting an ATTACHED role
-    (`MT_THREAD_ATTACHED_ROLES`, i.e. anything but `UNSPECIFIED`/
-    `UNASSIGNED`) with `<attached>` = `1`, is what actually proves a mesh
-    REJOIN happened rather than merely a bring-up with an event in transit.
-
-    Bit 28 fires on ROLE TRANSITIONS only (CHIP's own `RoleChanged`
-    flag), and the commissioning that already happened in step 2.3 ran
-    under the default mask, which does not carry bit 28 (it is opt-in,
-    design spec section 2.2), so any role events from THAT attach were
-    never surfaced and cannot be observed after the fact: a reboot with
-    the mask already open is the only way this harness can see the event
-    at all.
-
-    Thread-only: on a WiFi image there is no Thread stack to reattach and
-    bit 28 can never fire, so this is the one Phase 2 row that self-skips
-    by transport rather than hang on an event that can never come.
-    `run_phase2` has no gate mechanism for this (unlike --include-slow/
-    --include-manual, which are operator intent, not architecture): every
-    other Phase 2 row is transport-NEUTRAL in shape even where its content
-    differs (T4's design, TESTING.md section 7), and this is the first row
-    that is not applicable on one transport at all. Flagged as a design
-    decision in the task-3 report, not a default assumption; see also
-    `t_mtthread_query_shape`'s docstring for the Phase 1 half of the same
-    problem.
-
-    The mask is restored to the standing default in a `finally` block:
-    Phase 1's own mask row (`t_evt_mask_set_read_restore`) documents why a
-    nonstandard mask left behind races every later URC assertion, and this
-    step's own bit 25/28 subscription must not leak into 2.6's
-    root-endpoint URC sweep, the last step in the chain."""
+    Thread-only: on a WiFi image there is no Thread mesh to reattach to,
+    so this row is architecturally not applicable, and it reports through
+    `Suite.not_applicable()` rather than `Suite.skip()`: bench defect C's
+    controller ruling was that conflating "not applicable" with
+    "precondition broken" made every clean WiFi Phase 2 run exit 1 with
+    zero failures, which made the exit code useless as a WiFi pass
+    signal. See `Suite.not_applicable`'s own docstring for the full
+    reasoning; only `main()`'s exit code changes meaning, nothing about
+    what gets recorded or printed."""
     link, s = ctx.link, ctx.suite
-    name = "2.13 Thread role event on reattach"
+    name = "2.13 Thread reattach survives a non-factory reboot"
     if ctx.transport != "THREAD":
-        s.skip(name, "WIFI transport: no Thread role to reattach")
+        s.not_applicable(name, "WIFI transport: no Thread mesh to "
+                         "reattach to")
         return
-    mask = "0x%08X" % (0x0800003F | (1 << 25) | (1 << 28))  # 0x1A00003F
-    try:
-        res, _ = link.command("AT+MTEVT=%s" % mask)
-        if not s.check("2.13 MTEVT mask enable bits 25+28 -> OK",
-                       res == 0, tag="P2"):
-            raise StepAbort("could not enable the Thread role mask")
-        link.drain(0.3)
-        ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
-        if not s.check("2.13 SWD reset, port back", ok, tag="P2"):
-            raise StepAbort("bridge did not come back after SWD reset: %s"
-                            % detail)
-        ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
-        if not s.check("2.13 +MTREADY within 15 s", ready is not None,
-                       tag="P2"):
-            raise StepAbort("device did not come back after the reset")
-        res, lines = cmd_retry(link, "AT+MTFABRICS?")
-        if not s.check("2.13 fabric survived the reboot (self-validating "
-                       "guard, F1)", res == 0 and lines == ["+MTFABRICS:1"],
-                       tag="P2"):
-            raise StepAbort("fabric did not survive the reboot: this "
-                            "row's reboot mechanism must not touch "
-                            "Matter's factory-reset path")
-        got28 = link.await_urc(r"\+MTEVT:28,", timeout=30.0)
-        role_ok = False
-        if got28 is not None:
-            m = re.fullmatch(r"\+MTEVT:28,(.+)", got28)
-            role_ok = (m is not None and
-                      MT_THREAD_ROLE_TOKEN_RE.fullmatch(m.group(1))
-                      is not None)
-        s.check("2.13 MTEVT:28 arrives with a legal role token", role_ok,
-                tag="P2")
-        evt25 = link.await_urc(r"\+MTEVT:25$", timeout=5.0)
-        s.check("2.13 MTEVT:25 still fires, no payload", evt25 is not None,
-                tag="P2")
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    if not s.check("2.13 SWD reset, port back", ok, tag="P2"):
+        raise StepAbort("bridge did not come back after SWD reset: %s"
+                        % detail)
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    if not s.check("2.13 +MTREADY within 15 s", ready is not None,
+                   tag="P2"):
+        raise StepAbort("device did not come back after the reset")
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    if not s.check("2.13 fabric survived the reboot (self-validating "
+                   "guard, F1)", res == 0 and lines == ["+MTFABRICS:1"],
+                   tag="P2"):
+        raise StepAbort("fabric did not survive the reboot: this row's "
+                        "reboot mechanism must not touch Matter's "
+                        "factory-reset path")
+    attached_ok = False
+    for attempt in range(5):
         res, lines = cmd_retry(link, "AT+MTTHREAD?")
-        m2 = (re.match(r"\+MTTHREAD:([A-Z_]+|\d+),([01]),", lines[0])
-              if res == 0 and lines else None)
-        attached_ok = (m2 is not None and
-                      m2.group(1) in MT_THREAD_ATTACHED_ROLES and
-                      m2.group(2) == "1")
-        s.check("2.13 AT+MTTHREAD? reports an attached role after "
-                "reattach", attached_ok, tag="P2")
-    finally:
-        link.command("AT+MTEVT=0x0800003F")
+        m = (re.match(r"\+MTTHREAD:([A-Z_]+|\d+),([01]),", lines[0])
+             if res == 0 and lines else None)
+        attached_ok = (m is not None and
+                      m.group(1) in MT_THREAD_ATTACHED_ROLES and
+                      m.group(2) == "1")
+        if attached_ok or attempt == 4:
+            break
+        time.sleep(1.0)
+    s.check("2.13 AT+MTTHREAD? reports an attached role after reattach",
+            attached_ok, tag="P2")
 
 
 def step_2_6_root_urc_sweep(ctx):
@@ -5579,12 +5617,18 @@ def _capture_header_live(link, header):
 
 
 def write_baseline(path, header, suite):
+    # "N/A" is a distinct status from "SKIP" (bench defect C's controller
+    # ruling): both are recorded so neither is hidden, but a status diff
+    # against an old baseline can tell "this stopped running" (SKIP, a
+    # real regression signal) from "this transport never applied" (N/A,
+    # expected and stable) at a glance.
     data = {
         "header": header,
         "results": dict(
             [(name, "PASS" if ok else "FAIL")
              for name, ok, _ in suite.results]
-            + [(name, "SKIP") for name, _ in suite.skipped]),
+            + [(name, "SKIP") for name, _ in suite.skipped]
+            + [(name, "N/A") for name, _ in suite.na]),
     }
     with open(path, "w") as f:
         json.dump(data, f, indent=2, sort_keys=True)
@@ -6498,8 +6542,9 @@ register_phase1_t10_negative()
 # grammar AT_MT_SPEC.md 3.27 defines for AT+MTTHREAD? and reuses verbatim
 # for +MTEVT:28's payload (spec 3.11: "the identical decoded token").
 # Shared by t_mtthread_query_shape below (Phase 1) and
-# step_2_13_thread_role_event above (Phase 2) so the two checks cannot
-# silently drift onto different grammars.
+# step_2_3_commission's Thread-role observation (Phase 2, bench defect C
+# moved it there from a dedicated post-reboot row) so the two checks
+# cannot silently drift onto different grammars.
 MT_THREAD_ROLE_TOKENS = (
     "UNSPECIFIED", "UNASSIGNED", "SLEEPY_END_DEVICE", "END_DEVICE",
     "REED", "ROUTER", "LEADER",
@@ -6507,11 +6552,10 @@ MT_THREAD_ROLE_TOKENS = (
 
 # The subset of MT_THREAD_ROLE_TOKENS that means "on a mesh": everything
 # except UNSPECIFIED (interface down) and UNASSIGNED (up but detached).
-# step_2_13_thread_role_event's final AT+MTTHREAD? read uses this to prove
-# a REJOIN happened, not merely a bring-up (review finding F1): a device
-# that came back with no Thread dataset would still emit SOME role token
-# and possibly even a transition event on the way to UNASSIGNED, but it
-# could never land here.
+# step_2_13_thread_reboot_reattach's ends-attached AT+MTTHREAD? read uses
+# this to prove a REJOIN happened, not merely a bring-up (review finding
+# F1): a device that came back with no Thread dataset would still emit
+# SOME role token, but it could never land here.
 MT_THREAD_ATTACHED_ROLES = (
     "SLEEPY_END_DEVICE", "END_DEVICE", "REED", "ROUTER", "LEADER",
 )
@@ -6600,10 +6644,12 @@ def register_phase1_t11_negative():
       image-conditional row (see that function's docstring for the design
       decision this round needed).
 
-    The Phase 2 half of this round (the reattach-driven +MTEVT:28 row,
-    which needs a real commissioning cycle and so cannot be bench-safe on
-    Phase 1's single-light rig) lives in step_2_13_thread_role_event
-    instead."""
+    The Phase 2 half of this round (the +MTEVT:28 observation, which
+    needs a real commissioning cycle and so cannot be bench-safe on
+    Phase 1's single-light rig) lives inside step_2_3_commission's own
+    Thread-only branch (bench defect C moved it there from a dedicated
+    post-reboot row: the reboot path turned out to have no observable
+    event window at all)."""
     n = lambda name, fn: add_test(1, name, fn, tag="AT-")
     n("MTTHREAD=1 -> ERROR (query-only command, both images)",
       expect_err("AT+MTTHREAD=1", -1))
@@ -6630,8 +6676,8 @@ PHASE2_STEPS[:] = [
      "gate": "include_manual", "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.10 window expiry", "fn": step_2_10_window_expiry,
      "gate": "include_slow", "requires": ["2.3 commission ble-wifi"]},
-    {"name": "2.13 Thread role event on reattach",
-     "fn": step_2_13_thread_role_event,
+    {"name": "2.13 Thread reattach survives a non-factory reboot",
+     "fn": step_2_13_thread_reboot_reattach,
      "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.11 two resets", "fn": step_2_11_two_resets,
      "requires": ["2.3 commission ble-wifi"]},
@@ -6645,9 +6691,16 @@ def exit_code(suite, truncated):
     """main()'s pass/fail verdict: nonzero on any scored failure, any
     abort-skip, or a truncated run. Gated entries (--include-slow,
     --include-manual, -k: operator intent, not truncation) must never
-    tip this on their own (T3 final review finding 1b). Kept as its own
-    function, not inlined in main(), so a self-test can call the real
-    return path instead of re-deriving the same boolean expression."""
+    tip this on their own (T3 final review finding 1b), and NEITHER must
+    suite.na (bench defect C's controller ruling): a step reporting
+    itself architecturally not applicable to this run (e.g. a WiFi
+    transport has no Thread mesh for step_2_13 to reattach to) is a fact
+    about the environment, not a truncation or an operator choice, and a
+    clean WiFi run with zero failures must exit 0 to remain a usable pass
+    signal. suite.skipped is unaffected: a real precondition-broken skip
+    still tips this, on purpose. Kept as its own function, not inlined in
+    main(), so a self-test can call the real return path instead of
+    re-deriving the same boolean expression."""
     return 1 if (suite.failed or suite.skipped or truncated) else 0
 
 

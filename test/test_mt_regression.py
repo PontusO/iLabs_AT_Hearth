@@ -311,6 +311,38 @@ class TestSuiteSkip(unittest.TestCase):
         self.assertEqual(data["results"]["ran"], "PASS")
         self.assertEqual(data["results"]["not run"], "SKIP")
 
+    def test_not_applicable_is_counted_and_printed_distinctly(self):
+        # Bench defect C: not_applicable() must read differently from
+        # skip() in the printed output (so an operator scanning a log
+        # can tell "architecture" from "truncation" at a glance) and
+        # must land in its own bucket, never suite.skipped.
+        s = Suite()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            s.check("a", True)
+            s.not_applicable("2.13 ...", "WIFI transport: no Thread mesh")
+            s.summary()
+        text = out.getvalue()
+        self.assertIn(
+            "[SKIP] 2.13 ... (not applicable: WIFI transport: no Thread "
+            "mesh)", text)
+        self.assertIn("1 passed, 0 failed, 1 n/a", text)
+        self.assertEqual(s.na, [("2.13 ...", "WIFI transport: no Thread "
+                                 "mesh")])
+        self.assertEqual(s.skipped, [])
+
+    def test_baseline_records_not_applicable_as_na_not_skip(self):
+        s = Suite()
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.check("ran", True)
+            s.not_applicable("architecture", "wrong transport")
+        with tempfile.NamedTemporaryFile("r", suffix=".json") as f:
+            with contextlib.redirect_stdout(io.StringIO()):
+                write_baseline(f.name, {"port": "x"}, s)
+            data = json.load(open(f.name))
+        self.assertEqual(data["results"]["ran"], "PASS")
+        self.assertEqual(data["results"]["architecture"], "N/A")
+
 
 class TestRunPhase2(unittest.TestCase):
     def _ctx(self):
@@ -518,6 +550,27 @@ class TestExitCode(unittest.TestCase):
         s = Suite()
         s.check("a", True)
         self.assertEqual(exit_code(s, truncated=True), 1)
+
+    def test_na_only_suite_exits_zero(self):
+        # Bench defect C: a WiFi run where step_2_13 reports itself
+        # not-applicable must still be a usable pass signal. Before this
+        # fix the only bucket available was skip(), which this same
+        # scenario (a clean run plus one architectural non-applicability)
+        # would have failed.
+        s = Suite()
+        s.check("a", True)
+        s.not_applicable("2.13 Thread reattach survives a non-factory "
+                         "reboot", "WIFI transport")
+        self.assertEqual(exit_code(s, truncated=False), 0)
+
+    def test_skip_alone_exits_nonzero(self):
+        # The contrasting case, pinned so the two buckets cannot drift
+        # onto the same exit behaviour by accident: a REAL
+        # precondition-broken skip must still fail the run.
+        s = Suite()
+        s.check("a", True)
+        s.skip("b", "requires step that did not run: a")
+        self.assertEqual(exit_code(s, truncated=False), 1)
 
 
 from mt_regression import (ChipTool, parse_setup_payload,
@@ -1681,8 +1734,11 @@ class TestStep23(unittest.TestCase):
                 link.push_urcs(urcs)
         return on_call
 
-    def _ctx(self, runner, urcs):
-        link = FakeLink(dict(self.AT_OK))
+    def _ctx(self, runner, urcs, extra_commands=None):
+        commands = dict(self.AT_OK)
+        if extra_commands:
+            commands.update(extra_commands)
+        link = FakeLink(commands)
         d = tempfile.mkdtemp()  # outlives the step; ChipTool.run mkdirs it
         chip = ChipTool("/bin/chip-tool", d, runner=runner)
         runner.on_call = self._release_on_pairing(link, urcs)
@@ -1743,13 +1799,20 @@ class TestStep23(unittest.TestCase):
     def test_thread_transport_uses_ble_thread(self):
         """T4: ctx.transport = THREAD routes 2.3's pairing call through
         pairing_argv's ble-thread branch instead of ble-wifi, with no
-        WiFi credentials in the argv."""
+        WiFi credentials in the argv. Also carries the 0.11.0 role-event
+        URCs now that a THREAD ctx makes step 2.3 assert on them too
+        (bench defect C): this test's own concern is argv routing, not
+        the role event, so it stays a plain happy-path fixture rather
+        than growing its own role assertions (those belong to the
+        dedicated test_thread_transport_observes_role_event_during_join
+        below)."""
         runner = FakeChipRunner([
             (0, fixture("chiptool_parse_setup_payload.txt")),
             (0, "CHIP:TOO: Device commissioning completed with success"),
         ])
-        ctx, runner = self._ctx(runner,
-                                ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4"])
+        ctx, runner = self._ctx(
+            runner, ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4", "+MTEVT:28,REED",
+                    "+MTEVT:25"])
         ctx.transport = "THREAD"
         ctx.dataset = "0e08abc123"
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1760,6 +1823,163 @@ class TestStep23(unittest.TestCase):
         self.assertIn("hex:0e08abc123", pairing_argv_used)
         self.assertNotIn(ctx.opts.ssid, pairing_argv_used)
         self.assertNotIn(ctx.opts.psk, pairing_argv_used)
+
+    def test_wifi_transport_never_touches_the_event_mask(self):
+        """Bench defect C: the mask enable/observe/restore code must be
+        genuinely absent on a WiFi run, not merely skipped-and-passing --
+        no AT+MTEVT command at all, and no new check name in the report."""
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(runner,
+                                ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertFalse(any(c.startswith("AT+MTEVT=")
+                             for c in ctx.link.sent))
+        names = [n for n, _, _ in ctx.suite.results]
+        self.assertFalse(any("role token during the join" in n
+                             or "fires during the join" in n
+                             for n in names))
+
+    def test_thread_transport_observes_role_event_during_join(self):
+        """Bench defect C's redesign: the window exists during the live
+        join, not on a later reboot. Mask enabled before pairing, both
+        +MTEVT:28 (legal token) and +MTEVT:25 asserted, mask restored
+        after."""
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(
+            runner, ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4",
+                    "+MTEVT:28,UNASSIGNED", "+MTEVT:28,REED", "+MTEVT:25"])
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        # Enabled before the QR parse (the very first chip-tool call),
+        # i.e. before pairing begins, and restored last.
+        self.assertEqual(ctx.link.sent[0], "AT+MTEVT=0x1A00003F")
+        self.assertEqual(ctx.link.sent[-1], "AT+MTEVT=0x0800003F")
+
+    def test_thread_transport_tolerates_a_deduped_role_event(self):
+        """A same-token repeat during the join legitimately does not
+        arrive at all under the current firmware (design spec 2.2's
+        gate 2): the bench's own three-events-in-10ms case (UNASSIGNED,
+        REED, REED) collapses to two distinct tokens. This row asserts
+        only "at least one", so a single +MTEVT:28 for the whole join
+        must still pass, not be mistaken for a missing-event regression."""
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(
+            runner, ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4",
+                    "+MTEVT:28,REED", "+MTEVT:25"])
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_thread_transport_missing_role_event_fails(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(
+            runner, ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4", "+MTEVT:25"])
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn(
+            "2.3 MTEVT:28 arrives with a legal role token during the join",
+            failed)
+        # The restore still ran despite the failure.
+        self.assertEqual(ctx.link.sent[-1], "AT+MTEVT=0x0800003F")
+
+    def test_thread_transport_illegal_role_token_fails(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(
+            runner, ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4", "+MTEVT:28,BOGUS"])
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn(
+            "2.3 MTEVT:28 arrives with a legal role token during the join",
+            failed)
+
+    def test_thread_transport_missing_state_change_fails(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(
+            runner, ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4", "+MTEVT:28,REED"])
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.3 MTEVT:25 fires during the join", failed)
+
+    def test_thread_transport_pairing_failure_still_restores_mask(self):
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (1, "CHIP:TOO: Run command failure"),
+        ])
+        ctx, runner = self._ctx(runner, [])
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_3_commission(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+        # The mask was enabled before the failed pairing attempt and
+        # restored anyway: a StepAbort must not leak a nonstandard mask
+        # into whatever step runs next.
+        self.assertEqual(ctx.link.sent[0], "AT+MTEVT=0x1A00003F")
+        self.assertEqual(ctx.link.sent[-1], "AT+MTEVT=0x0800003F")
+
+    def test_thread_transport_mask_enable_failure_recorded_but_join_proceeds(
+            self):
+        # The mask-enable check is NOT gated with a StepAbort (unlike
+        # every other check in this step): losing the role-event
+        # observation for this one row is not worth aborting a
+        # commissioning cycle over. This pins both halves of that design
+        # choice: the failure is recorded, not swallowed, and pairing
+        # still goes ahead.
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+        ])
+        ctx, runner = self._ctx(
+            runner, ["+MTEVT:1", "+MTEVT:3", "+MTEVT:4", "+MTEVT:28,REED",
+                    "+MTEVT:25"],
+            extra_commands={"AT+MTEVT=0x1A00003F": (-1, [])})
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_3_commission(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn(
+            "2.3 MTEVT mask enable bits 25+28 -> OK (Thread role "
+            "observation window)", failed)
+        # Pairing still happened: the runner's "pairing" call is index 1.
+        self.assertEqual(len(runner.calls), 2)
+        self.assertIn("pairing", runner.calls[1][0])
 
 
 class FakeSubscriber:
@@ -2557,44 +2777,40 @@ class TestStep212(unittest.TestCase):
         self.assertIn("AT+MTEP=0x0071,0,0", ctx.link.sent)
 
 
-from mt_regression import step_2_13_thread_role_event
+from mt_regression import step_2_13_thread_reboot_reattach
 
 
-class TestStep213ThreadRoleEvent(unittest.TestCase):
-    """0.11.0 task 3, reworked for review finding F1: step_2_13's reattach
-    trigger was originally AT+MTRESET, which turns out to call
-    esp_matter::factory_reset() and erase the Thread dataset along with
-    the fabric (mt_at.c's cmd_mtreset, AT_MT_SPEC.md 3.7), so the row
-    could only ever observe a bring-up to UNASSIGNED with nothing to
-    rejoin. It now reboots the same way step 2.8 does (ctx.relink over
-    SWD, which never touches Matter's factory-reset path), asserts the
-    fabric survived as its own self-validating guard, and asserts
-    AT+MTTHREAD? ends ATTACHED once the dust settles, on top of the
-    original +MTEVT:28 (legal token) / +MTEVT:25 (unchanged) assertions
-    and the mask restore on every exit path. Also covers the
-    design-decision self-skip on WiFi (see the function's own
-    docstring)."""
+class TestStep213ThreadRebootReattach(unittest.TestCase):
+    """0.11.0 task 3, reworked TWICE. Review finding F1 moved the reboot
+    off AT+MTRESET (which factory-resets and erases the Thread dataset)
+    onto ctx.relink over SWD, the way step 2.8 does. Bench defect C then
+    found the row's remaining premise, observing an EVENT here, was
+    unreachable: the RAM-only mask is gone by reboot and even a
+    post-+MTREADY enable is too late (the reattach finishes before
+    mt_at_start() brings the AT link up). This row now asserts only what
+    the bench proved DOES hold across a non-factory reboot -- the SWD
+    reset itself, the fabric surviving, and AT+MTTHREAD? ending attached
+    -- with no event mask involved at all; the event observation moved to
+    step_2_3_commission's own tests (TestStep23). Also covers the
+    not_applicable() (not skip()) self-report on WiFi, bench defect C's
+    controller ruling."""
 
-    MASK_ON = "AT+MTEVT=0x1A00003F"
-    MASK_OFF = "AT+MTEVT=0x0800003F"
     ATTACHED_LINE = ('+MTTHREAD:ROUTER,1,15,0xFA25,0x000DB01A5C3F2E10,'
                      '0x00003A21,"MyThreadNet"')
     DETACHED_LINE = '+MTTHREAD:UNASSIGNED,0,,,,,""'
 
     def _commands(self, fabrics_line="+MTFABRICS:1",
                  thread_line=None):
-        return {self.MASK_ON: (0, []),
-                "AT+MTFABRICS?": (0, [fabrics_line]),
-                "AT+MTTHREAD?": (0, [thread_line or self.ATTACHED_LINE]),
-                self.MASK_OFF: (0, [])}
+        return {"AT+MTFABRICS?": (0, [fabrics_line]),
+                "AT+MTTHREAD?": (0, [thread_line or self.ATTACHED_LINE])}
 
-    def _ctx(self, link, urcs_after_reboot=None, swd_ok=True):
+    def _ctx(self, link, swd_ok=True):
         """A Phase2Context whose ctx.relink models make_relink closely
-        enough for this step: it runs the real swd_reset() (imported
-        below) against a fake process runner, so a genuine SWD failure
-        path is exercised, not just a canned return value, and on
-        success it releases the reboot's URCs the way a live reopen
-        would (TestStep28's own pattern)."""
+        enough for this step: it runs the real swd_reset() (imported by
+        production code) against a fake process runner, so a genuine SWD
+        failure path is exercised, not just a canned return value, and on
+        success it releases +MTREADY the way a live reopen would
+        (TestStep28's own pattern)."""
         ctx = fresh_ctx(link)
         ctx.transport = "THREAD"
         calls = []
@@ -2602,8 +2818,8 @@ class TestStep213ThreadRoleEvent(unittest.TestCase):
         def relink(action):
             ok, detail = action()
             calls.append((ok, detail))
-            if ok and urcs_after_reboot:
-                link.push_urcs(urcs_after_reboot)
+            if ok:
+                link.push_urcs(["+MTREADY"])
             return ok, detail
 
         ctx.relink = relink
@@ -2611,65 +2827,36 @@ class TestStep213ThreadRoleEvent(unittest.TestCase):
             returncode=0 if swd_ok else 1, stdout="", stderr="bad")
         return ctx, calls
 
-    def test_wifi_transport_skips(self):
+    def test_wifi_transport_reports_not_applicable(self):
         link = FakeLink(self._commands())
         ctx = fresh_ctx(link)
         ctx.transport = "WIFI"
         with contextlib.redirect_stdout(io.StringIO()):
-            step_2_13_thread_role_event(ctx)
+            step_2_13_thread_reboot_reattach(ctx)
         self.assertEqual(ctx.suite.failed, 0)
         self.assertEqual(ctx.suite.results, [])
-        self.assertTrue(any(n.startswith("2.13")
-                            for n, _ in ctx.suite.skipped))
-        # A self-skip must not touch the wire at all.
+        # Bench defect C's controller ruling, made concrete: this must be
+        # not_applicable(), not skip(), or a clean WiFi Phase 2 run would
+        # exit 1 with zero failures.
+        self.assertEqual(ctx.suite.skipped, [])
+        self.assertTrue(any(n.startswith("2.13") for n, _ in ctx.suite.na))
+        # A not-applicable report must not touch the wire at all.
         self.assertEqual(link.sent, [])
 
     def test_thread_happy_path(self):
         link = FakeLink(self._commands())
-        ctx, calls = self._ctx(
-            link, urcs_after_reboot=["+MTREADY", "+MTEVT:25",
-                                     "+MTEVT:28,ROUTER"])
+        ctx, calls = self._ctx(link)
         with contextlib.redirect_stdout(io.StringIO()):
-            step_2_13_thread_role_event(ctx)
+            step_2_13_thread_reboot_reattach(ctx)
         self.assertEqual(ctx.suite.failed, 0,
                          msg=[n for n, ok, _ in ctx.suite.results if not ok])
         self.assertTrue(calls and calls[0][0],
                         "the SWD relink must actually run")
-        self.assertEqual(link.sent[0], self.MASK_ON)
-        self.assertEqual(link.sent[-1], self.MASK_OFF)
-        # The reboot went through relink/SWD, never AT+MTRESET (F1: an
-        # AT+MTRESET here would erase the fabric it is about to check).
+        # No event mask touched at all (bench defect C): the reboot path
+        # has no observable window, so this row must not pretend to
+        # subscribe to one.
+        self.assertFalse(any(c.startswith("AT+MTEVT=") for c in link.sent))
         self.assertNotIn("AT+MTRESET", link.sent)
-
-    def test_missing_role_event_fails(self):
-        link = FakeLink(self._commands())
-        ctx, _ = self._ctx(link, urcs_after_reboot=["+MTREADY", "+MTEVT:25"])
-        with contextlib.redirect_stdout(io.StringIO()):
-            step_2_13_thread_role_event(ctx)
-        failed = [n for n, ok, _ in ctx.suite.results if not ok]
-        self.assertIn("2.13 MTEVT:28 arrives with a legal role token",
-                      failed)
-        # The restore still ran despite the failure.
-        self.assertEqual(link.sent[-1], self.MASK_OFF)
-
-    def test_illegal_role_token_fails(self):
-        link = FakeLink(self._commands())
-        ctx, _ = self._ctx(link, urcs_after_reboot=["+MTREADY",
-                                                     "+MTEVT:28,BOGUS"])
-        with contextlib.redirect_stdout(io.StringIO()):
-            step_2_13_thread_role_event(ctx)
-        failed = [n for n, ok, _ in ctx.suite.results if not ok]
-        self.assertIn("2.13 MTEVT:28 arrives with a legal role token",
-                      failed)
-
-    def test_missing_state_change_fails(self):
-        link = FakeLink(self._commands())
-        ctx, _ = self._ctx(link, urcs_after_reboot=["+MTREADY",
-                                                     "+MTEVT:28,ROUTER"])
-        with contextlib.redirect_stdout(io.StringIO()):
-            step_2_13_thread_role_event(ctx)
-        failed = [n for n, ok, _ in ctx.suite.results if not ok]
-        self.assertIn("2.13 MTEVT:25 still fires, no payload", failed)
 
     def test_fabric_did_not_survive_fails(self):
         # F1's headline guard: if the reboot mechanism is ever swapped
@@ -2677,55 +2864,58 @@ class TestStep213ThreadRoleEvent(unittest.TestCase):
         # them), AT+MTFABRICS? reading 0 must fail this row loudly
         # rather than let it silently degrade into a bring-up test.
         link = FakeLink(self._commands(fabrics_line="+MTFABRICS:0"))
-        ctx, _ = self._ctx(link, urcs_after_reboot=["+MTREADY"])
+        ctx, _ = self._ctx(link)
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(StepAbort):
-                step_2_13_thread_role_event(ctx)
+                step_2_13_thread_reboot_reattach(ctx)
         failed = [n for n, ok, _ in ctx.suite.results if not ok]
         self.assertIn(
             "2.13 fabric survived the reboot (self-validating guard, F1)",
             failed)
-        # The mask restore still ran despite the abort.
-        self.assertEqual(link.sent[-1], self.MASK_OFF)
 
-    def test_detached_after_reattach_fails(self):
-        # F1's other headline guard: a legal role token in transit and
-        # a surviving fabric are not enough on their own. If the device
-        # settles back to UNASSIGNED (no mesh rejoined, e.g. a stale or
-        # unreachable dataset), the row must fail even though every
-        # earlier assertion in it passed.
+    def test_detached_after_reattach_fails_after_polling(self):
+        # The row must not accept a device that came back detached (no
+        # mesh to rejoin, e.g. a stale or unreachable dataset), and it
+        # must actually retry across the bounded poll window before
+        # giving up, not just read once.
         link = FakeLink(self._commands(thread_line=self.DETACHED_LINE))
-        ctx, _ = self._ctx(
-            link, urcs_after_reboot=["+MTREADY", "+MTEVT:28,UNASSIGNED",
-                                     "+MTEVT:25"])
-        with contextlib.redirect_stdout(io.StringIO()):
-            step_2_13_thread_role_event(ctx)
+        ctx, _ = self._ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()), \
+             mock.patch("mt_regression.time.sleep"):
+            step_2_13_thread_reboot_reattach(ctx)
         failed = [n for n, ok, _ in ctx.suite.results if not ok]
         self.assertIn(
             "2.13 AT+MTTHREAD? reports an attached role after reattach",
             failed)
-        # The transition event itself was legal (UNASSIGNED IS a legal
-        # token) and +MTEVT:25 fired, so neither of those checks is
-        # what catches this: only the final-state read does.
-        self.assertNotIn("2.13 MTEVT:28 arrives with a legal role token",
-                         failed)
-        self.assertNotIn("2.13 MTEVT:25 still fires, no payload", failed)
+        # 5 attempts, one AT+MTTHREAD? each.
+        self.assertEqual(link.sent.count("AT+MTTHREAD?"), 5)
 
-    def test_swd_reset_failure_aborts_but_restores_mask(self):
+    def test_polling_stops_as_soon_as_attached(self):
+        # The converse of the above: a device that settles quickly must
+        # not cost the row the whole 5-attempt window, since a bench
+        # session pays that wall-clock cost on every Thread run.
+        link = FakeLink(self._commands())
+        ctx, _ = self._ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()), \
+             mock.patch("mt_regression.time.sleep") as sleep_mock:
+            step_2_13_thread_reboot_reattach(ctx)
+        self.assertEqual(link.sent.count("AT+MTTHREAD?"), 1)
+        sleep_mock.assert_not_called()
+
+    def test_swd_reset_failure_aborts(self):
         link = FakeLink(self._commands())
         ctx, calls = self._ctx(link, swd_ok=False)
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(StepAbort):
-                step_2_13_thread_role_event(ctx)
+                step_2_13_thread_reboot_reattach(ctx)
         # Pin the SPECIFIC check that must fail, not just "something
         # failed": a mutated "SWD reset, port back" check that always
         # passes would otherwise still abort one step later (no +MTREADY
-        # arrives, since relink only releases URCs on success) and this
+        # arrives, since relink only releases it on success) and this
         # test would pass for the wrong reason.
         failed = [n for n, ok, _ in ctx.suite.results if not ok]
         self.assertEqual(failed, ["2.13 SWD reset, port back"])
         self.assertFalse(calls[0][0])
-        self.assertEqual(link.sent[-1], self.MASK_OFF)
 
     def test_row_between_window_expiry_and_two_resets(self):
         # Placement is load-bearing, not cosmetic: 2.11 factory-resets
@@ -2733,9 +2923,12 @@ class TestStep213ThreadRoleEvent(unittest.TestCase):
         # while the device is still commissioned, or there is no Thread
         # fabric to reattach to.
         names = [step["name"] for step in PHASE2_STEPS]
-        self.assertIn("2.13 Thread role event on reattach", names)
-        self.assertLess(names.index("2.13 Thread role event on reattach"),
-                        names.index("2.11 two resets"))
+        self.assertIn(
+            "2.13 Thread reattach survives a non-factory reboot", names)
+        self.assertLess(
+            names.index("2.13 Thread reattach survives a non-factory "
+                        "reboot"),
+            names.index("2.11 two resets"))
         self.assertLess(names.index("2.11 two resets"),
                         names.index("2.12 rig restore"))
 
