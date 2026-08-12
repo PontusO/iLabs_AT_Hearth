@@ -1,15 +1,15 @@
 {
   "header": {
     "at_core_repo_head": "11c9935ea392b62c0a9c84c5197483aa1fee41ef",
-    "cgmr": "0.10.0",
-    "fw_repo_head": "494335ecd045bdbe1a1f29c7663fef27777744a0",
+    "cgmr": "0.10.1",
+    "fw_repo_head": "1db909254dc235703677a657502794953b63c321",
     "manual_code": "34970112332",
     "net": "+MTNET:THREAD,1,0,0",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-08-12T10:48:54+00:00",
+    "timestamp": "2026-08-12T14:04:39+00:00",
     "transport": "THREAD"
   },
   "results": {
@@ -340,7 +340,9 @@
     "3.25 BatCapacity write past the old 0xFFFF cap (13.5 kWh, 13500000) -> OK, echo line (B263)": "PASS",
     "3.25 BatChargeState write (1 IsCharging) -> OK: the attribute the SDK build omits entirely exists here (the RECHG conformance fix)": "PASS",
     "3.25 BatFunctionalWhileCharging reads 0 (the second RECHG-mandatory attribute, present and defaulted)": "PASS",
+    "3.25 BatPercentRemaining write at the legal boundary (200) -> OK, echo line (B264)": "PASS",
     "3.25 BatPercentRemaining write in hex (90%, half-percent units) -> OK, echo line in normalized decimal": "PASS",
+    "3.25 BatPercentRemaining write one past the boundary (201, in width, past ember's 0..200) -> +MTERR:1, not a bare ERROR (B264)": "PASS",
     "3.25 BatVoltage write (12.6 V) -> OK, echo line": "PASS",
     "3.25 DEMMode staged (tag-0 default + explicit kDeviceOptimization) -> OK": "PASS",
     "3.25 ESA identity push (ESAType BatteryStorage 5, ESACanGenerate true) -> OK": "PASS",
@@ -352,6 +354,7 @@
     "3.25 controller reads BatCapacity 5000": "PASS",
     "3.25 controller reads BatChargeState 1": "PASS",
     "3.25 controller reads BatPercentRemaining 180": "PASS",
+    "3.25 controller reads BatPercentRemaining still 200: the refused write did not change the attribute (B264)": "PASS",
     "3.25 controller reads BatVoltage 12600": "PASS",
     "3.25 controller reads ESACanGenerate TRUE": "PASS",
     "3.25 controller reads ESAType 5 (BatteryStorage)": "PASS",

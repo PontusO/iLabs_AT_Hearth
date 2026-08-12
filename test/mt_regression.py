@@ -670,8 +670,8 @@ def step_2_4_host_to_controller(ctx):
     reads. Mode 0 keeping the report suppressed is the one property
     nothing else in the suite can catch. Also pins the same-value mode-0
     fix (found sweeping B264): a mode-0 re-push of the value the attribute
-    already holds must answer OK, not a bare ERROR, and raise no +MTATTR
-    URC either."""
+    already holds must answer OK, not a bare ERROR, and emit no +MTATTR
+    line either."""
     link, s, chip = ctx.link, ctx.suite, ctx.chip
     for want in (1, 0):
         res, _ = link.command("AT+MTATTR=1,6,0,%d" % want)
@@ -695,26 +695,28 @@ def step_2_4_host_to_controller(ctx):
         s.check("2.4 mode 1 produces a report",
                 sub.wait_new_report(base, 5.0), tag="P2")
         base = len(sub.reports())
-        res, _ = link.command("AT+MTATTR=1,6,0,0,0")
+        # "No report" (below) is the fabric side only. POST_UPDATE, the
+        # +MTATTR line's source, runs on any ACTUAL value change regardless
+        # of mode (both notify=true and notify=false call set_val_internal()
+        # with call_callbacks=true), so this 1->0 write really does emit
+        # +MTATTR:1,6,0,0 on the AT link. It arrives BEFORE the write's own
+        # OK, and ATLink._derive_expect() maps "AT+MTATTR=..." to expect
+        # "+MTATTR:", so it lands in THIS command's response lines rather
+        # than in the URC queue: the same echo convention step 3.11 and the
+        # rest of the suite already assert on (spec 3.8, TESTING.md 6.3).
+        # Asserting it here also proves the same-value check below found
+        # nothing because nothing was emitted, not because a leftover had
+        # been consumed earlier (B265: this was asserted through
+        # link.await_urc() first, which no real device can satisfy).
+        res, lines = link.command("AT+MTATTR=1,6,0,0,0")
         s.check("2.4 mode 0 write -> OK", res == 0, tag="P2")
+        s.check("2.4 mode 0 write still echoes +MTATTR on an actual value "
+                "change", lines == ["+MTATTR:1,6,0,0"], tag="P2")
         res, lines = link.command("AT+MTATTR=1,6,0")
         s.check("2.4 local read shows 0",
                 res == 0 and lines == ["+MTATTR:1,6,0,0"], tag="P2")
         s.check("2.4 mode 0 produces no report",
                 sub.no_new_report(base, 5.0), tag="P2")
-
-        # "No report" (above) is the fabric side only. POST_UPDATE, the
-        # +MTATTR URC's source, runs on any ACTUAL value change regardless
-        # of mode (both notify=true and notify=false call set_val_internal()
-        # with call_callbacks=true), so the 1->0 write just made really does
-        # raise +MTATTR:1,6,0,0 on the AT link. Assert and drain it here, by
-        # its exact text per the suite's own convention (TESTING.md 6.3):
-        # otherwise it would sit in the URC queue and the same-value check
-        # below could pass by matching this leftover instead of correctly
-        # finding nothing.
-        got = link.await_urc(r"\+MTATTR:1,6,0", 3.0)
-        s.check("2.4 mode 0 write still raises a +MTATTR URC on an actual "
-                "value change", got == "+MTATTR:1,6,0,0", tag="P2")
 
         # A same-value re-push (the value already equals what mode 0 just
         # set) used to fall through esp_matter's ESP_ERR_NOT_FINISHED to a
@@ -722,11 +724,15 @@ def step_2_4_host_to_controller(ctx):
         # asked for, so the write succeeded by any definition that matters
         # to a host, and now answers OK. No POST_UPDATE callback runs for
         # an unchanged value in either mode (set_val_internal() returns
-        # before reaching it), so no +MTATTR URC either, in contrast with
-        # the real value-change write just drained above.
-        res, _ = link.command("AT+MTATTR=1,6,0,0,0")
+        # before reaching it), so no +MTATTR line either, in contrast with
+        # the real value-change write above. Both carriers are asserted:
+        # the echo (where a change would appear) and the URC queue (where
+        # an asynchronous report arriving late would appear).
+        res, lines = link.command("AT+MTATTR=1,6,0,0,0")
         s.check("2.4 same-value mode-0 re-push -> OK, not a bare ERROR",
                 res == 0, tag="P2")
+        s.check("2.4 same-value mode-0 re-push echoes no +MTATTR",
+                lines == [], tag="P2")
         s.check("2.4 same-value mode-0 re-push raises no +MTATTR URC",
                 link.assert_no_urc(r"\+MTATTR:1,6,0", 1.5), tag="P2")
     finally:
