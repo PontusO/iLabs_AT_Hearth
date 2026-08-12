@@ -6063,6 +6063,21 @@ class TestStep326Dem(unittest.TestCase):
             step_3_26_dem(ctx)
         self.assertGreater(ctx.suite.failed, 0)
 
+    def test_out_of_range_instance_served_write_fails(self):
+        # DE270 falsifiability, the OUT-OF-RANGE row: AT+MTATTR=27,152,2,9
+        # is a value AT+MTMEAS's own validate pass rejects with +MTERR:1
+        # (9 is outside ESAStateEnum). This is the row that carries the
+        # step's actual point, that the generic AT+MTATTR path never
+        # reaches enum validation for a managed-internally attribute at
+        # all, so it must not be able to rot silently: a firmware that
+        # mistakenly answered +MTERR:1 here, as if the value were the
+        # reason for the failure rather than writability, must be caught.
+        ctx = self._ctx()
+        ctx.link.commands["AT+MTATTR=27,152,2,9"] = (1, [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
     def test_guard_answering_success_fails(self):
         # The guard is the CHIP SERVER's, and its status is specific: a
         # Success (or any other code) means the ESAState precondition
