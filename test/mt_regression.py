@@ -744,7 +744,17 @@ def step_2_3_commission(ctx):
                 res == 0 and lines == ["+MTSTATE:2,1"], tag="P2")
     finally:
         if thread_mask:
-            link.command("AT+MTEVT=0x0800003F")
+            # Guarded like run_phase2's own AT+MTEP? capture and
+            # recover_after_abort's AT+MTRESET (review F2): a link that
+            # died during a failed pairing must not turn this restore
+            # into an unhandled OSError, which would propagate out of
+            # the finally block and skip the abort's recovery, summary
+            # and baseline write entirely.
+            try:
+                link.command("AT+MTEVT=0x0800003F")
+            except OSError as exc:
+                print("  (2.3 mask restore: link unavailable, skipped: %s)"
+                      % exc)
 
 
 def step_2_4_host_to_controller(ctx):

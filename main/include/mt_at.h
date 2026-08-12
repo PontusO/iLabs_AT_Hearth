@@ -78,6 +78,12 @@ enum {
      * renumbering a published mask when a Thread build arrives. */
     MT_EVT_THREAD_CONNECTIVITY        = 24,
     MT_EVT_THREAD_STATE_CHANGE        = 25,
+    /* Never emitted on ANY image, WiFi or Thread: CHIP declares
+     * DeviceEventType::kThreadInterfaceStateChange (CHIPDeviceEvent.h:189)
+     * but nothing in the pinned SDK ever posts it, confirmed by an
+     * unfiltered grep of the whole connectedhomeip tree turning up only the
+     * declaration. The bit stays allocated regardless (see the block
+     * comment above and AT_MT_SPEC.md 3.11). */
     MT_EVT_THREAD_IF_STATE_CHANGE     = 26,
 
     /* Device state (bit 27). Raised once at boot when the stored fabric was

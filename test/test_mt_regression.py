@@ -1981,6 +1981,49 @@ class TestStep23(unittest.TestCase):
         self.assertEqual(len(runner.calls), 2)
         self.assertIn("pairing", runner.calls[1][0])
 
+    def test_mask_restore_survives_a_dead_link(self):
+        """Review F2: the finally block's mask restore is now guarded the
+        same way run_phase2's own AT+MTEP? capture and
+        recover_after_abort's AT+MTRESET are. A link that dies exactly on
+        the restore command (the realistic case: pairing already failed
+        and dropped the port) must not turn an orderly StepAbort into an
+        unhandled OSError that skips run_phase2's recovery, summary and
+        baseline write."""
+
+        class DiesOnRestore:
+            """Wraps a FakeLink and raises OSError the one time the mask
+            restore command is sent, delegating everything else."""
+
+            def __init__(self, link, dies_on):
+                self._link = link
+                self._dies_on = dies_on
+
+            def command(self, cmd, *a, **kw):
+                if cmd == self._dies_on:
+                    self._link.sent.append(cmd)
+                    raise OSError("link died during restore")
+                return self._link.command(cmd, *a, **kw)
+
+            def __getattr__(self, name):
+                return getattr(self._link, name)
+
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_parse_setup_payload.txt")),
+            (1, "CHIP:TOO: Run command failure"),
+        ])
+        ctx, runner = self._ctx(runner, [])
+        ctx.transport = "THREAD"
+        ctx.dataset = "0e08abc123"
+        raw_link = ctx.link
+        ctx.link = DiesOnRestore(raw_link, "AT+MTEVT=0x0800003F")
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_3_commission(ctx)  # must not raise OSError
+        self.assertGreater(ctx.suite.failed, 0)
+        # The restore was attempted (not skipped), it just could not
+        # complete, and the step still aborted the orderly way.
+        self.assertEqual(raw_link.sent[-1], "AT+MTEVT=0x0800003F")
+
 
 class FakeSubscriber:
     """Scripted Subscriber: report counts stepped by the test."""
@@ -2797,6 +2840,17 @@ class TestStep213ThreadRebootReattach(unittest.TestCase):
 
     ATTACHED_LINE = ('+MTTHREAD:ROUTER,1,15,0xFA25,0x000DB01A5C3F2E10,'
                      '0x00003A21,"MyThreadNet"')
+    # Review F3: the bench proved this exact combination (UNASSIGNED with
+    # every id field empty) cannot occur on the wire. UNASSIGNED means a
+    # dataset is installed, which means the four id fields and the name
+    # are already populated (AT_MT_SPEC.md 3.27): the empty rendering only
+    # ever pairs with UNSPECIFIED (no dataset at all). The three real
+    # renderings are: no dataset (UNSPECIFIED, everything empty), dataset
+    # installed but detached (UNASSIGNED with real channel/panid/
+    # extpanid/name and partitionid 0x00000000), and attached (a real
+    # role with all fields populated). This line stays as a grammar and
+    # negative-path fixture -- it exercises the null-means-unknown parse
+    # path standalone -- not as a claim about a state the device reaches.
     DETACHED_LINE = '+MTTHREAD:UNASSIGNED,0,,,,,""'
 
     def _commands(self, fabrics_line="+MTFABRICS:1",
@@ -7030,7 +7084,16 @@ class TestMtThreadQueryShape(unittest.TestCase):
 
     def test_thread_detached_happy_path(self):
         # The null-means-unknown case (spec 2.1): every id field empty,
-        # never rendered as 0.
+        # never rendered as 0. Review F3: pairing UNASSIGNED with all
+        # fields empty cannot happen on real hardware -- UNASSIGNED means
+        # a dataset is installed, which populates channel/panid/extpanid/
+        # name and renders partitionid 0x00000000, not empty
+        # (AT_MT_SPEC.md 3.27's three renderings: no dataset ->
+        # UNSPECIFIED all empty; dataset, detached -> UNASSIGNED with
+        # real ids and partitionid 0x00000000; attached -> a real role
+        # with all fields populated). This fixture is grammar-only, a
+        # standalone check that the parser handles the empty-field form
+        # at all, not a claim about a reachable device state.
         link = FakeLink({
             "AT+MTNET?": (0, ["+MTNET:THREAD,1,0,0"]),
             "AT+MTTHREAD?": (0, ['+MTTHREAD:UNASSIGNED,0,,,,,""']),
