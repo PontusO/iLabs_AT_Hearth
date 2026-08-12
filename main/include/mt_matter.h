@@ -142,6 +142,15 @@ int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *o
  * malformed command. A managed-internally (Instance-owned) attribute never
  * reaches that bounds check and keeps its historical MT_ATTR_ERR_FAILED.
  *
+ * A write whose value already equals the attribute's current value (a
+ * same-value re-push) returns MT_ATTR_OK in both notify modes: the
+ * attribute holds exactly what was asked, so the write succeeded by any
+ * definition that matters to a host. notify=false used to answer
+ * MT_ATTR_ERR_FAILED (a bare ERROR) for this specific case, because
+ * esp_matter's set_val_internal() signals a same-value no-op with
+ * ESP_ERR_NOT_FINISHED and only the notify=true path (update_or_report())
+ * absorbed it into ESP_OK before this fix.
+ *
  * notify=true  uses attribute::update(): subscribers and bound devices see the
  *              change, which is what a host-driven change should normally do.
  * notify=false uses attribute::set_val(): the value changes locally without a

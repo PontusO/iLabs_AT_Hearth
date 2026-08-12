@@ -668,7 +668,10 @@ def step_2_4_host_to_controller(ctx):
     """TESTING.md 2.4. Sequencing per the concurrency rule: subscriber
     up, AT-side writes observed, subscriber down, only then controller
     reads. Mode 0 keeping the report suppressed is the one property
-    nothing else in the suite can catch."""
+    nothing else in the suite can catch. Also pins the same-value mode-0
+    fix (found sweeping B264): a mode-0 re-push of the value the attribute
+    already holds must answer OK, not a bare ERROR, and raise no +MTATTR
+    URC either."""
     link, s, chip = ctx.link, ctx.suite, ctx.chip
     for want in (1, 0):
         res, _ = link.command("AT+MTATTR=1,6,0,%d" % want)
@@ -699,6 +702,18 @@ def step_2_4_host_to_controller(ctx):
                 res == 0 and lines == ["+MTATTR:1,6,0,0"], tag="P2")
         s.check("2.4 mode 0 produces no report",
                 sub.no_new_report(base, 5.0), tag="P2")
+
+        # A same-value re-push (the value already equals what mode 0 just
+        # set) used to fall through esp_matter's ESP_ERR_NOT_FINISHED to a
+        # bare ERROR here: the attribute already held exactly the value
+        # asked for, so the write succeeded by any definition that matters
+        # to a host, and now answers OK. No POST_UPDATE callback runs for
+        # an unchanged value in either mode, so no +MTATTR URC either.
+        res, _ = link.command("AT+MTATTR=1,6,0,0,0")
+        s.check("2.4 same-value mode-0 re-push -> OK, not a bare ERROR",
+                res == 0, tag="P2")
+        s.check("2.4 same-value mode-0 re-push raises no +MTATTR URC",
+                link.assert_no_urc(r"\+MTATTR:1,6,0", 1.5), tag="P2")
     finally:
         sub.stop()
     rc, out = chip.run(["onoff", "read", "on-off", "0x%X" % ctx.node_id,

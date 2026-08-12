@@ -1788,12 +1788,21 @@ class FakeSubscriber:
 
 
 class TestStep24(unittest.TestCase):
-    def _ctx(self, runner, sub):
+    def _ctx(self, runner, sub, same_value_rewrite=None):
+        # AT+MTATTR=1,6,0,0,0 is sent TWICE by the step: once to establish
+        # 0 (a real change, from the mode-1 write's 1), once as the
+        # same-value re-push this class's fix targets. A list value is
+        # consumed one entry per call (FakeLink.command()), so the two
+        # calls can answer differently; same_value_rewrite overrides only
+        # the second entry, to mock a regression on the re-push alone.
+        rewrite_calls = [(0, []),
+                         same_value_rewrite if same_value_rewrite is not None
+                         else (0, [])]
         link = FakeLink({
             "AT+MTATTR=1,6,0,1": (0, []),
             "AT+MTATTR=1,6,0,0": (0, []),
             "AT+MTATTR=1,6,0,1,1": (0, []),
-            "AT+MTATTR=1,6,0,0,0": (0, []),
+            "AT+MTATTR=1,6,0,0,0": rewrite_calls,
             "AT+MTATTR=1,6,0": (0, ["+MTATTR:1,6,0,0"]),
         })
         d = tempfile.mkdtemp()
@@ -1843,6 +1852,24 @@ class TestStep24(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(StepAbort):
                 step_2_4_host_to_controller(ctx)
+
+    def test_same_value_mode0_rewrite_regressed_to_bare_error_fails(self):
+        # The fix's failure-shape pin. If mt_matter_attr_write() regressed
+        # (ESP_ERR_NOT_FINISHED falling through to MT_ATTR_ERR_FAILED
+        # again, the exact bug this fix closes), the same-value mode-0
+        # re-push answers a bare ERROR (res=-1) instead of OK. The step's
+        # own check on that write's result must catch it directly.
+        runner = FakeChipRunner([
+            (0, fixture("chiptool_onoff_read_true.txt")),
+            (0, fixture("chiptool_onoff_read_false.txt")),
+            (0, fixture("chiptool_onoff_read_false.txt")),
+        ])
+        sub = FakeSubscriber(counts=[1, 2, 2])
+        ctx = self._ctx(runner, sub, same_value_rewrite=(-1, []))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_4_host_to_controller(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+        self.assertTrue(sub.stopped)
 
 
 class TestStep25(unittest.TestCase):

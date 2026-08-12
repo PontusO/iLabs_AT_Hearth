@@ -1133,6 +1133,25 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
     if (err == ESP_OK) {
         return MT_ATTR_OK;
     }
+    /* Same-value fix: ESP_ERR_NOT_FINISHED is set_val_internal()'s ONLY
+     * return for it (esp_matter_data_model.cpp:741-742, val_compare()
+     * against the attribute's own current value); nothing else in the SDK
+     * generates it on a path reachable from here (the two other call sites
+     * that check for it, esp_matter_data_model_provider.cpp and
+     * esp_matter_ember_stubs.cpp, are the controller-side WriteAttribute /
+     * ember IM paths, not this bridge's set_val()/update() calls). The
+     * attribute already holds exactly the value the host asked for, so by
+     * any definition that matters to a host this write succeeded: answer
+     * MT_ATTR_OK rather than falling through to the default bare ERROR.
+     * This is also why notify=true never showed the bug: update_or_report()
+     * (esp_matter_attribute_utils.cpp:649) already absorbs the identical
+     * ESP_ERR_NOT_FINISHED into ESP_OK before returning, on the theory that
+     * there is nothing to report; notify=false calls set_val() directly
+     * with no such absorption, so the two modes disagreed on the exact same
+     * no-op until now. */
+    if (err == ESP_ERR_NOT_FINISHED) {
+        return MT_ATTR_OK;
+    }
     /* B264 fix: ember's own min/max bounds check
      * (compare_attr_val_with_bounds() inside set_val_internal(),
      * esp_matter_data_model.cpp) is the ONLY failure reachable on this call
@@ -1148,11 +1167,7 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
      * or returns ESP_ERR_NOT_SUPPORTED when it is not writable at all
      * (esp_matter_data_model.cpp:1103). Neither of those is
      * ESP_ERR_INVALID_ARG, so an Instance-owned attribute keeps answering a
-     * bare ERROR through the default arm below, unchanged by this fix. The
-     * one other reachable code, ESP_ERR_NOT_FINISHED (the value is already
-     * what was asked, notify=false / set_val() path only, since
-     * notify=true's update_or_report() absorbs it into ESP_OK), is also not
-     * ESP_ERR_INVALID_ARG and keeps its historical bare ERROR too. */
+     * bare ERROR through the default arm below, unchanged by this fix. */
     if (err == ESP_ERR_INVALID_ARG) {
         return MT_ATTR_ERR_VALUE;
     }
