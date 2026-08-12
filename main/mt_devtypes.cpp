@@ -2214,14 +2214,31 @@ static endpoint_t *mk_battery_storage(node_t *n, uint8_t variant)
     }
     /* The eight battery attributes, endpoint.cpp:1951-1960 mirrored with
      * the SDK config's defaults: nullables null (no reading at boot),
-     * BatCapacity 0, the fault lists empty. */
-    cluster::power_source::attribute::create_bat_voltage(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFF);
+     * BatCapacity 0, the fault lists empty.
+     *
+     * B263: BatVoltage, BatTimeRemaining, BatCapacity, BatTimeToFullCharge
+     * and BatChargingCurrent are all XML-typed uint32 with no <constraint>
+     * element (PowerSourceCluster.xml:636, 653, 748, 774, 787), so their
+     * real range is the full uint32 domain. The SDK's own example call caps
+     * all five at 0x00..0xFFFF (endpoint.cpp:1954, 1956, 1958, 1959, 1960).
+     * BatCapacity is the reported case: it is mAh or mWh depending on the
+     * chemistry field, and 13.5 kWh is 13,500,000 in either unit, which
+     * cannot be expressed under the inherited 0xFFFF ceiling. The other
+     * four widen with it for the same reason (no XML basis for a narrower
+     * bound) rather than leaving a mismatched cap on their siblings. We
+     * follow the XML, not the example, and bound all five 0x00..0xFFFFFFFF.
+     * BatPercentRemaining is left at 0..200: that IS the
+     * real range, PowerSourceCluster.xml:643-650 constrains it to max 200
+     * (half-percent). The two fault lists are left at their SDK-mirrored
+     * 0,0: that pair bounds a list's element count (XML maxCount 8 and 16
+     * respectively), not a value's range, so B263 does not apply to them. */
+    cluster::power_source::attribute::create_bat_voltage(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFFFFFF);
     cluster::power_source::attribute::create_bat_percent_remaining(ps_cl, nullable<uint8_t>(), 0, 200);
-    cluster::power_source::attribute::create_bat_time_remaining(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFF);
+    cluster::power_source::attribute::create_bat_time_remaining(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFFFFFF);
     cluster::power_source::attribute::create_active_bat_faults(ps_cl, NULL, 0, 0);
-    cluster::power_source::attribute::create_bat_capacity(ps_cl, 0, 0x00, 0xFFFF);
-    cluster::power_source::attribute::create_bat_time_to_full_charge(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFF);
-    cluster::power_source::attribute::create_bat_charging_current(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFF);
+    cluster::power_source::attribute::create_bat_capacity(ps_cl, 0, 0x00, 0xFFFFFFFF);
+    cluster::power_source::attribute::create_bat_time_to_full_charge(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFFFFFF);
+    cluster::power_source::attribute::create_bat_charging_current(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFFFFFF);
     cluster::power_source::attribute::create_active_bat_charge_faults(ps_cl, NULL, 0, 0);
 
     if (!mt_graft_electrical_sensor(ep, true, "battery storage")) {

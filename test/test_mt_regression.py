@@ -5600,13 +5600,15 @@ class TestStep325BatteryStorage(unittest.TestCase):
     capability round trip, and DEMMode's tag-0 default."""
 
     def _ctx(self, server26=None, capability=None, modes=None,
-             charge_state=None):
+             charge_state=None, wide_capacity=None):
         link = FakeLink({
             "AT+MTATTR=26,47,11,12600": (0, ["+MTATTR:26,47,11,12600"]),
             "AT+MTATTR=26,0x2F,0x0C,180": (0, ["+MTATTR:26,47,12,180"]),
             "AT+MTATTR=26,47,26,1": (0, ["+MTATTR:26,47,26,1"]),
             "AT+MTATTR=26,47,28": (0, ["+MTATTR:26,47,28,0"]),
             "AT+MTATTR=26,47,24,5000": (0, ["+MTATTR:26,47,24,5000"]),
+            "AT+MTATTR=26,47,24,13500000":
+                (0, ["+MTATTR:26,47,24,13500000"]),
             "AT+MTMEAS=26,144,0,230000,2,-2200000": (0, []),
             "AT+MTMEAS=26,152,0,5,1,1": (0, []),
             "AT+MTDEMCAP=26,2,1,1000000,5000000,60,1800": (0, []),
@@ -5621,6 +5623,8 @@ class TestStep325BatteryStorage(unittest.TestCase):
             (0, charge_state if charge_state is not None
              else "[TOO]   BatChargeState: 1"),
             (0, "[TOO]   BatCapacity: 5000"),
+            (0, wide_capacity if wide_capacity is not None
+             else "[TOO]   BatCapacity: 13500000"),
             (0, "[TOO]   ActivePower: -2200000"),
             (0, "[TOO]   ESAType: 5"),
             (0, "[TOO]   ESACanGenerate: TRUE"),
@@ -5678,6 +5682,17 @@ class TestStep325BatteryStorage(unittest.TestCase):
         # the controller read answers nothing this parser can find.
         ctx = self._ctx(charge_state="[TOO]   Error: 0x86 "
                                      "(UNSUPPORTED_ATTRIBUTE)")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_25_battery_storage(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_bat_capacity_regressed_to_old_cap_fails(self):
+        # B263 pin's failure shape: a mt_devtypes.cpp regression back to
+        # the SDK example's 0x00..0xFFFF bound would clamp the ember
+        # attribute at 65535, so a firmware that reintroduced the cap
+        # reads back 65535 here instead of 13500000, and the check must
+        # catch it rather than pass on the earlier 5000-scale row alone.
+        ctx = self._ctx(wide_capacity="[TOO]   BatCapacity: 65535")
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_25_battery_storage(ctx)
         self.assertGreater(ctx.suite.failed, 0)

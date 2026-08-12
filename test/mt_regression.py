@@ -3501,7 +3501,11 @@ def step_3_25_battery_storage(ctx):
     BatFunctionalWhileCharging (28/0x1C) is its sibling, read-only here
     because feature::rechargeable::add() is what created it. The
     BatPercentRemaining row is commanded in HEX to pin the same decimal
-    normalization TESTING.md 6.1's hex-parsing row does.
+    normalization TESTING.md 6.1's hex-parsing row does. BatCapacity is
+    written twice: once at the SDK example's own scale (5000), then
+    again past its old 0x00..0xFFFF bound at 13500000 (13.5 kWh), the
+    B263 pin against mt_devtypes.cpp regressing back to the SDK's
+    example-derived cap instead of the cluster XML's real uint32 range.
 
     DEM triple: this endpoint takes the SECOND HearthDemDelegate pool
     slot (2 of MT_DEM_MAX 4), so a capability install here plus a
@@ -3584,6 +3588,23 @@ def step_3_25_battery_storage(ctx):
                        timeout=30)
     s.check("3.25 controller reads BatCapacity 5000",
             rc == 0 and parse_int_attr(out) == 5000, tag="P3")
+
+    # --- B263 pin: BatCapacity at a realistic home-battery scale ---
+    # mt_devtypes.cpp used to mirror the SDK example's 0x00..0xFFFF bound
+    # (esp_matter_endpoint.cpp:1958), which cannot hold a real capacity:
+    # 13.5 kWh is 13,500,000 in either mWh or mAh. PowerSourceCluster.xml
+    # types BatCapacity uint32 with no <constraint>, so the fix widens the
+    # bound to the full uint32 domain; this row writes past the old cap
+    # and reads the same value back, which is exactly the write the B263
+    # bug report could not make.
+    res, lines = link.command("AT+MTATTR=26,47,24,13500000")
+    s.check("3.25 BatCapacity write past the old 0xFFFF cap (13.5 kWh, "
+            "13500000) -> OK, echo line (B263)",
+            res == 0 and lines == ["+MTATTR:26,47,24,13500000"], tag="P3")
+    rc, out = chip.run(["powersource", "read", "bat-capacity", node, "26"],
+                       timeout=30)
+    s.check("3.25 controller reads BatCapacity 13500000 (B263)",
+            rc == 0 and parse_int_attr(out) == 13500000, tag="P3")
 
     # --- the sixth measurement pool pair, charging draw ---
     res, lines = link.command("AT+MTMEAS=26,144,0,230000,2,-2200000")
