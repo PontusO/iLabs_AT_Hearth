@@ -505,6 +505,27 @@ static bool i64_to_attr_val(esp_matter_attr_val_t *v, int64_t in)
 }
 
 /*
+ * Forward declarations: both are implemented later in this file (attr_locate()
+ * with the other attribute-bridge plumbing, mt_thread_read_role() right beside
+ * mt_matter_thread_info()/mt_thread_role_name(), which it shares its read path
+ * with), but app_event_cb() below needs to call mt_thread_read_role() from its
+ * kThreadStateChange case, which runs earlier in this translation unit than
+ * either definition.
+ */
+static mt_attr_result_t attr_locate(uint16_t ep, uint32_t cluster, uint32_t attr,
+                                    esp_matter::attribute_t **out);
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+/* Guarded like its sole call site (app_event_cb()'s kThreadStateChange case,
+ * below) and its definition (near mt_matter_thread_info()): on a WiFi-only
+ * image (build_b4) this whole path does not exist, and an unconditional
+ * definition would be an unused static function there. noinline: this is a
+ * single-call-site static function GCC otherwise folds entirely into
+ * app_event_cb() even at -Os, leaving no distinct symbol; kept as a real
+ * frame so it has a name in a backtrace and in `nm`. */
+static bool mt_thread_read_role(uint8_t *role_out) __attribute__((noinline));
+#endif
+
+/*
  * Platform events. Each CHIP event we surface maps to a bit in the AT event
  * mask (mt_at.h); mt_at_event() drops the ones the host has not subscribed to,
  * so this switch can stay exhaustive without flooding a 115200 link.
@@ -644,6 +665,51 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         break;
     case DeviceEventType::kThreadStateChange:
         mt_at_event(MT_EVT_THREAD_STATE_CHANGE, nullptr);
+        /*
+         * Bit 28, 0.11.0 (design spec 2.2). CHIPDeviceEvent.h's
+         * ThreadStateChange struct carries four independent bool:1 bits
+         * (RoleChanged, AddressChanged, NetDataChanged, ChildNodesChanged;
+         * verified at source before relying on it, per the task brief), so
+         * gating on RoleChanged alone means this fires on a routing-role
+         * transition only, never on address, network-data or child-table
+         * churn, and the firmware tracks no delta state of its own to notice
+         * a "change": CHIP's own flag IS the change signal.
+         * MT_EVT_THREAD_STATE_CHANGE above stays exactly as it was, coarse
+         * and unconditional; this is additive, not a replacement.
+         *
+         * No ChipStackLock here: this callback already runs ON the CHIP
+         * event-loop task, the same reasoning the door lock adjudication
+         * block states explicitly for app_event_cb() ("NO ChipStackLock in
+         * this block, unlike every mt_matter_* bridge function below: these
+         * callbacks already run ON the CHIP event-loop task ..., the same
+         * reasoning as app_event_cb()", above mt_door_lock_adjudicate()).
+         * mt_matter_thread_info() cannot be reused to read the role here for
+         * that same reason: it opens its own ChipStackLock for its other
+         * caller (the AT parser task, via cmd_mtthread), and CHIP's
+         * PlatformManager lock is not documented reentrant, so taking it a
+         * second time from a task that already (implicitly) holds it risks a
+         * self-deadlock rather than a race. mt_thread_read_role() below
+         * mirrors just the RoutingRole probe inside mt_matter_thread_info(),
+         * with no lock of its own, since role is the only field this event's
+         * payload carries.
+         */
+        {
+            uint8_t role = 0;
+            if (mt_thread_read_role(&role)) {
+                char role_tok[8];
+                const char *tok = mt_thread_role_name(role);
+                if (tok == nullptr) {
+                    /* Same decimal-degrades-rather-than-lies fallback
+                     * cmd_mtthread uses for AT+MTTHREAD? (mt_at.c, design
+                     * spec 2.1): an out-of-range SDK value still reaches the
+                     * host instead of silently dropping the one notification
+                     * of this transition. */
+                    snprintf(role_tok, sizeof(role_tok), "%u", (unsigned)role);
+                    tok = role_tok;
+                }
+                mt_at_event(MT_EVT_THREAD_ROLE_CHANGED, tok);
+            }
+        }
         break;
     case DeviceEventType::kThreadInterfaceStateChange:
         mt_at_event(MT_EVT_THREAD_IF_STATE_CHANGE, nullptr);
@@ -1421,15 +1487,35 @@ extern "C" int mt_matter_thread_info(mt_thread_info_t *out)
                     chip::app::Clusters::ThreadNetworkDiagnostics::Attributes::NetworkName::Id,
                     &name_attr) == MT_ATTR_OK) {
         esp_matter_attr_val_t name_val;
-        if (esp_matter::attribute::get_val(name_attr, &name_val) == ESP_OK &&
-            name_val.type == ESP_MATTER_VAL_TYPE_CHAR_STRING && name_val.val.a.b != nullptr) {
-            uint16_t len = name_val.val.a.s;
-            if (len > sizeof(out->name) - 1) {
-                len = sizeof(out->name) - 1;
+        if (esp_matter::attribute::get_val(name_attr, &name_val) == ESP_OK) {
+            /*
+             * Task 2 review follow-up (robustness): the free used to be
+             * gated on the SAME "type == CHAR_STRING" check as the memcpy
+             * below, which is a tautology today (NetworkName only ever
+             * decodes as CHAR_STRING on this SDK) but would leak the buffer
+             * silently on a device expected to run for months if a future
+             * SDK bump ever encoded it as LONG_CHAR_STRING instead:
+             * esp_matter_attribute_utils.h's val union shares the SAME
+             * { uint8_t *b; uint16_t s; ... } "a" struct across every
+             * buffer-shaped type (CHAR_STRING, LONG_CHAR_STRING,
+             * OCTET_STRING, LONG_OCTET_STRING, ARRAY), so val.a.b is a
+             * valid, freeable pointer regardless of which of those get_val()
+             * returns. The free below is keyed on the pointer alone, so it
+             * is structurally leak-proof; the memcpy stays gated on
+             * CHAR_STRING specifically, since that is the only shape this
+             * bridge knows how to interpret as a plain byte string today.
+             */
+            if (name_val.type == ESP_MATTER_VAL_TYPE_CHAR_STRING && name_val.val.a.b != nullptr) {
+                uint16_t len = name_val.val.a.s;
+                if (len > sizeof(out->name) - 1) {
+                    len = sizeof(out->name) - 1;
+                }
+                memcpy(out->name, name_val.val.a.b, len);
+                out->name[len] = '\0';
             }
-            memcpy(out->name, name_val.val.a.b, len);
-            out->name[len] = '\0';
-            esp_matter_mem_free(name_val.val.a.b);
+            if (name_val.val.a.b != nullptr) {
+                esp_matter_mem_free(name_val.val.a.b);
+            }
         }
     }
 
@@ -1450,6 +1536,54 @@ extern "C" const char *mt_thread_role_name(uint8_t role)
     default:                                return nullptr;
     }
 }
+
+/*
+ * Read RoutingRole with NO ChipStackLock. The sole caller is
+ * app_event_cb()'s kThreadStateChange case (0.11.0, +MTEVT:28), which
+ * already runs on the CHIP event-loop task, where re-entering
+ * PlatformMgr().LockChipStack() would risk a self-deadlock rather than a
+ * race (see that case's own comment for the full reasoning, which cites the
+ * door lock adjudication block's identical rule for app_event_cb()).
+ * mt_matter_thread_info() is not reused here for that same reason: it wraps
+ * its whole read in a ChipStackLock for its other caller (the AT parser
+ * task, via cmd_mtthread). This mirrors only that function's RoutingRole
+ * probe (attr_locate() + get_val() + attr_val_to_i64()), since role is the
+ * only field the role-change event's payload carries.
+ *
+ * Returns false when the attribute cannot be located at all (should not
+ * happen: this only runs inside CHIP_DEVICE_CONFIG_ENABLE_THREAD, i.e. a
+ * Thread image, which always creates ThreadNetworkDiagnostics on endpoint 0,
+ * the same reasoning mt_matter_thread_info()'s own header comment gives) or
+ * decodes as null (thread-network-diagnostics-provider.cpp's own
+ * not-commissioned null list explicitly excludes RoutingRole, so this should
+ * not happen either; see mt_matter_thread_info()'s identical check).
+ *
+ * Guarded by CHIP_DEVICE_CONFIG_ENABLE_THREAD, matching its sole call site
+ * (app_event_cb()'s kThreadStateChange case) and its forward declaration
+ * above: on a WiFi-only image this function is unreachable and would
+ * otherwise be an unused static function.
+ */
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+static bool mt_thread_read_role(uint8_t *role_out)
+{
+    esp_matter::attribute_t *role_attr = nullptr;
+    if (attr_locate(0, chip::app::Clusters::ThreadNetworkDiagnostics::Id,
+                    chip::app::Clusters::ThreadNetworkDiagnostics::Attributes::RoutingRole::Id,
+                    &role_attr) != MT_ATTR_OK) {
+        return false;
+    }
+    esp_matter_attr_val_t role_val;
+    if (esp_matter::attribute::get_val(role_attr, &role_val) != ESP_OK) {
+        return false;
+    }
+    int64_t role64 = 0;
+    if (!attr_val_to_i64(&role_val, &role64)) {
+        return false;
+    }
+    *role_out = (uint8_t)role64;
+    return true;
+}
+#endif
 
 /*
  * AT+MTSWITCH: emit the Switch cluster's InitialPress event, which is what

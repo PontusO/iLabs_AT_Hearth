@@ -86,6 +86,17 @@ enum {
      * the nominally reserved 23, which the host library already maps to
      * MATTER_ESP32_SPECIFIC_EVENT. */
     MT_EVT_TRANSPORT_MISMATCH         = 27,
+
+    /* Thread role change (bit 28, 0.11.0). Registered here rather than folded
+     * into the bits 24-26 Thread group above: that group predates
+     * AT+MTTHREAD?/mt_matter_thread_info() and was already numbered before
+     * this event existed, and bit 27 sits between them, so renumbering would
+     * touch a published mask for no gain. Fires only on a routing-role
+     * transition (CHIP's own ThreadStateChange.RoleChanged bit, never on
+     * address/network-data/child-table churn), payload is the same decoded
+     * <role> token AT+MTTHREAD? reports (design spec 2.2). Bits 29-31 remain
+     * free in the 32-bit mask. */
+    MT_EVT_THREAD_ROLE_CHANGED        = 28,
 };
 
 /*
