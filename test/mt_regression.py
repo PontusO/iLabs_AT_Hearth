@@ -11,8 +11,8 @@ Phase 2 run: MT_SSID=... MT_PSK=... python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 2
 Phase 3 run (host-only segment plus the full controller matrix, including
 the RVC + Microwave batch's slots 12-13, the composed appliance
-round's slots 14-20, energy round A's slots 21-22 and energy round B's
-slots 23-24):
+round's slots 14-20, energy round A's slots 21-22, energy round B's
+slots 23-24 and energy round C1's slots 25-27):
 python3 test/mt_regression.py \
     --port /dev/ttyACM0 --phase 3
 (-k "3." scopes to Phase 3's own steps, since -k matches a literal
@@ -430,16 +430,20 @@ PHASE3_COMPOSITION = [
     # endpoint ids are assigned sequentially from 1, so index = endpoint
     # id - 1 throughout this table (index 13 = ep 14, and so on).
     #
-    # ModeBase delegate pool budget (MT_MB_MAX_LISTS = 8, main.cpp): this
-    # composition consumes ALL 8 slots: RVC 2 (RvcRunMode + RvcCleanMode,
-    # slot 12), microwave 1 (slot 13), fridge parent 1 (slot 14, its own
+    # ModeBase delegate pool budget (MT_MB_MAX_LISTS = 12, mt_matter.h,
+    # raised from 8 by energy round C1): this composition consumes 10 of
+    # the 12 slots: RVC 2 (RvcRunMode + RvcCleanMode, slot 12), microwave
+    # 1 (slot 13), fridge parent 1 (slot 14, its own
     # RefrigeratorAndTCCMode), the two fridge cabinets 2 (slots 15-16,
     # Cooler conditional cluster each), oven cavity 1 (slot 18, OvenMode),
-    # water heater 1 (slot 23, WaterHeaterMode, energy round B). The pool
-    # is FULL: any further ModeBase-carrying slot needs MT_MB_MAX_LISTS
-    # raised first, or the boot rebuild aborts when the pool runs dry
-    # (mk_* thunks return null on exhaustion and a failed create aborts
-    # the whole composition, CLAUDE.md).
+    # water heater 1 (slot 23, WaterHeaterMode, energy round B), battery
+    # storage 1 and standalone DEM 1 (slots 26-27, DeviceEnergyManagement
+    # Mode each, energy round C1). The remaining 2 are DELIBERATE
+    # headroom (see the round C1 comment at slot 25); a table edit that
+    # took the pool past 12 without raising MT_MB_MAX_LISTS would abort
+    # the boot rebuild when the pool ran dry (mk_* thunks return null on
+    # exhaustion and a failed create aborts the whole composition,
+    # CLAUDE.md).
     (14, "0x0070"),        # refrigerator parent (composed trio round)
     (15, "0x0071,0,13"),   # number cabinet under the fridge (index 13 = ep 14)
     (16, "0x0071,1,13"),   # levels cabinet under the fridge
@@ -476,17 +480,47 @@ PHASE3_COMPOSITION = [
     # table: its feature-gate refusals are exercised by Phase 1's staged
     # scratch composition (t_meas_staged_wh_min), which restores the
     # single-light standard state after itself. Measurement pool budget
-    # (MT_MEAS_MAX = 4, mt_matter.h): slots 21-24 are the four EPM/PT
-    # consumers, hitting the pool EXACTLY (design spec section 5's
-    # deliberate exhaustion-boundary coverage); a future
-    # measurement-bearing slot needs the pool raised first, same rule as
-    # the ModeBase budget above.
+    # (MT_MEAS_MAX = 8, mt_matter.h, raised from 4 by energy round C1):
+    # slots 21-24 were the four EPM/PT consumers that hit the old pool
+    # exactly, and round C1's slots 25-26 make six of eight; see the
+    # round C1 comment below for why the remaining two are deliberate
+    # headroom rather than another exhaustion boundary.
     (23, "0x050F"),        # water heater, variant 0 FULL (WHM + Thermostat
                             # + WaterHeaterMode + the 0x0510 sensor graft)
     (24, "0x0309"),        # heat pump (0x0309 + 0x0011 power source +
                             # 0x0510 sensor identity on one endpoint; no
                             # WHM, no Thermostat: the disclosed SDK-parity
                             # gap, mt_devtypes.cpp)
+    # Energy round C1 (0.10.0), task 4: solar power, battery storage and
+    # the standalone Device Energy Management ESA, behind the 0x0098 push
+    # table, the new AT+MTDEMCAP family and the PowerAdjust forwards
+    # (spec 3.17/3.25/3.26). All three slots are VARIANT 0, the full
+    # surface; every variant-1 refusal row lives in Phase 1's staged
+    # scratch composition (t_staged_variant1_energy_c1), the
+    # t_meas_staged_wh_min division.
+    #
+    # Budget HEADROOM IS DELIBERATE this round, unlike round B's three
+    # exact fits: the pools are proven and the exact-fit experiment ended
+    # with B247 (design spec section 5). Endpoints 27 of
+    # MT_COMP_MAX_ENDPOINTS 28 (CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_
+    # COUNT stays MT_COMP_MAX_ENDPOINTS + 1 = 29, the B247 invariant:
+    # root endpoint 0 counts against the SDK's limit); measurement pool 6
+    # of MT_MEAS_MAX 8; ModeBase pool 10 of MT_MB_MAX_LISTS 12; DEM
+    # delegate pool 2 of MT_DEM_MAX 4. All four budgets are pinned by
+    # their own self-tests, so a table edit that overruns one fails the
+    # host suite instead of the bench's boot rebuild.
+    (25, "0x0017"),        # solar power, variant 0 FULL (the composed
+                            # 0x0510 sensor graft WITH EEM; variant 1 is
+                            # the disclosed sub-conformant current-clamp
+                            # shape, Phase 1's staged row)
+    (26, "0x0018"),        # battery storage, variant 0 FULL (battery|
+                            # rechargeable PowerSource with the SDK's RECHG
+                            # conformance defect fixed, the sensor graft,
+                            # and the DEM triple: 0x050D + DEM + DEMMode)
+    (27, "0x050D"),        # device energy management, standalone, variant 0
+                            # (ControllableESA: the PowerAdjustment feature,
+                            # so PowerAdjustmentCapability, both PA commands
+                            # and both PA events exist)
 ]
 
 
@@ -3334,6 +3368,659 @@ def step_3_23_heat_pump(ctx):
             and 2500000 in parse_energy_values(out), tag="P3")
 
 
+def step_3_24_solar_power(ctx):
+    """Energy round C1 (0.10.0), task 4: the Solar Power slot
+    (PHASE3_COMPOSITION 25, endpoint 25, 0x0017 variant 0 FULL;
+    mt_devtypes.cpp's mk_solar_power(), hand-built because
+    solar_power::add() assigns feature_flags over caller pre-seeds and
+    creates EPM Voltage/ActiveCurrent as non-null zeros, ARCHITECTURE.md
+    8.12).
+
+    Identity: ONE endpoint carrying three device types (0x0017 Solar
+    Power = 23, 0x0011 Power Source = 17, the composed 0x0510 Electrical
+    Sensor = 1296), the step_3_23 shape on this round's first type.
+
+    Server list: PowerSource (47) plus the variant-0 graft's EPM (144),
+    EEM (145) and PowerTopology (156). DeviceEnergyManagement (152) is
+    pinned ABSENT: SolarPower.xml requests no DEM (unlike battery
+    storage's over-delivery), so both a 0x0098 push and an AT+MTDEMCAP
+    on this endpoint answer +MTERR:3, the cluster-not-carried code.
+    Those two rows are the Phase 3 half of spec 3.26's lookup division;
+    their +MTERR:2 and light-endpoint siblings live in step_3_26.
+
+    The energy push is the EXPORTED counter (field 1) at 4294967297 mWh,
+    two firsts in one row: no earlier step reads the exported side back
+    at all (step_3_21 pushes it only alongside imported), and no earlier
+    step proves the exported side survives the 64-bit pipeline. Solar is
+    the device type whose exported energy is the whole point. The
+    measurement values stay Instance-owned like every AT+MTMEAS value,
+    so controller reads are the only read-back and assert_no_urc pins
+    that no +MTATTR ever follows (spec 3.25).
+
+    Pool position, by construction: this endpoint is the FIFTH EPM/PT
+    pool pair (MT_MEAS_MAX raised 4 -> 8 this round), so its pushes are
+    the proof the raise took effect; slot 26 is the sixth, and the
+    remaining two are deliberate headroom (the composition table's own
+    round C1 comment). No command traffic exists on this endpoint (none
+    of its clusters declares an accepted command), the step_3_20/3_21
+    rule, so this step scripts none."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+
+    # --- identity: three device types on one endpoint ---
+    rc, out = chip.run(["descriptor", "read", "device-type-list", node,
+                        "25"], timeout=30)
+    types = parse_device_types(out)
+    s.check("3.24 device type list carries 0x0017 (23), 0x0011 (17) and "
+            "the composed 0x0510 sensor (1296)",
+            rc == 0 and 23 in types and 17 in types and 1296 in types,
+            tag="P3")
+
+    # --- server list: full sensor surface, no DEM ---
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "25"],
+                       timeout=30)
+    servers = parse_accepted_command_list(out)
+    s.check("3.24 server list carries PowerSource (47), EPM (144), EEM "
+            "(145) and PowerTopology (156)",
+            rc == 0 and 47 in servers and 144 in servers
+            and 145 in servers and 156 in servers, tag="P3")
+    s.check("3.24 no DeviceEnergyManagement (152) on solar power "
+            "(SolarPower.xml requests none: pinned as an absence)",
+            rc == 0 and bool(servers) and 152 not in servers, tag="P3")
+
+    # --- the DEM-less endpoint answers both DEM surfaces with 3 ---
+    s.check("3.24 AT+MTMEAS=25,152,0,1 -> +MTERR:3 (solar carries no "
+            "DeviceEnergyManagement cluster)",
+            expect_err("AT+MTMEAS=25,152,0,1", 3)(link), tag="P3")
+    s.check("3.24 AT+MTDEMCAP=25,1,0 -> +MTERR:3 (same cluster-missing "
+            "code on the new command family, spec 3.26)",
+            expect_err("AT+MTDEMCAP=25,1,0", 3)(link), tag="P3")
+
+    # --- power push, controller read-back only ---
+    res, lines = link.command("AT+MTMEAS=25,144,0,230000,1,433,2,99590")
+    s.check("3.24 power push -> OK (the fifth MT_MEAS_MAX pool pair, the "
+            "raise made observable)", res == 0 and lines == [], tag="P3")
+    s.check("3.24 no +MTATTR URC from the push (Instance-owned values, "
+            "spec 3.25)", link.assert_no_urc(r"\+MTATTR:25,", 1.5),
+            tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read", "voltage",
+                        node, "25"], timeout=30)
+    s.check("3.24 controller reads Voltage 230000",
+            rc == 0 and parse_int_attr(out) == 230000, tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read",
+                        "active-power", node, "25"], timeout=30)
+    s.check("3.24 controller reads ActivePower 99590",
+            rc == 0 and parse_int_attr(out) == 99590, tag="P3")
+
+    # --- energy: the EXPORTED side, above 2^32 ---
+    res, lines = link.command("AT+MTMEAS=25,145,1,4294967297")
+    s.check("3.24 exported energy push (2^32 + 1 mWh) -> OK",
+            res == 0 and lines == [], tag="P3")
+    rc, out = chip.run(["electricalenergymeasurement", "read",
+                        "cumulative-energy-exported", node, "25"],
+                       timeout=30)
+    s.check("3.24 CumulativeEnergyExported struct carries energy "
+            "4294967297 (the exported side's only read-back anywhere, "
+            "at full 64-bit width)",
+            rc == 0 and 4294967297 in parse_energy_values(out), tag="P3")
+    rc, out = chip.run(["electricalenergymeasurement", "read-event",
+                        "cumulative-energy-measured", node, "25"],
+                       timeout=30)
+    s.check("3.24 CumulativeEnergyMeasured event observed with the "
+            "exported energy",
+            rc == 0
+            and parse_event_count(out, "CumulativeEnergyMeasured") >= 1
+            and 4294967297 in parse_energy_values(out), tag="P3")
+
+
+def step_3_25_battery_storage(ctx):
+    """Energy round C1 (0.10.0), task 4: the Battery Storage slot
+    (PHASE3_COMPOSITION 26, endpoint 26, 0x0018 variant 0 FULL;
+    mt_devtypes.cpp's mk_battery_storage()).
+
+    Identity: FOUR device types on one endpoint (0x0018 = 24, 0x0011 =
+    17, the composed 0x0510 sensor = 1296, and 0x050D
+    DeviceEnergyManagement = 1293, which the SDK build bolts on as
+    over-delivery and this thunk keeps on variant 0 only).
+
+    The battery attributes are the round's no-new-surface claim (design
+    spec 3.5) made observable: they are EMBER-served, so plain AT+MTATTR
+    reads and writes reach them and a controller read agrees, the
+    deliberate contrast with every Instance-owned value on the same
+    endpoint. BatChargeState (attribute 26/0x1A) is the important one:
+    the SDK's own battery_storage::add() creates the four RECHG-GATED
+    attributes without the RECHG feature bit and omits the
+    RECHG-mandatory BatChargeState entirely, so its mere presence here
+    is the wire evidence for the conformance fix (battery|rechargeable
+    in the thunk's PowerSource config, ARCHITECTURE.md 8.12);
+    BatFunctionalWhileCharging (28/0x1C) is its sibling, read-only here
+    because feature::rechargeable::add() is what created it. The
+    BatPercentRemaining row is commanded in HEX to pin the same decimal
+    normalization TESTING.md 6.1's hex-parsing row does.
+
+    DEM triple: this endpoint takes the SECOND HearthDemDelegate pool
+    slot (2 of MT_DEM_MAX 4), so a capability install here plus a
+    controller read-back is the proof the pool serves more than its
+    first endpoint; the full PowerAdjust protocol lives on the
+    standalone ESA at slot 27 (step_3_26) rather than being run twice.
+    DeviceEnergyManagementMode (159/0x9F) is staged over the
+    cluster-aware AT+MTMODES with one tag-0 default, which must resolve
+    to kNoOptimization (0x4000, main.cpp's pinned default for this
+    cluster) and one explicit kDeviceOptimization (0x4001)."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+
+    # --- identity: four device types on one endpoint ---
+    rc, out = chip.run(["descriptor", "read", "device-type-list", node,
+                        "26"], timeout=30)
+    types = parse_device_types(out)
+    s.check("3.25 device type list carries 0x0018 (24), 0x0011 (17), the "
+            "composed 0x0510 sensor (1296) and 0x050D DEM (1293)",
+            rc == 0 and 24 in types and 17 in types and 1296 in types
+            and 1293 in types, tag="P3")
+
+    # --- server list: sensor graft, power source, the DEM pair ---
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "26"],
+                       timeout=30)
+    servers = parse_accepted_command_list(out)
+    s.check("3.25 server list carries PowerSource (47), EPM (144), EEM "
+            "(145) and PowerTopology (156)",
+            rc == 0 and 47 in servers and 144 in servers
+            and 145 in servers and 156 in servers, tag="P3")
+    s.check("3.25 server list carries DeviceEnergyManagement (152) and "
+            "DeviceEnergyManagementMode (159): the variant-0 DEM triple",
+            rc == 0 and 152 in servers and 159 in servers, tag="P3")
+
+    # --- battery attributes: ember-served, both directions ---
+    res, lines = link.command("AT+MTATTR=26,47,11,12600")
+    s.check("3.25 BatVoltage write (12.6 V) -> OK, echo line",
+            res == 0 and lines == ["+MTATTR:26,47,11,12600"], tag="P3")
+    rc, out = chip.run(["powersource", "read", "bat-voltage", node, "26"],
+                       timeout=30)
+    s.check("3.25 controller reads BatVoltage 12600",
+            rc == 0 and parse_int_attr(out) == 12600, tag="P3")
+    res, lines = link.command("AT+MTATTR=26,0x2F,0x0C,180")
+    s.check("3.25 BatPercentRemaining write in hex (90%, half-percent "
+            "units) -> OK, echo line in normalized decimal",
+            res == 0 and lines == ["+MTATTR:26,47,12,180"], tag="P3")
+    rc, out = chip.run(["powersource", "read", "bat-percent-remaining",
+                        node, "26"], timeout=30)
+    s.check("3.25 controller reads BatPercentRemaining 180",
+            rc == 0 and parse_int_attr(out) == 180, tag="P3")
+    res, lines = link.command("AT+MTATTR=26,47,26,1")
+    s.check("3.25 BatChargeState write (1 IsCharging) -> OK: the "
+            "attribute the SDK build omits entirely exists here (the "
+            "RECHG conformance fix)",
+            res == 0 and lines == ["+MTATTR:26,47,26,1"], tag="P3")
+    rc, out = chip.run(["powersource", "read", "bat-charge-state", node,
+                        "26"], timeout=30)
+    s.check("3.25 controller reads BatChargeState 1",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+    res, lines = link.command("AT+MTATTR=26,47,28")
+    s.check("3.25 BatFunctionalWhileCharging reads 0 (the second "
+            "RECHG-mandatory attribute, present and defaulted)",
+            res == 0 and lines == ["+MTATTR:26,47,28,0"], tag="P3")
+    res, lines = link.command("AT+MTATTR=26,47,24,5000")
+    s.check("3.25 BatCapacity write (5000 mAh) -> OK, echo line",
+            res == 0 and lines == ["+MTATTR:26,47,24,5000"], tag="P3")
+    rc, out = chip.run(["powersource", "read", "bat-capacity", node, "26"],
+                       timeout=30)
+    s.check("3.25 controller reads BatCapacity 5000",
+            rc == 0 and parse_int_attr(out) == 5000, tag="P3")
+
+    # --- the sixth measurement pool pair, charging draw ---
+    res, lines = link.command("AT+MTMEAS=26,144,0,230000,2,-2200000")
+    s.check("3.25 power push with a negative ActivePower (charging draw) "
+            "-> OK (the sixth MT_MEAS_MAX pool pair)",
+            res == 0 and lines == [], tag="P3")
+    s.check("3.25 no +MTATTR URC from the push (Instance-owned values, "
+            "spec 3.25)", link.assert_no_urc(r"\+MTATTR:26,144", 1.5),
+            tag="P3")
+    rc, out = chip.run(["electricalpowermeasurement", "read",
+                        "active-power", node, "26"], timeout=30)
+    s.check("3.25 controller reads ActivePower -2200000",
+            rc == 0 and parse_int_attr(out) == -2200000, tag="P3")
+
+    # --- DEM: the second pool slot serves this endpoint ---
+    res, lines = link.command("AT+MTMEAS=26,152,0,5,1,1")
+    s.check("3.25 ESA identity push (ESAType BatteryStorage 5, "
+            "ESACanGenerate true) -> OK", res == 0 and lines == [],
+            tag="P3")
+    s.check("3.25 no +MTATTR URC from the 0x0098 push (Instance-owned, "
+            "spec 3.25)", link.assert_no_urc(r"\+MTATTR:26,152", 1.5),
+            tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read", "esatype", node,
+                        "26"], timeout=30)
+    s.check("3.25 controller reads ESAType 5 (BatteryStorage)",
+            rc == 0 and parse_int_attr(out) == 5, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read",
+                        "esacan-generate", node, "26"], timeout=30)
+    s.check("3.25 controller reads ESACanGenerate TRUE",
+            rc == 0 and re.search(r"ESACanGenerate:\s*TRUE", out)
+            is not None, tag="P3")
+    res, _ = link.command(
+        "AT+MTDEMCAP=26,2,1,1000000,5000000,60,1800")
+    s.check("3.25 AT+MTDEMCAP one entry, cause 2 "
+            "(GridOptimizationAdjustment) -> OK", res == 0, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read",
+                        "power-adjustment-capability", node, "26"],
+                       timeout=30)
+    s.check("3.25 controller reads the single capability entry back "
+            "verbatim",
+            rc == 0
+            and parse_power_adjust_entries(out) == [(1000000, 5000000,
+                                                     60, 1800)], tag="P3")
+    s.check("3.25 capability cause is the pushed baseline 2",
+            rc == 0 and parse_cause_values(out) == [2], tag="P3")
+
+    # --- DeviceEnergyManagementMode: tag-0 default + explicit tag ---
+    res, _ = link.command(
+        'AT+MTMODES=26,159,0,0,"NoOptimization",1,16385,"DeviceOpt"')
+    s.check("3.25 DEMMode staged (tag-0 default + explicit "
+            "kDeviceOptimization) -> OK", res == 0, tag="P3")
+    rc, out = chip.run(["deviceenergymanagementmode", "read",
+                        "supported-modes", node, "26"], timeout=30)
+    s.check("3.25 SupportedModes labels verbatim",
+            rc == 0 and parse_string_list(out) == ["NoOptimization",
+                                                   "DeviceOpt"], tag="P3")
+    s.check("3.25 ModeTags: defaulted kNoOptimization (0x4000), explicit "
+            "kDeviceOptimization (0x4001)",
+            rc == 0 and parse_mode_tag_values(out) == [0x4000, 0x4001],
+            tag="P3")
+
+
+def step_3_26_dem(ctx):
+    """Energy round C1 (0.10.0), task 4: the standalone Device Energy
+    Management ESA (PHASE3_COMPOSITION 27, endpoint 27, 0x050D variant 0
+    ControllableESA; mt_devtypes.cpp's mk_dem() through
+    mt_add_dem_triple()), and with it the whole PowerAdjust protocol:
+    AT+MTDEMCAP (spec 3.26), the adjudicated 152/0 and 152/1 forwards
+    (spec 3.17) and the two LogEvent-emitted events.
+
+    Identity and absences: 0x050D (1293) alone, DEM (152) and DEMMode
+    (159) served, no PowerSource (47) and no EPM (144), so a power push
+    here answers +MTERR:3. AcceptedCommandList is exactly {0, 1}, which
+    is the IRON RULE's observability net (design spec 2.5): the ember
+    command entries and the Instance's FeatureMap-derived list agree
+    only because feature::power_adjustment::add() created both, and a
+    hand-set FeatureMap bit would diverge them into no-status invokes.
+    AttributeList carries exactly {0,1,2,3,4,5,7}: no Forecast (6, the
+    disclosed PFR/SFR gap) and, the point of the check, NO NINTH id.
+    Field 6 (AdjustmentEnergyUse) is an EVENT CARRIER, not an attribute
+    (spec 3.25), so it must never appear in an attribute read; that
+    absence is pinned three ways here, by the attribute-list shape, by
+    assert_no_urc on the push, and by the value surfacing only in
+    PowerAdjustEnd's EnergyUse field.
+
+    Server-side in-state guard, run FIRST while ESAState is still Online
+    from boot: CancelPowerAdjustRequest answers InvalidInState (0xCB)
+    FROM THE CHIP SERVER (device-energy-management-server.cpp checks
+    ESAState before calling the delegate), so unlike round B's
+    CancelBoost the firmware has nothing to guard and NO +MTCMD is ever
+    raised. Both halves are asserted.
+
+    The PowerAdjust chain, in order:
+      - AT+MTDEMCAP installs two entries, cause 1
+        (LocalOptimizationAdjustment) as the baseline; a controller read
+        gets the struct list back; n=0 makes the whole capability read
+        null; the two entries are re-installed for the chain.
+      - The canonical vector is power 5000000000 (above 2^32, the 64-bit
+        pipeline through a command payload rather than a push) with
+        duration 60, admitted by the first capability entry.
+      - DENY once: the forward carries the exact tail 5000000000,60,0,
+        the verdict maps to Status::Failure on the wire, and NOTHING
+        happens (no PowerAdjustStart, ESAState still Online).
+      - ALLOW: same vector; the FIRMWARE owns the transition (contrast
+        round B's Boost, where the host pushed BoostState), so ESAState
+        reads PowerAdjustActive with no host push at all, exactly one
+        PowerAdjustStart is emitted, and the capability's cause is
+        stamped 1 (LocalOptimization -> LocalOptimizationAdjustment).
+      - RE-ADJUST while active, with the other cause: the forward still
+        reaches the host and the accept still stamps the cause 2
+        (GridOptimization -> GridOptimizationAdjustment), but NO second
+        PowerAdjustStart is emitted and the duration clock is not
+        re-armed (TC_DEM_2_2 step 14). The harness pins the
+        SUPPRESSION, which is why the assertion is "still exactly one".
+      - The host pushes field 6, then ends the adjustment by pushing
+        ESAState Online: PowerAdjustEnd(NormalCompletion = 0, measured
+        duration, EnergyUse 120000), and the capability cause is
+        restored to the AT+MTDEMCAP baseline 1.
+      - A second adjustment ended by cancel-power-adjust-request: the
+        payload-less forward is answered allow, PowerAdjustEnd carries
+        cause 4 (Cancelled) and EnergyUse 0, because the first End
+        CONSUMED the field-6 cache and nothing re-pushed it.
+
+    Same-state pushes suppress BOTH the event and the attribute report:
+    ESAState is reported on change only (the reference implementation's
+    shape, the deliberate divergence from round B's report-per-sample
+    BoostState). The event half is invisible without a subscription, so
+    the closing segment subscribes to ESAState the step_3_21 way, pushes
+    the CURRENT state and requires NO report, then pushes a different
+    one and requires one. Subscriber contract: it runs last, and no
+    ChipTool.run() happens while it lives."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    responder = CmdResponder(link)
+
+    # --- identity, absences, and the two derived lists ---
+    rc, out = chip.run(["descriptor", "read", "device-type-list", node,
+                        "27"], timeout=30)
+    types = parse_device_types(out)
+    s.check("3.26 device type list is 0x050D (1293) alone",
+            rc == 0 and types == [1293], tag="P3")
+    rc, out = chip.run(["descriptor", "read", "server-list", node, "27"],
+                       timeout=30)
+    servers = parse_accepted_command_list(out)
+    s.check("3.26 server list carries DEM (152) and DEMMode (159)",
+            rc == 0 and 152 in servers and 159 in servers, tag="P3")
+    s.check("3.26 no PowerSource (47) and no EPM (144) on the standalone "
+            "ESA (the thin add() shape, pinned as an absence)",
+            rc == 0 and bool(servers) and 47 not in servers
+            and 144 not in servers, tag="P3")
+    s.check("3.26 AT+MTMEAS=27,144,0,230000 -> +MTERR:3 (no "
+            "ElectricalPowerMeasurement cluster here)",
+            expect_err("AT+MTMEAS=27,144,0,230000", 3)(link), tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read",
+                        "accepted-command-list", node, "27"], timeout=30)
+    s.check("3.26 AcceptedCommandList is exactly {0, 1} (the iron rule: "
+            "feature::power_adjustment::add() created the ember entries "
+            "AND the FeatureMap bit, so the two surfaces agree)",
+            rc == 0
+            and sorted(parse_accepted_command_list(out)) == [0, 1],
+            tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read",
+                        "attribute-list", node, "27"], timeout=30)
+    local = sorted(a for a in parse_accepted_command_list(out)
+                   if a < 0xF000)
+    s.check("3.26 AttributeList is exactly {0,1,2,3,4,5,7}: no Forecast "
+            "(6, the disclosed PFR/SFR gap) and NO attribute for field 6 "
+            "(AdjustmentEnergyUse is an event carrier, spec 3.25)",
+            rc == 0 and local == [0, 1, 2, 3, 4, 5, 7], tag="P3")
+
+    # --- AT+MTDEMCAP lookup and value rows (spec 3.26) ---
+    s.check("3.26 AT+MTDEMCAP=99,1,0 -> +MTERR:2 (unknown endpoint)",
+            expect_err("AT+MTDEMCAP=99,1,0", 2)(link), tag="P3")
+    s.check("3.26 AT+MTDEMCAP=1,1,0 -> +MTERR:3 (the light carries no "
+            "DeviceEnergyManagement cluster)",
+            expect_err("AT+MTDEMCAP=1,1,0", 3)(link), tag="P3")
+    s.check("3.26 AT+MTDEMCAP=27,3,0 -> +MTERR:1 (cause 3 outside "
+            "PowerAdjustReasonEnum: the bridge's own range check)",
+            expect_err("AT+MTDEMCAP=27,3,0", 1)(link), tag="P3")
+    s.check("3.26 AT+MTDEMCAP=27,1,1,5000,1000,60,3600 -> +MTERR:1 "
+            "(minPower > maxPower would make the server validate against "
+            "an empty interval)",
+            expect_err("AT+MTDEMCAP=27,1,1,5000,1000,60,3600", 1)(link),
+            tag="P3")
+    s.check("3.26 AT+MTDEMCAP=27,1,1,1000,5000,3600,60 -> +MTERR:1 "
+            "(minDuration > maxDuration, the same interval rule)",
+            expect_err("AT+MTDEMCAP=27,1,1,1000,5000,3600,60", 1)(link),
+            tag="P3")
+
+    # --- 0x0098 field validation on an endpoint that DOES serve it ---
+    s.check("3.26 AT+MTMEAS=27,152,7,1 -> +MTERR:1 (field 7 unknown to "
+            "0x0098: the bridge's validate pass)",
+            expect_err("AT+MTMEAS=27,152,7,1", 1)(link), tag="P3")
+    s.check("3.26 AT+MTMEAS=27,152,0,14 -> +MTERR:1 (ESAType 0x0E is the "
+            "gap between the contiguous 0x00..0x0D and kOther 0xFF)",
+            expect_err("AT+MTMEAS=27,152,0,14", 1)(link), tag="P3")
+    s.check("3.26 AT+MTMEAS=27,152,2,9 -> +MTERR:1 (9 is outside "
+            "ESAStateEnum 0..4)",
+            expect_err("AT+MTMEAS=27,152,2,9", 1)(link), tag="P3")
+    s.check("3.26 AT+MTMEAS=27,152,5,4 -> +MTERR:1 (4 is outside "
+            "OptOutStateEnum 0..3)",
+            expect_err("AT+MTMEAS=27,152,5,4", 1)(link), tag="P3")
+
+    # --- identity pushes, including kOther and the +-5 GmW envelope ---
+    res, lines = link.command(
+        "AT+MTMEAS=27,152,0,255,3,-5000000000,4,5000000000")
+    s.check("3.26 ESA identity push (ESAType kOther 0xFF, AbsMin/MaxPower "
+            "+-5 GmW, both above 2^32) -> OK",
+            res == 0 and lines == [], tag="P3")
+    s.check("3.26 no +MTATTR URC from the push (Instance-owned values, "
+            "spec 3.25)", link.assert_no_urc(r"\+MTATTR:27,", 1.5),
+            tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read", "esatype", node,
+                        "27"], timeout=30)
+    s.check("3.26 controller reads ESAType 255 (kOther, the enum's "
+            "non-contiguous top value)",
+            rc == 0 and parse_int_attr(out) == 255, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read", "abs-min-power",
+                        node, "27"], timeout=30)
+    s.check("3.26 controller reads AbsMinPower -5000000000 (signed, "
+            "64-bit, not truncated)",
+            rc == 0 and parse_int_attr(out) == -5000000000, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read", "abs-max-power",
+                        node, "27"], timeout=30)
+    s.check("3.26 controller reads AbsMaxPower 5000000000",
+            rc == 0 and parse_int_attr(out) == 5000000000, tag="P3")
+
+    # --- the server's in-state guard, while ESAState is still Online ---
+    link.drain(0.3)
+    rc, out = chip.run(["deviceenergymanagement",
+                        "cancel-power-adjust-request", node, "27"],
+                       timeout=30)
+    s.check("3.26 in-state guard: cancel while not PowerAdjustActive "
+            "fails (rc != 0)", rc != 0, tag="P3")
+    s.check("3.26 in-state guard: status 0xCB InvalidInState, FROM THE "
+            "CHIP SERVER (the firmware has no guard of its own here)",
+            parse_status(out) == 0xCB, tag="P3")
+    s.check("3.26 in-state guard: no +MTCMD raised (the server answers "
+            "before the delegate runs)",
+            link.assert_no_urc(r"\+MTCMD:", 2.0), tag="P3")
+
+    # --- AT+MTDEMCAP end to end: install, read back, null, reinstall ---
+    res, _ = link.command("AT+MTDEMCAP=27,1,2,1000000000,10000000000,30,"
+                          "3600,500,2000,30,600")
+    s.check("3.26 AT+MTDEMCAP two entries, cause 1 -> OK", res == 0,
+            tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read",
+                        "power-adjustment-capability", node, "27"],
+                       timeout=30)
+    s.check("3.26 controller reads both capability entries back verbatim "
+            "(maxPower above 2^32 through the struct list)",
+            rc == 0
+            and parse_power_adjust_entries(out) == [
+                (1000000000, 10000000000, 30, 3600),
+                (500, 2000, 30, 600)], tag="P3")
+    s.check("3.26 capability cause is the pushed baseline 1",
+            rc == 0 and parse_cause_values(out) == [1], tag="P3")
+    res, _ = link.command("AT+MTDEMCAP=27,1,0")
+    s.check("3.26 AT+MTDEMCAP n=0 -> OK", res == 0, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read",
+                        "power-adjustment-capability", node, "27"],
+                       timeout=30)
+    s.check("3.26 n=0 makes the whole capability read null (not an empty "
+            "list: the distinction the server's ConstraintError rests on)",
+            rc == 0 and parse_power_adjust_entries(out) == []
+            and re.search(r"PowerAdjustmentCapability:\s*null", out)
+            is not None, tag="P3")
+    res, _ = link.command("AT+MTDEMCAP=27,1,2,1000000000,10000000000,30,"
+                          "3600,500,2000,30,600")
+    s.check("3.26 capability reinstalled for the adjust chain -> OK",
+            res == 0, tag="P3")
+
+    # --- deny once: the forward reaches the host, nothing else happens ---
+    link.drain(0.3)
+    handle = invoke_chip(ctx, ["deviceenergymanagement",
+                              "power-adjust-request", "5000000000", "60",
+                              "0", node, "27"], timeout=30)
+    fwd = responder.expect(cluster=152, command=0, verdict=0,
+                           payload=[5000000000, 60, 0], timeout=5.0)
+    s.check("3.26 PowerAdjustRequest forward answered DENY with the "
+            "canonical tail 5000000000,60,0", fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.26 deny: chip-tool reports failure (rc != 0)", rc != 0,
+            tag="P3")
+    s.check("3.26 deny: status 0x01 Failure (the verdict IS the wire "
+            "response)", parse_status(out) == 0x1, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read-event",
+                        "power-adjust-start", node, "27"], timeout=30)
+    s.check("3.26 deny: no PowerAdjustStart event",
+            rc == 0 and parse_event_count(out, "PowerAdjustStart") == 0,
+            tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read", "esastate",
+                        node, "27"], timeout=30)
+    s.check("3.26 deny: ESAState still 1 (Online)",
+            rc == 0 and parse_int_attr(out) == 1, tag="P3")
+
+    # --- allow: the FIRMWARE owns the transition ---
+    handle = invoke_chip(ctx, ["deviceenergymanagement",
+                              "power-adjust-request", "5000000000", "60",
+                              "0", node, "27"], timeout=30)
+    fwd = responder.expect(cluster=152, command=0, verdict=1,
+                           payload=[5000000000, 60, 0], timeout=5.0)
+    s.check("3.26 PowerAdjustRequest forward answered ALLOW",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.26 allow: chip-tool exits 0 (Status::Success)", rc == 0,
+            tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read", "esastate",
+                        node, "27"], timeout=30)
+    s.check("3.26 allow: ESAState reads 3 (PowerAdjustActive) with NO "
+            "host push: the firmware owns this transition",
+            rc == 0 and parse_int_attr(out) == 3, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read-event",
+                        "power-adjust-start", node, "27"], timeout=30)
+    s.check("3.26 allow: exactly one PowerAdjustStart event",
+            rc == 0 and parse_event_count(out, "PowerAdjustStart") == 1,
+            tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read",
+                        "power-adjustment-capability", node, "27"],
+                       timeout=30)
+    s.check("3.26 allow: capability cause stamped 1 (LocalOptimization "
+            "-> LocalOptimizationAdjustment)",
+            rc == 0 and parse_cause_values(out) == [1], tag="P3")
+
+    # --- re-adjust while active: forward yes, second Start NO ---
+    handle = invoke_chip(ctx, ["deviceenergymanagement",
+                              "power-adjust-request", "5000000000", "60",
+                              "1", node, "27"], timeout=30)
+    fwd = responder.expect(cluster=152, command=0, verdict=1,
+                           payload=[5000000000, 60, 1], timeout=5.0)
+    s.check("3.26 re-adjust: the forward still reaches the host (only "
+            "the event and the clock are suppressed)", fwd is not None,
+            tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.26 re-adjust: chip-tool exits 0", rc == 0, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read-event",
+                        "power-adjust-start", node, "27"], timeout=30)
+    s.check("3.26 re-adjust: STILL exactly one PowerAdjustStart "
+            "(TC_DEM_2_2 step 14: SUCCESS and no event sent)",
+            rc == 0 and parse_event_count(out, "PowerAdjustStart") == 1,
+            tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read",
+                        "power-adjustment-capability", node, "27"],
+                       timeout=30)
+    s.check("3.26 re-adjust: capability cause restamped 2 "
+            "(GridOptimization -> GridOptimizationAdjustment)",
+            rc == 0 and parse_cause_values(out) == [2], tag="P3")
+
+    # --- field 6, then the host's normal end ---
+    res, lines = link.command("AT+MTMEAS=27,152,6,120000")
+    s.check("3.26 AdjustmentEnergyUse push (field 6) -> OK",
+            res == 0 and lines == [], tag="P3")
+    s.check("3.26 field 6 marks nothing dirty and raises no URC (event "
+            "carrier, not an attribute)",
+            link.assert_no_urc(r"\+MTATTR:27,", 1.5), tag="P3")
+    res, _ = link.command("AT+MTMEAS=27,152,2,1")
+    s.check("3.26 host ends the adjustment by pushing ESAState Online "
+            "-> OK", res == 0, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read-event",
+                        "power-adjust-end", node, "27"], timeout=30)
+    s.check("3.26 exactly one PowerAdjustEnd event",
+            rc == 0 and parse_event_count(out, "PowerAdjustEnd") == 1,
+            tag="P3")
+    s.check("3.26 PowerAdjustEnd cause 0 (NormalCompletion) with the "
+            "cached EnergyUse 120000 and a measured Duration",
+            rc == 0 and parse_cause_values(out) == [0]
+            and re.search(r"EnergyUse:\s*120000\b", out) is not None
+            and re.search(r"Duration:\s*\d+", out) is not None, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read",
+                        "power-adjustment-capability", node, "27"],
+                       timeout=30)
+    s.check("3.26 PowerAdjustEnd restored the capability cause to the "
+            "AT+MTDEMCAP baseline 1",
+            rc == 0 and parse_cause_values(out) == [1], tag="P3")
+
+    # --- second adjustment, ended by cancel: the Cancelled path ---
+    handle = invoke_chip(ctx, ["deviceenergymanagement",
+                              "power-adjust-request", "5000000000", "60",
+                              "0", node, "27"], timeout=30)
+    fwd = responder.expect(cluster=152, command=0, verdict=1,
+                           payload=[5000000000, 60, 0], timeout=5.0)
+    s.check("3.26 second adjustment: forward answered allow",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.26 second adjustment: chip-tool exits 0", rc == 0, tag="P3")
+    handle = invoke_chip(ctx, ["deviceenergymanagement",
+                              "cancel-power-adjust-request", node, "27"],
+                         timeout=30)
+    fwd = responder.expect(cluster=152, command=1, verdict=1, timeout=5.0)
+    s.check("3.26 CancelPowerAdjustRequest forward answered allow "
+            "(payload-less)",
+            fwd is not None and fwd["fields"] == [], tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.26 cancel: chip-tool exits 0", rc == 0, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read-event",
+                        "power-adjust-end", node, "27"], timeout=30)
+    s.check("3.26 a second PowerAdjustEnd event",
+            rc == 0 and parse_event_count(out, "PowerAdjustEnd") == 2,
+            tag="P3")
+    s.check("3.26 the cancel's PowerAdjustEnd carries cause 4 (Cancelled) "
+            "and EnergyUse 0: the first End CONSUMED the field-6 cache",
+            rc == 0 and 4 in parse_cause_values(out)
+            and re.search(r"EnergyUse:\s*0\b", out) is not None, tag="P3")
+    rc, out = chip.run(["deviceenergymanagement", "read", "esastate",
+                        node, "27"], timeout=30)
+    s.check("3.26 cancel: ESAState back to 1 (Online), reset by the "
+            "firmware", rc == 0 and parse_int_attr(out) == 1, tag="P3")
+
+    # --- DeviceEnergyManagementMode on the standalone ESA ---
+    res, _ = link.command(
+        'AT+MTMODES=27,159,0,0,"NoOptimization",1,16387,"GridOpt"')
+    s.check("3.26 DEMMode staged (tag-0 default + explicit "
+            "kGridOptimization) -> OK", res == 0, tag="P3")
+    rc, out = chip.run(["deviceenergymanagementmode", "read",
+                        "supported-modes", node, "27"], timeout=30)
+    s.check("3.26 SupportedModes labels verbatim",
+            rc == 0 and parse_string_list(out) == ["NoOptimization",
+                                                   "GridOpt"], tag="P3")
+    s.check("3.26 ModeTags: defaulted kNoOptimization (0x4000), explicit "
+            "kGridOptimization (0x4003)",
+            rc == 0 and parse_mode_tag_values(out) == [0x4000, 0x4003],
+            tag="P3")
+
+    # --- LAST: the on-change-only ESAState report contract ---
+    factory = ctx.subscriber_factory or (
+        lambda: Subscriber(chip, ctx.node_id, endpoint=27,
+                           cluster="deviceenergymanagement",
+                           attribute="esastate",
+                           parser=parse_esa_state_reports))
+    sub = factory()
+    started = s.check("3.26 ESAState subscriber starts (priming report)",
+                      sub.start(), tag="P3")
+    try:
+        base = len(sub.reports()) if started else 0
+        res, _ = link.command("AT+MTMEAS=27,152,2,1")
+        s.check("3.26 same-state ESAState push (Online again) -> OK",
+                res == 0, tag="P3")
+        s.check("3.26 same-state push produces NO report: ESAState is "
+                "reported on change only, the deliberate divergence from "
+                "round B's report-per-sample BoostState",
+                started and sub.no_new_report(base, 3.0), tag="P3")
+        res, _ = link.command("AT+MTMEAS=27,152,2,2")
+        s.check("3.26 changed ESAState push (Fault) -> OK", res == 0,
+                tag="P3")
+        s.check("3.26 the CHANGED push does report (so the silence above "
+                "is on-change-only, not a dead subscription)",
+                started and sub.wait_new_report(base, 5.0), tag="P3")
+    finally:
+        sub.stop()
+    res, _ = link.command("AT+MTMEAS=27,152,2,1")
+    s.check("3.26 ESAState restored to 1 (Online) at step end", res == 0,
+            tag="P3")
+
+
 def step_3_14_root_urc_sweep(ctx):
     """Design spec 4.3's standing-disciplines bullet ("no
     `+MTATTR:0,...` ever"), pinned by a dedicated sweep for the same
@@ -3513,6 +4200,12 @@ PHASE3_STEPS[:] = [
     {"name": "3.22 water heater", "fn": step_3_22_water_heater,
      "requires": ["3.5 commission"]},
     {"name": "3.23 heat pump", "fn": step_3_23_heat_pump,
+     "requires": ["3.5 commission"]},
+    {"name": "3.24 solar power", "fn": step_3_24_solar_power,
+     "requires": ["3.5 commission"]},
+    {"name": "3.25 battery storage", "fn": step_3_25_battery_storage,
+     "requires": ["3.5 commission"]},
+    {"name": "3.26 device energy management", "fn": step_3_26_dem,
      "requires": ["3.5 commission"]},
     {"name": "3.14 root-endpoint URC sweep", "fn": step_3_14_root_urc_sweep},
 ]
@@ -3839,6 +4532,79 @@ def parse_energy_values(text):
     "EnergyImported:"/"EnergyExported:" continue past "Energy" before
     their colon. Empty list on no match, never raises."""
     return [int(m) for m in re.findall(r"\bEnergy:\s*(-?\d+)", text)]
+
+
+def parse_power_adjust_entries(text):
+    """Every `PowerAdjustStruct` entry in a chip-tool
+    `PowerAdjustmentCapability` read, in order, as
+    `(minPower, maxPower, minDuration, maxDuration)` tuples: step_3_26's
+    AT+MTDEMCAP round trip (spec 3.26).
+
+    INFERENCE (energy round C1, awaiting the bench): derived from the
+    pinned generated DataModelLogger.cpp's `PowerAdjustStruct` LogValue
+    overload, which prints the four fields with the labels `MinPower`,
+    `MaxPower`, `MinDuration`, `MaxDuration` in that order, each through
+    the integral overload's std::to_string (plain decimal, full 64-bit
+    width, minus sign included on the two powers); the entries sit under
+    the `PowerAdjustCapability` list of the enclosing
+    `PowerAdjustCapabilityStruct`, whose only other field is `Cause`
+    (parse_cause_values below). The four labels are collected
+    INDEPENDENTLY and zipped rather than matched as four consecutive
+    lines, so no assumption about interior blank/prefix lines is baked
+    in; a length disagreement between the four means the capture is not
+    the shape this parser understands and yields an empty list rather
+    than a mis-zipped one. `MinDuration`/`MaxDuration` are also
+    `SlotStruct` field names, but Forecast is permanently null in C1
+    (main.cpp) and is never read here. Empty list on no match, never
+    raises."""
+    mins = re.findall(r"MinPower:\s*(-?\d+)", text)
+    maxs = re.findall(r"MaxPower:\s*(-?\d+)", text)
+    mind = re.findall(r"MinDuration:\s*(\d+)", text)
+    maxd = re.findall(r"MaxDuration:\s*(\d+)", text)
+    if not (len(mins) == len(maxs) == len(mind) == len(maxd)):
+        return []
+    return [(int(a), int(b), int(c), int(d))
+            for a, b, c, d in zip(mins, maxs, mind, maxd)]
+
+
+def parse_cause_values(text):
+    """Every `Cause:` value chip-tool prints, in order, as ints. One
+    parser serves both shapes step_3_25/step_3_26 read: the
+    `PowerAdjustCapabilityStruct`'s `cause` field
+    (`PowerAdjustReasonEnum`: 0 NoAdjustment, 1
+    LocalOptimizationAdjustment, 2 GridOptimizationAdjustment) and the
+    `PowerAdjustEnd` event's `cause` field (`CauseEnum`: 0
+    NormalCompletion, 4 Cancelled). The two spaces never appear in one
+    capture, so one parser is honest here; the caller names which it
+    reads.
+
+    INFERENCE (energy round C1, awaiting the bench): both structures'
+    LogValue overloads in the pinned generated DataModelLogger.cpp print
+    the field with the label `Cause`, and both fields are enums, which
+    the DataModelLogger.h enum template routes to
+    `chip::to_underlying()` and then the integral overload's
+    std::to_string: plain decimal, no parenthesised name. The `\\b`
+    keeps `AdjustmentCause`-style compounds out (none is printed on
+    these paths today, but the boundary is free). Empty list on no
+    match, never raises."""
+    return [int(m) for m in re.findall(r"\bCause:\s*(\d+)", text)]
+
+
+def parse_esa_state_reports(text):
+    """Every `ESAState` value chip-tool prints, in order, as ints:
+    step_3_26's subscription report stream (and any one-shot read).
+
+    INFERENCE (energy round C1, awaiting the bench): the generated
+    DataModelLogger.cpp's DeviceEnergyManagement ESAState case decodes
+    `ESAStateEnum` and prints it with the label `ESAState` through the
+    enum template into the integral overload's std::to_string, the
+    parse_active_power_reports derivation on this round's cluster. The
+    regex is case-sensitive and no sibling label contains the
+    `ESAState:` substring. Deliberately NOT end-anchored: Subscriber
+    output bypasses the central ANSI strip (reports()'s F1 note), and an
+    end-anchored regex would break on a trailing SGR escape. Empty list
+    on no match, never raises."""
+    return [int(m) for m in re.findall(r"ESAState:\s*(-?\d+)", text)]
 
 
 def parse_change_to_mode_status(text):
@@ -5163,6 +5929,206 @@ def register_phase1_t9_negative():
 
 
 register_phase1_t9_negative()
+
+
+def t_staged_variant1_energy_c1(link):
+    """Energy round C1: the variant-1 refusal rows for all THREE of this
+    round's device types need real variant-1 endpoints, which the Phase 3
+    composition deliberately does not carry (its slots 25-27 are the full
+    variants, and the two variants of one device type cannot ride one
+    composition without burning a slot each for a handful of rows).
+    Staged here instead, the t_meas_staged_wh_min pattern and the design
+    spec section 5 assignment: declare a scratch composition of the
+    standard light plus one variant-1 endpoint per type (endpoints 2, 3
+    and 4), AT+MTEPAPPLY (which persists and REBOOTS, spec 3.9), VERIFY
+    the composition actually took effect via AT+MTEP? (the
+    known-start-state rule: a check that cannot observe its variable is
+    not a check), run the rows, and restore the single-light standard
+    state in a finally block so the rest of Phase 1's single-light
+    contract holds no matter which stage failed. Restore is by re-stage
+    plus re-apply, NOT AT+MTFRESET: Phase 1 must not destroy fabric state
+    that is none of its business.
+
+    ONE composite row carrying all three types rather than three rows,
+    for the reason t_meas_staged_wh_min gives and more strongly: each
+    staged row costs the same two reboots, so three would cost six for
+    no added coverage. Sub-stage failures print a diagnosis line so the
+    single FAIL stays attributable.
+
+    The rows (TESTING.md 6.2/6.4, AT_MT_SPEC.md 3.25/3.26):
+      - ep 2, solar variant 1: an ENERGY push answers +MTERR:3 (the
+        no-EEM current-clamp shape), while a POWER push on the same
+        endpoint answers OK. The pair is the point: variant 1 keeps the
+        sensor graft and loses only ElectricalEnergyMeasurement, so a
+        thunk regression that dropped the whole graft would turn the
+        control row red instead of passing quietly.
+      - ep 3, battery variant 1: both DEM surfaces answer +MTERR:3, the
+        cluster-not-carried code, because variant 1 omits the DEM triple
+        the SDK build bolts on unconditionally.
+      - ep 4, DEM variant 1 (FeatureMap 0, the report-only ESA):
+        AT+MTDEMCAP answers +MTERR:4, the ATTRIBUTE-missing code, NOT
+        +MTERR:3 -- the cluster is there and only the PowerAdjustment
+        feature (and with it the PowerAdjustmentCapability attribute) is
+        absent. Its control row is a 0x0098 push, which answers OK on
+        both variants because the five ESA attributes are Instance-served
+        either way (design spec 2.4). That contrast is exactly what
+        separates code 4 from code 3 here.
+
+    NOT COVERED HERE, and it has no home in this harness: the design
+    spec's "a chip-tool power-adjust-request against DEM variant 1
+    answers UnsupportedCommand" probe. Phase 1 test functions receive
+    only the AT link (add_test's contract) and Phase 1 runs with no
+    commissioned fabric and no controller at all, while Phase 3's
+    composition is fixed at 27 variant-0 slots, so no phase can host a
+    controller invoke against a variant-1 DEM endpoint. The nearest
+    executable sibling IS covered: step_3_26 pins the variant-0
+    AcceptedCommandList at exactly {0, 1}, so a feature bit appearing or
+    vanishing changes an asserted list. Flagged in the task-4 report."""
+    def diag(msg):
+        print("    (staged energy C1 variant 1: %s)" % msg)
+
+    def apply_and_wait():
+        link.drain(0.3)
+        if link.command("AT+MTEPAPPLY", timeout=5.0)[0] != 0:
+            return False
+        return link.await_urc(r"\+MTREADY$", timeout=15.0) is not None
+
+    staged = ["0x0100", "0x0017,1", "0x0018,1", "0x050D,1"]
+    expect = ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x0017,1",
+              "+MTEP:2,3,0x0018,1", "+MTEP:3,4,0x050D,1"]
+    ok = True
+    try:
+        if not stage_composition(link, staged):
+            diag("staging the scratch composition failed")
+            return False
+        if not apply_and_wait():
+            diag("AT+MTEPAPPLY or the +MTREADY wait failed")
+            return False
+        res, lines = cmd_retry(link, "AT+MTEP?")
+        if res != 0 or lines != expect:
+            diag("composition readback wrong: %r" % lines)
+            ok = False
+        else:
+            for cmd, want in (("AT+MTMEAS=2,145,0,1500000", 3),
+                              ("AT+MTMEAS=2,144,0,230000", 0),
+                              ("AT+MTMEAS=3,152,0,5", 3),
+                              ("AT+MTDEMCAP=3,1,0", 3),
+                              ("AT+MTDEMCAP=4,1,0", 4),
+                              ("AT+MTMEAS=4,152,0,5", 0)):
+                res, _ = link.command(cmd)
+                if res != want:
+                    diag("%s answered %d, wanted %s"
+                         % (cmd, res, "OK" if want == 0
+                            else "+MTERR:%d" % want))
+                    ok = False
+    finally:
+        restored = (stage_composition(link, ["0x0100"])
+                    and apply_and_wait())
+        if restored:
+            res, lines = cmd_retry(link, "AT+MTEP?")
+            restored = res == 0 and lines == ["+MTEP:0,1,0x0100"]
+        if not restored:
+            diag("RESTORE FAILED: bench is not in the single-light "
+                 "standard state")
+            ok = False
+    return ok
+
+
+def register_phase1_t10_negative():
+    """Energy round C1 (0.10.0), task 4: the state-safe rows TESTING.md
+    6.2/6.4 gained from the round's firmware tasks (the AT+MTMEAS 0x0098
+    family, task 2; the whole AT+MTDEMCAP grammar, task 2), transcribed
+    from the tables, not re-derived, the same order-independent split
+    register_phase1_t5/t6/t7/t8/t9 established.
+
+    Why every row below is safe on the single-light bench:
+
+    - The 0x0098 MTMEAS rows die inside cmd_mtmeas()'s own shape and
+      parse gates before any endpoint lookup runs (the odd-tail row by
+      the cluster-independent pair gate, the four leading-minus rows by
+      the signedness table, which needs only the <cluster> token: of the
+      0x0098 family only fields 3, 4 and 6 are signed). ep 1 stands in
+      for "any endpoint" exactly as t8's and t9's MTMEAS rows use it.
+    - The ONE row that deliberately reaches the endpoint lookup is the
+      signed-field contrast row (field 3 with a minus), which answers
+      +MTERR:3 rather than 1 precisely because the minus is legal there.
+      It is the mirror image of its four siblings and needs ep 1 to be a
+      light, the same rig precondition register_phase1_t7's MTALARM row
+      documents; it is state-safe because the lookup refuses before
+      anything is applied.
+    - The MTDEMCAP rows all die in cmd_mtdemcap() before the bridge:
+      the four bare-ERROR forms by the arity/type gates, the n=5 row by
+      the <n> range check (which deliberately outranks the count check,
+      mt_at.c), and the four value rows by the per-entry integer parses.
+      Everything semantic (the cause enum range, the interval ordering,
+      the PowerAdjustment feature gate) is the bridge's business and
+      therefore needs a real DEM endpoint: those rows live in Phase 3's
+      step_3_26_dem, where TESTING.md sends them.
+
+    A sibling of t5/t6/t7/t8/t9, not an addition to any of them: this
+    round's rows are their own project, same reasoning as t6's
+    docstring."""
+    n = lambda name, fn: add_test(1, name, fn, tag="AT-")
+
+    # AT+MTMEAS 0x0098 rows (TESTING.md 6.2, energy round C1; spec 3.25).
+    n("MTMEAS=1,152,0 -> +MTERR:1 (0x98 odd tail: field 0 has no value, "
+      "the cluster-independent pair gate)",
+      expect_err("AT+MTMEAS=1,152,0", 1))
+    n("MTMEAS=1,152,0,-1 -> +MTERR:1 (minus on ESAType, an unsigned "
+      "enum8: rejected at parse before any endpoint lookup)",
+      expect_err("AT+MTMEAS=1,152,0,-1", 1))
+    n("MTMEAS=1,152,1,-1 -> +MTERR:1 (minus on ESACanGenerate, a bool)",
+      expect_err("AT+MTMEAS=1,152,1,-1", 1))
+    n("MTMEAS=1,152,2,-1 -> +MTERR:1 (minus on ESAState, an unsigned "
+      "enum8)", expect_err("AT+MTMEAS=1,152,2,-1", 1))
+    n("MTMEAS=1,152,5,-1 -> +MTERR:1 (minus on OptOutState, an unsigned "
+      "enum8)", expect_err("AT+MTMEAS=1,152,5,-1", 1))
+    n("MTMEAS=1,152,3,-5000000000 -> +MTERR:3 (AbsMinPower IS signed, so "
+      "the minus parses and the light's missing cluster answers: the "
+      "signedness table's positive control)",
+      expect_err("AT+MTMEAS=1,152,3,-5000000000", 3))
+
+    # AT+MTDEMCAP grammar rows (TESTING.md 6.4, energy round C1; spec
+    # 3.26). The +MTERR:2/3/4 lookups, the cause-range and interval-order
+    # rows and the OK pushes all need a real DEM endpoint: Phase 3
+    # (step_3_26_dem) and the staged variant-1 row below.
+    n("MTDEMCAP? -> ERROR (query form on a set-only command)",
+      expect_err("AT+MTDEMCAP?", -1))
+    n("MTDEMCAP no args -> ERROR (exec form)", expect_err("AT+MTDEMCAP", -1))
+    n("MTDEMCAP=1 -> ERROR (fewer than the three mandatory parameters)",
+      expect_err("AT+MTDEMCAP=1", -1))
+    n("MTDEMCAP=1,1,2,1000,5000,60,3600 -> ERROR (7 parameters contradict "
+      "n=2's required 11: <n> declares the command's own form)",
+      expect_err("AT+MTDEMCAP=1,1,2,1000,5000,60,3600", -1))
+    n("MTDEMCAP=1,1,0,1000 -> ERROR (n=0 declares exactly 3 parameters, "
+      "a fourth is junk)", expect_err("AT+MTDEMCAP=1,1,0,1000", -1))
+    n("MTDEMCAP=1,zz,0 -> +MTERR:1 (cause not numeric: the parses run "
+      "before the arity check, so the value code wins here)",
+      expect_err("AT+MTDEMCAP=1,zz,0", 1))
+    n("MTDEMCAP n=5 -> +MTERR:1 (a well-formed count above the 4-entry "
+      "bound: the range check outranks the arity check)",
+      expect_err("AT+MTDEMCAP=1,1,5,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,"
+                 "1,2,3,4", 1))
+    n("MTDEMCAP=1,1,1,-2,5000,zz,60 -> +MTERR:1 (minDuration not "
+      "numeric; the minus on minPower is fine, powers are signed)",
+      expect_err("AT+MTDEMCAP=1,1,1,-2,5000,zz,60", 1))
+    n("MTDEMCAP=1,1,1,92233720368547758080,5000,60,3600 -> +MTERR:1 "
+      "(minPower literal overflows 64 bits: rejected at parse, ERANGE)",
+      expect_err("AT+MTDEMCAP=1,1,1,92233720368547758080,5000,60,3600", 1))
+    n("MTDEMCAP=1,1,1,1000,5000,60,4294967296 -> +MTERR:1 (maxDuration "
+      "above uint32: parse_u64's ERANGE-checked bound, where parse_u's "
+      "32-bit strtoul would have clamped silently on the target)",
+      expect_err("AT+MTDEMCAP=1,1,1,1000,5000,60,4294967296", 1))
+    n("MTDEMCAP=1,1,1,1000,5000,-1,3600 -> +MTERR:1 (minus on an "
+      "unsigned duration)",
+      expect_err("AT+MTDEMCAP=1,1,1,1000,5000,-1,3600", 1))
+
+    n("MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM: the "
+      "cluster-missing and attribute-missing rows with their OK "
+      "controls, then restore", t_staged_variant1_energy_c1)
+
+
+register_phase1_t10_negative()
 
 
 PHASE2_STEPS[:] = [

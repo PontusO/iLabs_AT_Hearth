@@ -3011,6 +3011,9 @@ from mt_regression import (
     parse_change_to_mode_status, parse_parts_list, parse_notify_active,
     parse_active_power_reports, parse_energy_values, parse_device_types,
     CmdResponder,
+    step_3_24_solar_power, step_3_25_battery_storage, step_3_26_dem,
+    t_staged_variant1_energy_c1, parse_power_adjust_entries,
+    parse_cause_values, parse_esa_state_reports,
 )
 
 
@@ -3054,16 +3057,20 @@ class TestPhase3Composition(unittest.TestCase):
     (RVC + Microwave batch harness task) and 14-20 (composed appliance
     round, task 6) extend the same pin."""
 
-    def test_twenty_four_slots_sequential(self):
-        # The composition-size gate: energy round B grew the table to
-        # 24 (round A had grown it to 22), hitting MT_COMP_MAX_ENDPOINTS
-        # (24) EXACTLY: the table is full, and any 25th slot needs the
-        # caps raised first. CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT
-        # (the setting CLAUDE.md warns silently refuses endpoints past
-        # its limit) is 25, not 24: the SDK counts the root endpoint 0
-        # against it (B247), so it stays MT_COMP_MAX_ENDPOINTS + 1.
+    def test_twentyseven_slots_sequential(self):
+        # The composition-size gate: energy round C1 grew the table to
+        # 27 (round A had grown it to 22, round B to 24, which hit the
+        # then-cap of 24 exactly). MT_COMP_MAX_ENDPOINTS is 28 now, so
+        # this table leaves ONE slot of headroom, deliberately: the
+        # exact-fit experiment ended with B247 and is not repeated
+        # (design spec section 5). CONFIG_ESP_MATTER_MAX_DYNAMIC_
+        # ENDPOINT_COUNT (the setting CLAUDE.md warns silently refuses
+        # endpoints past its limit) is 29, not 28: the SDK counts the
+        # root endpoint 0 against it (B247), so it stays
+        # MT_COMP_MAX_ENDPOINTS + 1.
         slots = [slot for slot, _ in PHASE3_COMPOSITION]
-        self.assertEqual(slots, list(range(1, 25)))
+        self.assertEqual(slots, list(range(1, 28)))
+        self.assertLessEqual(len(slots), 28)
 
     def test_slot_ten_and_eleven_are_the_two_cabinet_variants(self):
         # Slot 11 is not in the T5 design spec's 10-row table; it exists
@@ -3098,49 +3105,84 @@ class TestPhase3Composition(unittest.TestCase):
         self.assertEqual(by_slot[20], "0x0077,0,18")
 
     def test_modebase_pool_budget_holds(self):
-        # MT_MB_MAX_LISTS is 8 and this composition must consume exactly
-        # 8 ModeBase delegate slots (RVC 2, microwave 1, fridge parent 1,
-        # two parented cabinets 2, oven cavity 1, water heater 1): the
-        # pool is FULL as of energy round B, and a table edit that adds
-        # another consumer without raising the firmware pool would abort
-        # the boot rebuild on the bench. Consumers by construction:
-        # 0x0074 counts twice (RvcRunMode + RvcCleanMode), 0x0079,
-        # 0x0070 and 0x050F (WaterHeaterMode, either variant) once each,
-        # and every PARENTED 0x0071 cabinet once (Cooler or Heater
-        # conditional cluster); standalone cabinets carry no ModeBase
-        # cluster.
+        # MT_MB_MAX_LISTS is 12 (raised from 8 by energy round C1) and
+        # this composition must consume exactly 10 ModeBase delegate
+        # slots (RVC 2, microwave 1, fridge parent 1, two parented
+        # cabinets 2, oven cavity 1, water heater 1, battery storage 1,
+        # standalone DEM 1). The two remaining are DELIBERATE headroom
+        # (design spec section 5), and a table edit that took the pool
+        # past 12 without raising the firmware pool would abort the boot
+        # rebuild on the bench. Consumers by construction: 0x0074 counts
+        # twice (RvcRunMode + RvcCleanMode), 0x0079, 0x0070 and 0x050F
+        # (WaterHeaterMode, either variant) once each, every PARENTED
+        # 0x0071 cabinet once (Cooler or Heater conditional cluster;
+        # standalone cabinets carry no ModeBase cluster), 0x050D once
+        # (DeviceEnergyManagementMode rides BOTH variants: the XML makes
+        # it otherwiseConform, so mt_add_dem_triple() always creates it),
+        # and 0x0018 once but only on VARIANT 0, whose DEM triple is the
+        # over-delivery variant 1 drops.
         consumed = 0
         for _slot, dt in PHASE3_COMPOSITION:
             parts = dt.split(",")
             base, parented = parts[0], len(parts) == 3
+            variant = parts[1] if len(parts) > 1 else "0"
             if base == "0x0074":
                 consumed += 2
-            elif base in ("0x0079", "0x0070", "0x050F"):
+            elif base in ("0x0079", "0x0070", "0x050F", "0x050D"):
                 consumed += 1
             elif base == "0x0071" and parented:
                 consumed += 1
-        self.assertEqual(consumed, 8)
+            elif base == "0x0018" and variant == "0":
+                consumed += 1
+        self.assertEqual(consumed, 10)
+        self.assertLessEqual(consumed, 12)
 
     def test_measurement_pool_budget_holds(self):
-        # MT_MEAS_MAX is 4 and this composition must consume exactly 4
-        # EPM/PowerTopology pool pairs: the sensor (21, variant 1 still
-        # draws its EPM slot), the meter (22), the FULL water heater
-        # (23, the sensor graft) and the heat pump (24). Deliberately
-        # exact (design spec section 5): the boundary is coverage, and
-        # a fifth measurement-bearing slot needs the pool raised first
-        # or the boot rebuild aborts, the ModeBase rule's sibling. A
-        # variant-1 water heater would consume nothing, which is part
-        # of why Phase 1 stages it instead of this table carrying it.
+        # MT_MEAS_MAX is 8 (raised from 4 by energy round C1) and this
+        # composition must consume exactly 6 EPM/PowerTopology pool
+        # pairs: the sensor (21, variant 1 still draws its EPM slot),
+        # the meter (22), the FULL water heater (23, the sensor graft),
+        # the heat pump (24), solar power (25) and battery storage (26).
+        # Round B's table hit the then-cap of 4 exactly; this round's
+        # two spare slots are DELIBERATE headroom (design spec section
+        # 5), and a seventh consumer is still fine while an ninth would
+        # abort the boot rebuild, the ModeBase rule's sibling. A
+        # variant-1 water heater would consume nothing, which is part of
+        # why Phase 1 stages it instead of this table carrying it; the
+        # variant-1 solar and battery endpoints Phase 1 stages DO draw a
+        # pair each, but never at the same time as this composition.
         consumed = 0
         for _slot, dt in PHASE3_COMPOSITION:
             parts = dt.split(",")
             base = parts[0]
             variant = parts[1] if len(parts) > 1 else "0"
-            if base in ("0x0510", "0x0514", "0x0309"):
+            if base in ("0x0510", "0x0514", "0x0309", "0x0017", "0x0018"):
                 consumed += 1
             elif base == "0x050F" and variant == "0":
                 consumed += 1
-        self.assertEqual(consumed, 4)
+        self.assertEqual(consumed, 6)
+        self.assertLessEqual(consumed, 8)
+
+    def test_dem_pool_budget_holds(self):
+        # MT_DEM_MAX is 4 (new in energy round C1) and this composition
+        # must consume exactly 2 HearthDemDelegate slots: battery
+        # storage variant 0 (26) and the standalone ESA (27). Headroom
+        # is deliberate (design spec section 5): C2's EVSE pair takes
+        # one more and the last stays spare. The delegate is pooled on
+        # BOTH DEM variants (the five ESA attributes are Instance-served
+        # either way, design spec 2.4), which is why the 0x050D arm has
+        # no variant condition while the battery arm does.
+        consumed = 0
+        for _slot, dt in PHASE3_COMPOSITION:
+            parts = dt.split(",")
+            base = parts[0]
+            variant = parts[1] if len(parts) > 1 else "0"
+            if base == "0x050D":
+                consumed += 1
+            elif base == "0x0018" and variant == "0":
+                consumed += 1
+        self.assertEqual(consumed, 2)
+        self.assertLessEqual(consumed, 4)
 
     def test_slot_twentyone_and_twentytwo_are_the_electrical_pair(self):
         # Energy round A, task 5: the variant assignment is deliberately
@@ -3169,6 +3211,20 @@ class TestPhase3Composition(unittest.TestCase):
         by_slot = dict(PHASE3_COMPOSITION)
         self.assertEqual(by_slot[23], "0x050F")
         self.assertEqual(by_slot[24], "0x0309")
+
+    def test_slots_twentyfive_to_twentyseven_are_the_energy_c1_trio(self):
+        # Energy round C1, task 4: all three are VARIANT 0, the full
+        # surface. A table edit that made any of them variant 1 would
+        # silently invalidate the assertions that depend on the dropped
+        # part (solar's EEM read-back, battery's whole DEM triple, the
+        # standalone ESA's PowerAdjust commands and capability), AND
+        # turn Phase 1's staged-variant division
+        # (t_staged_variant1_energy_c1 owns every variant-1 refusal row)
+        # into double coverage of one variant with zero of the other.
+        by_slot = dict(PHASE3_COMPOSITION)
+        self.assertEqual(by_slot[25], "0x0017")
+        self.assertEqual(by_slot[26], "0x0018")
+        self.assertEqual(by_slot[27], "0x050D")
 
     def test_no_accidental_duplicate_devtype(self):
         devtypes = [dt for _slot, dt in PHASE3_COMPOSITION]
@@ -3481,7 +3537,7 @@ class TestRunPhase3(unittest.TestCase):
         # recover_after_abort's own AT+MTRESET)
         self.assertIn("AT+MTFRESET", link.sent)
 
-    def test_registered_steps_are_the_full_1_through_23_chain_plus_sweep(self):
+    def test_registered_steps_are_the_full_1_through_26_chain_plus_sweep(self):
         names = [s["name"] for s in PHASE3_STEPS]
         self.assertEqual(names, [
             "3.1 compose + boot-rebuild pin",
@@ -3505,6 +3561,9 @@ class TestRunPhase3(unittest.TestCase):
             "3.21 electrical meter",
             "3.22 water heater",
             "3.23 heat pump",
+            "3.24 solar power",
+            "3.25 battery storage",
+            "3.26 device energy management",
             "3.14 root-endpoint URC sweep",
         ])
 
@@ -4865,15 +4924,23 @@ class TestMeasurementStepsScriptNoCommandTraffic(unittest.TestCase):
     lives in the happy-path tests (no AT+MTCMDRESP ever sent); this is
     the source half, so a future edit that reaches for the forward
     machinery on these endpoints trips a named test instead of quietly
-    acquiring an adjudication path the device would never exercise. The
-    water heater step is deliberately NOT here: its endpoint carries
-    Boost/CancelBoost and ChangeToMode, real forwards."""
+    acquiring an adjudication path the device would never exercise.
+    Energy round C1 extends the list with solar power (whose endpoint is
+    the same sensor-plus-PowerSource shape) and battery storage: the
+    battery DOES carry a DeviceEnergyManagement cluster, but this
+    harness deliberately runs the whole PowerAdjust protocol once, on
+    the standalone ESA at slot 27, so its step scripts no forwards
+    either. The water heater and DEM steps are deliberately NOT here:
+    their endpoints carry Boost/CancelBoost, ChangeToMode and the two
+    PowerAdjust commands, real forwards."""
 
     def test_step_sources_use_no_forward_machinery(self):
         import inspect
         for fn in (step_3_20_electrical_sensor,
                    step_3_21_electrical_meter,
-                   step_3_23_heat_pump):
+                   step_3_23_heat_pump,
+                   step_3_24_solar_power,
+                   step_3_25_battery_storage):
             src = inspect.getsource(fn)
             self.assertNotIn("CmdResponder", src)
             self.assertNotIn("invoke_chip", src)
@@ -5280,6 +5347,627 @@ class TestParseDeviceTypes(unittest.TestCase):
 
     def test_empty_on_no_match(self):
         self.assertEqual(parse_device_types(""), [])
+
+
+SERVER25_SOLAR = "\n".join([
+    "[TOO]   ServerList: 5 entries",
+    "[TOO]     [1]: 29 (Descriptor)",
+    "[TOO]     [2]: 47 (PowerSource)",
+    "[TOO]     [3]: 156 (PowerTopology)",
+    "[TOO]     [4]: 144 (ElectricalPowerMeasurement)",
+    "[TOO]     [5]: 145 (ElectricalEnergyMeasurement)",
+])
+DEVTYPES25_SOLAR = "\n".join([
+    "[TOO]   DeviceTypeList: 3 entries",
+    "[TOO]     [1]: {",
+    "[TOO]       DeviceType: 23 (Solar Power)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+    "[TOO]     [2]: {",
+    "[TOO]       DeviceType: 17 (Power Source)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+    "[TOO]     [3]: {",
+    "[TOO]       DeviceType: 1296 (Electrical Sensor)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+])
+SERVER26_BATTERY = "\n".join([
+    "[TOO]   ServerList: 7 entries",
+    "[TOO]     [1]: 29 (Descriptor)",
+    "[TOO]     [2]: 47 (PowerSource)",
+    "[TOO]     [3]: 156 (PowerTopology)",
+    "[TOO]     [4]: 144 (ElectricalPowerMeasurement)",
+    "[TOO]     [5]: 145 (ElectricalEnergyMeasurement)",
+    "[TOO]     [6]: 152 (DeviceEnergyManagement)",
+    "[TOO]     [7]: 159 (DeviceEnergyManagementMode)",
+])
+DEVTYPES26_BATTERY = "\n".join([
+    "[TOO]   DeviceTypeList: 4 entries",
+    "[TOO]     [1]: {",
+    "[TOO]       DeviceType: 24 (Battery Storage)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+    "[TOO]     [2]: {",
+    "[TOO]       DeviceType: 17 (Power Source)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+    "[TOO]     [3]: {",
+    "[TOO]       DeviceType: 1296 (Electrical Sensor)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+    "[TOO]     [4]: {",
+    "[TOO]       DeviceType: 1293 (Device Energy Management)",
+    "[TOO]       Revision: 4",
+    "[TOO]      }",
+])
+SERVER27_DEM = "\n".join([
+    "[TOO]   ServerList: 3 entries",
+    "[TOO]     [1]: 29 (Descriptor)",
+    "[TOO]     [2]: 152 (DeviceEnergyManagement)",
+    "[TOO]     [3]: 159 (DeviceEnergyManagementMode)",
+])
+DEVTYPES27_DEM = "\n".join([
+    "[TOO]   DeviceTypeList: 1 entries",
+    "[TOO]     [1]: {",
+    "[TOO]       DeviceType: 1293 (Device Energy Management)",
+    "[TOO]       Revision: 4",
+    "[TOO]      }",
+])
+DEM_ACCEPTED_CMDS = "\n".join([
+    "[TOO]   AcceptedCommandList: 2 entries",
+    "[TOO]     [1]: 0 (PowerAdjustRequest)",
+    "[TOO]     [2]: 1 (CancelPowerAdjustRequest)",
+])
+DEM_ATTR_LIST = "\n".join([
+    "[TOO]   AttributeList: 13 entries",
+    "[TOO]     [1]: 0 (ESAType)",
+    "[TOO]     [2]: 1 (ESACanGenerate)",
+    "[TOO]     [3]: 2 (ESAState)",
+    "[TOO]     [4]: 3 (AbsMinPower)",
+    "[TOO]     [5]: 4 (AbsMaxPower)",
+    "[TOO]     [6]: 5 (PowerAdjustmentCapability)",
+    "[TOO]     [7]: 7 (OptOutState)",
+    "[TOO]     [8]: 65528 (GeneratedCommandList)",
+    "[TOO]     [9]: 65529 (AcceptedCommandList)",
+    "[TOO]     [10]: 65530 (EventList)",
+    "[TOO]     [11]: 65531 (AttributeList)",
+    "[TOO]     [12]: 65532 (FeatureMap)",
+    "[TOO]     [13]: 65533 (ClusterRevision)",
+])
+
+
+def dem_capability(entries, cause):
+    """Render a chip-tool PowerAdjustmentCapability read the way the
+    pinned generated DataModelLogger.cpp does (INFERENCE, see
+    parse_power_adjust_entries' docstring), so the fixtures below and
+    the parser tests share one shape."""
+    lines = ["[TOO]   PowerAdjustmentCapability: {",
+             "[TOO]     PowerAdjustCapability: %d entries" % len(entries)]
+    for i, (mnp, mxp, mnd, mxd) in enumerate(entries, 1):
+        lines += ["[TOO]       [%d]: {" % i,
+                  "[TOO]         MinPower: %d" % mnp,
+                  "[TOO]         MaxPower: %d" % mxp,
+                  "[TOO]         MinDuration: %d" % mnd,
+                  "[TOO]         MaxDuration: %d" % mxd,
+                  "[TOO]        }"]
+    lines += ["[TOO]     Cause: %d" % cause, "[TOO]    }"]
+    return "\n".join(lines)
+
+
+CAP_ENTRIES_C1 = [(1000000000, 10000000000, 30, 3600), (500, 2000, 30, 600)]
+CAP_NULL = "[TOO]   PowerAdjustmentCapability: null"
+PA_START_ONE = "\n".join([
+    "[TOO]   PowerAdjustStart: {",
+    "[TOO]    }",
+])
+PA_END_NORMAL = "\n".join([
+    "[TOO]   PowerAdjustEnd: {",
+    "[TOO]     Cause: 0",
+    "[TOO]     Duration: 12",
+    "[TOO]     EnergyUse: 120000",
+    "[TOO]    }",
+])
+PA_END_CANCELLED = "\n".join([
+    "[TOO]   PowerAdjustEnd: {",
+    "[TOO]     Cause: 4",
+    "[TOO]     Duration: 3",
+    "[TOO]     EnergyUse: 0",
+    "[TOO]    }",
+])
+INVALID_IN_STATE = "[TOO]     status = 0xCB (INVALID_IN_STATE),"
+STATUS_FAILURE = "[TOO]     status = 0x01 (FAILURE),"
+
+
+def dem_modes(labels, tags):
+    lines = ["[TOO]   SupportedModes: %d entries" % len(labels)]
+    for i, (label, tag) in enumerate(zip(labels, tags)):
+        lines += ["[TOO]     [%d]: {" % (i + 1),
+                  "[TOO]       Label: %s" % label,
+                  "[TOO]       Mode: %d" % i,
+                  "[TOO]       ModeTags: 1 entries",
+                  "[TOO]         [1]: {",
+                  "[TOO]           Value: %d" % tag,
+                  "[TOO]          }",
+                  "[TOO]      }"]
+    return "\n".join(lines)
+
+
+class TestStep324SolarPower(unittest.TestCase):
+    """Energy round C1, task 4: solar's three-device-type identity, the
+    DEM-absence pair (a 0x0098 push and an AT+MTDEMCAP both answering
+    +MTERR:3), the fifth measurement pool pair's power push, and the
+    EXPORTED energy counter read back at full 64-bit width."""
+
+    def _ctx(self, server25=None, exported=None):
+        link = FakeLink({
+            "AT+MTMEAS=25,152,0,1": (3, []),
+            "AT+MTDEMCAP=25,1,0": (3, []),
+            "AT+MTMEAS=25,144,0,230000,1,433,2,99590": (0, []),
+            "AT+MTMEAS=25,145,1,4294967297": (0, []),
+        })
+        energy_attr = "\n".join([
+            "[TOO]   CumulativeEnergyExported: {",
+            "[TOO]     Energy: %d" % (exported if exported is not None
+                                      else 4294967297),
+            "[TOO]     EndSystime: 100000",
+            "[TOO]    }",
+        ])
+        energy_event = "\n".join([
+            "[TOO]   CumulativeEnergyMeasured: {",
+            "[TOO]     EnergyExported: {",
+            "[TOO]       Energy: %d" % (exported if exported is not None
+                                        else 4294967297),
+            "[TOO]       EndSystime: 100000",
+            "[TOO]      }",
+            "[TOO]    }",
+        ])
+        script = [
+            (0, DEVTYPES25_SOLAR),
+            (0, server25 if server25 is not None else SERVER25_SOLAR),
+            (0, "[TOO]   Voltage: 230000"),
+            (0, "[TOO]   ActivePower: 99590"),
+            (0, energy_attr),
+            (0, energy_event),
+        ]
+        runner = FakeChipRunner(script)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_phase3_ctx(link, chip=chip)
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_24_solar_power(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertFalse(any("MTCMDRESP" in c for c in ctx.link.sent))
+
+    def test_dem_on_solar_fails(self):
+        # The absence pin: a thunk change that grew a DEM cluster onto
+        # solar (the battery's over-delivery shape) must fail loudly.
+        with_dem = SERVER25_SOLAR + \
+            "\n[TOO]     [6]: 152 (DeviceEnergyManagement)"
+        ctx = self._ctx(server25=with_dem)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_24_solar_power(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_exported_energy_truncated_fails(self):
+        # 4294967297 truncated to 32 bits is 1: the regression shape the
+        # beyond-2^32 exported value exists to catch, on the side no
+        # other step reads back.
+        ctx = self._ctx(exported=1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_24_solar_power(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep325BatteryStorage(unittest.TestCase):
+    """Energy round C1, task 4: the battery's four-device-type identity,
+    the ember-served battery attributes (BatChargeState above all: the
+    wire evidence for the SDK RECHG conformance fix), the sixth
+    measurement pool pair, the second DEM pool slot proven by a
+    capability round trip, and DEMMode's tag-0 default."""
+
+    def _ctx(self, server26=None, capability=None, modes=None,
+             charge_state=None):
+        link = FakeLink({
+            "AT+MTATTR=26,47,11,12600": (0, ["+MTATTR:26,47,11,12600"]),
+            "AT+MTATTR=26,0x2F,0x0C,180": (0, ["+MTATTR:26,47,12,180"]),
+            "AT+MTATTR=26,47,26,1": (0, ["+MTATTR:26,47,26,1"]),
+            "AT+MTATTR=26,47,28": (0, ["+MTATTR:26,47,28,0"]),
+            "AT+MTATTR=26,47,24,5000": (0, ["+MTATTR:26,47,24,5000"]),
+            "AT+MTMEAS=26,144,0,230000,2,-2200000": (0, []),
+            "AT+MTMEAS=26,152,0,5,1,1": (0, []),
+            "AT+MTDEMCAP=26,2,1,1000000,5000000,60,1800": (0, []),
+            'AT+MTMODES=26,159,0,0,"NoOptimization",1,16385,"DeviceOpt"':
+                (0, []),
+        })
+        script = [
+            (0, DEVTYPES26_BATTERY),
+            (0, server26 if server26 is not None else SERVER26_BATTERY),
+            (0, "[TOO]   BatVoltage: 12600"),
+            (0, "[TOO]   BatPercentRemaining: 180"),
+            (0, charge_state if charge_state is not None
+             else "[TOO]   BatChargeState: 1"),
+            (0, "[TOO]   BatCapacity: 5000"),
+            (0, "[TOO]   ActivePower: -2200000"),
+            (0, "[TOO]   ESAType: 5"),
+            (0, "[TOO]   ESACanGenerate: TRUE"),
+            (0, capability if capability is not None
+             else dem_capability([(1000000, 5000000, 60, 1800)], 2)),
+            (0, modes if modes is not None
+             else dem_modes(["NoOptimization", "DeviceOpt"],
+                            [0x4000, 0x4001])),
+        ]
+        runner = FakeChipRunner(script)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_phase3_ctx(link, chip=chip)
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_25_battery_storage(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertFalse(any("MTCMDRESP" in c for c in ctx.link.sent))
+
+    def test_variant_one_battery_without_the_dem_triple_fails(self):
+        # A slot-26 edit to variant 1 (or a thunk that dropped the DEM
+        # over-delivery) leaves no 152/159 on the endpoint; the presence
+        # check must fail rather than the capability rows quietly
+        # answering +MTERR:3 later.
+        without = "\n".join(SERVER26_BATTERY.split("\n")[:6])
+        ctx = self._ctx(server26=without)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_25_battery_storage(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_wrong_capability_readback_fails(self):
+        # The struct list must come back verbatim; a dropped or reordered
+        # field would be invisible to a count-only check.
+        ctx = self._ctx(capability=dem_capability(
+            [(1000000, 5000000, 60, 1801)], 2))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_25_battery_storage(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_undefaulted_mode_tag_fails(self):
+        # The tag-0 default must resolve to kNoOptimization (0x4000);
+        # a firmware that stored the literal 0 reads back 0 here.
+        ctx = self._ctx(modes=dem_modes(["NoOptimization", "DeviceOpt"],
+                                        [0, 0x4001]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_25_battery_storage(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_missing_bat_charge_state_fails(self):
+        # The RECHG conformance fix's observability net: without
+        # feature::rechargeable::add() the attribute does not exist and
+        # the controller read answers nothing this parser can find.
+        ctx = self._ctx(charge_state="[TOO]   Error: 0x86 "
+                                     "(UNSUPPORTED_ATTRIBUTE)")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_25_battery_storage(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep326Dem(unittest.TestCase):
+    """Energy round C1, task 4: the standalone ESA's identity and the
+    two derived lists (the iron rule's net), the AT+MTDEMCAP round trip
+    including the null distinction, the server's own InvalidInState
+    guard with the no-forward assertion, and the whole PowerAdjust
+    chain: deny, allow, re-adjust with Start SUPPRESSED, the host's
+    normal end with the consumed field-6 energy use, the Cancelled path,
+    and the on-change-only ESAState report contract."""
+
+    def _ctx(self, guard_reply=None, guard_leaks_forward=False,
+             second_start=None, end_after_readjust=None,
+             cap_after_end=None, pa_payloads=None, sub=None):
+        link = FakeLink({
+            "AT+MTMEAS=27,144,0,230000": (3, []),
+            "AT+MTDEMCAP=99,1,0": (2, []),
+            "AT+MTDEMCAP=1,1,0": (3, []),
+            "AT+MTDEMCAP=27,3,0": (1, []),
+            "AT+MTDEMCAP=27,1,1,5000,1000,60,3600": (1, []),
+            "AT+MTDEMCAP=27,1,1,1000,5000,3600,60": (1, []),
+            "AT+MTMEAS=27,152,7,1": (1, []),
+            "AT+MTMEAS=27,152,0,14": (1, []),
+            "AT+MTMEAS=27,152,2,9": (1, []),
+            "AT+MTMEAS=27,152,5,4": (1, []),
+            "AT+MTMEAS=27,152,0,255,3,-5000000000,4,5000000000": (0, []),
+            "AT+MTDEMCAP=27,1,2,1000000000,10000000000,30,3600,500,2000,"
+            "30,600": (0, []),
+            "AT+MTDEMCAP=27,1,0": (0, []),
+            "AT+MTMEAS=27,152,6,120000": (0, []),
+            "AT+MTMEAS=27,152,2,1": (0, []),
+            "AT+MTMEAS=27,152,2,2": (0, []),
+            "AT+MTCMDRESP=1,0": (0, []),
+            "AT+MTCMDRESP=2,1": (0, []),
+            "AT+MTCMDRESP=3,1": (0, []),
+            "AT+MTCMDRESP=4,1": (0, []),
+            "AT+MTCMDRESP=5,1": (0, []),
+            'AT+MTMODES=27,159,0,0,"NoOptimization",1,16387,"GridOpt"':
+                (0, []),
+        })
+        cap_c1 = dem_capability(CAP_ENTRIES_C1, 1)
+        script = [
+            (0, DEVTYPES27_DEM),
+            (0, SERVER27_DEM),
+            (0, DEM_ACCEPTED_CMDS),
+            (0, DEM_ATTR_LIST),
+            (0, "[TOO]   ESAType: 255"),
+            (0, "[TOO]   AbsMinPower: -5000000000"),
+            (0, "[TOO]   AbsMaxPower: 5000000000"),
+            (guard_reply if guard_reply is not None
+             else (1, INVALID_IN_STATE)),          # the in-state guard
+            (0, cap_c1),                           # capability read back
+            (0, CAP_NULL),                         # n=0 reads null
+            (1, STATUS_FAILURE),                   # deny invoke
+            (0, ""),                               # no PowerAdjustStart
+            (0, "[TOO]   ESAState: 1"),
+            (0, ""),                               # allow invoke
+            (0, "[TOO]   ESAState: 3"),
+            (0, PA_START_ONE),
+            (0, cap_c1),                           # cause stamped 1
+            (0, ""),                               # re-adjust invoke
+            (0, second_start if second_start is not None
+             else PA_START_ONE),                   # STILL one Start
+            (0, dem_capability(CAP_ENTRIES_C1, 2)),  # cause restamped 2
+            (0, end_after_readjust if end_after_readjust is not None
+             else PA_END_NORMAL),
+            (0, cap_after_end if cap_after_end is not None else cap_c1),
+            (0, ""),                               # second adjust invoke
+            (0, ""),                               # cancel invoke
+            (0, "\n".join([PA_END_NORMAL, PA_END_CANCELLED])),
+            (0, "[TOO]   ESAState: 1"),
+            (0, dem_modes(["NoOptimization", "GridOpt"],
+                          [0x4000, 0x4003])),
+        ]
+        tails = pa_payloads if pa_payloads is not None else [
+            "5000000000,60,0", "5000000000,60,0", "5000000000,60,1",
+            "5000000000,60,0"]
+        counts = {"pa": 0, "cancel": 0}
+
+        def on_call(argv):
+            if "power-adjust-request" in argv:
+                counts["pa"] += 1
+                i = counts["pa"]
+                link.push_urcs(["+MTCMD:%d,27,152,0,%s"
+                                % (i, tails[i - 1])])
+            elif "cancel-power-adjust-request" in argv:
+                counts["cancel"] += 1
+                if counts["cancel"] == 2:
+                    link.push_urcs(["+MTCMD:5,27,152,1"])
+                elif guard_leaks_forward:
+                    # Regression shape: a firmware that forwarded a
+                    # cancel the server should have refused outright.
+                    link.push_urcs(["+MTCMD:9,27,152,1"])
+
+        runner = FakeChipRunner(script, on_call=on_call)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        sub = sub if sub is not None else FakeSubscriber(counts=[1, 1, 2])
+        ctx.subscriber_factory = lambda: sub
+        ctx._sub = sub
+        return ctx
+
+    def test_happy_path(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertTrue(ctx._sub.stopped)
+
+    def test_guard_answering_success_fails(self):
+        # The guard is the CHIP SERVER's, and its status is specific: a
+        # Success (or any other code) means the ESAState precondition
+        # stopped being checked where the spec says it is.
+        ctx = self._ctx(guard_reply=(0, "[TOO]     status = 0x00 "
+                                        "(SUCCESS),"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_guard_leaking_a_forward_fails(self):
+        ctx = self._ctx(guard_leaks_forward=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_second_power_adjust_start_fails(self):
+        # The re-adjust rule (TC_DEM_2_2 step 14) is a SUPPRESSION pin: a
+        # firmware that emitted a second PowerAdjustStart on the second
+        # accept must fail the "still exactly one" check.
+        ctx = self._ctx(second_start="\n".join([PA_START_ONE,
+                                                PA_START_ONE]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_wrong_power_adjust_payload_fails(self):
+        # The canonical vector pin: a forward that lost the 64-bit power
+        # (5000000000 truncated to 705032704) must not be answered.
+        ctx = self._ctx(pa_payloads=["705032704,60,0", "5000000000,60,0",
+                                     "5000000000,60,1", "5000000000,60,0"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_energy_use_not_carried_into_the_end_event_fails(self):
+        # Field 6 is an event carrier and the End is where it surfaces;
+        # a 0 there means the cache never reached the emission.
+        ctx = self._ctx(end_after_readjust="\n".join([
+            "[TOO]   PowerAdjustEnd: {",
+            "[TOO]     Cause: 0",
+            "[TOO]     Duration: 12",
+            "[TOO]     EnergyUse: 0",
+            "[TOO]    }",
+        ]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_capability_cause_not_restored_fails(self):
+        # Every PowerAdjustEnd restores the AT+MTDEMCAP baseline (task
+        # review F2); a cause still reading the stamped 2 is the
+        # regression.
+        ctx = self._ctx(cap_after_end=dem_capability(CAP_ENTRIES_C1, 2))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_same_state_push_reporting_fails(self):
+        # The on-change-only contract: a report arriving after a
+        # same-value ESAState push is exactly the round B behaviour this
+        # round deliberately diverges from.
+        ctx = self._ctx(sub=FakeSubscriber(counts=[1, 2, 3]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+        self.assertTrue(ctx._sub.stopped)
+
+
+class TestEnergyC1Parsers(unittest.TestCase):
+    """Energy round C1, task 4: the three parsers the round adds, all
+    INFERENCE-derived from the pinned generated DataModelLogger.cpp (see
+    their docstrings) and awaiting bench confirmation."""
+
+    def test_power_adjust_entries_in_order(self):
+        self.assertEqual(
+            parse_power_adjust_entries(dem_capability(CAP_ENTRIES_C1, 1)),
+            [(1000000000, 10000000000, 30, 3600), (500, 2000, 30, 600)])
+
+    def test_power_adjust_entries_empty_on_null(self):
+        self.assertEqual(parse_power_adjust_entries(CAP_NULL), [])
+
+    def test_power_adjust_entries_empty_on_a_ragged_capture(self):
+        # A truncated struct (the "Struct truncated due to invalid value"
+        # path) leaves the four label counts disagreeing; an empty list
+        # is the honest answer, not a mis-zipped one.
+        ragged = "\n".join(["[TOO]         MinPower: 1",
+                            "[TOO]         MaxPower: 2",
+                            "[TOO]         MinDuration: 3"])
+        self.assertEqual(parse_power_adjust_entries(ragged), [])
+
+    def test_power_adjust_entries_keeps_negative_powers(self):
+        self.assertEqual(
+            parse_power_adjust_entries(
+                dem_capability([(-5000000000, 5000000000, 0, 60)], 0)),
+            [(-5000000000, 5000000000, 0, 60)])
+
+    def test_cause_values_from_a_capability_read(self):
+        self.assertEqual(parse_cause_values(dem_capability(
+            CAP_ENTRIES_C1, 2)), [2])
+
+    def test_cause_values_from_both_end_events_in_order(self):
+        self.assertEqual(
+            parse_cause_values("\n".join([PA_END_NORMAL,
+                                          PA_END_CANCELLED])), [0, 4])
+
+    def test_cause_values_empty_on_no_match(self):
+        self.assertEqual(parse_cause_values(PA_START_ONE), [])
+
+    def test_esa_state_reports_in_order(self):
+        text = "\n".join(["[TOO]   ESAState: 1", "[TOO]   ESAState: 3",
+                          "[TOO]   ESAState: 1"])
+        self.assertEqual(parse_esa_state_reports(text), [1, 3, 1])
+
+    def test_esa_state_reports_survive_a_trailing_escape(self):
+        # Subscriber output bypasses the central ANSI strip, so the
+        # parser must not be end-anchored (reports()'s F1 note).
+        self.assertEqual(
+            parse_esa_state_reports("[TOO]   ESAState: 3\x1b[0m"), [3])
+
+    def test_esa_state_reports_empty_on_no_match(self):
+        self.assertEqual(parse_esa_state_reports(""), [])
+
+
+class TestStagedVariant1EnergyC1(unittest.TestCase):
+    """Energy round C1, task 4: the Phase 1 staged variant-1 row
+    (t_staged_variant1_energy_c1): one scratch composition carrying all
+    three variant-1 types, VERIFIED after the apply (the
+    known-start-state rule), the cluster-missing rows with their OK
+    controls, the DEM v1 +MTERR:4 attribute-missing row, and the
+    finally-block restore of the single-light standard state on every
+    exit path."""
+
+    RESTORE_TAIL = ["AT+MTEPCLEAR", "AT+MTEP=0x0100", "AT+MTEPAPPLY",
+                    "AT+MTEP?"]
+    STAGED_READBACK = ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x0017,1",
+                       "+MTEP:2,3,0x0018,1", "+MTEP:3,4,0x050D,1"]
+
+    def _link(self, overrides=None):
+        cmds = {
+            "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []),
+            "AT+MTEP=0x0017,1": (0, []),
+            "AT+MTEP=0x0018,1": (0, []),
+            "AT+MTEP=0x050D,1": (0, []),
+            "AT+MTEPAPPLY": (0, []),
+            "AT+MTEP?": [(0, list(self.STAGED_READBACK)),
+                         (0, ["+MTEP:0,1,0x0100"])],
+            "AT+MTMEAS=2,145,0,1500000": (3, []),
+            "AT+MTMEAS=2,144,0,230000": (0, []),
+            "AT+MTMEAS=3,152,0,5": (3, []),
+            "AT+MTDEMCAP=3,1,0": (3, []),
+            "AT+MTDEMCAP=4,1,0": (4, []),
+            "AT+MTMEAS=4,152,0,5": (0, []),
+        }
+        cmds.update(overrides or {})
+        return ApplyLink(cmds)
+
+    def test_happy_path(self):
+        link = self._link()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(t_staged_variant1_energy_c1(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_dem_v1_answering_cluster_missing_fails(self):
+        # The whole point of the +MTERR:4 row: on DEM variant 1 the
+        # cluster IS there and only the PowerAdjustment feature is
+        # absent, so a firmware answering 3 has lost the distinction
+        # between "no cluster" and "no attribute".
+        link = self._link({"AT+MTDEMCAP=4,1,0": (3, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_staged_variant1_energy_c1(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_solar_v1_losing_the_whole_graft_fails(self):
+        # The control row: variant 1 drops EEM only. A thunk that
+        # dropped the sensor graft entirely would still pass the
+        # +MTERR:3 energy row and must fail on the power row.
+        link = self._link({"AT+MTMEAS=2,144,0,230000": (3, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_staged_variant1_energy_c1(link))
+
+    def test_wrong_composition_readback_fails_but_still_restores(self):
+        link = self._link({"AT+MTEP?": [
+            (0, ["+MTEP:0,1,0x0100"]),      # the three entries missing
+            (0, ["+MTEP:0,1,0x0100"]),      # restore readback, correct
+        ]})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_staged_variant1_energy_c1(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_apply_failure_fails_and_attempts_restore(self):
+        link = self._link({"AT+MTEPAPPLY": (-1, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_staged_variant1_energy_c1(link))
+        self.assertEqual(link.sent.count("AT+MTEPAPPLY"), 2)
+
+    def test_restore_failure_alone_fails_the_row(self):
+        link = self._link({"AT+MTEP?": [
+            (0, list(self.STAGED_READBACK)),
+            (0, list(self.STAGED_READBACK)),   # restore did not take
+        ]})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_staged_variant1_energy_c1(link))
 
 
 class TestStep313Restore(unittest.TestCase):
