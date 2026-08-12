@@ -2557,6 +2557,120 @@ class TestStep212(unittest.TestCase):
         self.assertIn("AT+MTEP=0x0071,0,0", ctx.link.sent)
 
 
+from mt_regression import step_2_13_thread_role_event
+
+
+class TestStep213ThreadRoleEvent(unittest.TestCase):
+    """0.11.0 task 3: step_2_13_thread_role_event, the Phase 2 row
+    proving +MTEVT:28 actually arrives with a legal token on a Thread
+    reattach, +MTEVT:25 still fires unchanged, the mask is restored on
+    every exit path, and (the design-decision row, see the function's own
+    docstring) a WiFi-transport run self-skips instead of hanging on an
+    event that transport can never raise."""
+
+    MASK_ON = "AT+MTEVT=0x1A00003F"
+    MASK_OFF = "AT+MTEVT=0x0800003F"
+
+    def _commands(self):
+        return {self.MASK_ON: (0, []), "AT+MTRESET": (0, []),
+                self.MASK_OFF: (0, [])}
+
+    def test_wifi_transport_skips(self):
+        link = FakeLink(self._commands())
+        ctx = fresh_ctx(link)
+        ctx.transport = "WIFI"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_13_thread_role_event(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual(ctx.suite.results, [])
+        self.assertTrue(any(n.startswith("2.13")
+                            for n, _ in ctx.suite.skipped))
+        # A self-skip must not touch the wire at all.
+        self.assertEqual(link.sent, [])
+
+    def test_thread_happy_path(self):
+        link = FakeLink(self._commands(), urcs_on_command={
+            "AT+MTRESET": ["+MTREADY", "+MTEVT:25", "+MTEVT:28,ROUTER"]})
+        ctx = fresh_ctx(link)
+        ctx.transport = "THREAD"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_13_thread_role_event(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertEqual(link.sent[0], self.MASK_ON)
+        self.assertEqual(link.sent[-1], self.MASK_OFF)
+
+    def test_thread_detached_role_token_is_legal(self):
+        # UNASSIGNED (detached) is as legal a transition target as an
+        # attached role: the check must not assume "attached" is the
+        # only reattach outcome worth accepting.
+        link = FakeLink(self._commands(), urcs_on_command={
+            "AT+MTRESET": ["+MTREADY", "+MTEVT:28,UNASSIGNED",
+                          "+MTEVT:25"]})
+        ctx = fresh_ctx(link)
+        ctx.transport = "THREAD"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_13_thread_role_event(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_missing_role_event_fails(self):
+        link = FakeLink(self._commands(), urcs_on_command={
+            "AT+MTRESET": ["+MTREADY", "+MTEVT:25"]})
+        ctx = fresh_ctx(link)
+        ctx.transport = "THREAD"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_13_thread_role_event(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.13 MTEVT:28 arrives with a legal role token",
+                      failed)
+        # The restore still ran despite the failure.
+        self.assertEqual(link.sent[-1], self.MASK_OFF)
+
+    def test_illegal_role_token_fails(self):
+        link = FakeLink(self._commands(), urcs_on_command={
+            "AT+MTRESET": ["+MTREADY", "+MTEVT:28,BOGUS"]})
+        ctx = fresh_ctx(link)
+        ctx.transport = "THREAD"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_13_thread_role_event(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.13 MTEVT:28 arrives with a legal role token",
+                      failed)
+
+    def test_missing_state_change_fails(self):
+        link = FakeLink(self._commands(), urcs_on_command={
+            "AT+MTRESET": ["+MTREADY", "+MTEVT:28,ROUTER"]})
+        ctx = fresh_ctx(link)
+        ctx.transport = "THREAD"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_13_thread_role_event(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.13 MTEVT:25 still fires, no payload", failed)
+
+    def test_reset_failure_aborts_but_restores_mask(self):
+        link = FakeLink({self.MASK_ON: (0, []), "AT+MTRESET": (-1, []),
+                         self.MASK_OFF: (0, [])})
+        ctx = fresh_ctx(link)
+        ctx.transport = "THREAD"
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_13_thread_role_event(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+        self.assertEqual(link.sent[-1], self.MASK_OFF)
+
+    def test_row_between_window_expiry_and_two_resets(self):
+        # Placement is load-bearing, not cosmetic: 2.11 factory-resets
+        # the device (TESTING.md 2.11), so this row must run BEFORE it
+        # while the device is still commissioned, or there is no Thread
+        # fabric to reattach to.
+        names = [step["name"] for step in PHASE2_STEPS]
+        self.assertIn("2.13 Thread role event on reattach", names)
+        self.assertLess(names.index("2.13 Thread role event on reattach"),
+                        names.index("2.11 two resets"))
+        self.assertLess(names.index("2.11 two resets"),
+                        names.index("2.12 rig restore"))
+
+
 from mt_regression import step_2_6_root_urc_sweep
 
 
@@ -6615,6 +6729,94 @@ class TestPhase1T7Negative(unittest.TestCase):
         # fail on current firmware.
         self.assertFalse(any(n.startswith("MTALARM=1,0,0 -> +MTERR:1")
                              for n in phase1))
+
+
+from mt_regression import t_mtthread_query_shape
+
+
+class TestMtThreadQueryShape(unittest.TestCase):
+    """0.11.0 task 3: t_mtthread_query_shape, the one Phase 1 row whose
+    correct answer differs by image. Nine scenarios: the three happy
+    paths (WiFi's +MTERR:8; Thread attached with real ids; Thread
+    detached with every id field empty, the null-means-unknown case) and
+    six failure shapes proving the check enforces more than "something
+    came back OK" -- the WiFi branch pins the exact error code, and the
+    Thread branch pins the role token, the attached flag, the id width
+    and the name's quoting, any one of which a firmware regression could
+    break silently while everything else still looked fine."""
+
+    def test_wifi_happy_path(self):
+        link = FakeLink({"AT+MTNET?": (0, ["+MTNET:WIFI,1,1,0"]),
+                         "AT+MTTHREAD?": (8, [])})
+        self.assertTrue(t_mtthread_query_shape(link))
+
+    def test_wifi_wrong_code_fails(self):
+        # A bare ERROR instead of +MTERR:8 must fail: AT_MT_SPEC.md
+        # 3.27's "never a bare ERROR" half of the WiFi-image contract.
+        link = FakeLink({"AT+MTNET?": (0, ["+MTNET:WIFI,1,1,0"]),
+                         "AT+MTTHREAD?": (-1, [])})
+        self.assertFalse(t_mtthread_query_shape(link))
+
+    def test_thread_attached_happy_path(self):
+        link = FakeLink({
+            "AT+MTNET?": (0, ["+MTNET:THREAD,1,1,0"]),
+            "AT+MTTHREAD?": (0, [
+                '+MTTHREAD:ROUTER,1,15,0xFA25,0x000DB01A5C3F2E10,'
+                '0x00003A21,"MyThreadNet"']),
+        })
+        self.assertTrue(t_mtthread_query_shape(link))
+
+    def test_thread_detached_happy_path(self):
+        # The null-means-unknown case (spec 2.1): every id field empty,
+        # never rendered as 0.
+        link = FakeLink({
+            "AT+MTNET?": (0, ["+MTNET:THREAD,1,0,0"]),
+            "AT+MTTHREAD?": (0, ['+MTTHREAD:UNASSIGNED,0,,,,,""']),
+        })
+        self.assertTrue(t_mtthread_query_shape(link))
+
+    def test_thread_illegal_role_token_fails(self):
+        link = FakeLink({
+            "AT+MTNET?": (0, ["+MTNET:THREAD,1,1,0"]),
+            "AT+MTTHREAD?": (0, ['+MTTHREAD:BOGUS,0,,,,,""']),
+        })
+        self.assertFalse(t_mtthread_query_shape(link))
+
+    def test_thread_attached_not_boolean_fails(self):
+        link = FakeLink({
+            "AT+MTNET?": (0, ["+MTNET:THREAD,1,1,0"]),
+            "AT+MTTHREAD?": (0, [
+                '+MTTHREAD:ROUTER,2,15,0xFA25,0x000DB01A5C3F2E10,'
+                '0x00003A21,"MyThreadNet"']),
+        })
+        self.assertFalse(t_mtthread_query_shape(link))
+
+    def test_thread_unquoted_name_fails(self):
+        link = FakeLink({
+            "AT+MTNET?": (0, ["+MTNET:THREAD,1,0,0"]),
+            "AT+MTTHREAD?": (0, ['+MTTHREAD:UNASSIGNED,0,,,,,unquoted']),
+        })
+        self.assertFalse(t_mtthread_query_shape(link))
+
+    def test_thread_short_panid_fails(self):
+        link = FakeLink({
+            "AT+MTNET?": (0, ["+MTNET:THREAD,1,1,0"]),
+            "AT+MTTHREAD?": (0, [
+                '+MTTHREAD:ROUTER,1,15,0xFA2,0x000DB01A5C3F2E10,'
+                '0x00003A21,"MyThreadNet"']),
+        })
+        self.assertFalse(t_mtthread_query_shape(link))
+
+    def test_transport_undetectable_fails(self):
+        link = FakeLink({"AT+MTNET?": (0, ["garbage"])})
+        self.assertFalse(t_mtthread_query_shape(link))
+
+    def test_t11_rows_registered(self):
+        phase1 = [n for p, n, _, _, _ in TESTS if p == 1]
+        self.assertTrue(any(n.startswith("MTTHREAD=1 -> ERROR")
+                            for n in phase1))
+        self.assertTrue(any(n.startswith("MTTHREAD? shape by image")
+                            for n in phase1))
 
 
 class TestMainPhase3Wiring(unittest.TestCase):

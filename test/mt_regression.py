@@ -1048,6 +1048,79 @@ def step_2_12_rig_restore(ctx):
             tag="P2")
 
 
+def step_2_13_thread_role_event(ctx):
+    """0.11.0 task 3, design spec 2026-08-12 section 4's Phase 2 row: with
+    bit 28 enabled, a Thread reattach cycle drives the device's
+    RoutingRole from `UNASSIGNED` back to its attached role, so at least
+    one `+MTEVT:28` must arrive carrying a legal token (the
+    `MT_THREAD_ROLE_TOKEN_RE` grammar, defined next to
+    `t_mtthread_query_shape` since AT_MT_SPEC.md 3.11 states the payload
+    is "the identical decoded token" `AT+MTTHREAD?` reports, one grammar
+    for both), and `+MTEVT:25` (bit 25, Thread state change, unchanged by
+    this round) must still fire.
+
+    The reattach is `AT+MTRESET`, not a fresh commission: bit 28 fires on
+    ROLE TRANSITIONS only (CHIP's own `RoleChanged` flag), and the
+    commissioning that already happened in step 2.3 ran under the default
+    mask, which does not carry bit 28 (it is opt-in, design spec section
+    2.2), so any role events from THAT attach were never surfaced and
+    cannot be observed after the fact. A warm reboot (the composition and
+    fabric survive `AT+MTRESET`, CLAUDE.md) forces a fresh Thread
+    interface bring-up with the mask already open, which is the only way
+    this harness can see the event at all.
+
+    Thread-only: on a WiFi image there is no Thread stack to reattach and
+    bit 28 can never fire, so this is the one Phase 2 row that self-skips
+    by transport rather than hang on an event that can never come.
+    `run_phase2` has no gate mechanism for this (unlike --include-slow/
+    --include-manual, which are operator intent, not architecture): every
+    other Phase 2 row is transport-NEUTRAL in shape even where its content
+    differs (T4's design, TESTING.md section 7), and this is the first row
+    that is not applicable on one transport at all. Flagged as a design
+    decision in the task-3 report, not a default assumption; see also
+    `t_mtthread_query_shape`'s docstring for the Phase 1 half of the same
+    problem.
+
+    The mask is restored to the standing default in a `finally` block:
+    Phase 1's own mask row (`t_evt_mask_set_read_restore`) documents why a
+    nonstandard mask left behind races every later URC assertion, and this
+    step's own bit 25/28 subscription must not leak into 2.6's
+    root-endpoint URC sweep, the last step in the chain."""
+    link, s = ctx.link, ctx.suite
+    name = "2.13 Thread role event on reattach"
+    if ctx.transport != "THREAD":
+        s.skip(name, "WIFI transport: no Thread role to reattach")
+        return
+    mask = "0x%08X" % (0x0800003F | (1 << 25) | (1 << 28))  # 0x1A00003F
+    try:
+        res, _ = link.command("AT+MTEVT=%s" % mask)
+        if not s.check("2.13 MTEVT mask enable bits 25+28 -> OK",
+                       res == 0, tag="P2"):
+            raise StepAbort("could not enable the Thread role mask")
+        link.drain(0.3)
+        res, _ = cmd_retry(link, "AT+MTRESET")
+        if not s.check("2.13 MTRESET -> OK", res == 0, tag="P2"):
+            raise StepAbort("AT+MTRESET failed")
+        ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+        if not s.check("2.13 +MTREADY within 15 s", ready is not None,
+                       tag="P2"):
+            raise StepAbort("device did not come back after AT+MTRESET")
+        got28 = link.await_urc(r"\+MTEVT:28,", timeout=30.0)
+        role_ok = False
+        if got28 is not None:
+            m = re.fullmatch(r"\+MTEVT:28,(.+)", got28)
+            role_ok = (m is not None and
+                      MT_THREAD_ROLE_TOKEN_RE.fullmatch(m.group(1))
+                      is not None)
+        s.check("2.13 MTEVT:28 arrives with a legal role token", role_ok,
+                tag="P2")
+        evt25 = link.await_urc(r"\+MTEVT:25$", timeout=5.0)
+        s.check("2.13 MTEVT:25 still fires, no payload", evt25 is not None,
+                tag="P2")
+    finally:
+        link.command("AT+MTEVT=0x0800003F")
+
+
 def step_2_6_root_urc_sweep(ctx):
     """TESTING.md 2.6, scored last: across every URC of the whole run,
     endpoint 0 stays silent. Every reboot in the chain (four resets
@@ -6368,6 +6441,115 @@ def register_phase1_t10_negative():
 register_phase1_t10_negative()
 
 
+# Thread role API round (0.11.0), task 3: the decoded RoutingRoleEnum
+# grammar AT_MT_SPEC.md 3.27 defines for AT+MTTHREAD? and reuses verbatim
+# for +MTEVT:28's payload (spec 3.11: "the identical decoded token").
+# Shared by t_mtthread_query_shape below (Phase 1) and
+# step_2_13_thread_role_event above (Phase 2) so the two checks cannot
+# silently drift onto different grammars.
+MT_THREAD_ROLE_TOKENS = (
+    "UNSPECIFIED", "UNASSIGNED", "SLEEPY_END_DEVICE", "END_DEVICE",
+    "REED", "ROUTER", "LEADER",
+)
+
+# A future SDK addition outside the known set degrades to the raw decimal
+# (design spec 2.1, mt_at.c's role_tok fallback), so the grammar admits
+# \d+ alongside the named tokens rather than treating an unknown number as
+# malformed.
+MT_THREAD_ROLE_TOKEN_RE = re.compile(
+    r"(?:" + "|".join(MT_THREAD_ROLE_TOKENS) + r"|\d+)")
+
+# mt_at.c's cmd_mtthread() renders channel decimal, the three ids
+# 0x-prefixed upper-case hex at their natural byte width (panid 4 digits,
+# extpanid 16, partitionid 8; snprintf's "%04lX"/"%016llX"/"%08lX"), and
+# each of the four stays the empty string when its has_* flag is clear
+# (null-means-unknown, never 0). The name is always double-quoted, with
+# `"` and `\` escaped.
+MT_THREAD_LINE_RE = re.compile(
+    r"\+MTTHREAD:" + MT_THREAD_ROLE_TOKEN_RE.pattern + r","
+    r"[01],"
+    r"\d*,"
+    r"(?:0x[0-9A-F]{4})?,"
+    r"(?:0x[0-9A-F]{16})?,"
+    r"(?:0x[0-9A-F]{8})?,"
+    r'"(?:[^"\\]|\\.)*"')
+
+
+def t_mtthread_query_shape(link):
+    """AT+MTTHREAD? (design spec 2026-08-12 section 2.1, AT_MT_SPEC.md
+    3.27) answers differently depending on the image: a WiFi image has no
+    ThreadNetworkDiagnostics cluster on endpoint 0 at all and answers
+    +MTERR:8, never a bare ERROR; a Thread image answers OK with a
+    decoded role line.
+
+    Design decision (task-3 report): Phase 1 has no per-image test list of
+    its own. add_test's whole contract is fn(link) with no context object,
+    and both committed baselines (wifi.json, thread.json) run the exact
+    same TESTS list and simply record whatever the flashed image gives
+    back (capture_header does the same self-detection from AT+MTNET? to
+    label the report header). This is the first row whose CORRECT answer
+    differs by image rather than its recorded value only, so rather than
+    inventing a Phase-1-wide transport-gating mechanism this row detects
+    its own image the same way capture_header and phase2_gate already do
+    and asserts the behaviour that image is contracted to give. The
+    set-form row (AT+MTTHREAD=1 -> ERROR) needed no such split: it is
+    identical on both images, so it stays a plain expect_err row in
+    register_phase1_t11_negative below.
+
+    Only the line's SHAPE is asserted on a Thread image, never the
+    observed role, ids or name: those are the rig's Thread network
+    identity, and B181 treats dataset material as credentials, so no
+    observed value may reach a committed baseline through this check."""
+    res, lines = link.command("AT+MTNET?")
+    if res != 0 or not lines:
+        return False
+    m = re.match(r"\+MTNET:(WIFI|THREAD),", lines[0])
+    if not m:
+        return False
+    if m.group(1) == "WIFI":
+        res, _ = link.command("AT+MTTHREAD?")
+        return res == 8
+    res, lines = link.command("AT+MTTHREAD?")
+    return (res == 0 and bool(lines) and
+           MT_THREAD_LINE_RE.fullmatch(lines[0]) is not None)
+
+
+def register_phase1_t11_negative():
+    """Thread role API round (0.11.0), task 3: the two state-safe rows
+    TESTING.md 6.2 gains from the round's firmware tasks 1 and 2
+    (AT+MTTHREAD?, spec 3.27; +MTEVT:28, spec 3.11), a sibling of
+    register_phase1_t5/t6/t7/t8/t9/t10 in the same order-independent
+    split.
+
+    Both rows are safe on the single-light bench and need no endpoint:
+    cmd_mtthread() answers from endpoint 0's ThreadNetworkDiagnostics
+    cluster or its absence, never from anything Phase 1's standard
+    composition declares.
+
+    - The set-form row is identical on both images (a bare ERROR, the
+      standing "wrong command form" division): AT+MTTHREAD? is
+      query-only, so AT+MTTHREAD=1 dies in the parser before the image is
+      even asked, and one row covers both.
+    - The query row is the one whose answer differs by image (+MTERR:8 on
+      WiFi, a shape-asserted OK line on Thread); t_mtthread_query_shape
+      carries both branches, since Phase 1 has no other place to put an
+      image-conditional row (see that function's docstring for the design
+      decision this round needed).
+
+    The Phase 2 half of this round (the reattach-driven +MTEVT:28 row,
+    which needs a real commissioning cycle and so cannot be bench-safe on
+    Phase 1's single-light rig) lives in step_2_13_thread_role_event
+    instead."""
+    n = lambda name, fn: add_test(1, name, fn, tag="AT-")
+    n("MTTHREAD=1 -> ERROR (query-only command, both images)",
+      expect_err("AT+MTTHREAD=1", -1))
+    n("MTTHREAD? shape by image (+MTERR:8 on WiFi, decoded line on "
+      "Thread)", t_mtthread_query_shape)
+
+
+register_phase1_t11_negative()
+
+
 PHASE2_STEPS[:] = [
     {"name": "2.1 factory-fresh baseline", "fn": step_2_1_factory_fresh},
     {"name": "2.2 onboarding codes stable", "fn": step_2_2_codes_stable},
@@ -6384,6 +6566,9 @@ PHASE2_STEPS[:] = [
      "gate": "include_manual", "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.10 window expiry", "fn": step_2_10_window_expiry,
      "gate": "include_slow", "requires": ["2.3 commission ble-wifi"]},
+    {"name": "2.13 Thread role event on reattach",
+     "fn": step_2_13_thread_role_event,
+     "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.11 two resets", "fn": step_2_11_two_resets,
      "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.12 rig restore", "fn": step_2_12_rig_restore,
