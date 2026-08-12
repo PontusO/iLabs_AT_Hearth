@@ -238,6 +238,36 @@ static bool s_transport_mismatch = false;
  */
 static volatile bool s_window_evt_sent = false;
 
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+/*
+ * Last role token reported on +MTEVT:28, and whether one has been reported at
+ * all since the Thread interface last came up. Only app_event_cb() touches
+ * these, and only from the CHIP event-loop task, so they need no lock and no
+ * volatile.
+ *
+ * Why the firmware keeps this delta state after all (bench defect A, design
+ * spec 2.2): CHIP's ThreadStateChange.RoleChanged tracks the OPENTHREAD role,
+ * while this event carries the MATTER RoutingRole token, and that mapping is
+ * many-to-one. thread-network-diagnostics-provider.cpp derives the token from
+ * otThreadGetDeviceRole() combined with otThreadGetLinkMode() and
+ * otThreadIsRouterEligible(), so OT_DEVICE_ROLE_CHILD alone renders as
+ * SLEEPY_END_DEVICE, END_DEVICE or REED depending on link mode and router
+ * eligibility. Two genuine OT role changes can therefore land on one Matter
+ * token, and the bench saw exactly that: three bit-28 events inside 10 ms
+ * during commissioning carrying UNASSIGNED, REED, REED. Gating on
+ * RoleChanged is necessary but not sufficient; a token that did not change is
+ * not a change the host can act on.
+ *
+ * The role byte is cached rather than the rendered string because
+ * mt_thread_role_name() is injective: seven enum values, seven distinct
+ * tokens, and the out-of-range fallback renders the byte itself in decimal.
+ * Byte equality is therefore token equality, in two bytes instead of
+ * eighteen.
+ */
+static uint8_t s_last_role_tok = 0;
+static bool    s_last_role_tok_valid = false;
+#endif
+
 /* Window opened on a transport mismatch. The same 300 s AT+MTCOMMISSION
  * defaults to: long enough to commission unhurriedly, short enough that a
  * device nobody is attending stops advertising. */
@@ -662,18 +692,48 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     case DeviceEventType::kThreadConnectivityChange:
         mt_at_event(MT_EVT_THREAD_CONNECTIVITY,
                     event->ThreadConnectivityChange.Result == kConnectivity_Established ? "1" : "0");
+        /* Thread interface down: forget the last reported role token, so a
+         * genuine return to that same role after the interface comes back is
+         * reported rather than swallowed as a repeat (design spec 2.2).
+         *
+         * This is the reset point because it is the only one CHIP actually
+         * raises. kThreadInterfaceStateChange looks like the natural hook and
+         * is not: CHIPDeviceEvent.h:189 declares it, and nothing anywhere in
+         * connectedhomeip posts it, so a reset hung there would be dead code.
+         * Ordering is safe: GenericThreadStackManagerImpl_OpenThread.hpp:201
+         * posts this event from its own kThreadStateChange handling, so it is
+         * queued behind the state change that caused it and the reset lands
+         * after that transition's own bit-28 emit, never before it. */
+        if (event->ThreadConnectivityChange.Result == kConnectivity_Lost) {
+            s_last_role_tok_valid = false;
+        }
         break;
     case DeviceEventType::kThreadStateChange:
         mt_at_event(MT_EVT_THREAD_STATE_CHANGE, nullptr);
         /*
-         * Bit 28, 0.11.0 (design spec 2.2). CHIPDeviceEvent.h's
-         * ThreadStateChange struct carries four independent bool:1 bits
-         * (RoleChanged, AddressChanged, NetDataChanged, ChildNodesChanged;
-         * verified at source before relying on it, per the task brief), so
-         * gating on RoleChanged alone means this fires on a routing-role
-         * transition only, never on address, network-data or child-table
-         * churn, and the firmware tracks no delta state of its own to notice
-         * a "change": CHIP's own flag IS the change signal.
+         * Bit 28, 0.11.0 (design spec 2.2). CHIPDeviceEvent.h:522 declares
+         * the ThreadStateChange struct's four independent bool:1 bits
+         * (RoleChanged, AddressChanged, NetDataChanged, ChildNodesChanged),
+         * and GenericThreadStackManagerImpl_OpenThread.hpp:114 populates
+         * RoleChanged as (flags & OT_CHANGED_THREAD_ROLE) != 0. Gating on it
+         * means this fires on a routing-role transition only, never on
+         * address, network-data or child-table churn.
+         *
+         * The gate is a bench fix, not a design flourish (defect A): the
+         * first cut of this block described the gate in this comment but
+         * never tested the bit, and registering one test prefix on the
+         * border router (pure netdata churn, no role transition possible)
+         * produced four +MTEVT:25/+MTEVT:28,ROUTER pairs while the role
+         * never left ROUTER.
+         *
+         * The RoleChanged bit alone is still not enough, hence the
+         * s_last_role_tok cache: CHIP's bit tracks the OpenThread role while
+         * this payload carries the Matter token, and that mapping is
+         * many-to-one (see the cache's own comment near the top of this
+         * file). Same-token repeats are suppressed here; the cache is reset
+         * on a Thread connectivity loss above, so a genuine return to a
+         * previously reported role is always reported again.
+         *
          * MT_EVT_THREAD_STATE_CHANGE above stays exactly as it was, coarse
          * and unconditional; this is additive, not a replacement.
          *
@@ -693,9 +753,10 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
          * with no lock of its own, since role is the only field this event's
          * payload carries.
          */
-        {
+        if (event->ThreadStateChange.RoleChanged) {
             uint8_t role = 0;
-            if (mt_thread_read_role(&role)) {
+            if (mt_thread_read_role(&role) &&
+                (!s_last_role_tok_valid || role != s_last_role_tok)) {
                 char role_tok[8];
                 const char *tok = mt_thread_role_name(role);
                 if (tok == nullptr) {
@@ -707,6 +768,13 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
                     snprintf(role_tok, sizeof(role_tok), "%u", (unsigned)role);
                     tok = role_tok;
                 }
+                /* Cached whether or not the host has bit 28 unmasked:
+                 * mt_at_event()'s mask test decides delivery, not what the
+                 * firmware believes it last told the host about the role.
+                 * Keying the cache on the return value instead would make a
+                 * mask flip resend a role the host already knows. */
+                s_last_role_tok = role;
+                s_last_role_tok_valid = true;
                 mt_at_event(MT_EVT_THREAD_ROLE_CHANGED, tok);
             }
         }
