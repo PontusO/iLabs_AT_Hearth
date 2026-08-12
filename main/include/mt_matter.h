@@ -335,8 +335,14 @@ int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *la
  * single RVC endpoint carries TWO ModeBase clusters at once (RvcRunMode and
  * RvcCleanMode, design spec section 2.1), so the store is keyed by the pair,
  * not by endpoint alone.
+ *
+ * Raised 8 -> 12 for energy round C1 (design spec 2.1): the round's Phase 3
+ * composition adds two ModeBase slots (battery storage's DEM Mode and the
+ * standalone DEM device's DEM Mode) on top of the eight the RVC/appliance
+ * rounds consume, and round C2's EVSE adds two more (EVSE Mode plus its DEM
+ * Mode), leaving zero headroom after C2, deliberately.
  */
-#define MT_MB_MAX_LISTS     8   /* (endpoint, cluster) lists this firmware can store */
+#define MT_MB_MAX_LISTS     12  /* (endpoint, cluster) lists this firmware can store */
 #define MT_MB_MAX_COUNT     8   /* mode/tag/label triples per list, 1..this many     */
 #define MT_MB_MAX_LABEL_LEN 32  /* bytes per label, excluding the NUL                */
 
@@ -402,8 +408,8 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
  * MT_ATTR_ERR_CLUSTER when cluster is not one of the ModeBase ids above, or
  * ep has no such cluster, MT_ATTR_ERR_FAILED for a bad count or an internal
- * failure (store exhaustion: MT_MB_MAX_LISTS (8) is smaller than
- * MT_COMP_MAX_ENDPOINTS (16), so a composition with enough ModeBase cluster
+ * failure (store exhaustion: MT_MB_MAX_LISTS (12) is smaller than
+ * MT_COMP_MAX_ENDPOINTS (28), so a composition with enough ModeBase cluster
  * instances CAN exhaust it; refused with this code rather than silently
  * overwriting an unrelated (endpoint, cluster) slot).
  */
@@ -716,13 +722,18 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep);
 
 /*
  * How many measurement-capable endpoints one composition can carry. A
- * deliberate step down from MT_COMP_MAX_ENDPOINTS (16): each slot pairs an
+ * deliberate step down from MT_COMP_MAX_ENDPOINTS (28): each slot pairs an
  * ElectricalPowerMeasurement delegate (seven Nullable<int64_t> values plus
- * vtable) with a PowerTopology delegate, and four electrical sensors or
- * heavyweight plugs per composition is already beyond any host this firmware
- * targets, the same sizing reasoning MT_MB_MAX_LISTS documents above.
+ * vtable) with a PowerTopology delegate, the same sizing reasoning
+ * MT_MB_MAX_LISTS documents above.
+ *
+ * Raised 4 -> 8 for energy round C1 (design spec 2.1): Phase 3's four EPM/PT
+ * pairs from the electrical rounds consumed the pool exactly, and this round
+ * adds two more (solar, battery storage), with one for C2's EVSE and one
+ * slot of headroom. Unlike Round B's exact fit, the headroom is deliberate:
+ * the pools are proven and the exact-fit experiment is concluded.
  */
-#define MT_MEAS_MAX 4  /* measurement-capable endpoints per composition */
+#define MT_MEAS_MAX 8  /* measurement-capable endpoints per composition */
 
 /*
  * AT+MTMEAS field ids, the wire contract task 3 documents in AT_MT_SPEC.md
@@ -897,6 +908,91 @@ void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
  * alloc.
  */
 void *mt_matter_whm_delegate_alloc(uint16_t ep);
+
+/* ---- device energy management (energy round C1, task 1) ------------------ */
+
+/*
+ * How many DeviceEnergyManagement-bearing endpoints one composition can
+ * carry. Same deliberate step down from MT_COMP_MAX_ENDPOINTS as MT_MEAS_MAX
+ * and MT_WHM_MAX above, and the same reasoning: each slot is a
+ * HearthDemDelegate (main.cpp), the largest pooled object yet (the cached
+ * attribute values plus an owned PowerAdjustCapabilityStruct with a
+ * MT_DEM_CAP_MAX_ENTRIES backing array). Sizing (design spec 2.1): battery
+ * storage variant 0 and the standalone DEM device each take one in this
+ * round's Phase 3, round C2's EVSE pair takes a third, headroom 1.
+ */
+#define MT_DEM_MAX 4  /* DeviceEnergyManagement endpoints per composition */
+
+/*
+ * AT+MTMEAS field ids for the DeviceEnergyManagement cluster (0x0098), the
+ * wire contract task 2's 0x98 branch serves and AT_MT_SPEC.md documents.
+ * Same family-selection rule as MT_MEAS_F_* / MT_WHM_F_* above: the cluster
+ * id the host passes decides which table applies, so the spaces may overlap
+ * numerically. Fields 0-5 back the cluster's six delegate-served scalar
+ * attributes (all Instance-served, so pushes update the delegate cache and
+ * report dirty; they never round-trip through ember). Field 6 is the odd one
+ * out: AbsMinPower/AbsMaxPower's sibling numerically, but an EVENT CARRIER,
+ * not an attribute. It caches the session's approximate energy use (mWh) for
+ * the PowerAdjustEnd event's energyUse field, the reference delegate's
+ * GetApproxEnergyDuringSession() shape, and reads back nothing.
+ *
+ * ESAState (field 2) transitions drive events (design spec 3.3): a push
+ * LEAVING kPowerAdjustActive emits PowerAdjustEnd(NormalCompletion, measured
+ * duration, cached field-6 energyUse); a same-state push emits nothing (the
+ * Round B BoostState rule). The host does NOT push the entry transition: an
+ * accepted PowerAdjustRequest sets kPowerAdjustActive firmware-side and
+ * emits PowerAdjustStart itself (the contrast to Round B's Boost, where the
+ * host pushed BoostState; here the event is fieldless and the state change
+ * is unconditional on accept).
+ */
+#define MT_DEM_F_ESA_TYPE        0  /* enum8, unsigned */
+#define MT_DEM_F_ESA_CAN_GEN     1  /* bool, unsigned */
+#define MT_DEM_F_ESA_STATE       2  /* enum8, unsigned; transitions drive events */
+#define MT_DEM_F_ABS_MIN_POWER   3  /* int64 mW, signed */
+#define MT_DEM_F_ABS_MAX_POWER   4  /* int64 mW, signed */
+#define MT_DEM_F_OPT_OUT_STATE   5  /* enum8, unsigned */
+#define MT_DEM_F_ADJ_ENERGY_USE  6  /* int64 mWh, signed; EVENT CARRIER, not an attribute */
+
+/*
+ * How many PowerAdjustStruct entries the delegate's owned
+ * PowerAdjustmentCapability list can hold: the AT+MTDEMCAP bound (design
+ * spec 3.2, task 2's surface). The CHIP server validates every
+ * PowerAdjustRequest against this list BEFORE the delegate runs
+ * (device-energy-management-server.cpp:254-359), so until the host installs
+ * entries the capability is null and every PowerAdjustRequest answers
+ * ConstraintError without waking the host.
+ */
+#define MT_DEM_CAP_MAX_ENTRIES   4
+
+/*
+ * The DEM delegate-pool handout, task 3's thunk protocol. Same alloc(ep)
+ * interface as mt_matter_whm_delegate_alloc() above and for the same two
+ * reasons: the round's task brief pins it, and stamping the endpoint id at
+ * handout makes the by-endpoint slot lookup independent of init-callback
+ * timing (the SDK sets it again, identically and later: the Instance
+ * constructor calls mDelegate.SetEndpointId(), device-energy-management-
+ * server.h:210-216, when DeviceEnergyManagementDelegateInitCB
+ * (esp_matter_delegate_callbacks.cpp:368-376) news the Instance from the
+ * endpoint's FeatureMap snapshot). The thunk attaches the delegate via
+ * esp_matter::cluster::set_delegate_and_init_callback() with the SDK's own
+ * DeviceEnergyManagementDelegateInitCB, the WHM post-create precedent, and
+ * sets DEM feature bits ONLY via cluster::device_energy_management::
+ * feature::X::add() beforehand, never a FeatureMap write (the iron rule,
+ * see HearthDemDelegate's class comment in main.cpp).
+ *
+ * Returns nullptr once MT_DEM_MAX slots are handed out, the same
+ * abort-the-boot-rebuild contract as every other pool in this file.
+ *
+ * Consumed-by-task-2 entry points (all main.cpp-side, C++; listed here so
+ * the names are pinned): task 2's mt_matter_meas_set() 0x98 branch finds the
+ * slot with dem_for(ep) (the whm_for() shape), pushes cache fields through
+ * the public members, drives ESAState transitions through
+ * HearthDemDelegate::SetESAState() (the cluster Delegate virtual, overridden
+ * to derive the PowerAdjustEnd(NormalCompletion) emission when a push leaves
+ * kPowerAdjustActive), and caches field 6 through
+ * HearthDemDelegate::SetAdjEnergyUse().
+ */
+void *mt_matter_dem_delegate_alloc(uint16_t ep);
 
 #ifdef __cplusplus
 }

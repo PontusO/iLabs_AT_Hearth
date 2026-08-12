@@ -24,18 +24,20 @@ CONFIG_ENABLE_WIFI_AP=n
 CONFIG_LWIP_HOOK_IP6_ROUTE_DEFAULT=y
 CONFIG_LWIP_HOOK_ND6_GET_GW_DEFAULT=y
 
-# Endpoint composition (C1): the host declares up to MT_COMP_MAX_ENDPOINTS (24)
+# Endpoint composition (C1): the host declares up to MT_COMP_MAX_ENDPOINTS (28)
 # endpoints over AT+MTEP, and the SDK counts the root endpoint 0 against this
 # cap too (endpoint::create()'s get_count() check walks the node's whole
 # endpoint list, esp_matter_data_model.cpp:1659; root_node::create goes through
-# the same path), so the cap must be MT_COMP_MAX_ENDPOINTS + 1 = 25 (B247: at
+# the same path), so the cap must be MT_COMP_MAX_ENDPOINTS + 1 = 29 (B247: at
 # 24, a 24-slot composition aborted at entry 24 and read back 23 lines).
 # Was 2, inherited from the esp-matter light example this project started from,
 # which silently refused every endpoint past the first. Raised from 16 to 24
 # for the composed-appliance round (parent endpoints, spec 2.3), then to 25
-# for the root-endpoint allowance, costing ~1 KB (measured +1040 bytes .bss),
-# more than the historical ~404 bytes/slot figure.
-CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=25
+# for the root-endpoint allowance, costing ~1 KB (measured +1040 bytes .bss)
+# per slot, more than the historical ~404 bytes/slot figure, then to 29 for
+# energy round C1 (MT_COMP_MAX_ENDPOINTS 24 -> 28: three Phase 3 slots this
+# round, one for C2's EVSE; the B247 +1 invariant carries).
+CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=29
 
 # Button
 CONFIG_BUTTON_PERIOD_TIME_MS=20
@@ -139,14 +141,24 @@ CONFIG_SUPPORT_COMMISSIONER_CONTROL_CLUSTER=n
 CONFIG_SUPPORT_CONTENT_LAUNCHER_CLUSTER=n
 CONFIG_SUPPORT_CONTENT_CONTROL_CLUSTER=n
 CONFIG_SUPPORT_CONTENT_APP_OBSERVER_CLUSTER=n
-# DEVICE_ENERGY_MANAGEMENT_CLUSTER / DEVICE_ENERGY_MANAGEMENT_MODE_CLUSTER:
-# deliberately left =n by energy round B (decision DE235: the heat pump ships
-# without DeviceEnergyManagement). The first is the dedicated
-# device-energy-management-server directory (link-critical the moment any
-# firmware code names DeviceEnergyManagement::Delegate); the second maps to
-# the shared mode-base-server directory and is inert either way.
-CONFIG_SUPPORT_DEVICE_ENERGY_MANAGEMENT_CLUSTER=n
-CONFIG_SUPPORT_DEVICE_ENERGY_MANAGEMENT_MODE_CLUSTER=n
+# DEVICE_ENERGY_MANAGEMENT_CLUSTER: re-enabled, energy round C1 task 1
+# (energy round B had deliberately left it =n, decision DE235: the heat pump
+# shipped without DeviceEnergyManagement). main.cpp's HearthDemDelegate
+# subclasses DeviceEnergyManagement::Delegate and the SDK's
+# DeviceEnergyManagementDelegateInitCB news a DeviceEnergyManagement::
+# Instance, all compiled from the DEDICATED
+# src/app/clusters/device-energy-management-server directory, shared with
+# nothing else this firmware builds: leaving it disabled is a link failure
+# (undefined reference), the WATER_HEATER_MANAGEMENT_CLUSTER shape below,
+# not a silent no-op.
+CONFIG_SUPPORT_DEVICE_ENERGY_MANAGEMENT_CLUSTER=y
+# DEVICE_ENERGY_MANAGEMENT_MODE_CLUSTER: re-enabled, energy round C1 task 1.
+# Maps to the SHARED src/app/clusters/mode-base-server directory the RVC/
+# microwave/water-heater mode flags already pull in, so this flip is inert
+# today; listed per the standing MICROWAVE_OVEN_MODE_CLUSTER rule below, so
+# a rebase or edit that removed one of the other mode flags cannot silently
+# reintroduce the ModeBase link failure.
+CONFIG_SUPPORT_DEVICE_ENERGY_MANAGEMENT_MODE_CLUSTER=y
 CONFIG_SUPPORT_DIAGNOSTIC_LOGS_CLUSTER=n
 CONFIG_SUPPORT_DISHWASHER_ALARM_CLUSTER=n
 CONFIG_SUPPORT_DISHWASHER_MODE_CLUSTER=n
@@ -176,6 +188,11 @@ CONFIG_SUPPORT_ECOSYSTEM_INFORMATION_CLUSTER=n
 # cluster_dir.cmake, shared with nothing else this firmware builds.
 CONFIG_SUPPORT_ELECTRICAL_ENERGY_MEASUREMENT_CLUSTER=y
 CONFIG_SUPPORT_ELECTRICAL_POWER_MEASUREMENT_CLUSTER=y
+# ENERGY_EVSE_CLUSTER / ENERGY_EVSE_MODE_CLUSTER: stay =n until energy round
+# C2 ships the EVSE device type (design spec 2.7). The first is the dedicated
+# energy-evse-server directory and becomes link-critical the moment firmware
+# code names EnergyEvse::Delegate; the second is the shared mode-base-server
+# directory, inert either way.
 CONFIG_SUPPORT_ENERGY_EVSE_CLUSTER=n
 CONFIG_SUPPORT_ENERGY_EVSE_MODE_CLUSTER=n
 CONFIG_SUPPORT_ENERGY_PREFERENCE_CLUSTER=n
