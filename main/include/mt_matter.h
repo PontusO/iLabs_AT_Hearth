@@ -991,6 +991,16 @@ void *mt_matter_whm_delegate_alloc(uint16_t ep);
  * to derive the PowerAdjustEnd(NormalCompletion) emission when a push leaves
  * kPowerAdjustActive), and caches field 6 through
  * HearthDemDelegate::SetAdjEnergyUse().
+ *
+ * Capability cause contract (task review F2, for task 2's AT+MTDEMCAP
+ * bridge): the delegate keeps TWO cause values. The live one
+ * (m_pa_capability.Value().cause) is firmware-owned while an adjustment
+ * runs: an accepted PowerAdjustRequest stamps it with the request's
+ * adjustment reason and every PowerAdjustEnd restores the baseline
+ * (TC_DEM_2_2 steps 13a/14b assert the stamping). The bridge must set the
+ * BASELINE member (m_pa_cause_baseline, default kNoAdjustment) and, only
+ * when no adjustment is active, the live cause with it; see the store's
+ * comment in main.cpp.
  */
 void *mt_matter_dem_delegate_alloc(uint16_t ep);
 
