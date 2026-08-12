@@ -2561,19 +2561,55 @@ from mt_regression import step_2_13_thread_role_event
 
 
 class TestStep213ThreadRoleEvent(unittest.TestCase):
-    """0.11.0 task 3: step_2_13_thread_role_event, the Phase 2 row
-    proving +MTEVT:28 actually arrives with a legal token on a Thread
-    reattach, +MTEVT:25 still fires unchanged, the mask is restored on
-    every exit path, and (the design-decision row, see the function's own
-    docstring) a WiFi-transport run self-skips instead of hanging on an
-    event that transport can never raise."""
+    """0.11.0 task 3, reworked for review finding F1: step_2_13's reattach
+    trigger was originally AT+MTRESET, which turns out to call
+    esp_matter::factory_reset() and erase the Thread dataset along with
+    the fabric (mt_at.c's cmd_mtreset, AT_MT_SPEC.md 3.7), so the row
+    could only ever observe a bring-up to UNASSIGNED with nothing to
+    rejoin. It now reboots the same way step 2.8 does (ctx.relink over
+    SWD, which never touches Matter's factory-reset path), asserts the
+    fabric survived as its own self-validating guard, and asserts
+    AT+MTTHREAD? ends ATTACHED once the dust settles, on top of the
+    original +MTEVT:28 (legal token) / +MTEVT:25 (unchanged) assertions
+    and the mask restore on every exit path. Also covers the
+    design-decision self-skip on WiFi (see the function's own
+    docstring)."""
 
     MASK_ON = "AT+MTEVT=0x1A00003F"
     MASK_OFF = "AT+MTEVT=0x0800003F"
+    ATTACHED_LINE = ('+MTTHREAD:ROUTER,1,15,0xFA25,0x000DB01A5C3F2E10,'
+                     '0x00003A21,"MyThreadNet"')
+    DETACHED_LINE = '+MTTHREAD:UNASSIGNED,0,,,,,""'
 
-    def _commands(self):
-        return {self.MASK_ON: (0, []), "AT+MTRESET": (0, []),
+    def _commands(self, fabrics_line="+MTFABRICS:1",
+                 thread_line=None):
+        return {self.MASK_ON: (0, []),
+                "AT+MTFABRICS?": (0, [fabrics_line]),
+                "AT+MTTHREAD?": (0, [thread_line or self.ATTACHED_LINE]),
                 self.MASK_OFF: (0, [])}
+
+    def _ctx(self, link, urcs_after_reboot=None, swd_ok=True):
+        """A Phase2Context whose ctx.relink models make_relink closely
+        enough for this step: it runs the real swd_reset() (imported
+        below) against a fake process runner, so a genuine SWD failure
+        path is exercised, not just a canned return value, and on
+        success it releases the reboot's URCs the way a live reopen
+        would (TestStep28's own pattern)."""
+        ctx = fresh_ctx(link)
+        ctx.transport = "THREAD"
+        calls = []
+
+        def relink(action):
+            ok, detail = action()
+            calls.append((ok, detail))
+            if ok and urcs_after_reboot:
+                link.push_urcs(urcs_after_reboot)
+            return ok, detail
+
+        ctx.relink = relink
+        ctx.swd_runner = lambda argv, **kw: types.SimpleNamespace(
+            returncode=0 if swd_ok else 1, stdout="", stderr="bad")
+        return ctx, calls
 
     def test_wifi_transport_skips(self):
         link = FakeLink(self._commands())
@@ -2589,35 +2625,25 @@ class TestStep213ThreadRoleEvent(unittest.TestCase):
         self.assertEqual(link.sent, [])
 
     def test_thread_happy_path(self):
-        link = FakeLink(self._commands(), urcs_on_command={
-            "AT+MTRESET": ["+MTREADY", "+MTEVT:25", "+MTEVT:28,ROUTER"]})
-        ctx = fresh_ctx(link)
-        ctx.transport = "THREAD"
+        link = FakeLink(self._commands())
+        ctx, calls = self._ctx(
+            link, urcs_after_reboot=["+MTREADY", "+MTEVT:25",
+                                     "+MTEVT:28,ROUTER"])
         with contextlib.redirect_stdout(io.StringIO()):
             step_2_13_thread_role_event(ctx)
         self.assertEqual(ctx.suite.failed, 0,
                          msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertTrue(calls and calls[0][0],
+                        "the SWD relink must actually run")
         self.assertEqual(link.sent[0], self.MASK_ON)
         self.assertEqual(link.sent[-1], self.MASK_OFF)
-
-    def test_thread_detached_role_token_is_legal(self):
-        # UNASSIGNED (detached) is as legal a transition target as an
-        # attached role: the check must not assume "attached" is the
-        # only reattach outcome worth accepting.
-        link = FakeLink(self._commands(), urcs_on_command={
-            "AT+MTRESET": ["+MTREADY", "+MTEVT:28,UNASSIGNED",
-                          "+MTEVT:25"]})
-        ctx = fresh_ctx(link)
-        ctx.transport = "THREAD"
-        with contextlib.redirect_stdout(io.StringIO()):
-            step_2_13_thread_role_event(ctx)
-        self.assertEqual(ctx.suite.failed, 0)
+        # The reboot went through relink/SWD, never AT+MTRESET (F1: an
+        # AT+MTRESET here would erase the fabric it is about to check).
+        self.assertNotIn("AT+MTRESET", link.sent)
 
     def test_missing_role_event_fails(self):
-        link = FakeLink(self._commands(), urcs_on_command={
-            "AT+MTRESET": ["+MTREADY", "+MTEVT:25"]})
-        ctx = fresh_ctx(link)
-        ctx.transport = "THREAD"
+        link = FakeLink(self._commands())
+        ctx, _ = self._ctx(link, urcs_after_reboot=["+MTREADY", "+MTEVT:25"])
         with contextlib.redirect_stdout(io.StringIO()):
             step_2_13_thread_role_event(ctx)
         failed = [n for n, ok, _ in ctx.suite.results if not ok]
@@ -2627,10 +2653,9 @@ class TestStep213ThreadRoleEvent(unittest.TestCase):
         self.assertEqual(link.sent[-1], self.MASK_OFF)
 
     def test_illegal_role_token_fails(self):
-        link = FakeLink(self._commands(), urcs_on_command={
-            "AT+MTRESET": ["+MTREADY", "+MTEVT:28,BOGUS"]})
-        ctx = fresh_ctx(link)
-        ctx.transport = "THREAD"
+        link = FakeLink(self._commands())
+        ctx, _ = self._ctx(link, urcs_after_reboot=["+MTREADY",
+                                                     "+MTEVT:28,BOGUS"])
         with contextlib.redirect_stdout(io.StringIO()):
             step_2_13_thread_role_event(ctx)
         failed = [n for n, ok, _ in ctx.suite.results if not ok]
@@ -2638,24 +2663,68 @@ class TestStep213ThreadRoleEvent(unittest.TestCase):
                       failed)
 
     def test_missing_state_change_fails(self):
-        link = FakeLink(self._commands(), urcs_on_command={
-            "AT+MTRESET": ["+MTREADY", "+MTEVT:28,ROUTER"]})
-        ctx = fresh_ctx(link)
-        ctx.transport = "THREAD"
+        link = FakeLink(self._commands())
+        ctx, _ = self._ctx(link, urcs_after_reboot=["+MTREADY",
+                                                     "+MTEVT:28,ROUTER"])
         with contextlib.redirect_stdout(io.StringIO()):
             step_2_13_thread_role_event(ctx)
         failed = [n for n, ok, _ in ctx.suite.results if not ok]
         self.assertIn("2.13 MTEVT:25 still fires, no payload", failed)
 
-    def test_reset_failure_aborts_but_restores_mask(self):
-        link = FakeLink({self.MASK_ON: (0, []), "AT+MTRESET": (-1, []),
-                         self.MASK_OFF: (0, [])})
-        ctx = fresh_ctx(link)
-        ctx.transport = "THREAD"
+    def test_fabric_did_not_survive_fails(self):
+        # F1's headline guard: if the reboot mechanism is ever swapped
+        # back to something that factory-resets (AT+MTRESET among
+        # them), AT+MTFABRICS? reading 0 must fail this row loudly
+        # rather than let it silently degrade into a bring-up test.
+        link = FakeLink(self._commands(fabrics_line="+MTFABRICS:0"))
+        ctx, _ = self._ctx(link, urcs_after_reboot=["+MTREADY"])
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(StepAbort):
                 step_2_13_thread_role_event(ctx)
-        self.assertGreater(ctx.suite.failed, 0)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn(
+            "2.13 fabric survived the reboot (self-validating guard, F1)",
+            failed)
+        # The mask restore still ran despite the abort.
+        self.assertEqual(link.sent[-1], self.MASK_OFF)
+
+    def test_detached_after_reattach_fails(self):
+        # F1's other headline guard: a legal role token in transit and
+        # a surviving fabric are not enough on their own. If the device
+        # settles back to UNASSIGNED (no mesh rejoined, e.g. a stale or
+        # unreachable dataset), the row must fail even though every
+        # earlier assertion in it passed.
+        link = FakeLink(self._commands(thread_line=self.DETACHED_LINE))
+        ctx, _ = self._ctx(
+            link, urcs_after_reboot=["+MTREADY", "+MTEVT:28,UNASSIGNED",
+                                     "+MTEVT:25"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_13_thread_role_event(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn(
+            "2.13 AT+MTTHREAD? reports an attached role after reattach",
+            failed)
+        # The transition event itself was legal (UNASSIGNED IS a legal
+        # token) and +MTEVT:25 fired, so neither of those checks is
+        # what catches this: only the final-state read does.
+        self.assertNotIn("2.13 MTEVT:28 arrives with a legal role token",
+                         failed)
+        self.assertNotIn("2.13 MTEVT:25 still fires, no payload", failed)
+
+    def test_swd_reset_failure_aborts_but_restores_mask(self):
+        link = FakeLink(self._commands())
+        ctx, calls = self._ctx(link, swd_ok=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_13_thread_role_event(ctx)
+        # Pin the SPECIFIC check that must fail, not just "something
+        # failed": a mutated "SWD reset, port back" check that always
+        # passes would otherwise still abort one step later (no +MTREADY
+        # arrives, since relink only releases URCs on success) and this
+        # test would pass for the wrong reason.
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertEqual(failed, ["2.13 SWD reset, port back"])
+        self.assertFalse(calls[0][0])
         self.assertEqual(link.sent[-1], self.MASK_OFF)
 
     def test_row_between_window_expiry_and_two_resets(self):

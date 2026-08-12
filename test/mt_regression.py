@@ -325,9 +325,15 @@ class Suite:
         return ok
 
     def skip(self, name, reason):
-        """A step not run because an earlier step broke its preconditions.
-        Counted separately from failures, and never silently: a truncated
-        run must not read as a clean one (design spec section 3)."""
+        """A step not run, either because an earlier step broke its
+        preconditions (run_phase2's own generic use, "requires step that
+        did not run") or because the step itself determined it does not
+        apply to the current run at all (a step calling this on itself,
+        e.g. step_2_13_thread_role_event on a WiFi transport: there is no
+        Thread role to observe, not a broken precondition). Counted
+        separately from failures, and never silently: a truncated OR an
+        inapplicable run must not read as a clean one (design spec
+        section 3)."""
         self.skipped.append((name, reason))
         print("  [SKIP] %s: %s" % (name, reason))
 
@@ -1056,18 +1062,49 @@ def step_2_13_thread_role_event(ctx):
     `MT_THREAD_ROLE_TOKEN_RE` grammar, defined next to
     `t_mtthread_query_shape` since AT_MT_SPEC.md 3.11 states the payload
     is "the identical decoded token" `AT+MTTHREAD?` reports, one grammar
-    for both), and `+MTEVT:25` (bit 25, Thread state change, unchanged by
-    this round) must still fire.
+    for both), `+MTEVT:25` (bit 25, Thread state change, unchanged by this
+    round) must still fire, and the device must actually FINISH the
+    reattach: `AT+MTTHREAD?` must read back an attached role once the dust
+    settles, not merely a transition event.
 
-    The reattach is `AT+MTRESET`, not a fresh commission: bit 28 fires on
-    ROLE TRANSITIONS only (CHIP's own `RoleChanged` flag), and the
-    commissioning that already happened in step 2.3 ran under the default
-    mask, which does not carry bit 28 (it is opt-in, design spec section
-    2.2), so any role events from THAT attach were never surfaced and
-    cannot be observed after the fact. A warm reboot (the composition and
-    fabric survive `AT+MTRESET`, CLAUDE.md) forces a fresh Thread
-    interface bring-up with the mask already open, which is the only way
-    this harness can see the event at all.
+    **`AT+MTRESET` is NOT usable as the reattach trigger, and review
+    finding F1 is why this comment exists.** `cmd_mtreset` (`mt_at.c`)
+    calls `mt_matter_factory_reset()`, which is `esp_matter::factory_reset()`
+    -> `ConfigurationMgr().InitiateFactoryReset()` -> `DoFactoryReset()`,
+    and that erases fabrics, credentials AND the Thread operational
+    dataset (`ThreadStackMgr().ErasePersistentInfo()`) before rebooting
+    (`AT_MT_SPEC.md` §3.7: "erases all Matter data: fabrics, credentials,
+    attribute persistence"). CLAUDE.md's "the composition survives
+    `AT+MTRESET`" note is about the ENDPOINT COMPOSITION only (a separate
+    NVS namespace, `mt_ep`); its own next sentence names `AT+MTRESET` as
+    exactly this `factory_reset()` call. A row built on `AT+MTRESET` would
+    erase the Thread dataset before observing anything, so at best it
+    watches a bring-up to `UNASSIGNED` with no mesh to join and proves
+    nothing; a real regression where the device cannot rejoin its
+    previously-provisioned mesh would sail through such a row undetected.
+
+    The reboot instead goes through `ctx.relink(lambda:
+    swd_reset(ctx.swd_runner))`, the exact mechanism step 2.8 uses for
+    precisely this reason: an RP2350-driven SWD reset never touches
+    Matter's factory-reset path, so both the fabric and the Thread
+    dataset survive, and step 2.8's own `AT+MTFABRICS?` check is the
+    proof pattern this step copies. `AT+MTFABRICS?` reading back `1`
+    straight after the reboot is this step's own self-validating guard:
+    if the reboot mechanism is ever swapped back to something that
+    factory-resets, that assertion fails loudly instead of the row
+    quietly degrading into the bring-up test F1 found. The final
+    `AT+MTTHREAD?` read, asserting an ATTACHED role
+    (`MT_THREAD_ATTACHED_ROLES`, i.e. anything but `UNSPECIFIED`/
+    `UNASSIGNED`) with `<attached>` = `1`, is what actually proves a mesh
+    REJOIN happened rather than merely a bring-up with an event in transit.
+
+    Bit 28 fires on ROLE TRANSITIONS only (CHIP's own `RoleChanged`
+    flag), and the commissioning that already happened in step 2.3 ran
+    under the default mask, which does not carry bit 28 (it is opt-in,
+    design spec section 2.2), so any role events from THAT attach were
+    never surfaced and cannot be observed after the fact: a reboot with
+    the mask already open is the only way this harness can see the event
+    at all.
 
     Thread-only: on a WiFi image there is no Thread stack to reattach and
     bit 28 can never fire, so this is the one Phase 2 row that self-skips
@@ -1098,13 +1135,21 @@ def step_2_13_thread_role_event(ctx):
                        res == 0, tag="P2"):
             raise StepAbort("could not enable the Thread role mask")
         link.drain(0.3)
-        res, _ = cmd_retry(link, "AT+MTRESET")
-        if not s.check("2.13 MTRESET -> OK", res == 0, tag="P2"):
-            raise StepAbort("AT+MTRESET failed")
+        ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+        if not s.check("2.13 SWD reset, port back", ok, tag="P2"):
+            raise StepAbort("bridge did not come back after SWD reset: %s"
+                            % detail)
         ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
         if not s.check("2.13 +MTREADY within 15 s", ready is not None,
                        tag="P2"):
-            raise StepAbort("device did not come back after AT+MTRESET")
+            raise StepAbort("device did not come back after the reset")
+        res, lines = cmd_retry(link, "AT+MTFABRICS?")
+        if not s.check("2.13 fabric survived the reboot (self-validating "
+                       "guard, F1)", res == 0 and lines == ["+MTFABRICS:1"],
+                       tag="P2"):
+            raise StepAbort("fabric did not survive the reboot: this "
+                            "row's reboot mechanism must not touch "
+                            "Matter's factory-reset path")
         got28 = link.await_urc(r"\+MTEVT:28,", timeout=30.0)
         role_ok = False
         if got28 is not None:
@@ -1117,6 +1162,14 @@ def step_2_13_thread_role_event(ctx):
         evt25 = link.await_urc(r"\+MTEVT:25$", timeout=5.0)
         s.check("2.13 MTEVT:25 still fires, no payload", evt25 is not None,
                 tag="P2")
+        res, lines = cmd_retry(link, "AT+MTTHREAD?")
+        m2 = (re.match(r"\+MTTHREAD:([A-Z_]+|\d+),([01]),", lines[0])
+              if res == 0 and lines else None)
+        attached_ok = (m2 is not None and
+                      m2.group(1) in MT_THREAD_ATTACHED_ROLES and
+                      m2.group(2) == "1")
+        s.check("2.13 AT+MTTHREAD? reports an attached role after "
+                "reattach", attached_ok, tag="P2")
     finally:
         link.command("AT+MTEVT=0x0800003F")
 
@@ -6450,6 +6503,17 @@ register_phase1_t10_negative()
 MT_THREAD_ROLE_TOKENS = (
     "UNSPECIFIED", "UNASSIGNED", "SLEEPY_END_DEVICE", "END_DEVICE",
     "REED", "ROUTER", "LEADER",
+)
+
+# The subset of MT_THREAD_ROLE_TOKENS that means "on a mesh": everything
+# except UNSPECIFIED (interface down) and UNASSIGNED (up but detached).
+# step_2_13_thread_role_event's final AT+MTTHREAD? read uses this to prove
+# a REJOIN happened, not merely a bring-up (review finding F1): a device
+# that came back with no Thread dataset would still emit SOME role token
+# and possibly even a transition event on the way to UNASSIGNED, but it
+# could never land here.
+MT_THREAD_ATTACHED_ROLES = (
+    "SLEEPY_END_DEVICE", "END_DEVICE", "REED", "ROUTER", "LEADER",
 )
 
 # A future SDK addition outside the known set degrades to the raw decimal
