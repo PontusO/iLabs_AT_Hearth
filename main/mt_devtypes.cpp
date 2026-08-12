@@ -1866,6 +1866,413 @@ static endpoint_t *mk_heat_pump(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * ---- Solar Power, Battery Storage and DEM (energy round C1, task 3) -----
+ *
+ * Three device types on Round A's measurement machinery plus this round's
+ * task-1 DEM delegate pool. Design record: ARCHITECTURE.md 8.12; fact base:
+ * the Round C SDK survey (.superpowers/sdd/2026-08-11-energy-round-c/
+ * sdk-survey.md), every citation below re-read at source while writing.
+ *
+ * ALL THREE THUNKS HAND-BUILD (the round's decision of record, design spec
+ * section 1), and for a different reason than Round B's: there is NO
+ * boot-panic trap anywhere on these paths (survey, solar section:
+ * solar_power::add() is the first SDK endpoint builder callable unmodified
+ * without a panic). What forces the hand-build is a set of SILENT contract
+ * breaks in solar_power::add()/battery_storage::add(), invisible to any
+ * build or host suite:
+ *
+ *   - Both add() bodies ASSIGN feature_flags over whatever the caller
+ *     pre-seeded (esp_matter_endpoint.cpp:1907 and 1910 for solar's
+ *     PowerSource and EEM, :1949 and :1963-1964 for battery's), so no
+ *     config pre-seed can survive: the mk_room_air_conditioner() |= trick
+ *     has nothing to land on.
+ *   - The EEM mask both assign is exported|cumulative (:1910/:1963), which
+ *     contradicts HearthEemInitCB's fixed Imported|Exported|Cumulative
+ *     wildcard AttrAccess mask (Round A's binding contract, main.cpp): the
+ *     served FeatureMap would lie, and CumulativeEnergyImported would not
+ *     exist at all, because cumulative_energy::add() gates it on the
+ *     Imported bit (esp_matter_feature.cpp:2479-2481).
+ *   - Both add() bodies create the EPM Voltage and ActiveCurrent attributes
+ *     as NON-NULL zeros from function locals (:1917-1919 solar, battery via
+ *     its config's voltage(0)/active_current(0) defaults), breaking
+ *     AT_MT_SPEC.md 3.25's null-until-pushed contract; and because a
+ *     duplicate attribute create returns the existing entry
+ *     (esp_matter_data_model.cpp:567), mt_epm_add_field_attributes() run
+ *     afterwards could not repair the two to null.
+ *
+ * The DEM endpoint add() (esp_matter_endpoint.cpp:1708-1717) is thin and
+ * break-free, but it hand-builds too: one discipline across the round, and
+ * its two cluster creates are exactly what mt_add_dem_triple() below runs.
+ */
+
+/*
+ * The Electrical Sensor graft as a named helper: the mk_electrical_sensor()
+ * variant-0 sequence on an endpoint that already exists, verbatim the Round
+ * B water-heater variant-0 graft above (mk_water_heater(), which keeps its
+ * in-line copy untouched, as does mk_heat_pump()). Device type 0x0510 plus
+ * PowerTopology and EPM via electrical_sensor::add(), the six null field
+ * attributes, and (with_eem) the EEM cluster with the fixed
+ * Imported|Exported|Cumulative mask and HearthEemInitCB. Draws one EPM and
+ * one PT slot from the Round A pools; allocs happen after endpoint creation
+ * because the endpoint id is already known here (mt_cabinet_add_cooler()'s
+ * note on the same shape). Returns false on any failure: the caller returns
+ * nullptr and the boot rebuild aborts, this file's contract.
+ */
+static bool mt_graft_electrical_sensor(endpoint_t *ep, bool with_eem, const char *who)
+{
+    void *epm_delegate = mt_matter_epm_delegate_alloc();
+    if (epm_delegate == nullptr) {
+        ESP_LOGE(TAG, "EPM delegate pool exhausted (%s)", who);
+        return false;
+    }
+    void *ptop_delegate = mt_matter_ptop_delegate_alloc();
+    if (ptop_delegate == nullptr) {
+        ESP_LOGE(TAG, "PowerTopology delegate pool exhausted (%s)", who);
+        return false;
+    }
+    electrical_sensor::config_t es;
+    es.power_topology.feature_flags = cluster::power_topology::feature::node_topology::get_id();
+    es.power_topology.delegate = ptop_delegate;
+    es.electrical_power_measurement.feature_flags =
+        cluster::electrical_power_measurement::feature::alternating_current::get_id();
+    es.electrical_power_measurement.delegate = epm_delegate;
+    if (electrical_sensor::add(ep, &es) != ESP_OK) {
+        ESP_LOGE(TAG, "electrical sensor graft failed (%s)", who);
+        return false;
+    }
+    /* Six null field attributes, the 3.25 null-until-pushed contract; this
+     * is the repair solar_power::add() would have made impossible (see the
+     * section comment above: non-null zeros first, duplicate create returns
+     * existing). */
+    if (!mt_epm_add_field_attributes(ep)) {
+        return false;
+    }
+    if (with_eem) {
+        cluster::electrical_energy_measurement::config_t ec;
+        ec.feature_flags = mt_eem_feature_flags();
+        cluster_t *eem_cl =
+            cluster::electrical_energy_measurement::create(ep, &ec, CLUSTER_FLAG_SERVER);
+        if (eem_cl == nullptr) {
+            ESP_LOGE(TAG, "creating ElectricalEnergyMeasurement cluster failed (%s)", who);
+            return false;
+        }
+        esp_matter::cluster::set_delegate_and_init_callback(eem_cl, HearthEemInitCB, nullptr);
+    }
+    uint16_t ep_id = endpoint::get_id(ep);
+    mt_matter_meas_delegate_set_endpoint(epm_delegate, ep_id);
+    mt_matter_meas_delegate_set_endpoint(ptop_delegate, ep_id);
+    return true;
+}
+
+/*
+ * The DEM triple: device type 0x050D + DeviceEnergyManagement cluster with
+ * a pooled HearthDemDelegate + DeviceEnergyManagementMode with a ModeBase
+ * slot. Shared by battery storage variant 0 (where it is over-delivery, see
+ * mk_battery_storage()) and both mk_dem() variants.
+ *
+ * THE IRON RULE (design spec 2.5, ARCHITECTURE.md 8.12): DEM feature bits
+ * are set ONLY via cluster::device_energy_management::feature::X::add(),
+ * NEVER by writing FeatureMap. Instance::RetrieveAcceptedCommands derives
+ * the advertised command list from its FeatureMap snapshot while
+ * esp-matter's dispatcher looks the invoke up as an ember command_t
+ * (esp_matter_command.cpp:42-44: get(cluster, command_id,
+ * COMMAND_FLAG_ACCEPTED) then VerifyOrReturn, so a missing entry means the
+ * invoke returns NO status at all, not an error); only feature::add()
+ * creates those entries. power_adjustment::add()
+ * (esp_matter_feature.cpp:3050-3067) creates PowerAdjustmentCapability and
+ * OptOutState, both PA commands and both PA events alongside the bit. This
+ * is the exact inverse of Round B's WHM hand-set (mk_water_heater() above),
+ * which was forced by two broken WHM helpers on a cluster whose commands
+ * create() had already wired; DEM's helper is healthy and its commands come
+ * from nowhere else. The PA bit is also load-bearing for the AT surface:
+ * without it mt_matter_demcap_set() answers MT_ATTR_ERR_ATTRIBUTE
+ * (PowerAdjustmentCapability exists only under PA), so a variant-0 build
+ * missing this add() turns every AT+MTDEMCAP into +MTERR:4.
+ *
+ * Feature-add timing: DeviceEnergyManagementDelegateInitCB
+ * (esp_matter_delegate_callbacks.cpp:367-375) news the Instance with a
+ * feature bitmask SNAPSHOTTED from the endpoint's FeatureMap attribute, and
+ * every delegate init callback runs at endpoint enable
+ * (invoke_init_callbacks_internal, esp_matter_data_model.cpp:259-266,
+ * during esp_matter::start()'s enable pass), long after this thunk: the
+ * feature::add() here is guaranteed to precede the snapshot, the same
+ * ordering argument as Round B's WHM hand-set. The CB keeps a static
+ * single-Instance pointer overwritten per endpoint with no Shutdown of the
+ * previous one; benign, delegate lifetimes are boot-long (mt_matter.h).
+ *
+ * Variant 1 (with_pa false) leaves the FeatureMap at the 0 create()
+ * hardcodes (esp_matter_cluster.cpp:3478): a non-controllable ESA, and
+ * CONFORMANT: the device type XML (1.5.1 DeviceEnergyManagement.xml) makes
+ * all five DEM features an optionalConform choice (min 1) UNDER the
+ * ControllableESA condition, so a device that does not declare the
+ * condition owes no feature bit. The delegate is still required either way:
+ * the cluster's five attributes are delegate-served
+ * (cluster.cpp:3463-3494 creates them for the Instance to serve; nothing
+ * answers without one, the 8.10 disease otherwise).
+ *
+ * Delegate wiring is the WHM post-create shape: the pool alloc takes the
+ * real endpoint id (mt_matter.h's documented protocol), then
+ * set_delegate_and_init_callback() attaches the SDK's own
+ * DeviceEnergyManagementDelegateInitCB. DEM Mode wires its delegate through
+ * its config instead (DeviceEnergyManagementModeDelegateInitCB,
+ * esp_matter_cluster.cpp:3510-3513), the water_heater_mode shape. 8.6 check
+ * on DEM Mode: CLEAN, create() wires ChangeToMode and its response
+ * unconditionally (esp_matter_cluster.cpp:3529-3531, the rvc_run_mode
+ * shape, not the operational_state disease); Mode_DeviceEnergyManagement.xml
+ * carries no mandatory-tag conformance and marks StartUpMode/OnMode
+ * disallowConform, correctly absent from the SDK build (the AT+MTMODES
+ * kNoOptimization tag-0 default is task 2's branch, main.cpp).
+ */
+static bool mt_add_dem_triple(endpoint_t *ep, bool with_pa, const char *who)
+{
+    uint16_t ep_id = endpoint::get_id(ep);
+    void *dem_delegate = mt_matter_dem_delegate_alloc(ep_id);
+    if (dem_delegate == nullptr) {
+        ESP_LOGE(TAG, "DEM delegate pool exhausted (%s)", who);
+        return false;
+    }
+    void *mode_delegate =
+        mt_matter_modebase_delegate_alloc(chip::app::Clusters::DeviceEnergyManagementMode::Id);
+    if (mode_delegate == nullptr) {
+        ESP_LOGE(TAG, "modebase delegate pool exhausted (%s DEM mode)", who);
+        return false;
+    }
+    /* Endpoint already exists: fix the ModeBase slot's endpoint immediately,
+     * the mt_cabinet_add_cooler() note. The DEM slot took its id at alloc. */
+    mt_matter_modebase_delegate_set_endpoint(mode_delegate, ep_id);
+
+    if (endpoint::add_device_type(ep, device_energy_management::get_device_type_id(),
+                                  device_energy_management::get_device_type_version()) != ESP_OK) {
+        ESP_LOGE(TAG, "adding DEM device type failed (%s)", who);
+        return false;
+    }
+
+    cluster::device_energy_management::config_t dc;
+    /* dc.delegate stays null: create() would wire the identical init CB from
+     * it (cluster.cpp:3468-3472), but the pool protocol pins the explicit
+     * post-create attach below (mt_matter.h), one unambiguous wiring site. */
+    cluster_t *dem_cl = cluster::device_energy_management::create(ep, &dc, CLUSTER_FLAG_SERVER);
+    if (dem_cl == nullptr) {
+        ESP_LOGE(TAG, "creating DeviceEnergyManagement cluster failed (%s)", who);
+        return false;
+    }
+    if (with_pa) {
+        /* The iron rule's one legal site: feature::add() ONLY, never a
+         * FeatureMap write (see the class comment above). */
+        if (cluster::device_energy_management::feature::power_adjustment::add(dem_cl) != ESP_OK) {
+            ESP_LOGE(TAG, "adding PowerAdjustment feature failed (%s)", who);
+            return false;
+        }
+    }
+    esp_matter::cluster::set_delegate_and_init_callback(
+        dem_cl, esp_matter::cluster::delegate_cb::DeviceEnergyManagementDelegateInitCB, dem_delegate);
+
+    cluster::device_energy_management_mode::config_t mc;
+    mc.delegate = mode_delegate;
+    if (cluster::device_energy_management_mode::create(ep, &mc, CLUSTER_FLAG_SERVER) == nullptr) {
+        ESP_LOGE(TAG, "creating DeviceEnergyManagementMode cluster failed (%s)", who);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Solar Power (0x0017): hand-built stack mirroring solar_power::add()
+ * (esp_matter_endpoint.cpp:1899-1922) read side by side while writing, the
+ * oven-shell discipline, with the add() body's three silent breaks (the
+ * section comment above) replaced by the Round A contracts: device types
+ * 0x0017 + 0x0011 + 0x0510, descriptor tag_list (SDK-build parity), wired
+ * Power Source, the sensor graft with six NULL EPM fields, and, variant 0
+ * only, EEM with mt_eem_feature_flags() + HearthEemInitCB.
+ *
+ * Variant 1 (no EEM) is the current-clamp shape, the variant-1 electrical
+ * sensor precedent, and DISCLOSED SUB-CONFORMANT: SolarPower.xml's
+ * composedDeviceTypes block mandates EPM and EEM both on the composed
+ * Electrical Sensor, so a solar declaration without energy measurement
+ * departs from the letter of the device type. Disclosed in the design spec
+ * (2.2), here, and ARCHITECTURE.md 8.12.
+ *
+ * DISCLOSED GAP, both variants: the same composedDeviceTypes block lists
+ * User Label with describedConform on the sensor. This firmware ships no
+ * User Label cluster anywhere (CONFIG_SUPPORT_USER_LABEL_CLUSTER stays n),
+ * matching the SDK build's own omission; disclosed, not wired.
+ */
+static endpoint_t *mk_solar_power(node_t *n, uint8_t variant)
+{
+    /* Raw endpoint plus descriptor, the two things common::create() does
+     * before any add() body runs (the mk_heat_pump() shape above). */
+    endpoint_t *ep = endpoint::create(n, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    cluster::descriptor::config_t dc;
+    cluster_t *desc_cl = cluster::descriptor::create(ep, &dc, CLUSTER_FLAG_SERVER);
+    if (desc_cl == nullptr) {
+        ESP_LOGE(TAG, "creating descriptor cluster failed (solar power)");
+        return nullptr;
+    }
+    if (endpoint::add_device_type(ep, solar_power::get_device_type_id(),
+                                  solar_power::get_device_type_version()) != ESP_OK) {
+        ESP_LOGE(TAG, "adding solar power device type failed");
+        return nullptr;
+    }
+    /* tag_list for parity with the SDK build (endpoint.cpp:1904-1905). */
+    cluster::descriptor::feature::tag_list::add(desc_cl);
+
+    /* Power Source 0x0011, wired: the SDK build's own choice
+     * (endpoint.cpp:1907-1908), and the exact mk_heat_pump() call. */
+    power_source::config_t pc;
+    pc.power_source.feature_flags = cluster::power_source::feature::wired::get_id();
+    if (power_source::add(ep, &pc) != ESP_OK) {
+        ESP_LOGE(TAG, "power source add failed (solar power)");
+        return nullptr;
+    }
+
+    if (!mt_graft_electrical_sensor(ep, variant == 0, "solar power")) {
+        return nullptr;
+    }
+    return ep;
+}
+
+/*
+ * Battery Storage (0x0018): hand-built stack mirroring
+ * battery_storage::add() (esp_matter_endpoint.cpp:1941-1977) read side by
+ * side while writing: device types 0x0018 + 0x0011 + 0x0510 (+ 0x050D on
+ * variant 0), descriptor tag_list, battery Power Source with the eight
+ * battery attributes, the sensor graft with EEM, and, variant 0 only, the
+ * DEM triple.
+ *
+ * REAL SDK CONFORMANCE DEFECT, fixed here: battery_storage::add() assigns
+ * the Power Source feature map kBattery alone (endpoint.cpp:1949) and then
+ * hand-creates four attributes that PowerSourceCluster.xml gates on the
+ * RECHG feature (BatTimeToFullCharge, BatChargingCurrent,
+ * ActiveBatChargeFaults, BatCapacity), while the RECHG-MANDATORY
+ * BatChargeState is missing entirely. The fix is battery|rechargeable in
+ * the config: power_source::create()'s own feature walk
+ * (esp_matter_cluster.cpp:988-992) then calls feature::rechargeable::add()
+ * (esp_matter_feature.cpp:289-306, guarded on the battery bit being
+ * present, which it is), creating BatChargeState and
+ * BatFunctionalWhileCharging and making the four gated attributes legal.
+ * The rechargeable config defaults (bat_charge_state 0 = kUnknown,
+ * bat_functional_while_charging false) are the correct boot answers.
+ *
+ * The eight battery attributes mirror endpoint.cpp:1951-1960 with the
+ * config_t's own defaults (nullable attributes null, BatCapacity 0), all
+ * ember-served and AT+MTATTR-reachable: no new AT surface rides on them
+ * (design spec 3.5). The two fault lists ship empty and host-untouched,
+ * disclosed there.
+ *
+ * The DEM triple is variant 0 ONLY, and is OVER-DELIVERY, the heat pump
+ * shape: BatteryStorage.xml never requests DEM (its clusters block lists
+ * Identify optional, nothing else); the SDK build bolts the triple on
+ * anyway (endpoint.cpp:1972-1975). Variant 1 omits it and stays conformant.
+ *
+ * DISCLOSED XML INCONSISTENCY: BatteryStorage.xml revision 2's summary says
+ * "Added mandate of two Power Source and Electrical Sensor composed devices
+ * types", but the body encodes that as ONE composed 0x0510 block whose
+ * cluster requirements are simply duplicated (EPM twice, EEM twice) and
+ * lists no Power Source device type at all. A two-instance mandate is not
+ * expressible by duplicating cluster rows inside one block; this endpoint
+ * delivers ONE sensor and ONE power source and discloses the departure
+ * (design spec 2.3, survey B, ARCHITECTURE.md 8.12). Flag, don't chase.
+ */
+static endpoint_t *mk_battery_storage(node_t *n, uint8_t variant)
+{
+    endpoint_t *ep = endpoint::create(n, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    cluster::descriptor::config_t dc;
+    cluster_t *desc_cl = cluster::descriptor::create(ep, &dc, CLUSTER_FLAG_SERVER);
+    if (desc_cl == nullptr) {
+        ESP_LOGE(TAG, "creating descriptor cluster failed (battery storage)");
+        return nullptr;
+    }
+    if (endpoint::add_device_type(ep, battery_storage::get_device_type_id(),
+                                  battery_storage::get_device_type_version()) != ESP_OK) {
+        ESP_LOGE(TAG, "adding battery storage device type failed");
+        return nullptr;
+    }
+    /* tag_list for parity with the SDK build (endpoint.cpp:1946-1947). */
+    cluster::descriptor::feature::tag_list::add(desc_cl);
+
+    /* Power Source 0x0011, battery|rechargeable: the RECHG defect fix (see
+     * above). VALIDATE_FEATURES_EXACT_ONE checks Wired against Battery only
+     * (esp_matter_cluster.cpp:982), so the extra rechargeable bit passes. */
+    power_source::config_t pc;
+    pc.power_source.feature_flags = cluster::power_source::feature::battery::get_id() |
+                                    cluster::power_source::feature::rechargeable::get_id();
+    if (power_source::add(ep, &pc) != ESP_OK) {
+        ESP_LOGE(TAG, "power source add failed (battery storage)");
+        return nullptr;
+    }
+    cluster_t *ps_cl = cluster::get(ep, chip::app::Clusters::PowerSource::Id);
+    if (ps_cl == nullptr) {
+        ESP_LOGE(TAG, "PowerSource cluster missing after add (battery storage)");
+        return nullptr;
+    }
+    /* The eight battery attributes, endpoint.cpp:1951-1960 mirrored with
+     * the SDK config's defaults: nullables null (no reading at boot),
+     * BatCapacity 0, the fault lists empty. */
+    cluster::power_source::attribute::create_bat_voltage(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFF);
+    cluster::power_source::attribute::create_bat_percent_remaining(ps_cl, nullable<uint8_t>(), 0, 200);
+    cluster::power_source::attribute::create_bat_time_remaining(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFF);
+    cluster::power_source::attribute::create_active_bat_faults(ps_cl, NULL, 0, 0);
+    cluster::power_source::attribute::create_bat_capacity(ps_cl, 0, 0x00, 0xFFFF);
+    cluster::power_source::attribute::create_bat_time_to_full_charge(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFF);
+    cluster::power_source::attribute::create_bat_charging_current(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFF);
+    cluster::power_source::attribute::create_active_bat_charge_faults(ps_cl, NULL, 0, 0);
+
+    if (!mt_graft_electrical_sensor(ep, true, "battery storage")) {
+        return nullptr;
+    }
+    if (variant == 0) {
+        if (!mt_add_dem_triple(ep, true, "battery storage")) {
+            return nullptr;
+        }
+    }
+    return ep;
+}
+
+/*
+ * Device Energy Management (0x050D) standalone: device type + DEM cluster +
+ * DEM Mode, nothing else, mirroring the SDK's thin add()
+ * (esp_matter_endpoint.cpp:1708-1717, which adds no tag_list: parity kept).
+ * The XML classifies it a utility device type, stackable on any endpoint;
+ * this row is the standalone declaration.
+ *
+ * Variant 0 declares the ControllableESA condition's minimum:
+ * PowerAdjustment via feature::add() (the iron rule, mt_add_dem_triple()'s
+ * comment above). Variant 1 is the report-only ESA: FeatureMap 0, which the
+ * XML makes conformant for a device NOT declaring ControllableESA (the
+ * five-feature min-1 choice applies only under the condition), and DEM Mode
+ * stays legal (otherwiseConform: mandatory under ControllableESA, optional
+ * otherwise). The delegate is still pooled in variant 1: the five
+ * attributes are Instance-served either way, and a chip-tool
+ * power-adjust-request against variant 1 answers UNSUPPORTED_COMMAND from
+ * the data model (no ember command entry exists), never reaching any
+ * delegate.
+ */
+static endpoint_t *mk_dem(node_t *n, uint8_t variant)
+{
+    endpoint_t *ep = endpoint::create(n, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    cluster::descriptor::config_t dc;
+    if (cluster::descriptor::create(ep, &dc, CLUSTER_FLAG_SERVER) == nullptr) {
+        ESP_LOGE(TAG, "creating descriptor cluster failed (device energy management)");
+        return nullptr;
+    }
+    /* The triple adds device type 0x050D itself; here it is the endpoint's
+     * primary (and only) device type rather than battery's fourth. */
+    if (!mt_add_dem_triple(ep, variant == 0, "device energy management")) {
+        return nullptr;
+    }
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -1917,6 +2324,9 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { electrical_meter::get_device_type_id(),         mk_electrical_meter,        "electrical_meter",        1 },
     { water_heater::get_device_type_id(),             mk_water_heater,            "water_heater",            1 },
     { heat_pump::get_device_type_id(),                mk_heat_pump,               "heat_pump",               0 },
+    { solar_power::get_device_type_id(),              mk_solar_power,             "solar_power",             1 },
+    { battery_storage::get_device_type_id(),          mk_battery_storage,         "battery_storage",         1 },
+    { device_energy_management::get_device_type_id(), mk_dem,                     "device_energy_management", 1 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

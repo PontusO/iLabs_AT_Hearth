@@ -1959,11 +1959,12 @@ public:
 
     /*
      * ChangeToMode::Id is 0x00 for RvcRunMode, RvcCleanMode, (composed
-     * appliance round, task 3) RefrigeratorAndTemperatureControlledCabinetMode
-     * AND (task 4) OvenMode
-     * (verified against each cluster's generated CommandIds.h: all four
+     * appliance round, task 3) RefrigeratorAndTemperatureControlledCabinetMode,
+     * (task 4) OvenMode, (energy round B) WaterHeaterMode AND (energy round
+     * C1) DeviceEnergyManagementMode
+     * (verified against each cluster's generated CommandIds.h: all six
      * declare "inline constexpr CommandId Id = 0x00000000" for ChangeToMode),
-     * so one constant covers all four. MicrowaveOvenMode never reaches this
+     * so one constant covers all six. MicrowaveOvenMode never reaches this
      * override at all: its generated CommandIds.h declares
      * kAcceptedCommandsCount = 0, so the SDK wires no ChangeToMode command for
      * it at all (design spec 3.3's plan-time correction; the microwave's mode
