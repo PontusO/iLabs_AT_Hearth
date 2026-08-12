@@ -790,12 +790,22 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep);
  *     and no optionals when there is none), Active to Inactive emits
  *     BoostEnded, and a push repeating the current state emits nothing.
  *
+ *   - DeviceEnergyManagement (0x0098, energy round C1): pull-model like EPM
+ *     and WHM. Each value is stored into the endpoint's HearthDemDelegate
+ *     (main.cpp), one MatterReportingAttributeChangeCallback per applied
+ *     attribute field, with two departures documented at MT_DEM_F_* below:
+ *     ESAState pushes route through the delegate's SetESAState() (which owns
+ *     the leaving-kPowerAdjustActive PowerAdjustEnd derivation and reports
+ *     the attribute on change only, so a same-state push emits nothing and
+ *     reports nothing), and field 6 is an event carrier that caches only and
+ *     never reports anything dirty.
+ *
  * Two-pass validate-then-apply, a hard contract: every pair is validated
  * before any pair is applied, so a bad third pair leaves the first two
  * unapplied and the device state untouched.
  *
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
- * MT_ATTR_ERR_CLUSTER when cluster is none of the three push-served ids, ep
+ * MT_ATTR_ERR_CLUSTER when cluster is none of the four push-served ids, ep
  * does not carry it, or (0x0094) a pushed field's backing feature is absent
  * on that endpoint, MT_ATTR_ERR_VALUE for a field unknown to that cluster or
  * a value outside that field's own XML range (see the field tables above and
@@ -1003,6 +1013,38 @@ void *mt_matter_whm_delegate_alloc(uint16_t ep);
  * comment in main.cpp.
  */
 void *mt_matter_dem_delegate_alloc(uint16_t ep);
+
+/*
+ * AT+MTDEMCAP: replace ep's whole DeviceEnergyManagement
+ * PowerAdjustmentCapability (energy round C1 task 2, design spec 3.2).
+ * quads carries n PowerAdjustStruct entries flattened in wire order,
+ * 4 values each: minPower (int64 mW), maxPower (int64 mW), minDuration
+ * (u32 s, already range-checked by cmd_mtdemcap), maxDuration (u32 s).
+ * n is 0..MT_DEM_CAP_MAX_ENTRIES; 0 means the capability reads null (the
+ * CHIP server then answers every PowerAdjustRequest ConstraintError
+ * without waking the host, see MT_DEM_CAP_MAX_ENTRIES above).
+ *
+ * The bridge owns everything semantic (mt_at.c checks arity and
+ * signedness only): the cause enum range
+ * (0..PowerAdjustReasonEnum::kUnknownEnumValue-1), per-entry
+ * minPower<=maxPower and minDuration<=maxDuration ordering (the CHIP
+ * server's range walk assumes ordered entries,
+ * device-energy-management-server.cpp:326-359), and the PowerAdjustment
+ * feature gate (the attribute exists only under PA, XML mandatoryConform;
+ * a variant-1 endpoint answers MT_ATTR_ERR_ATTRIBUTE). It honours the
+ * capability cause contract above: the baseline member always takes
+ * cause, the live struct cause only when no adjustment is running (a
+ * running adjustment keeps its firmware-stamped live cause, restored to
+ * the new baseline by the eventual PowerAdjustEnd). Replaces the owned
+ * store under ChipStackLock and reports PowerAdjustmentCapability dirty.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT unknown ep,
+ * MT_ATTR_ERR_CLUSTER no DeviceEnergyManagement cluster on ep,
+ * MT_ATTR_ERR_ATTRIBUTE PowerAdjustment feature absent (variant 1),
+ * MT_ATTR_ERR_VALUE cause out of enum range or an entry mis-ordered,
+ * MT_ATTR_ERR_FAILED internal (no pool slot serves ep).
+ */
+int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *quads);
 
 #ifdef __cplusplus
 }

@@ -647,8 +647,9 @@ static int cmd_mtvalve(at_type_t type, char *args)
  *       -> replace ep's ModeSelect SupportedModes list (the original form).
  *   AT+MTMODES=<ep>,<cluster>,<mode>,<tag>,"<label>"[,...]
  *       -> replace the (ep, cluster) ModeBase cluster's SupportedModes list
- *          (RvcRunMode, RvcCleanMode or MicrowaveOvenMode; RVC + Microwave
- *          batch, task 2).
+ *          (RvcRunMode, RvcCleanMode or MicrowaveOvenMode from the RVC +
+ *          Microwave batch, task 2; later rounds grow the accept list
+ *          bridge-side, see mt_matter_modebase_set()).
  *
  * Both are set-only, the AT+MTTEMPLEVELS convention: bare/query forms answer
  * a plain ERROR. Neither is persisted: the host is expected to re-send its
@@ -684,9 +685,9 @@ static int cmd_mtvalve(at_type_t type, char *args)
  * <tag> field inserted into each triple (+MTERR:1 on any violation, decided
  * here before mt_matter_modebase_set() is ever called):
  *   - <cluster>: a bare unsigned token, hex or decimal; validated against
- *     the three legal ModeBase cluster ids in the bridge (main.cpp), not
- *     here, since this C translation unit has no esp_matter/CHIP header to
- *     read those ids from.
+ *     the legal ModeBase cluster ids in the bridge (main.cpp), not here,
+ *     since this C translation unit has no esp_matter/CHIP header to read
+ *     those ids from.
  *   - 1..MT_MB_MAX_COUNT <mode>,<tag>,"<label>" triples, same <mode> and
  *     label rules as the ModeSelect form above, mode uniqueness included.
  *   - <tag>: a bare unsigned token, hex or decimal, 0..0xFFFF (u16); a value
@@ -1056,19 +1057,22 @@ static int cmd_mtalarm(at_type_t type, char *args)
 }
 
 /* Signedness per (cluster, field) for AT+MTMEAS value parsing, mirroring the
- * MT_MEAS_F_* / MT_ENERGY_F_* / MT_WHM_F_* unit comments in mt_matter.h:
- * every ElectricalPowerMeasurement (0x0090) field is signed, both
- * ElectricalEnergyMeasurement (0x0091) cumulative counters are unsigned, and
+ * MT_MEAS_F_* / MT_ENERGY_F_* / MT_WHM_F_* / MT_DEM_F_* unit comments in
+ * mt_matter.h: every ElectricalPowerMeasurement (0x0090) field is signed,
+ * both ElectricalEnergyMeasurement (0x0091) cumulative counters are unsigned,
  * of the WaterHeaterManagement (0x0094) fields only EstimatedHeatRequired
  * (field 4, int64 mWh) is signed, kept signed for 64-bit pipeline symmetry
  * even though the XML pins its minimum at 0: the min-0 range check is the
  * bridge's business (feature gating likewise; this C side only classifies
  * signedness), so "-1" on field 4 parses here and answers +MTERR:1 from the
- * bridge's validate pass instead of the parse gate. Unknown fields (and
- * unknown clusters) default to signed: the accept set only shapes the parse,
- * and the bridge rejects an unknown field with MT_ATTR_ERR_VALUE in its
- * validate pass regardless of how the value was parsed, so nothing wrongly
- * admitted here is ever applied. */
+ * bridge's validate pass instead of the parse gate. Of the
+ * DeviceEnergyManagement (0x0098, energy round C1) fields the two int64 mW
+ * powers (3-4) and the int64 mWh event carrier (6) are signed and the three
+ * enums/bool (0-2, 5) are unsigned. Unknown fields (and unknown clusters)
+ * default to signed: the accept set only shapes the parse, and the bridge
+ * rejects an unknown field with MT_ATTR_ERR_VALUE in its validate pass
+ * regardless of how the value was parsed, so nothing wrongly admitted here
+ * is ever applied. */
 static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
 {
     if (cluster == 0x0091 &&
@@ -1079,17 +1083,22 @@ static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
         field != MT_WHM_F_EST_HEAT_REQ) {
         return false;
     }
+    if (cluster == 0x0098 && field <= MT_DEM_F_OPT_OUT_STATE &&
+        field != MT_DEM_F_ABS_MIN_POWER && field != MT_DEM_F_ABS_MAX_POWER) {
+        return false;
+    }
     return true;
 }
 
 /*
  * AT+MTMEAS=<ep>,<cluster>,<field>,<value>[,<field>,<value>,...] -> push
  * 1..MT_MEAS_MAX_PAIRS (field, value) measurement/state pairs onto <ep>'s
- * push-served cluster in one call (energy round A; round B adds 0x0094).
- * <cluster> selects the family, 0x0090 ElectricalPowerMeasurement, 0x0091
- * ElectricalEnergyMeasurement or 0x0094 WaterHeaterManagement; the field ids
- * (MT_MEAS_F_* / MT_ENERGY_F_* / MT_WHM_F_*, mt_matter.h) are per-cluster
- * spaces that may overlap numerically. Set-only, the
+ * push-served cluster in one call (energy round A; round B adds 0x0094,
+ * round C1 adds 0x0098). <cluster> selects the family, 0x0090
+ * ElectricalPowerMeasurement, 0x0091 ElectricalEnergyMeasurement, 0x0094
+ * WaterHeaterManagement or 0x0098 DeviceEnergyManagement; the field ids
+ * (MT_MEAS_F_* / MT_ENERGY_F_* / MT_WHM_F_* / MT_DEM_F_*, mt_matter.h) are
+ * per-cluster spaces that may overlap numerically. Set-only, the
  * AT+MTLOCK/AT+MTVALVE/AT+MTOPSTATE/AT+MTALARM convention: bare/query
  * forms answer a plain ERROR.
  *
@@ -1104,7 +1113,7 @@ static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
  * pair leaves the first two unapplied.
  *
  * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
- * +MTERR:3 <cluster> is not one of the three push-served ids, <ep> does not
+ * +MTERR:3 <cluster> is not one of the four push-served ids, <ep> does not
  * carry it, or (0x0094 only) a pushed field's backing feature is absent on
  * that endpoint (the bridge-side gate; see mt_matter.h's MT_WHM_F_* note).
  * A bare ERROR covers an unclassified runtime failure, routed through
@@ -1142,6 +1151,97 @@ static int cmd_mtmeas(at_type_t type, char *args)
         fields[i] = (uint8_t)field;
     }
     int r = mt_matter_meas_set((uint16_t)ep, (uint32_t)cluster, fields, values, count);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
+/*
+ * AT+MTDEMCAP=<ep>,<cause>,<n>[,<minPower>,<maxPower>,<minDuration>,<maxDuration>]{n}
+ *   -> replace <ep>'s whole DeviceEnergyManagement PowerAdjustmentCapability
+ * (energy round C1, design spec 3.2): <cause> is the PowerAdjustReasonEnum,
+ * <n> counts PowerAdjustStruct entries, 0..MT_DEM_CAP_MAX_ENTRIES where 0
+ * means the capability reads null. Set-only, no query form (the Instance-
+ * owned rule): bare/query forms answer a plain ERROR. A struct list
+ * genuinely does not fit AT+MTMEAS's field=value grammar, hence the round's
+ * one new command family.
+ *
+ * The error division, per the design spec's own split for this command
+ * ("bare ERROR (form) / +MTERR:1 (values)"):
+ *   - exactly 3 + 4n parameters or bare ERROR: <n> declares the command's
+ *     own shape, so a token count contradicting it is a malformed FORM, not
+ *     a bad value (contrast cmd_mtmeas above, whose pair grammar is
+ *     self-delimiting and answers +MTERR:1 on arity);
+ *   - +MTERR:1 for values: a non-numeric token, <n> above
+ *     MT_DEM_CAP_MAX_ENTRIES (a well-formed count carrying an out-of-range
+ *     value), a duration above u32, or a signed-parse failure on a power.
+ * This C side checks arity and signedness only (the standing split): powers
+ * parse through the signed 64-bit pipeline, durations through the unsigned
+ * one with an explicit u32 bound. parse_u64 rather than parse_u for the
+ * durations, deliberately: parse_u's unsigned long is 32-bit on the target
+ * and strtoul clamps an out-of-range token to ULONG_MAX without parse_u
+ * noticing (it never checks errno), so "4294967296" would silently become
+ * 0xFFFFFFFF there while the 64-bit host suite rejected it; parse_u64
+ * checks ERANGE, so the u32 bound below actually holds on both. Everything
+ * semantic (the cause enum range, per-entry
+ * minPower<=maxPower / minDuration<=maxDuration ordering, the
+ * PowerAdjustment feature gate) is the bridge's business
+ * (mt_matter_demcap_set(), main.cpp) and answers through
+ * attr_err_to_mterr() like every other bridge call in this file.
+ *
+ * The token array carries one entry of headroom past the n=4 maximum so a
+ * full n=5 line still splits far enough for the <n> range check to answer
+ * +MTERR:1; anything longer overflows at_split_args() and lands in the
+ * arity mismatch's bare ERROR (the <n> token itself is always terminated,
+ * so the range check still outranks the count check).
+ */
+#define MT_DEMCAP_MAX_TOKENS (3 + 4 * (MT_DEM_CAP_MAX_ENTRIES + 1))
+static int cmd_mtdemcap(at_type_t type, char *args)
+{
+    char *f[MT_DEMCAP_MAX_TOKENS];
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    int ntok = at_split_args(args, f, MT_DEMCAP_MAX_TOKENS);
+    if (ntok >= 0 && ntok < 3) {
+        /* fewer than the three mandatory parameters: form */
+        return MT_R_ERROR;
+    }
+
+    unsigned long ep, cause, n;
+    if (!parse_u(f[0], &ep) || ep > 0xFFFF ||
+        !parse_u(f[1], &cause) || cause > 0xFF ||
+        !parse_u(f[2], &n)) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (n > MT_DEM_CAP_MAX_ENTRIES) {
+        return MT_ERR_BAD_PARAM;
+    }
+    if (ntok != 3 + 4 * (int)n) {
+        /* the token count contradicts <n>: form */
+        return MT_R_ERROR;
+    }
+
+    int64_t quads[4 * MT_DEM_CAP_MAX_ENTRIES];
+    for (unsigned long i = 0; i < n; i++) {
+        /* minPower, maxPower: int64 mW through the 64-bit pipeline */
+        if (!parse_i64(f[3 + 4 * i], true, &quads[4 * i]) ||
+            !parse_i64(f[4 + 4 * i], true, &quads[4 * i + 1])) {
+            return MT_ERR_BAD_PARAM;
+        }
+        /* minDuration, maxDuration: u32 seconds (parse_u64 for the
+         * ERANGE-checked bound, see the block comment above) */
+        uint64_t mind, maxd;
+        if (!parse_u64(f[5 + 4 * i], &mind) || mind > 0xFFFFFFFFULL ||
+            !parse_u64(f[6 + 4 * i], &maxd) || maxd > 0xFFFFFFFFULL) {
+            return MT_ERR_BAD_PARAM;
+        }
+        quads[4 * i + 2] = (int64_t)mind;
+        quads[4 * i + 3] = (int64_t)maxd;
+    }
+
+    int r = mt_matter_demcap_set((uint16_t)ep, (uint8_t)cause, (uint8_t)n, quads);
     if (r != MT_ATTR_OK) {
         return attr_err_to_mterr(r);
     }
@@ -1989,6 +2089,7 @@ static const at_command_t s_cmds[] = {
     { "MTCHIMESOUNDS", cmd_mtchimesounds },
     { "MTCHIME",      cmd_mtchime     },
     { "MTMEAS",       cmd_mtmeas      },
+    { "MTDEMCAP",     cmd_mtdemcap    },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif
