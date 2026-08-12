@@ -3013,7 +3013,7 @@ from mt_regression import (
     CmdResponder,
     step_3_24_solar_power, step_3_25_battery_storage, step_3_26_dem,
     t_staged_variant1_energy_c1, parse_power_adjust_entries,
-    parse_cause_values, parse_esa_state_reports,
+    parse_cause_values, parse_esa_state_reports, _hold_clock_gap,
 )
 
 
@@ -5461,13 +5461,22 @@ PA_START_ONE = "\n".join([
     "[TOO]   PowerAdjustStart: {",
     "[TOO]    }",
 ])
-PA_END_NORMAL = "\n".join([
-    "[TOO]   PowerAdjustEnd: {",
-    "[TOO]     Cause: 0",
-    "[TOO]     Duration: 12",
-    "[TOO]     EnergyUse: 120000",
-    "[TOO]    }",
-])
+def pa_end_normal(duration=20, energy=120000):
+    """A NormalCompletion PowerAdjustEnd block. `duration` is a real knob,
+    not decoration: step_3_26 bounds it against its own clock (the
+    TC_DEM_2_2 step 14 rule that a re-adjust does not re-arm the clock),
+    and the default is chosen to clear the floor FakeClock's default
+    scripted span implies (20 s span, 2 s slack, so 18 s floor)."""
+    return "\n".join([
+        "[TOO]   PowerAdjustEnd: {",
+        "[TOO]     Cause: 0",
+        "[TOO]     Duration: %d" % duration,
+        "[TOO]     EnergyUse: %d" % energy,
+        "[TOO]    }",
+    ])
+
+
+PA_END_NORMAL = pa_end_normal()
 PA_END_CANCELLED = "\n".join([
     "[TOO]   PowerAdjustEnd: {",
     "[TOO]     Cause: 4",
@@ -5477,6 +5486,26 @@ PA_END_CANCELLED = "\n".join([
 ])
 INVALID_IN_STATE = "[TOO]     status = 0xCB (INVALID_IN_STATE),"
 STATUS_FAILURE = "[TOO]     status = 0x01 (FAILURE),"
+
+
+class FakeClock:
+    """Deterministic `ctx.clock`: successive calls return the scripted
+    values in order, the last repeating forever so a wait loop always
+    terminates. step_3_26 takes exactly three readings (the allow
+    timestamp, one pass of `_hold_clock_gap`, the end timestamp), so the
+    default `[1000.0, 1010.0, 1020.0]` gives a 20 s allow-to-end span and
+    therefore an 18 s duration floor, with the gap hold satisfied on its
+    first look. Without this seam the self-test's span would be ~0 and
+    the duration bound would accept any value at all, which is precisely
+    the hole the bound was added to close."""
+
+    def __init__(self, values):
+        self.values = list(values)
+
+    def __call__(self):
+        if len(self.values) > 1:
+            return self.values.pop(0)
+        return self.values[0]
 
 
 def dem_modes(labels, tags):
@@ -5665,7 +5694,10 @@ class TestStep326Dem(unittest.TestCase):
 
     def _ctx(self, guard_reply=None, guard_leaks_forward=False,
              second_start=None, end_after_readjust=None,
-             cap_after_end=None, pa_payloads=None, sub=None):
+             cap_after_end=None, pa_payloads=None, sub=None,
+             accepted_cmds=None, attr_list=None, cap_null=None,
+             start_after_allow=None, esastate_after_allow=None,
+             end_pair=None, clock=None):
         link = FakeLink({
             "AT+MTMEAS=27,144,0,230000": (3, []),
             "AT+MTDEMCAP=99,1,0": (2, []),
@@ -5696,21 +5728,25 @@ class TestStep326Dem(unittest.TestCase):
         script = [
             (0, DEVTYPES27_DEM),
             (0, SERVER27_DEM),
-            (0, DEM_ACCEPTED_CMDS),
-            (0, DEM_ATTR_LIST),
+            (0, accepted_cmds if accepted_cmds is not None
+             else DEM_ACCEPTED_CMDS),
+            (0, attr_list if attr_list is not None else DEM_ATTR_LIST),
             (0, "[TOO]   ESAType: 255"),
             (0, "[TOO]   AbsMinPower: -5000000000"),
             (0, "[TOO]   AbsMaxPower: 5000000000"),
             (guard_reply if guard_reply is not None
              else (1, INVALID_IN_STATE)),          # the in-state guard
             (0, cap_c1),                           # capability read back
-            (0, CAP_NULL),                         # n=0 reads null
+            (0, cap_null if cap_null is not None
+             else CAP_NULL),                       # n=0 reads null
             (1, STATUS_FAILURE),                   # deny invoke
             (0, ""),                               # no PowerAdjustStart
             (0, "[TOO]   ESAState: 1"),
             (0, ""),                               # allow invoke
-            (0, "[TOO]   ESAState: 3"),
-            (0, PA_START_ONE),
+            (0, esastate_after_allow if esastate_after_allow is not None
+             else "[TOO]   ESAState: 3"),
+            (0, start_after_allow if start_after_allow is not None
+             else PA_START_ONE),
             (0, cap_c1),                           # cause stamped 1
             (0, ""),                               # re-adjust invoke
             (0, second_start if second_start is not None
@@ -5721,7 +5757,8 @@ class TestStep326Dem(unittest.TestCase):
             (0, cap_after_end if cap_after_end is not None else cap_c1),
             (0, ""),                               # second adjust invoke
             (0, ""),                               # cancel invoke
-            (0, "\n".join([PA_END_NORMAL, PA_END_CANCELLED])),
+            (0, end_pair if end_pair is not None
+             else "\n".join([PA_END_NORMAL, PA_END_CANCELLED])),
             (0, "[TOO]   ESAState: 1"),
             (0, dem_modes(["NoOptimization", "GridOpt"],
                           [0x4000, 0x4003])),
@@ -5754,6 +5791,9 @@ class TestStep326Dem(unittest.TestCase):
         sub = sub if sub is not None else FakeSubscriber(counts=[1, 1, 2])
         ctx.subscriber_factory = lambda: sub
         ctx._sub = sub
+        ctx.clock = clock if clock is not None else FakeClock(
+            [1000.0, 1010.0, 1020.0])
+        ctx.sleeper = lambda _s: None
         return ctx
 
     def test_happy_path(self):
@@ -5801,14 +5841,119 @@ class TestStep326Dem(unittest.TestCase):
 
     def test_energy_use_not_carried_into_the_end_event_fails(self):
         # Field 6 is an event carrier and the End is where it surfaces;
-        # a 0 there means the cache never reached the emission.
-        ctx = self._ctx(end_after_readjust="\n".join([
-            "[TOO]   PowerAdjustEnd: {",
-            "[TOO]     Cause: 0",
-            "[TOO]     Duration: 12",
-            "[TOO]     EnergyUse: 0",
+        # a 0 there means the cache never reached the emission. The
+        # duration stays at the passing value so this isolates the
+        # EnergyUse mutation.
+        ctx = self._ctx(end_after_readjust=pa_end_normal(energy=0))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_rearmed_duration_clock_fails(self):
+        # TC_DEM_2_2 step 14's other half, and the review's F1: a
+        # firmware that re-armed m_pa_start_ms on the re-adjust reports
+        # the interval since the RE-ADJUST, not since the first accept.
+        # With the default clock the allow-to-end span is 20 s and the
+        # floor 18 s, so a 3 s duration (the shape a re-arm produces) is
+        # unambiguously short. Every other check still passes, so this
+        # isolates the clock rule.
+        ctx = self._ctx(end_after_readjust=pa_end_normal(duration=3))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertEqual(
+            failed,
+            ["3.26 PowerAdjustEnd duration measures from the FIRST "
+             "accept, not the re-adjust (the clock is not re-armed)"])
+
+    def test_duration_bound_tolerates_truncation_and_jitter(self):
+        # The other side of the bound: the firmware truncates to whole
+        # seconds and the harness's timestamps bracket the firmware's,
+        # so a duration one second under the measured span must still
+        # pass. A bound tight enough to fail here would be flaky on the
+        # bench, which is the failure mode this test exists to prevent.
+        ctx = self._ctx(end_after_readjust=pa_end_normal(duration=19))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+
+    def test_hold_clock_gap_waits_until_the_gap_has_passed(self):
+        # The gap hold is what keeps the duration bound discriminating
+        # on a rig whose chip-tool round trips are fast: without it the
+        # two accepts could be close enough together that a re-armed
+        # clock still cleared the floor.
+        slept = []
+        ctx = fresh_phase3_ctx()
+        ctx.clock = FakeClock([100.0, 101.0, 103.0, 110.0])
+        ctx.sleeper = slept.append
+        got = _hold_clock_gap(ctx, 100.0)
+        self.assertEqual(got, 110.0)
+        # 100.0, 101.0 and 103.0 are all short of the 106.0 deadline.
+        self.assertEqual(len(slept), 3)
+
+    def test_accepted_command_list_with_an_extra_entry_fails(self):
+        # The IRON RULE's observability net: the ember command entries
+        # and the Instance's FeatureMap-derived list agree only because
+        # feature::power_adjustment::add() created both. A third entry
+        # means a feature bit was set some other way.
+        extra = DEM_ACCEPTED_CMDS + \
+            "\n[TOO]     [3]: 2 (StartTimeAdjustRequest)"
+        ctx = self._ctx(accepted_cmds=extra)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_attribute_list_with_a_ninth_id_fails(self):
+        # The field-6 net: AdjustmentEnergyUse is an event carrier and
+        # must never acquire an attribute. Any extra non-global id here
+        # (this fixture uses Forecast, 6) has to fail loudly.
+        extra = DEM_ATTR_LIST + "\n[TOO]     [14]: 6 (Forecast)"
+        ctx = self._ctx(attr_list=extra)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_n_zero_reading_an_empty_list_instead_of_null_fails(self):
+        # The distinction the CHIP server's ConstraintError rests on: a
+        # capability that reads as an EMPTY LIST is not null, and a
+        # firmware that produced one would leave power-adjust-request
+        # answering something other than ConstraintError.
+        empty = "\n".join([
+            "[TOO]   PowerAdjustmentCapability: {",
+            "[TOO]     PowerAdjustCapability: 0 entries",
+            "[TOO]     Cause: 1",
             "[TOO]    }",
-        ]))
+        ])
+        ctx = self._ctx(cap_null=empty)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_missing_power_adjust_start_after_allow_fails(self):
+        # The accept must emit exactly one Start. Zero means the
+        # firmware stopped owning the transition's event.
+        ctx = self._ctx(start_after_allow="")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_esastate_not_active_after_allow_fails(self):
+        # The firmware owns the entry transition (the contrast with
+        # round B's Boost, where the host pushed the state). A device
+        # still reading Online after an accepted request has lost that.
+        ctx = self._ctx(esastate_after_allow="[TOO]   ESAState: 1")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_26_dem(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_cancel_end_with_the_wrong_cause_or_stale_energy_fails(self):
+        # The Cancelled path carries cause 4, and EnergyUse 0 because
+        # the FIRST End consumed the field-6 cache. This fixture is a
+        # second NormalCompletion still carrying 120000: both halves of
+        # the check are wrong, and both must be caught.
+        ctx = self._ctx(end_pair="\n".join([PA_END_NORMAL,
+                                            PA_END_NORMAL]))
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_26_dem(ctx)
         self.assertGreater(ctx.suite.failed, 0)
@@ -5854,6 +5999,23 @@ class TestEnergyC1Parsers(unittest.TestCase):
                             "[TOO]         MaxPower: 2",
                             "[TOO]         MinDuration: 3"])
         self.assertEqual(parse_power_adjust_entries(ragged), [])
+
+    def test_power_adjust_entries_ignores_abs_min_max_power(self):
+        # Review F3: without word boundaries `AbsMinPower:`/`AbsMaxPower:`
+        # satisfy the two power patterns (no boundary sits between `Abs`
+        # and `Min`). This fixture is the shape that turns that into a
+        # PHANTOM ENTRY rather than a harmless miss: the DEM power
+        # envelope supplies the two powers and a duration-bearing struct
+        # supplies the other two, so all four counts agree at 1 and the
+        # unanchored parser happily zips them into
+        # (-5000000000, 5000000000, 30, 3600), an entry no host ever
+        # pushed. Anchored, the powers do not match at all, the counts
+        # disagree, and the honest empty list comes back.
+        phantom = "\n".join(["[TOO]   AbsMinPower: -5000000000",
+                             "[TOO]   AbsMaxPower: 5000000000",
+                             "[TOO]     MinDuration: 30",
+                             "[TOO]     MaxDuration: 3600"])
+        self.assertEqual(parse_power_adjust_entries(phantom), [])
 
     def test_power_adjust_entries_keeps_negative_powers(self):
         self.assertEqual(

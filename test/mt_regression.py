@@ -553,6 +553,11 @@ class Phase3Context:
         self.chip_call = None      # test seam; None means the real
                                     # threaded chip.run() (see
                                     # invoke_chip/_threaded_chip_call)
+        self.clock = None          # test seam; None means time.monotonic.
+                                    # step_3_26 measures the PowerAdjust
+                                    # duration clock against it (see
+                                    # PA_CLOCK_GAP_S below)
+        self.sleeper = None        # test seam; None means time.sleep
 
 
 def step_2_1_factory_fresh(ctx):
@@ -3506,7 +3511,19 @@ def step_3_25_battery_storage(ctx):
     DeviceEnergyManagementMode (159/0x9F) is staged over the
     cluster-aware AT+MTMODES with one tag-0 default, which must resolve
     to kNoOptimization (0x4000, main.cpp's pinned default for this
-    cluster) and one explicit kDeviceOptimization (0x4001)."""
+    cluster) and one explicit kDeviceOptimization (0x4001).
+
+    INFERENCE in this step's body (energy round C1, awaiting the bench;
+    the parse_energy_values confidence class, with the parsers' own
+    shapes documented in their docstrings): `ESACanGenerate:\\s*TRUE`,
+    asserted with a regex rather than through parse_int_attr because the
+    field is a bool and the pinned DataModelLogger.h bool overload
+    prints the literal `TRUE`/`FALSE`. If the bench sees `1`, that is a
+    one-line harness fix, not a firmware defect. The battery attribute
+    labels themselves ride parse_int_attr's CONFIRMED
+    `]  <Label>: <int>` shape; the chip-tool attribute NAMES were read
+    from the pinned Commands.h registration block, so those are not
+    inferred."""
     link, s, chip = ctx.link, ctx.suite, ctx.chip
     node = "0x%X" % ctx.node_id
 
@@ -3629,6 +3646,46 @@ def step_3_25_battery_storage(ctx):
             tag="P3")
 
 
+# Energy round C1: the two numbers that make the PowerAdjust duration-clock
+# rule assertable. Design spec 3.3 and TC_DEM_2_2 step 14 say a re-adjust
+# accepted while ESAState is already PowerAdjustActive does NOT re-arm the
+# clock, so the eventual PowerAdjustEnd's duration measures from the FIRST
+# accept. A firmware that re-armed it (one line, main.cpp's
+# `if (!in_progress)` around the m_pa_start_ms write) reports a duration
+# short by however long the first accept and the re-adjust are apart, so
+# the check is: reported >= (end - first accept) - slack.
+#
+# PA_CLOCK_GAP_S is the separation step_3_26 GUARANTEES between the two
+# accepts. On a real rig the three chip-tool round trips in between already
+# exceed it and the wait is a no-op; it exists so the check keeps its
+# discriminating power on a fast rig rather than silently degrading into
+# "some integer was printed", which is exactly the hole this constant was
+# added to close.
+#
+# PA_CLOCK_SLACK_S covers the firmware's integer-second truncation (up to
+# 1 s, since duration is (now_ms - start_ms) / 1000) plus link and
+# round-trip jitter between the harness's timestamps and the firmware's.
+# It must stay well under PA_CLOCK_GAP_S or the check stops separating.
+PA_CLOCK_GAP_S = 6.0
+PA_CLOCK_SLACK_S = 2.0
+
+
+def _hold_clock_gap(ctx, since, gap=PA_CLOCK_GAP_S):
+    """Block until `gap` seconds have passed since `since` on ctx's clock.
+
+    Both the clock and the sleeper are ctx seams so the self-test can drive
+    the duration bound deterministically instead of against wall time; the
+    real run uses time.monotonic/time.sleep. Returns the clock reading it
+    stopped at."""
+    clock = ctx.clock or time.monotonic
+    sleeper = ctx.sleeper or time.sleep
+    while True:
+        now = clock()
+        if now >= since + gap:
+            return now
+        sleeper(min(0.5, since + gap - now))
+
+
 def step_3_26_dem(ctx):
     """Energy round C1 (0.10.0), task 4: the standalone Device Energy
     Management ESA (PHASE3_COMPOSITION 27, endpoint 27, 0x050D variant 0
@@ -3697,7 +3754,28 @@ def step_3_26_dem(ctx):
     the closing segment subscribes to ESAState the step_3_21 way, pushes
     the CURRENT state and requires NO report, then pushes a different
     one and requires one. Subscriber contract: it runs last, and no
-    ChipTool.run() happens while it lives."""
+    ChipTool.run() happens while it lives.
+
+    INFERENCE in this step's body (energy round C1, awaiting the bench;
+    the parse_energy_values confidence class, with the three new
+    parsers' own shapes documented in their docstrings):
+
+      - `EnergyUse:` and `Duration:` as the PowerAdjustEnd event's field
+        labels, both plain decimal through the integral overload. Only
+        the labels are inferred; the VALUES are the round's own
+        contracts (120000 then 0 for the consumed cache; the duration
+        bound above).
+      - `PowerAdjustmentCapability:\\s*null` as the null rendering, from
+        DataModelLogger.h's Nullable template, which logs the literal
+        string "null" and nothing else. This is what separates n=0 from
+        an empty list, so if the bench sees an empty-list rendering
+        instead, the DISTINCTION still has to hold; only the text of the
+        assertion moves.
+      - parse_event_count against a FIELDLESS event block
+        (`PowerAdjustStart: {` immediately followed by `}`). The
+        `<EventName>: {` form parse_event_count matches is CONFIRMED,
+        but no earlier step counts an event with no fields at all, and
+        every PowerAdjustStart assertion here is a count."""
     link, s, chip = ctx.link, ctx.suite, ctx.chip
     node = "0x%X" % ctx.node_id
     responder = CmdResponder(link)
@@ -3869,6 +3947,13 @@ def step_3_26_dem(ctx):
                               "0", node, "27"], timeout=30)
     fwd = responder.expect(cluster=152, command=0, verdict=1,
                            payload=[5000000000, 60, 0], timeout=5.0)
+    # The duration clock starts HERE in the firmware (the accept, not the
+    # invoke), so this is the reference the PowerAdjustEnd bound below
+    # measures against. Taken right after the verdict went out, which is
+    # a few ms EARLIER than the firmware's own stamp: that direction is
+    # safe, since it can only make the measured elapsed longer than the
+    # reported duration, which the slack absorbs.
+    t_allow = (ctx.clock or time.monotonic)()
     s.check("3.26 PowerAdjustRequest forward answered ALLOW",
             fwd is not None, tag="P3")
     rc, out = handle.join(30)
@@ -3892,6 +3977,9 @@ def step_3_26_dem(ctx):
             rc == 0 and parse_cause_values(out) == [1], tag="P3")
 
     # --- re-adjust while active: forward yes, second Start NO ---
+    # Guarantee the accepts are far enough apart for the duration bound
+    # below to tell a re-armed clock from normal jitter (PA_CLOCK_GAP_S).
+    _hold_clock_gap(ctx, t_allow)
     handle = invoke_chip(ctx, ["deviceenergymanagement",
                               "power-adjust-request", "5000000000", "60",
                               "1", node, "27"], timeout=30)
@@ -3922,6 +4010,9 @@ def step_3_26_dem(ctx):
     s.check("3.26 field 6 marks nothing dirty and raises no URC (event "
             "carrier, not an attribute)",
             link.assert_no_urc(r"\+MTATTR:27,", 1.5), tag="P3")
+    # Taken BEFORE the push that triggers the emission, so the firmware's
+    # own end timestamp is at or after it: again the safe direction.
+    t_end = (ctx.clock or time.monotonic)()
     res, _ = link.command("AT+MTMEAS=27,152,2,1")
     s.check("3.26 host ends the adjustment by pushing ESAState Online "
             "-> OK", res == 0, tag="P3")
@@ -3931,10 +4022,26 @@ def step_3_26_dem(ctx):
             rc == 0 and parse_event_count(out, "PowerAdjustEnd") == 1,
             tag="P3")
     s.check("3.26 PowerAdjustEnd cause 0 (NormalCompletion) with the "
-            "cached EnergyUse 120000 and a measured Duration",
+            "cached EnergyUse 120000 and a Duration field",
             rc == 0 and parse_cause_values(out) == [0]
             and re.search(r"EnergyUse:\s*120000\b", out) is not None
             and re.search(r"Duration:\s*\d+", out) is not None, tag="P3")
+    # The other half of TC_DEM_2_2 step 14, and the reason the re-adjust
+    # ran at all: the clock was NOT re-armed, so this duration measures
+    # from the FIRST accept. A re-armed clock reports the far shorter
+    # interval since the re-adjust, which is at least PA_CLOCK_GAP_S
+    # short of the bound.
+    dur = re.search(r"Duration:\s*(\d+)", out)
+    floor_s = (t_end - t_allow) - PA_CLOCK_SLACK_S
+    # The check NAME must stay byte-stable: it is the baseline's key, so
+    # the measured numbers go to stdout beside it, never into it.
+    print("    (duration rule: reported %s s, floor %.1f s, allow-to-end "
+          "span %.1f s)" % (dur.group(1) if dur else "none", floor_s,
+                            t_end - t_allow))
+    s.check("3.26 PowerAdjustEnd duration measures from the FIRST accept, "
+            "not the re-adjust (the clock is not re-armed)",
+            rc == 0 and dur is not None
+            and int(dur.group(1)) >= floor_s, tag="P3")
     rc, out = chip.run(["deviceenergymanagement", "read",
                         "power-adjustment-capability", node, "27"],
                        timeout=30)
@@ -4555,12 +4662,18 @@ def parse_power_adjust_entries(text):
     the shape this parser understands and yields an empty list rather
     than a mis-zipped one. `MinDuration`/`MaxDuration` are also
     `SlotStruct` field names, but Forecast is permanently null in C1
-    (main.cpp) and is never read here. Empty list on no match, never
-    raises."""
-    mins = re.findall(r"MinPower:\s*(-?\d+)", text)
-    maxs = re.findall(r"MaxPower:\s*(-?\d+)", text)
-    mind = re.findall(r"MinDuration:\s*(\d+)", text)
-    maxd = re.findall(r"MaxDuration:\s*(\d+)", text)
+    (main.cpp) and is never read here.
+
+    All four labels are `\\b`-anchored, parse_cause_values' discipline:
+    without it `AbsMinPower:`/`AbsMaxPower:` satisfy the two power
+    patterns (no word boundary sits between `Abs` and `Min`), so any
+    capture carrying the DEM power envelope beside a capability, or a
+    whole-cluster attribute dump, would yield a phantom or mis-zipped
+    entry. Empty list on no match, never raises."""
+    mins = re.findall(r"\bMinPower:\s*(-?\d+)", text)
+    maxs = re.findall(r"\bMaxPower:\s*(-?\d+)", text)
+    mind = re.findall(r"\bMinDuration:\s*(\d+)", text)
+    maxd = re.findall(r"\bMaxDuration:\s*(\d+)", text)
     if not (len(mins) == len(maxs) == len(mind) == len(maxd)):
         return []
     return [(int(a), int(b), int(c), int(d))
