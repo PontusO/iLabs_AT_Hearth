@@ -1,14 +1,14 @@
 {
   "header": {
     "at_core_repo_head": "11c9935ea392b62c0a9c84c5197483aa1fee41ef",
-    "cgmr": "0.10.0",
-    "fw_repo_head": "494335ecd045bdbe1a1f29c7663fef27777744a0",
+    "cgmr": "0.11.0",
+    "fw_repo_head": "9c5d65164f6a1749715eb3dec217e11046128136",
     "manual_code": "34970112332",
     "net": "+MTNET:THREAD,1,0,0",
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-08-12T10:46:49+00:00",
+    "timestamp": "2026-08-12T21:40:36+00:00",
     "transport": "THREAD"
   },
   "results": {
@@ -181,6 +181,8 @@
     "MTTEMPLEVELS=4 -> +MTERR:1 (no labels)": "PASS",
     "MTTEMPLEVELS=4,Low -> +MTERR:1 (missing quotes)": "PASS",
     "MTTEMPLEVELS? -> ERROR (set-only, query form)": "PASS",
+    "MTTHREAD=1 -> ERROR (query-only command, both images)": "PASS",
+    "MTTHREAD? shape by image (+MTERR:8 on WiFi, decoded line on Thread)": "PASS",
     "MTVALVE no args -> ERROR": "PASS",
     "MTVALVE=1 -> +MTERR:1 (too few params)": "PASS",
     "MTVALVE=1,1,1,1 -> +MTERR:1 (too many)": "PASS",

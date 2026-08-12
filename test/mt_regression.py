@@ -414,6 +414,11 @@ class Phase2Context:
         self.composition = None   # +MTEP: lines captured by run_phase2
         self.transport = "WIFI"   # set from phase2_gate's detection
         self.dataset = None       # Thread active dataset hex, if any
+        self.sleeper = None       # test seam; None means time.sleep. Only
+                                   # 2.7's window settle uses it, so the
+                                   # self-test can assert the wait without
+                                   # spending it (Phase3Context carries the
+                                   # same seam for step_3_26)
 
 
 # Slot order is load-bearing: step_3_2_grammar and friends reference
@@ -860,12 +865,33 @@ def step_2_5_controller_to_host(ctx):
             raise StepAbort("controller-side write failed")
 
 
+SECOND_WINDOW_SETTLE_S = 15.0
+# 2.7 opens a second commissioning window and immediately asks a second
+# controller to find it by long discriminator. The discriminator is fixed
+# for the device, so every window in a session republishes the SAME
+# commissionable mDNS record under a new address, and `onnetwork-long`
+# resolving before the republication lands picks up the previous window's
+# address and dies in PASE (`PASESession.cpp:311 CHIP Error 0x00000032:
+# Timeout`) without ever reaching the device.
+#
+# Found on the 0.11.0 bench round, on Thread, where the record travels
+# through the border router's advertising proxy and the window is widest.
+# Isolated outside the harness rather than guessed at: pairing with no gap
+# failed twice, pairing after an intervening `discover commissionables`
+# succeeded, and pairing after a bare 15 s settle with no browse at all
+# succeeded too, which is what rules out the browse and names elapsed time
+# as the variable. A settle, not a retry: a retry pays chip-tool's 120 s
+# pairing timeout again before it helps, and the second attempt would race
+# the same republication.
 def step_2_7_second_fabric(ctx):
     """TESTING.md 2.7: fabric accounting through an additional window.
     The second controller pairs over the network (the device is already
     on WiFi; verb pinned by T3 Task 1 finding (b): `onnetwork-long`), and
     the DE24 pair (one +MTEVT:4 per +MTEVT:0, after complete) must hold
-    for host-opened windows exactly as it does for the boot window."""
+    for host-opened windows exactly as it does for the boot window.
+
+    The SECOND_WINDOW_SETTLE_S wait above the pairing is load-bearing and
+    must stay BEFORE the invocation; see that constant's comment."""
     link, s, chip2 = ctx.link, ctx.suite, ctx.chip2
     res, _ = link.command("AT+MTCOMMISSION=180")
     okw = s.check("2.7 MTCOMMISSION=180 -> OK", res == 0, tag="P2")
@@ -876,6 +902,7 @@ def step_2_7_second_fabric(ctx):
             res == 0 and lines == ["+MTSTATE:1,1"], tag="P2")
     if not okw:
         raise StepAbort("could not open an additional window")
+    (ctx.sleeper or time.sleep)(SECOND_WINDOW_SETTLE_S)
     node2 = ctx.node_id + 1
     rc, out = chip2.run(["pairing", "onnetwork-long", "0x%X" % node2,
                          str(ctx.passcode), str(ctx.discriminator)],

@@ -2293,7 +2293,7 @@ class TestStep25(unittest.TestCase):
         self.assertGreater(ctx.suite.failed, 0)
 
 
-from mt_regression import step_2_7_second_fabric
+from mt_regression import step_2_7_second_fabric, SECOND_WINDOW_SETTLE_S
 
 
 class TestStep27(unittest.TestCase):
@@ -2324,6 +2324,11 @@ class TestStep27(unittest.TestCase):
         ctx = fresh_ctx(link)
         ctx.chip2 = ChipTool("/bin/chip-tool", d, runner=runner)
         ctx.passcode, ctx.discriminator = 20202021, 3840
+        # The window settle is real wall time on hardware; every test in
+        # this class records it instead of spending it, or the class
+        # would cost SECOND_WINDOW_SETTLE_S per method.
+        self.trace = []
+        ctx.sleeper = lambda n: self.trace.append(("sleep", n))
         return ctx, link
 
     @staticmethod
@@ -2377,6 +2382,39 @@ class TestStep27(unittest.TestCase):
         self.assertIn("2.7 fabric index found", failed_names)
         # no index means remove-fabric must never be attempted
         self.assertEqual(len(runner.calls), 2)
+
+    def test_window_settles_before_the_second_pairing(self):
+        """Bench defect: pairing the instant the window opens times out in
+        PASE, because `onnetwork-long` resolves the fixed discriminator
+        from a commissionable mDNS record that has not been republished
+        yet, and on Thread that record travels through the border router.
+        Reproduced outside the harness twice with a 0 s gap (both failed)
+        and twice with a settle (both paired), so the step must wait
+        before it invokes the second controller, and the wait must happen
+        BEFORE the pairing call, not after it."""
+        runner = FakeChipRunner([
+            (0, "CHIP:TOO: Device commissioning completed with success"),
+            (0, fixture("chiptool_read_fabrics.txt")),
+            (0, "CHIP:TOO: NOCResponse"),
+        ])
+        ctx, link = self._ctx(runner)
+        trace = self.trace
+        base_on_call = self._release_on_pairing(link)
+
+        def on_call(argv):
+            trace.append(("call", argv[1] if len(argv) > 1 else ""))
+            base_on_call(argv)
+        runner.on_call = on_call
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_7_second_fabric(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        slept = sum(n for kind, n in trace if kind == "sleep")
+        self.assertGreaterEqual(slept, SECOND_WINDOW_SETTLE_S)
+        first_call = next(i for i, (kind, _) in enumerate(trace)
+                          if kind == "call")
+        first_sleep = next(i for i, (kind, _) in enumerate(trace)
+                           if kind == "sleep")
+        self.assertLess(first_sleep, first_call)
 
 
 from mt_regression import step_2_8_warm_reboot
