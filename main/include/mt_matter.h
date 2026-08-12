@@ -67,6 +67,48 @@ int mt_matter_net_info(int *transport, int *enabled, int *connected);
  */
 int mt_matter_transport_mismatch(void);
 
+/* ---- Thread role and mesh identity (0.11.0 task 1, AT+MTTHREAD?) ------- */
+
+/*
+ * mt_matter.h, C-visible. Fields carry has_* flags because a detached
+ * device reports null for the four ids and the wire renders that as an
+ * empty field, never as 0. name is NUL terminated, Thread's own 16-byte
+ * limit plus the terminator.
+ *
+ * role and attached carry no has_* flag: role is a Matter RoutingRoleEnum
+ * value CHIP derives from live OpenThread state even when the interface is
+ * disabled or detached (design spec 2.1; thread-network-diagnostics-
+ * provider.cpp's own not-commissioned null list explicitly excludes
+ * RoutingRole), and attached is a plain predicate, not an attribute read.
+ */
+typedef struct {
+    uint8_t  role;            /* Matter RoutingRoleEnum, raw */
+    bool     attached;
+    bool     has_channel;      uint16_t channel;
+    bool     has_panid;        uint16_t panid;
+    bool     has_extpanid;     uint64_t extpanid;
+    bool     has_partitionid;  uint32_t partitionid;
+    char     name[17];
+} mt_thread_info_t;
+
+/*
+ * Fill *out from the ThreadNetworkDiagnostics cluster (0x0035) on endpoint 0,
+ * plus the same attached predicate mt_matter_net_info() above uses. Returns
+ * an mt_attr_result_t: MT_ATTR_OK on success, MT_ATTR_ERR_CLUSTER when the
+ * cluster is absent (a WiFi image never creates it), which cmd_mtthread
+ * (mt_at.c) maps to +MTERR:8 rather than the generic +MTERR:3, since the
+ * question here is "does this image speak Thread at all". Never calls into
+ * OpenThread directly: every field comes from the same esp_matter provider
+ * read path mt_matter_attr_read() uses for any other attribute.
+ */
+int mt_matter_thread_info(mt_thread_info_t *out);
+
+/* Decode a Matter RoutingRoleEnum value into its AT_MT_SPEC.md 2.1 token.
+ * NULL when role is outside the enum's known range (an unmapped SDK value,
+ * so an out-of-range role degrades to a decimal number on the wire rather
+ * than a lie); cmd_mtthread is the sole caller. */
+const char *mt_thread_role_name(uint8_t role);
+
 /* ---- live composition (built at boot from the stored composition) ------ */
 
 /* Number of endpoints this device currently presents, excluding the Root

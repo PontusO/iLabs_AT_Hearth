@@ -1533,6 +1533,98 @@ static int cmd_mtnet(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/*
+ * AT+MTTHREAD? -> +MTTHREAD:<role>,<attached>,<channel>,<panid>,<extpanid>,
+ *                            <partitionid>,"<name>"
+ * (design spec 2.1, task 1). Query form only; a set form is a wrong command
+ * FORM, so it answers a bare ERROR, not a +MTERR line (this project's own
+ * grammar division). Exists on both images: on a WiFi image
+ * mt_matter_thread_info() answers MT_ATTR_ERR_CLUSTER (Thread's diagnostics
+ * cluster is never created there) and this handler maps that specifically
+ * to +MTERR:8 (MT_ERR_UNSUPPORTED), not the generic +MTERR:3 attr_err_to_
+ * mterr() would give a plain missing cluster, since the question here is
+ * "does this image speak Thread at all", not "does this one endpoint carry
+ * the cluster".
+ */
+static int cmd_mtthread(at_type_t type, char *args)
+{
+    (void)args;
+    if (type != AT_QUERY) {
+        return MT_R_ERROR;
+    }
+
+    mt_thread_info_t info;
+    int r = mt_matter_thread_info(&info);
+    if (r != MT_ATTR_OK) {
+        /* Any failure other than "no cluster" should not happen (endpoint 0
+         * always exists): no more specific +MTERR code applies, so it falls
+         * back to a bare ERROR rather than borrowing attr_err_to_mterr()'s
+         * generic attribute-lookup mapping. */
+        return (r == MT_ATTR_ERR_CLUSTER) ? MT_ERR_UNSUPPORTED : MT_R_ERROR;
+    }
+
+    /* <role>: a decoded RoutingRoleEnum token, or the raw decimal when the
+     * value is outside the known set (spec 2.1: "a future SDK addition
+     * degrades to a number rather than a lie"). */
+    char role_tok[8];
+    const char *role = mt_thread_role_name(info.role);
+    if (role == NULL) {
+        snprintf(role_tok, sizeof(role_tok), "%u", (unsigned)info.role);
+        role = role_tok;
+    }
+
+    /*
+     * Null renders as an EMPTY field, never as 0 (spec 2.1): channel decimal,
+     * the three ids 0x-prefixed hex at their natural byte width, matching
+     * how AT+MTEP/AT+MTEVTMASK already render ids in this file. Each stays
+     * "" (its already-initialised value) when the matching has_* flag is
+     * clear.
+     */
+    char channel_f[8]   = "";
+    char panid_f[8]     = "";
+    char extpanid_f[20] = "";
+    char partid_f[12]   = "";
+    if (info.has_channel) {
+        snprintf(channel_f, sizeof(channel_f), "%u", (unsigned)info.channel);
+    }
+    if (info.has_panid) {
+        snprintf(panid_f, sizeof(panid_f), "0x%04lX", (unsigned long)info.panid);
+    }
+    if (info.has_extpanid) {
+        snprintf(extpanid_f, sizeof(extpanid_f), "0x%016llX",
+                 (unsigned long long)info.extpanid);
+    }
+    if (info.has_partitionid) {
+        snprintf(partid_f, sizeof(partid_f), "0x%08lX", (unsigned long)info.partitionid);
+    }
+
+    /*
+     * <name>: always double-quoted, `"` escaped as `\"` and `\` as `\\`
+     * (spec 2.1, normative for any future string field in this command
+     * family). name_esc is sized for the worst case, every one of
+     * info.name's up to 16 characters needing a 2-byte escape, plus the
+     * terminator.
+     */
+    char name_esc[2 * sizeof(info.name)];
+    size_t o = 0;
+    for (size_t i = 0; info.name[i] != '\0'; i++) {
+        char c = info.name[i];
+        if (o + 3 > sizeof(name_esc)) {
+            break;  /* defensive: cannot happen given the sizing above */
+        }
+        if (c == '"' || c == '\\') {
+            name_esc[o++] = '\\';
+        }
+        name_esc[o++] = c;
+    }
+    name_esc[o] = '\0';
+
+    at_uart_write_line("+MTTHREAD:%s,%d,%s,%s,%s,%s,\"%s\"",
+                       role, info.attached ? 1 : 0,
+                       channel_f, panid_f, extpanid_f, partid_f, name_esc);
+    return AT_R_OK;
+}
+
 /* ---- endpoint composition staging (C1) -------------------------------- *
  * AT+MTEPCLEAR opens a staging session, AT+MTEP= appends to it, and
  * AT+MTEPAPPLY persists it and reboots. Staging lives in RAM only, so an
@@ -2086,6 +2178,7 @@ static const at_command_t s_cmds[] = {
     { "MTEPAPPLY",    cmd_mtepapply   },
     { "MTEVT",        cmd_mtevt       },
     { "MTNET",        cmd_mtnet       },
+    { "MTTHREAD",     cmd_mtthread    },
     { "MTBAUD",       cmd_mtbaud      },
     { "MTFLOW",       cmd_mtflow      },
     { "MTCMDRESP",    cmd_mtcmdresp   },

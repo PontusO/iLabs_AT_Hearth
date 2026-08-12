@@ -160,6 +160,20 @@
 #include <app/clusters/device-energy-management-server/device-energy-management-server.h>
 #include <app/EventLogging.h>
 
+/* 0.11.0 task 1: AT+MTTHREAD? is the first place this firmware reads a
+ * string-valued attribute (ThreadNetworkDiagnostics NetworkName) off the
+ * generic esp_matter::attribute::get_val() path. get_val_from_tlv_data()
+ * (esp_matter_data_model.cpp) hands a non-null string back in a freshly
+ * esp_matter_mem_calloc()'d buffer it documents as "now owned by the
+ * caller"; esp_matter_mem_free() (this header) is the matching release,
+ * not the general-purpose free(), since esp-matter does not guarantee the
+ * two allocators are the same one. ThreadNetworkDiagnostics::Id and its
+ * Attributes::*::Id/RoutingRoleEnum need no include of their own: they are
+ * already visible via esp_matter.h's own transitive include of the
+ * generated per-cluster ids and cluster-enums.h, the same precedent
+ * RefrigeratorAlarm::Id's comment above documents. */
+#include <esp_matter_mem.h>
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 
@@ -1233,6 +1247,208 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
         return MT_ATTR_ERR_READONLY;
     }
     return MT_ATTR_ERR_FAILED;
+}
+
+/* ---- Thread role and mesh identity (0.11.0 task 1, AT+MTTHREAD?) --------
+ *
+ * Sources read before writing this bridge (task brief step 1; esp-matter
+ * release/v1.5.1 pin, connectedhomeip submodule at the same pin):
+ *
+ *   - esp_matter_attribute.cpp:847-851 (thread_network_diagnostics::
+ *     attribute::create_routing_role() and its five siblings): Channel,
+ *     RoutingRole, NetworkName, PanId, ExtendedPanId and PartitionId are ALL
+ *     created with ATTRIBUTE_FLAG_MANAGED_INTERNALLY | ATTRIBUTE_FLAG_
+ *     NULLABLE, NetworkName via esp_matter_char_str() rather than a numeric
+ *     constructor. Managed-internally is what puts every one of them,
+ *     string included, on the SAME live provider-read path below, not a
+ *     value cached at create() time (esp_matter_cluster.cpp's
+ *     thread_network_diagnostics::create() passes each one a placeholder
+ *     zero/NULL that is never read back).
+ *   - esp_matter_data_model.cpp:927-999 (get_val(ep, cluster, attr, val)):
+ *     builds a real AttributeReportIBs::Builder/TLVWriter and calls the data
+ *     model provider's ReadAttribute() (esp_matter_data_model_provider.cpp:
+ *     317-329), the same call mt_matter_attr_read() above already relies
+ *     on. For a path with no ServerClusterInterface registered (Thread
+ *     diagnostics has none), ReadAttribute() falls to
+ *     TryReadViaAccessInterface() against the AttributeAccessInterface
+ *     ThreadNetworkDiagnostics registers, so this reaches CHIP's own
+ *     cluster server code, never a value this firmware wrote.
+ *   - clusters/ThreadNetworkDiagnostics/AttributeIds.h: Channel = 0x0000,
+ *     RoutingRole = 0x0001, NetworkName = 0x0002, PanId = 0x0003,
+ *     ExtendedPanId = 0x0004. PartitionId is 0x0009, NOT the next id after
+ *     ExtendedPanId as a naive reading of the cluster's attribute list order
+ *     might suggest; read from the generated header, not assumed.
+ *   - thread-network-diagnostics-server.cpp:68-141
+ *     (ThreadDiagnosticsAttrAccess::Read()): Channel, RoutingRole,
+ *     NetworkName, PanId, ExtendedPanId and PartitionId are all in the
+ *     switch's WriteThreadNetworkDiagnosticAttributeToTlv() arm, confirming
+ *     the AttributeAccessInterface actually serves all six, and
+ *     MatterThreadNetworkDiagnosticsPluginServerInitCallback() (same file,
+ *     ~line 211) is what registers it, wired in automatically by
+ *     esp_matter_cluster.cpp's CLUSTER_FLAG_SERVER branch.
+ *   - thread-network-diagnostics-provider.cpp:68-97
+ *     (WriteThreadNetworkDiagnosticAttributeToTlv()): while the Thread
+ *     dataset is not commissioned, Channel/NetworkName/PanId/ExtendedPanId/
+ *     PartitionId all encode null; the comment on that switch is explicit
+ *     that RoutingRole is "nullable but not listed here as thread provides
+ *     valid data even when disabled or detached". This is why
+ *     mt_thread_info_t (mt_matter.h) carries has_* flags for the first five
+ *     and not for role: the SDK itself guarantees role is never null.
+ *   - thread-network-diagnostics-provider.cpp:107-150: RoutingRole's exact
+ *     derivation from otDeviceRole/otThreadGetLinkMode/
+ *     otThreadIsRouterEligible, matching design spec 2.1's token table field
+ *     for field; mt_thread_role_name() below reads the SAME RoutingRoleEnum
+ *     the SDK derives into, not a transcribed copy (the project's "read SDK
+ *     enums at call time" rule, mt_matter_lock_source_max()'s precedent).
+ *   - esp_matter_attr_data_buffer.cpp (attribute_data_decode_buffer::Decode,
+ *     get_val_from_tlv_data()): a null CHAR_STRING decodes with val.a.b ==
+ *     nullptr; a present one is copied into a fresh esp_matter_mem_calloc()
+ *     buffer "now owned by the caller" (that file's own comment), which this
+ *     bridge frees with esp_matter_mem_free() after copying it, bounded,
+ *     into mt_thread_info_t::name. This is the SAME get_val() mechanism the
+ *     five integer fields above use, branching on val.type rather than
+ *     inventing a second read path, per the task brief's instruction.
+ */
+
+/*
+ * One nullable identity field, shared by Channel/PanId/ExtendedPanId/
+ * PartitionId below: the same attr_locate() + get_val() + attr_val_to_i64()
+ * path mt_matter_attr_read() uses for any other integer attribute, fixed to
+ * endpoint 0 cluster 0x0035. False means either the attribute could not be
+ * located (should not happen: the RoutingRole probe in
+ * mt_matter_thread_info() already proved the cluster exists) or its current
+ * value is null (attr_val_to_i64()'s meaning for a NULLABLE_* type); both
+ * are answered identically here; the caller clears its has_* flag either
+ * way, since a field that is missing and one that is null render the same
+ * way on the wire: empty (design spec 2.1).
+ */
+static bool mt_thread_read_id_field(uint32_t attr_id, int64_t *out)
+{
+    esp_matter::attribute_t *a = nullptr;
+    if (attr_locate(0, chip::app::Clusters::ThreadNetworkDiagnostics::Id, attr_id, &a) != MT_ATTR_OK) {
+        return false;
+    }
+    esp_matter_attr_val_t val;
+    if (esp_matter::attribute::get_val(a, &val) != ESP_OK) {
+        return false;
+    }
+    return attr_val_to_i64(&val, out);
+}
+
+extern "C" int mt_matter_thread_info(mt_thread_info_t *out)
+{
+    if (out == nullptr) {
+        return MT_ATTR_ERR_FAILED;
+    }
+    memset(out, 0, sizeof(*out));
+
+    ChipStackLock lock;
+
+    /* RoutingRole doubles as the cluster-presence probe: a WiFi image never
+     * creates ThreadNetworkDiagnostics on endpoint 0, so attr_locate() fails
+     * here with MT_ATTR_ERR_CLUSTER before any other field is touched.
+     * cmd_mtthread (mt_at.c) maps THAT specific failure to +MTERR:8
+     * (unsupported command), not the generic +MTERR:3 the attr_result-to-
+     * +MTERR table would give it, because the question this command asks
+     * first is "does this image speak Thread at all", not "does this one
+     * endpoint carry the cluster". */
+    esp_matter::attribute_t *role_attr = nullptr;
+    mt_attr_result_t r = attr_locate(0, chip::app::Clusters::ThreadNetworkDiagnostics::Id,
+                                     chip::app::Clusters::ThreadNetworkDiagnostics::Attributes::RoutingRole::Id,
+                                     &role_attr);
+    if (r != MT_ATTR_OK) {
+        return r;
+    }
+
+    esp_matter_attr_val_t role_val;
+    if (esp_matter::attribute::get_val(role_attr, &role_val) != ESP_OK) {
+        return MT_ATTR_ERR_FAILED;
+    }
+    int64_t role64 = 0;
+    if (!attr_val_to_i64(&role_val, &role64)) {
+        /* Never observed on real firmware: thread-network-diagnostics-
+         * provider.cpp deliberately excludes RoutingRole from its not-
+         * commissioned null list (see this function's header comment).
+         * Treated as a runtime failure rather than defaulted to a role,
+         * since mt_thread_info_t::role carries no has_role flag to report
+         * "unknown" honestly if this ever did happen. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    out->role = (uint8_t)role64;
+
+    /* Same attached predicate the P2 transport-mismatch check uses
+     * (mt_matter_net_info() above, spec 3.12.1). IsThreadAttached() is
+     * always declared regardless of build (GenericConnectivityManagerImpl_
+     * NoThread::_IsThreadAttached() answers false on a WiFi image), so this
+     * needs no #if guard; the RoutingRole probe above already returned on a
+     * WiFi image before execution ever reaches here anyway. */
+    out->attached = chip::DeviceLayer::ConnectivityMgr().IsThreadAttached();
+
+    int64_t v = 0;
+    out->has_channel = mt_thread_read_id_field(
+        chip::app::Clusters::ThreadNetworkDiagnostics::Attributes::Channel::Id, &v);
+    out->channel = out->has_channel ? (uint16_t)v : 0;
+
+    out->has_panid = mt_thread_read_id_field(
+        chip::app::Clusters::ThreadNetworkDiagnostics::Attributes::PanId::Id, &v);
+    out->panid = out->has_panid ? (uint16_t)v : 0;
+
+    out->has_extpanid = mt_thread_read_id_field(
+        chip::app::Clusters::ThreadNetworkDiagnostics::Attributes::ExtendedPanId::Id, &v);
+    out->extpanid = out->has_extpanid ? (uint64_t)v : 0;
+
+    out->has_partitionid = mt_thread_read_id_field(
+        chip::app::Clusters::ThreadNetworkDiagnostics::Attributes::PartitionId::Id, &v);
+    out->partitionid = out->has_partitionid ? (uint32_t)v : 0;
+
+    /* NetworkName: a CHAR_STRING, not one of the NULLABLE_* integer types
+     * attr_val_to_i64() understands, so it is read and branched on
+     * separately, through the SAME attr_locate() + get_val() call the four
+     * fields above just used (this section's header comment: same
+     * mechanism, different branch on val.type, not a second read path). A
+     * null name decodes with val.a.b == nullptr
+     * (esp_matter_attr_data_buffer.cpp's Decode()); a present one arrives in
+     * a freshly calloc'd, NUL-terminated buffer this bridge now owns and
+     * must free. Copied bounded into out->name[17], Thread's own 16-byte
+     * limit plus the terminator; a name at or over that width is truncated
+     * rather than rejected, the same "firmware bound tighter than the far
+     * end, never reject" treatment MT_MODES_MAX_LABEL_LEN and friends give
+     * an over-length host-independent value this firmware did not create.
+     * out->name is already "" from the memset above, so every early-exit
+     * branch below leaves it correctly empty. */
+    esp_matter::attribute_t *name_attr = nullptr;
+    if (attr_locate(0, chip::app::Clusters::ThreadNetworkDiagnostics::Id,
+                    chip::app::Clusters::ThreadNetworkDiagnostics::Attributes::NetworkName::Id,
+                    &name_attr) == MT_ATTR_OK) {
+        esp_matter_attr_val_t name_val;
+        if (esp_matter::attribute::get_val(name_attr, &name_val) == ESP_OK &&
+            name_val.type == ESP_MATTER_VAL_TYPE_CHAR_STRING && name_val.val.a.b != nullptr) {
+            uint16_t len = name_val.val.a.s;
+            if (len > sizeof(out->name) - 1) {
+                len = sizeof(out->name) - 1;
+            }
+            memcpy(out->name, name_val.val.a.b, len);
+            out->name[len] = '\0';
+            esp_matter_mem_free(name_val.val.a.b);
+        }
+    }
+
+    return MT_ATTR_OK;
+}
+
+extern "C" const char *mt_thread_role_name(uint8_t role)
+{
+    using chip::app::Clusters::ThreadNetworkDiagnostics::RoutingRoleEnum;
+    switch (static_cast<RoutingRoleEnum>(role)) {
+    case RoutingRoleEnum::kUnspecified:     return "UNSPECIFIED";
+    case RoutingRoleEnum::kUnassigned:      return "UNASSIGNED";
+    case RoutingRoleEnum::kSleepyEndDevice: return "SLEEPY_END_DEVICE";
+    case RoutingRoleEnum::kEndDevice:       return "END_DEVICE";
+    case RoutingRoleEnum::kReed:            return "REED";
+    case RoutingRoleEnum::kRouter:          return "ROUTER";
+    case RoutingRoleEnum::kLeader:          return "LEADER";
+    default:                                return nullptr;
+    }
 }
 
 /*
