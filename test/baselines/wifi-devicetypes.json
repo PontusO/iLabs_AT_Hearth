@@ -2,14 +2,14 @@
   "header": {
     "at_core_repo_head": "11c9935ea392b62c0a9c84c5197483aa1fee41ef",
     "cgmr": "0.10.0",
-    "fw_repo_head": "f113bfc179ea5344bbf32c5123f33dc48dc172b4",
+    "fw_repo_head": "2cad88c11ac3a21a5a2b1bdcbaf29e7612cb211e",
     "manual_code": "34970112332",
     "net": "+MTNET:WIFI,1,0,0",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-08-12T09:32:21+00:00",
+    "timestamp": "2026-08-12T10:35:59+00:00",
     "transport": "WIFI"
   },
   "results": {
@@ -337,6 +337,7 @@
     "3.24 server list carries PowerSource (47), EPM (144), EEM (145) and PowerTopology (156)": "PASS",
     "3.25 AT+MTDEMCAP one entry, cause 2 (GridOptimizationAdjustment) -> OK": "PASS",
     "3.25 BatCapacity write (5000 mAh) -> OK, echo line": "PASS",
+    "3.25 BatCapacity write past the old 0xFFFF cap (13.5 kWh, 13500000) -> OK, echo line (B263)": "PASS",
     "3.25 BatChargeState write (1 IsCharging) -> OK: the attribute the SDK build omits entirely exists here (the RECHG conformance fix)": "PASS",
     "3.25 BatFunctionalWhileCharging reads 0 (the second RECHG-mandatory attribute, present and defaulted)": "PASS",
     "3.25 BatPercentRemaining write in hex (90%, half-percent units) -> OK, echo line in normalized decimal": "PASS",
@@ -347,6 +348,7 @@
     "3.25 SupportedModes labels verbatim": "PASS",
     "3.25 capability cause is the pushed baseline 2": "PASS",
     "3.25 controller reads ActivePower -2200000": "PASS",
+    "3.25 controller reads BatCapacity 13500000 (B263)": "PASS",
     "3.25 controller reads BatCapacity 5000": "PASS",
     "3.25 controller reads BatChargeState 1": "PASS",
     "3.25 controller reads BatPercentRemaining 180": "PASS",
