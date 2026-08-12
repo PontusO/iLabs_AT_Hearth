@@ -2239,11 +2239,12 @@ static endpoint_t *mk_battery_storage(node_t *n, uint8_t variant)
      * 0,0: that pair bounds a list's element count (XML maxCount 8 and 16
      * respectively), not a value's range, so B263 does not apply to them.
      *
-     * B264 rides along on all of this and is NOT fixed here: whichever
-     * bound is created, a write that lands outside it is refused by ember
-     * and answers a bare ERROR with no +MTERR code (main.cpp's
-     * MT_ATTR_ERR_FAILED through attr_err_to_mterr()'s default arm). See
-     * docs/TESTING.md section 12; fixing it needs a baseline re-record. */
+     * B264 rides along on all of this and is now FIXED: whichever bound is
+     * created, a write that lands outside it is refused by ember and
+     * answers +MTERR:1 (main.cpp's mt_matter_attr_write() maps
+     * ESP_ERR_INVALID_ARG to MT_ATTR_ERR_VALUE). See docs/TESTING.md
+     * section 12 and AT_MT_SPEC.md section 5 for the fix and its baseline
+     * re-record. */
     cluster::power_source::attribute::create_bat_voltage(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFFFFFF);
     cluster::power_source::attribute::create_bat_percent_remaining(ps_cl, nullable<uint8_t>(), 0, 200);
     cluster::power_source::attribute::create_bat_time_remaining(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFFFFFF);

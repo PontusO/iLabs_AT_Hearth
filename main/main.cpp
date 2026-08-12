@@ -1130,7 +1130,33 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
 
     esp_err_t err = notify ? esp_matter::attribute::update(ep, cluster, attr, &val)
                            : esp_matter::attribute::set_val(a, &val);
-    return (err == ESP_OK) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+    if (err == ESP_OK) {
+        return MT_ATTR_OK;
+    }
+    /* B264 fix: ember's own min/max bounds check
+     * (compare_attr_val_with_bounds() inside set_val_internal(),
+     * esp_matter_data_model.cpp) is the ONLY failure reachable on this call
+     * that returns ESP_ERR_INVALID_ARG, given the checks already passed
+     * above: attr_locate() proved the attribute exists, and
+     * i64_to_attr_val() proved val's type and width already match it, so
+     * set_val()'s own "attribute not found" (ESP_ERR_NOT_FOUND) and "type
+     * mismatch" (ESP_ERR_INVALID_ARG, esp_matter_data_model.cpp:1082/1087)
+     * guards cannot fire here. A managed-internally (Instance-owned)
+     * attribute never reaches the bounds check at all: it takes the
+     * WriteAttribute() detour instead, which collapses every failure to
+     * ESP_FAIL (esp_matter_data_model.cpp's set_val_via_write_attribute()),
+     * or returns ESP_ERR_NOT_SUPPORTED when it is not writable at all
+     * (esp_matter_data_model.cpp:1103). Neither of those is
+     * ESP_ERR_INVALID_ARG, so an Instance-owned attribute keeps answering a
+     * bare ERROR through the default arm below, unchanged by this fix. The
+     * one other reachable code, ESP_ERR_NOT_FINISHED (the value is already
+     * what was asked, notify=false / set_val() path only, since
+     * notify=true's update_or_report() absorbs it into ESP_OK), is also not
+     * ESP_ERR_INVALID_ARG and keeps its historical bare ERROR too. */
+    if (err == ESP_ERR_INVALID_ARG) {
+        return MT_ATTR_ERR_VALUE;
+    }
+    return MT_ATTR_ERR_FAILED;
 }
 
 /*

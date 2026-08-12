@@ -3501,11 +3501,15 @@ def step_3_25_battery_storage(ctx):
     BatFunctionalWhileCharging (28/0x1C) is its sibling, read-only here
     because feature::rechargeable::add() is what created it. The
     BatPercentRemaining row is commanded in HEX to pin the same decimal
-    normalization TESTING.md 6.1's hex-parsing row does. BatCapacity is
-    written twice: once at the SDK example's own scale (5000), then
-    again past its old 0x00..0xFFFF bound at 13500000 (13.5 kWh), the
-    B263 pin against mt_devtypes.cpp regressing back to the SDK's
-    example-derived cap instead of the cluster XML's real uint32 range.
+    normalization TESTING.md 6.1's hex-parsing row does, then written at
+    its legal boundary (200) and one past it (201): the B264 pin, an
+    in-width value ember refuses on its own min/max, which must answer
+    +MTERR:1, not a bare ERROR (main.cpp's mt_matter_attr_write()), and
+    must not change the stored value. BatCapacity is written twice: once
+    at the SDK example's own scale (5000), then again past its old
+    0x00..0xFFFF bound at 13500000 (13.5 kWh), the B263 pin against
+    mt_devtypes.cpp regressing back to the SDK's example-derived cap
+    instead of the cluster XML's real uint32 range.
 
     DEM triple: this endpoint is the composition's FIRST DEM-bearing
     one, so it takes the FIRST HearthDemDelegate pool slot (1 of
@@ -3570,6 +3574,29 @@ def step_3_25_battery_storage(ctx):
                         node, "26"], timeout=30)
     s.check("3.25 controller reads BatPercentRemaining 180",
             rc == 0 and parse_int_attr(out) == 180, tag="P3")
+
+    # --- B264 pin: an in-width, out-of-bounds write answers +MTERR:1 ---
+    # BatPercentRemaining's created range really is 0..200 (half-percent,
+    # PowerSourceCluster.xml:643-650), so 200 is the legal upper boundary
+    # and 201 is in width (fits uint8) but past ember's own min/max. Before
+    # the B264 fix the refusal answered a bare ERROR, indistinguishable
+    # from a malformed command; the fix maps ember's ESP_ERR_INVALID_ARG to
+    # MT_ATTR_ERR_VALUE, so it now carries +MTERR:1 like every other
+    # out-of-range AT+MTATTR value (main.cpp's mt_matter_attr_write()).
+    res, lines = link.command("AT+MTATTR=26,47,12,200")
+    s.check("3.25 BatPercentRemaining write at the legal boundary (200) "
+            "-> OK, echo line (B264)",
+            res == 0 and lines == ["+MTATTR:26,47,12,200"], tag="P3")
+    res, lines = link.command("AT+MTATTR=26,47,12,201")
+    s.check("3.25 BatPercentRemaining write one past the boundary (201, "
+            "in width, past ember's 0..200) -> +MTERR:1, not a bare ERROR "
+            "(B264)", res == 1 and lines == [], tag="P3")
+    rc, out = chip.run(["powersource", "read", "bat-percent-remaining",
+                        node, "26"], timeout=30)
+    s.check("3.25 controller reads BatPercentRemaining still 200: the "
+            "refused write did not change the attribute (B264)",
+            rc == 0 and parse_int_attr(out) == 200, tag="P3")
+
     res, lines = link.command("AT+MTATTR=26,47,26,1")
     s.check("3.25 BatChargeState write (1 IsCharging) -> OK: the "
             "attribute the SDK build omits entirely exists here (the "

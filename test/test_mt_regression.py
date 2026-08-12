@@ -5597,13 +5597,21 @@ class TestStep325BatteryStorage(unittest.TestCase):
     the ember-served battery attributes (BatChargeState above all: the
     wire evidence for the SDK RECHG conformance fix), the sixth
     measurement pool pair, the second DEM pool slot proven by a
-    capability round trip, and DEMMode's tag-0 default."""
+    capability round trip, DEMMode's tag-0 default, and the B264 pin
+    (BatPercentRemaining's 0..200 bound: the boundary write succeeds,
+    the one-past-boundary write answers +MTERR:1, not a bare ERROR)."""
 
     def _ctx(self, server26=None, capability=None, modes=None,
-             charge_state=None, wide_capacity=None):
+             charge_state=None, wide_capacity=None,
+             boundary_write=None, over_boundary_write=None,
+             percent_after_boundary=None):
         link = FakeLink({
             "AT+MTATTR=26,47,11,12600": (0, ["+MTATTR:26,47,11,12600"]),
             "AT+MTATTR=26,0x2F,0x0C,180": (0, ["+MTATTR:26,47,12,180"]),
+            "AT+MTATTR=26,47,12,200": (boundary_write if boundary_write
+                is not None else (0, ["+MTATTR:26,47,12,200"])),
+            "AT+MTATTR=26,47,12,201": (over_boundary_write
+                if over_boundary_write is not None else (1, [])),
             "AT+MTATTR=26,47,26,1": (0, ["+MTATTR:26,47,26,1"]),
             "AT+MTATTR=26,47,28": (0, ["+MTATTR:26,47,28,0"]),
             "AT+MTATTR=26,47,24,5000": (0, ["+MTATTR:26,47,24,5000"]),
@@ -5620,6 +5628,8 @@ class TestStep325BatteryStorage(unittest.TestCase):
             (0, server26 if server26 is not None else SERVER26_BATTERY),
             (0, "[TOO]   BatVoltage: 12600"),
             (0, "[TOO]   BatPercentRemaining: 180"),
+            (0, percent_after_boundary if percent_after_boundary is not None
+             else "[TOO]   BatPercentRemaining: 200"),
             (0, charge_state if charge_state is not None
              else "[TOO]   BatChargeState: 1"),
             (0, "[TOO]   BatCapacity: 5000"),
@@ -5689,16 +5699,54 @@ class TestStep325BatteryStorage(unittest.TestCase):
     def test_bat_capacity_regressed_to_old_cap_fails(self):
         # B263 pin's failure shape. The real pre-fix path REJECTS the
         # write rather than clamping it: with the SDK example's
-        # 0x00..0xFFFF bound restored, ember refuses 13500000 outright
-        # and the AT write answers a bare ERROR (B264: no +MTERR code
-        # on an ember min/max refusal), so BatCapacity keeps whatever
-        # the earlier 5000-scale row left and the controller reads that
-        # back, not 13500000. Hardware-confirmed both ways, round C1
-        # tasks 7 and 8. The 65535 fixture below stands in for "any
-        # stale value that is not 13500000", which is the whole class
-        # this check has to catch; the earlier 5000-scale row alone
-        # cannot tell a correct bound from a too-narrow one.
+        # 0x00..0xFFFF bound restored, ember refuses 13500000 outright,
+        # so BatCapacity keeps whatever the earlier 5000-scale row left
+        # and the controller reads that back, not 13500000. (Since the
+        # B264 fix the AT write for a regression like this answers
+        # +MTERR:1, not a bare ERROR; before B264 it answered a bare
+        # ERROR with no +MTERR code on any ember min/max refusal. This
+        # test asserts the read-back symptom either way, not the write's
+        # own wire code.) Hardware-confirmed both ways, round C1 tasks 7
+        # and 8. The 65535 fixture below stands in for "any stale value
+        # that is not 13500000", which is the whole class this check has
+        # to catch; the earlier 5000-scale row alone cannot tell a
+        # correct bound from a too-narrow one.
         ctx = self._ctx(wide_capacity="[TOO]   BatCapacity: 65535")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_25_battery_storage(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_bat_percent_remaining_over_boundary_still_bare_error_fails(self):
+        # B264 pin's failure shape. If the fix regressed (the write past
+        # BatPercentRemaining's 0..200 bound went back to answering a
+        # bare ERROR, main.cpp's mt_matter_attr_write() collapsing
+        # ESP_ERR_INVALID_ARG into MT_ATTR_ERR_FAILED again), the wire
+        # code the harness sees is res=-1, not res=1. The step's own
+        # check on the write's result must catch that directly, with no
+        # dependence on a later read-back.
+        ctx = self._ctx(over_boundary_write=(-1, []))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_25_battery_storage(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_bat_percent_remaining_over_boundary_wrongly_accepted_fails(self):
+        # The opposite regression: ember's bound silently widened (or the
+        # write path stopped checking it at all) and 201 is accepted as
+        # OK. Both directions matter: B264 is specifically about the
+        # REFUSAL's wire code, not about whether ember refuses; a bound
+        # that stopped refusing at all is a different defect this same
+        # row happens to also catch.
+        ctx = self._ctx(over_boundary_write=(0, ["+MTATTR:26,47,12,201"]),
+                        percent_after_boundary="[TOO]   BatPercentRemaining: 201")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_25_battery_storage(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_bat_percent_remaining_boundary_write_rejected_fails(self):
+        # The legal boundary (200) must still succeed: a bound that
+        # narrowed to reject its own maximum is as wrong as one that
+        # widened past it.
+        ctx = self._ctx(boundary_write=(1, []))
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_25_battery_storage(ctx)
         self.assertGreater(ctx.suite.failed, 0)

@@ -135,6 +135,13 @@ int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *o
  * own width returns MT_ATTR_ERR_VALUE (+MTERR:1) instead of truncating; the
  * pre-round-A pipeline cast through 32-bit long and truncated silently.
  *
+ * A value that is in width but refused by the attribute's own ember min/max
+ * bounds (esp_matter::attribute::update()/set_val()'s ESP_ERR_INVALID_ARG)
+ * also returns MT_ATTR_ERR_VALUE (+MTERR:1), fixed in B264: before this it
+ * fell through to MT_ATTR_ERR_FAILED, a bare ERROR indistinguishable from a
+ * malformed command. A managed-internally (Instance-owned) attribute never
+ * reaches that bounds check and keeps its historical MT_ATTR_ERR_FAILED.
+ *
  * notify=true  uses attribute::update(): subscribers and bound devices see the
  *              change, which is what a host-driven change should normally do.
  * notify=false uses attribute::set_val(): the value changes locally without a
