@@ -163,6 +163,19 @@ int mt_rows_validate(const mt_row_stage_t *s, uint16_t count)
         return MT_ROW_ERR_FORM;
     }
 
+    /* count == 0 is the documented clear request (design spec 2.6): a host
+     * sends AT+MTROWAPPLY=<ep>,<kind>,0 without staging anything first, and
+     * that clears the entire stored payload for that (ep, kind). It answers
+     * MT_ROW_OK whether nothing was ever staged (the ordinary case) or a set
+     * happens to be staged but empty for that (ep, kind). Do NOT add an
+     * "!s->active" requirement here: that looks like a missing safety check
+     * but is the exact bug this comment exists to prevent, since it would
+     * make the clear-nothing case answer +MTERR:1 and there would be no way
+     * to empty a schedule from the host at all. */
+    if (count == 0) {
+        return MT_ROW_OK;
+    }
+
     if (!s->active || count != s->count) {
         return MT_ROW_ERR_VALUE;
     }

@@ -43,13 +43,23 @@ static void test_stage_and_validate(void)
           mt_rows_validate(&s, 1) == MT_ROW_OK);
     check("validate rejects a count that disagrees with what was staged",
           mt_rows_validate(&s, 2) == MT_ROW_ERR_VALUE);
-    /* count=2 above is caught by the dense-index gap check too (index 1 was
-     * never staged), which would still catch it even if the explicit count
-     * comparison were removed. count=0 exercises the comparison on its own:
-     * the gap-check loop runs zero iterations, so only the direct
-     * count != s->count test can reject it. */
+
+    /* A second row, so a "smaller" count can be tested with a nonzero
+     * value: count 0 is the documented clear request (see
+     * test_count_zero_is_clear) and always succeeds, so it can no longer
+     * stand in for "too small" here. count=3 above is also caught by the
+     * dense-index gap check (index 1 was never staged), which would still
+     * catch it even with the explicit count comparison removed; count=1
+     * below exercises that comparison on its own, since index 0 IS staged
+     * and the gap-check loop bounded by count=1 would not see anything
+     * wrong on its own. */
+    mt_row_t r2 = evse_row(0x04, 600, true, 60, false, 0);
+    check("staging a second row succeeds",
+          mt_rows_stage(&s, 5, MT_ROW_KIND_EVSE_TARGET, 1, &r2) == MT_ROW_OK);
+    check("validate rejects a count that disagrees upward with two staged rows",
+          mt_rows_validate(&s, 3) == MT_ROW_ERR_VALUE);
     check("validate rejects a count smaller than what was staged",
-          mt_rows_validate(&s, 0) == MT_ROW_ERR_VALUE);
+          mt_rows_validate(&s, 1) == MT_ROW_ERR_VALUE);
 }
 
 static void test_field_ranges(void)
@@ -171,6 +181,62 @@ static void test_sparse_indices_are_rejected(void)
           mt_rows_validate(&s, 3) == MT_ROW_ERR_VALUE);
 }
 
+/*
+ * A count of 0 is the documented clear request (design spec 2.6): a host
+ * empties a schedule by calling apply with count 0 and nothing staged. It
+ * must succeed whether nothing was ever staged, or a set happens to be
+ * staged but empty; a count > 0 that claims rows nothing ever staged is
+ * still a real value error.
+ */
+static void test_count_zero_is_clear(void)
+{
+    mt_row_stage_t fresh;
+    mt_rows_init(&fresh);
+    check("validate(0) with nothing ever staged is the clear request and succeeds",
+          mt_rows_validate(&fresh, 0) == MT_ROW_OK);
+    check("validate(N) with nothing ever staged and N > 0 is a value error",
+          mt_rows_validate(&fresh, 5) == MT_ROW_ERR_VALUE);
+
+    /* A stage marked active but holding zero rows for its (ep, kind).
+     * mt_rows_stage() never produces this state on its own (every
+     * successful stage leaves count >= 1), so it is built directly: the
+     * struct's fields are public for exactly this kind of test. */
+    mt_row_stage_t empty_active = { 0 };
+    empty_active.active = true;
+    empty_active.ep = 5;
+    empty_active.kind = MT_ROW_KIND_EVSE_TARGET;
+    check("validate(0) against a staged-but-empty set also succeeds",
+          mt_rows_validate(&empty_active, 0) == MT_ROW_OK);
+}
+
+/*
+ * Every check elsewhere in this suite exercises an INVALID value one step
+ * past a boundary. None confirmed the boundary value itself is accepted, so
+ * an off-by-one that rejected a legal value (>= where > was meant) would
+ * have passed every one of them.
+ */
+static void test_field_boundaries(void)
+{
+    mt_row_stage_t s;
+    mt_rows_init(&s);
+
+    mt_row_t day_max = evse_row(0x7F, 480, true, 80, false, 0);
+    check("day bitmap 0x7F (every day set) is accepted",
+          mt_rows_stage(&s, 5, MT_ROW_KIND_EVSE_TARGET, 0, &day_max) == MT_ROW_OK);
+
+    mt_row_t time_max = evse_row(0x02, 1439, true, 80, false, 0);
+    check("time 1439 (the last minute of the day) is accepted",
+          mt_rows_stage(&s, 5, MT_ROW_KIND_EVSE_TARGET, 1, &time_max) == MT_ROW_OK);
+
+    mt_row_t soc_max = evse_row(0x02, 480, true, 100, false, 0);
+    check("SoC 100 (fully charged) is accepted",
+          mt_rows_stage(&s, 5, MT_ROW_KIND_EVSE_TARGET, 2, &soc_max) == MT_ROW_OK);
+
+    mt_row_t energy_min = evse_row(0x02, 480, false, 0, true, 0);
+    check("added energy 0 (the non-negative floor) is accepted",
+          mt_rows_stage(&s, 5, MT_ROW_KIND_EVSE_TARGET, 3, &energy_min) == MT_ROW_OK);
+}
+
 int main(void)
 {
     printf("mt_rows\n");
@@ -181,6 +247,8 @@ int main(void)
     test_index_and_kind();
     test_staging_is_single();
     test_sparse_indices_are_rejected();
+    test_count_zero_is_clear();
+    test_field_boundaries();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
