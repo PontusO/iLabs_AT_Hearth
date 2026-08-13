@@ -2661,16 +2661,20 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         }
     }
     if (!slot) {
-        /* MT_MB_MAX_LISTS (12) bounds how many distinct (endpoint, cluster)
-         * ModeBase lists this firmware stores at once; it is smaller than
-         * MT_COMP_MAX_ENDPOINTS (28), so a composition dense enough in
-         * RvcRunMode/RvcCleanMode/MicrowaveOvenMode instances CAN exhaust it
-         * (e.g. more than 12 such cluster instances combined, which the
-         * three-ModeBase-clusters-per-RVC-endpoint shape in this batch makes
-         * reachable well under 28 endpoints). This return is the safe
-         * fallback for that case: the call is refused with MT_ATTR_ERR_FAILED
-         * rather than silently overwriting an unrelated (endpoint, cluster)
-         * slot. */
+        /* MT_MB_MAX_LISTS (mt_matter.h) bounds how many distinct (endpoint,
+         * cluster) ModeBase lists this firmware stores at once; it is
+         * smaller than MT_COMP_MAX_ENDPOINTS (mt_composition.h) - cited by
+         * name rather than value, since both have already moved once across
+         * the RVC/appliance and energy rounds and a number copied into this
+         * comment goes stale exactly when either next changes - so a
+         * composition dense enough in RvcRunMode/RvcCleanMode/
+         * MicrowaveOvenMode/EnergyEvseMode/DeviceEnergyManagementMode
+         * instances CAN exhaust it well under the endpoint cap (the
+         * multiple-ModeBase-clusters-per-endpoint shape several device types
+         * in this firmware use makes that reachable). This return is the
+         * safe fallback for that case: the call is refused with
+         * MT_ATTR_ERR_FAILED rather than silently overwriting an unrelated
+         * (endpoint, cluster) slot. */
         return MT_ATTR_ERR_FAILED;
     }
 
