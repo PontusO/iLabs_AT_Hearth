@@ -36,6 +36,7 @@
 #include "mt_composition.h"
 #include "mt_devtypes.h"
 #include "mt_matter.h"
+#include "mt_rows.h"
 #include "mt_transport.h"
 
 /* Longest +MTEVT line: "+MTEVT:31," plus a detail. Details are "0"/"1" today
@@ -2157,6 +2158,492 @@ static int cmd_mtcmdresp(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/* ---- nested row payloads (AT+MTROW family, energy round C2 task 2) ---- *
+ * AT+MTROW stages one row at a time into a single global buffer (matching
+ * the composition's AT+MTEP / AT+MTEPCLEAR / AT+MTEPAPPLY staging idiom,
+ * design spec 2.1); AT+MTROWCLEAR discards the pending set; AT+MTROWAPPLY
+ * validates the whole set and commits it through the mt_matter_rows_*
+ * bridge (implemented later, in C++, by the task that wires each row kind
+ * to a live store); AT+MTROWGET reads back, either one row or every row,
+ * straight from the live store, with no cursor state kept here (design
+ * spec 2.3, "reads are stateless").                                       */
+
+/* Fixed leading tokens (<ep>,<kind>,<idx>) plus the widest row shape any
+ * kind defines. */
+#define MT_ROW_MAX_TOKENS (3 + MT_ROW_MAX_FIELDS)
+
+/* One global staging buffer, matching s_staged/s_staging above: a host
+ * stages one (ep, kind) set at a time, and mt_rows_stage() itself discards
+ * a set staged for a different (ep, kind) before starting a new one. */
+static mt_row_stage_t s_row_stage;
+
+/*
+ * Guards every call into mt_rows.c's mutators (mt_rows_stage(),
+ * mt_rows_clear(), mt_rows_validate()) against s_row_stage: same reason and
+ * the same pattern as s_cmdbox_mux above. mt_rows.c has no locking of its
+ * own, by design (it stays host-testable with no FreeRTOS headers, see
+ * mt_rows.h's file comment), so the critical section lives here, never in
+ * mt_rows.c. Today only the AT parser task (the handlers below) touches
+ * s_row_stage; the inbound SetTargets path (a later task) will write it
+ * from the CHIP event loop task too, which is exactly the second writer
+ * this mux exists for.
+ *
+ * The mux is deliberately NOT held across mt_matter_rows_apply(): that call
+ * may block (it takes ChipStackLock, the standing mt_matter_* bridge
+ * convention) and a portMUX_TYPE is a spinlock, which must never wrap a
+ * call that can block or take another lock. cmd_mtrowapply() below reads
+ * s_row_stage under the mux only long enough to validate and decide
+ * whether to proceed, then passes the struct to the bridge by pointer,
+ * unguarded: a full copy does not fit the AT parser task's 6144-byte
+ * stack (mt_row_stage_t holds MT_ROW_MAX_ROWS rows and runs to several KB,
+ * see mt_rows.h). Once the inbound path exists this is a real, narrow race
+ * window (the CHIP task could restage between the validate and the
+ * apply); closing it is that task's problem to solve, since it is the one
+ * that introduces the second writer.
+ */
+static portMUX_TYPE s_row_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/*
+ * Map every mt_rows.h / mt_matter.h MT_ROW_* code onto this personality's
+ * +MTERR space (design spec 2.5's error table, reproduced in the task
+ * brief): MT_ROW_OK -> OK, MT_ROW_ERR_FORM -> a bare ERROR (the command
+ * form was wrong), MT_ROW_ERR_VALUE -> +MTERR:1, MT_ROW_ERR_KIND ->
+ * +MTERR:3, MT_ROW_ERR_ENDPOINT -> +MTERR:2, MT_ROW_ERR_NO_PAYLOAD ->
+ * +MTERR:4. No new error codes this round.
+ */
+static int row_err_to_mterr(int r)
+{
+    switch (r) {
+    case MT_ROW_OK:             return AT_R_OK;
+    case MT_ROW_ERR_VALUE:      return MT_ERR_BAD_PARAM;
+    case MT_ROW_ERR_KIND:       return MT_ERR_NO_CLUSTER;
+    case MT_ROW_ERR_ENDPOINT:   return MT_ERR_NO_ENDPOINT;
+    case MT_ROW_ERR_NO_PAYLOAD: return MT_ERR_NO_ATTRIBUTE;
+    case MT_ROW_ERR_FORM:       return MT_R_ERROR;
+    default:                    return MT_R_ERROR;
+    }
+}
+
+/*
+ * AT+MTROW=<ep>,<kind>,<idx>,<field>[,<field>...] -> stage one row of a
+ * nested payload (design spec 2.1) into the single global row stage above.
+ * Set-only: bare/query forms answer a plain ERROR.
+ *
+ * <kind> selects the field table (mt_rows_field_count()); the number of
+ * trailing field tokens must equal it EXACTLY, always, including a
+ * present-but-empty token for an absent optional: "AT+MTROW=5,1,0,64,480,80"
+ * for a 4-field kind is five tokens, one short, a form error (bare ERROR),
+ * while "AT+MTROW=5,1,0,64,480,80," (trailing comma) is a complete,
+ * well-formed row whose last field is an absent optional. That is what
+ * keeps "the line was too short" (form) distinguishable from "the host
+ * chose not to supply this optional" (a value-level concept): the token
+ * must still be present, only its content may be empty.
+ *
+ * <field> tokens parse through the generic signed 64-bit pipeline
+ * (parse_i64(), sign always accepted): mt_at.c does not know any kind's
+ * per-field range or signedness, only mt_rows.c's field table does (kept
+ * that way deliberately, mt_rows.h's file comment), so range and
+ * signedness rejection both happen inside mt_rows_stage() and both answer
+ * +MTERR:1 (MT_ROW_ERR_VALUE) the same way.
+ *
+ * This handler never touches the live composition (staging is pure RAM),
+ * so it can only answer a bare ERROR, +MTERR:1 or +MTERR:3, never
+ * +MTERR:2 or +MTERR:4; those two are reserved for AT+MTROWAPPLY and
+ * AT+MTROWGET, which do consult the live model through the
+ * mt_matter_rows_* bridge.
+ */
+static int cmd_mtrow(at_type_t type, char *args)
+{
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+
+    char *f[MT_ROW_MAX_TOKENS];
+    int ntok = at_split_args(args, f, MT_ROW_MAX_TOKENS);
+    if (ntok < 3) {
+        /* too few tokens for even <ep>,<kind>,<idx>, or at_split_args()
+         * overflowed (-1, more tokens than any kind could ever need):
+         * either way, form */
+        return MT_R_ERROR;
+    }
+
+    unsigned long ep;
+    if (!parse_u(f[0], &ep)) {
+        return MT_R_ERROR;
+    }
+    if (ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long kind;
+    if (!parse_u(f[1], &kind)) {
+        return MT_R_ERROR;
+    }
+    if (kind > 0xFF) {
+        return MT_ERR_NO_CLUSTER;
+    }
+    int nfields = mt_rows_field_count((uint8_t)kind);
+    if (nfields < 0) {
+        return MT_ERR_NO_CLUSTER;
+    }
+
+    if (ntok - 3 != nfields) {
+        return MT_R_ERROR;
+    }
+
+    unsigned long idx;
+    if (!parse_u(f[2], &idx)) {
+        return MT_R_ERROR;
+    }
+    if (idx > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    mt_row_t row;
+    memset(&row, 0, sizeof(row));
+    row.nfields = (uint8_t)nfields;
+    for (int i = 0; i < nfields; i++) {
+        const char *tok = f[3 + i];
+        if (tok[0] == '\0') {
+            /* an empty token: absent optional (design spec 2.2), the one
+             * place in the whole protocol an empty field is not a form
+             * error */
+            continue;
+        }
+        int64_t v;
+        if (!parse_i64(tok, true, &v)) {
+            return MT_R_ERROR;
+        }
+        row.present[i] = true;
+        row.value[i] = v;
+    }
+
+    taskENTER_CRITICAL(&s_row_mux);
+    int r = mt_rows_stage(&s_row_stage, (uint16_t)ep, (uint8_t)kind, (uint16_t)idx, &row);
+    taskEXIT_CRITICAL(&s_row_mux);
+
+    return row_err_to_mterr(r);
+}
+
+/*
+ * AT+MTROWCLEAR=<ep>,<kind> -> discard the PENDING (staged) set for
+ * (ep, kind); never touches the stored/live payload (design spec 2.6,
+ * "the two are deliberately different verbs because confusing them
+ * destroys a live schedule"). Set-only: bare/query forms answer ERROR.
+ *
+ * mt_rows_clear() itself refuses (MT_ROW_ERR_VALUE, +MTERR:1) rather than
+ * silently no-op when nothing is staged for (ep, kind): see its comment in
+ * mt_rows.c. A <kind> mt_rows.c has never heard of answers +MTERR:3 here,
+ * the same as every other command in the family, checked before calling
+ * into the codec so a truly unknown kind is never confused with "nothing
+ * staged".
+ */
+static int cmd_mtrowclear(at_type_t type, char *args)
+{
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+
+    char *f[2];
+    int n = at_split_args(args, f, 2);
+    if (n != 2) {
+        return MT_R_ERROR;
+    }
+
+    unsigned long ep;
+    if (!parse_u(f[0], &ep)) {
+        return MT_R_ERROR;
+    }
+    if (ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long kind;
+    if (!parse_u(f[1], &kind)) {
+        return MT_R_ERROR;
+    }
+    if (kind > 0xFF || mt_rows_field_count((uint8_t)kind) < 0) {
+        return MT_ERR_NO_CLUSTER;
+    }
+
+    taskENTER_CRITICAL(&s_row_mux);
+    int r = mt_rows_clear(&s_row_stage, (uint16_t)ep, (uint8_t)kind);
+    taskEXIT_CRITICAL(&s_row_mux);
+
+    return row_err_to_mterr(r);
+}
+
+/*
+ * AT+MTROWAPPLY=<ep>,<kind>,<count> -> validate the whole staged set for
+ * (ep, kind), then commit it through mt_matter_rows_apply() (design spec
+ * 2.6). <count> must equal the number of rows staged for (ep, kind), or 0,
+ * which is the documented clear request: it empties the entire stored
+ * payload for (ep, kind), whether or not anything happens to be staged
+ * (mt_rows_validate()'s own comment; do NOT add an "is anything staged"
+ * precondition here, it would reintroduce the exact bug Task 1's review
+ * caught). Set-only: bare/query forms answer ERROR.
+ *
+ * mt_rows_validate() checks the set structurally (dense indices, kind-
+ * specific whole-set rules) but, by design, takes no <ep>/<kind> of its
+ * own to compare against: it only sees whatever is CURRENTLY staged. So
+ * this handler checks the (ep, kind) match itself before trusting
+ * mt_rows_validate()'s count comparison: a nonzero <count> against a stage
+ * that belongs to a different (ep, kind), or nothing at all, is the same
+ * "count disagrees with what is actually staged for this target" value
+ * error mt_rows_validate() gives when the match DOES hold but the count is
+ * wrong, so both answer +MTERR:1 identically.
+ *
+ * On a successful commit the pending set is retired (reset to inactive),
+ * mirroring AT+MTEPAPPLY ending its own staging session; on any failure
+ * the stage is left untouched so the host can fix and retry without
+ * restaging everything.
+ */
+static int cmd_mtrowapply(at_type_t type, char *args)
+{
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+
+    char *f[3];
+    int n = at_split_args(args, f, 3);
+    if (n != 3) {
+        return MT_R_ERROR;
+    }
+
+    unsigned long ep;
+    if (!parse_u(f[0], &ep)) {
+        return MT_R_ERROR;
+    }
+    if (ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long kind;
+    if (!parse_u(f[1], &kind)) {
+        return MT_R_ERROR;
+    }
+    if (kind > 0xFF || mt_rows_field_count((uint8_t)kind) < 0) {
+        return MT_ERR_NO_CLUSTER;
+    }
+
+    unsigned long count;
+    if (!parse_u(f[2], &count)) {
+        return MT_R_ERROR;
+    }
+    if (count > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    taskENTER_CRITICAL(&s_row_mux);
+    bool matches = s_row_stage.active && s_row_stage.ep == (uint16_t)ep &&
+                   s_row_stage.kind == (uint8_t)kind;
+    int vr;
+    if (count == 0) {
+        /* the documented clear request: always valid, independent of
+         * whatever else happens to be staged (mirrors mt_rows_validate()'s
+         * own count == 0 short-circuit) */
+        vr = MT_ROW_OK;
+    } else if (!matches) {
+        /* nothing staged for THIS (ep, kind): a nonzero count cannot
+         * possibly match it, the same value error mt_rows_validate() gives
+         * when a matching stage's count is wrong */
+        vr = MT_ROW_ERR_VALUE;
+    } else {
+        vr = mt_rows_validate(&s_row_stage, (uint16_t)count);
+    }
+    taskEXIT_CRITICAL(&s_row_mux);
+
+    if (vr != MT_ROW_OK) {
+        return row_err_to_mterr(vr);
+    }
+
+    /* Outside the critical section: mt_matter_rows_apply() may block (it
+     * takes ChipStackLock), which a portMUX_TYPE spinlock must never wrap.
+     * It is passed the file-static stage directly (see s_row_mux's comment
+     * above for why this is not a full copy) and is responsible for
+     * treating a stage that does not currently match (ep, kind) as an
+     * empty set, exactly the convention just used above. */
+    int r = mt_matter_rows_apply((uint16_t)ep, (uint8_t)kind, &s_row_stage);
+    if (r != MT_ROW_OK) {
+        return row_err_to_mterr(r);
+    }
+
+    taskENTER_CRITICAL(&s_row_mux);
+    if (s_row_stage.active && s_row_stage.ep == (uint16_t)ep && s_row_stage.kind == (uint8_t)kind) {
+        mt_rows_init(&s_row_stage);
+    }
+    taskEXIT_CRITICAL(&s_row_mux);
+
+    return AT_R_OK;
+}
+
+/*
+ * Worst-case rendered "+MTROW:" line, for the assertion the task brief asks
+ * for: "+MTROW:" (7 bytes) + a 5-digit <idx> (uint16_t max 65535) + ","
+ * (1) + a 5-digit <total> (5) + MT_ROW_MAX_FIELDS (8) fields, each a ","
+ * (1) plus a full-width negative int64 (INT64_MIN, "-9223372036854775808",
+ * 20 characters). 7 + 5 + 1 + 5 + 8 * (1 + 20) = 186 bytes, plus a NUL =
+ * 187; 200 leaves headroom. This is the bound for the GENERIC
+ * MT_ROW_MAX_FIELDS shape any future kind might use, not this round's
+ * actual one: kind 1 (EVSE target) has 4 fields, all non-negative, idx
+ * 0..69 and total <= 70, so its worst line ("+MTROW:69,70,127,1439,100,"
+ * plus a 19-digit added-energy value) is under 50 bytes, matching the task
+ * brief's "roughly 40 bytes" estimate. Either way this sits far inside the
+ * 250-byte budget the host's 255-byte usable RX line leaves for a response
+ * (design spec 1.1 / 2.5): the bulk read is the one place in this round a
+ * line-length mistake would be invisible to firmware and silently dropped
+ * whole by the host (design spec 1.1's overflow-behaviour row).
+ */
+#define MT_ROW_LINE_MAX 200
+
+static void emit_row_line(uint16_t idx, uint16_t total, const mt_row_t *row, int nfields)
+{
+    char line[MT_ROW_LINE_MAX];
+    int off = snprintf(line, sizeof(line), "+MTROW:%u,%u", (unsigned)idx, (unsigned)total);
+    for (int i = 0; i < nfields && off >= 0 && (size_t)off < sizeof(line); i++) {
+        if (row->present[i]) {
+            off += snprintf(line + off, sizeof(line) - (size_t)off, ",%lld",
+                             (long long)row->value[i]);
+        } else {
+            off += snprintf(line + off, sizeof(line) - (size_t)off, ",");
+        }
+    }
+    at_uart_write_line("%s", line);
+}
+
+/*
+ * AT+MTROWGET=<ep>,<kind>,<idx> -> one line, "+MTROW:<idx>,<total>,<field>
+ * [,<field>...]", then OK; <idx> at or past <total> answers OK with no
+ * +MTROW line (design spec 2.3, how a host detects an empty payload).
+ * AT+MTROWGET=<ep>,<kind>       -> every row, 0..<total>-1, as consecutive
+ * +MTROW: lines, then OK; this bulk form is only safe because the host is
+ * inside a command dedicated to draining it (design spec 2.3).
+ *
+ * Reads are stateless: no cursor is kept here, every call re-derives
+ * <total> from mt_matter_rows_total() before touching a single row, which
+ * is also where +MTERR:2 (unknown ep) and +MTERR:4 (ep exists, no payload
+ * of this kind) are answered, before any row read is attempted. Set-only:
+ * bare/query forms answer ERROR.
+ */
+static int cmd_mtrowget(at_type_t type, char *args)
+{
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+
+    char *f[3];
+    int n = at_split_args(args, f, 3);
+    if (n != 2 && n != 3) {
+        return MT_R_ERROR;
+    }
+
+    unsigned long ep;
+    if (!parse_u(f[0], &ep)) {
+        return MT_R_ERROR;
+    }
+    if (ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+
+    unsigned long kind;
+    if (!parse_u(f[1], &kind)) {
+        return MT_R_ERROR;
+    }
+    if (kind > 0xFF) {
+        return MT_ERR_NO_CLUSTER;
+    }
+    int nfields = mt_rows_field_count((uint8_t)kind);
+    if (nfields < 0) {
+        return MT_ERR_NO_CLUSTER;
+    }
+
+    bool single = (n == 3);
+    unsigned long idx = 0;
+    if (single) {
+        if (!parse_u(f[2], &idx)) {
+            return MT_R_ERROR;
+        }
+        if (idx > 0xFFFF) {
+            return MT_ERR_BAD_PARAM;
+        }
+    }
+
+    uint16_t total;
+    int r = mt_matter_rows_total((uint16_t)ep, (uint8_t)kind, &total);
+    if (r != MT_ROW_OK) {
+        return row_err_to_mterr(r);
+    }
+
+    if (single) {
+        if (idx >= total) {
+            /* at or past total: OK, no +MTROW line */
+            return AT_R_OK;
+        }
+        mt_row_t row;
+        uint16_t t2;
+        int rr = mt_matter_rows_get((uint16_t)ep, (uint8_t)kind, (uint16_t)idx, &row, &t2);
+        if (rr != MT_ROW_OK) {
+            return row_err_to_mterr(rr);
+        }
+        emit_row_line((uint16_t)idx, t2, &row, nfields);
+        return AT_R_OK;
+    }
+
+    for (uint16_t i = 0; i < total; i++) {
+        mt_row_t row;
+        uint16_t t2;
+        int rr = mt_matter_rows_get((uint16_t)ep, (uint8_t)kind, i, &row, &t2);
+        if (rr != MT_ROW_OK) {
+            return row_err_to_mterr(rr);
+        }
+        emit_row_line(i, t2, &row, nfields);
+    }
+    return AT_R_OK;
+}
+
+/*
+ * Weak, fail-closed stubs for the three mt_matter_rows_* bridge functions
+ * (declared and fully documented in mt_matter.h): they exist ONLY so the
+ * firmware links before the C++ implementation (main.cpp, a later task
+ * that wires a row kind to a live store) exists. "weak" so a later strong
+ * definition in main.cpp silently wins at final link with no edit needed
+ * here; remove this block once that definition exists (grep
+ * "mt_matter_rows_" in main.cpp to check). Every call answers as if the
+ * endpoint does not exist: a real, defined MT_ROW_* code, not a crash and
+ * not an uninitialised out-param, and honest about there being no real
+ * bridge behind it yet.
+ */
+__attribute__((weak)) int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
+{
+    (void)ep;
+    (void)kind;
+    (void)stage;
+    return MT_ROW_ERR_ENDPOINT;
+}
+
+__attribute__((weak)) int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
+                                              mt_row_t *out, uint16_t *total)
+{
+    (void)ep;
+    (void)kind;
+    (void)idx;
+    (void)out;
+    if (total) {
+        *total = 0;
+    }
+    return MT_ROW_ERR_ENDPOINT;
+}
+
+__attribute__((weak)) int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
+{
+    (void)ep;
+    (void)kind;
+    if (total) {
+        *total = 0;
+    }
+    return MT_ROW_ERR_ENDPOINT;
+}
+
 /* ---- dispatch table & registration ------------------------------------ */
 
 static const at_command_t s_cmds[] = {
@@ -2191,6 +2678,10 @@ static const at_command_t s_cmds[] = {
     { "MTCHIME",      cmd_mtchime     },
     { "MTMEAS",       cmd_mtmeas      },
     { "MTDEMCAP",     cmd_mtdemcap    },
+    { "MTROW",        cmd_mtrow       },
+    { "MTROWCLEAR",   cmd_mtrowclear  },
+    { "MTROWAPPLY",   cmd_mtrowapply  },
+    { "MTROWGET",     cmd_mtrowget    },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif

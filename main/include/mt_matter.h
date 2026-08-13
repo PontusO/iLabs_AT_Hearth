@@ -1114,6 +1114,105 @@ void *mt_matter_dem_delegate_alloc(uint16_t ep);
  */
 int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *quads);
 
+/* ---- nested row payloads (AT+MTROW family, energy round C2 task 2) ---- */
+
+#include "mt_rows.h"
+
+/*
+ * Additional codes the mt_matter_rows_* bridge functions below may return,
+ * beyond the four already defined in mt_rows.h (MT_ROW_OK, MT_ROW_ERR_FORM,
+ * MT_ROW_ERR_VALUE, MT_ROW_ERR_KIND). mt_rows.h's codec is deliberately free
+ * of any notion of a live endpoint or composition (its own file comment,
+ * "free of IDF dependencies so the codec can be unit-tested on the host"),
+ * so the two checks that DO need that knowledge, "does this endpoint
+ * exist" and "does it carry a payload of this row kind", live here instead
+ * of being folded into mt_rows.h's enum. Negative, and continuing that
+ * enum's numbering, so a switch over every MT_ROW_* value stays one
+ * enumeration for a caller that wants to.
+ */
+#define MT_ROW_ERR_ENDPOINT   (-4) /* unknown endpoint: mt_at.c answers +MTERR:2   */
+#define MT_ROW_ERR_NO_PAYLOAD (-5) /* endpoint exists, no payload of this row kind:
+                                     * mt_at.c answers +MTERR:4                    */
+
+/*
+ * Commit a validated staged set for (ep, kind) (design spec 2.6, "AT+MTROW
+ * family"). Called by cmd_mtrowapply() (mt_at.c) only after
+ * mt_rows_validate() has already passed the set structurally; this function
+ * owns everything that needs the live composition: whether <ep> exists,
+ * whether it carries a cluster that stores payloads of <kind>, and actually
+ * committing the data (kind 1, EVSE charging targets: MERGE by day bitmap
+ * per EvseTargetsDelegate::SetTargets() semantics, not a wholesale replace,
+ * design spec 2.6).
+ *
+ * stage->row[0..stage->count-1] are the rows to commit, but ONLY when
+ * stage->active && stage->ep == ep && stage->kind == kind. When that match
+ * does not hold, treat the call as applying zero rows, i.e. a clear: this
+ * is the same (ep, kind) match convention mt_rows_clear() and
+ * mt_rows_validate() already use against their own copy of the same
+ * mt_row_stage_t, and it is what makes AT+MTROWAPPLY=<ep>,<kind>,0 with
+ * nothing staged (the documented clear path, see mt_rows_validate()'s own
+ * comment) work correctly: the caller passes the file-static stage
+ * unconditionally and relies on this function to recognise it does not
+ * belong to (ep, kind) rather than misreading unrelated staged data. Do
+ * NOT read stage->row[] when the match fails.
+ *
+ * Returns MT_ROW_OK, MT_ROW_ERR_ENDPOINT (unknown ep), MT_ROW_ERR_NO_PAYLOAD
+ * (ep exists, no cluster stores this row kind), or MT_ROW_ERR_VALUE for a
+ * semantic rejection only the live model can see (e.g. CHIP's own day-bit
+ * reuse check running against the MERGED result, not just the applied
+ * set). Must hold ChipStackLock, the standing mt_matter_* bridge convention
+ * (every bridge function that touches the CHIP stack takes it; see the
+ * project's "Every mt_matter_* bridge function must hold the CHIP stack
+ * lock" note).
+ *
+ * Task 2 ships a weak, fail-closed stub in mt_at.c (always
+ * MT_ROW_ERR_ENDPOINT) purely so the firmware links before the real
+ * implementation lands; whichever task wires kind 1 to a live store
+ * provides the strong definition here and the stub silently stops being
+ * linked in.
+ */
+int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage);
+
+/*
+ * Read one stored row. On MT_ROW_OK, *out is filled (out->nfields set to
+ * the kind's field count, out->present[]/value[] to the stored row) and
+ * *total is set to the endpoint's stored row count for <kind>; *total is
+ * only meaningful when the return is MT_ROW_OK.
+ *
+ * The caller (cmd_mtrowget(), mt_at.c) always calls mt_matter_rows_total()
+ * first and only calls this function for idx < that total (design spec
+ * 2.3, "reads are stateless"): idx is therefore guaranteed in range by the
+ * time this runs, and this function does not need its own "idx past the
+ * end" case. It still independently reports *total on every successful
+ * call rather than trusting the caller's earlier snapshot, since the two
+ * calls are not atomic with each other.
+ *
+ * Returns MT_ROW_OK, MT_ROW_ERR_ENDPOINT (unknown ep) or
+ * MT_ROW_ERR_NO_PAYLOAD (ep exists, no payload of this kind). Must hold
+ * ChipStackLock, same convention as mt_matter_rows_apply() above.
+ *
+ * Task 2's weak stub (mt_at.c) always answers MT_ROW_ERR_ENDPOINT and
+ * leaves *out untouched, *total set to 0.
+ */
+int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
+                       mt_row_t *out, uint16_t *total);
+
+/*
+ * Number of stored rows for (ep, kind): AT+MTROWGET's bulk-read loop bound,
+ * and the first check cmd_mtrowget() makes so the +MTERR:2 / +MTERR:4 cases
+ * are answered before any row read is attempted. *total is set to 0 on
+ * every error return and to the true count (0 is a valid, empty payload)
+ * on MT_ROW_OK.
+ *
+ * Returns MT_ROW_OK, MT_ROW_ERR_ENDPOINT or MT_ROW_ERR_NO_PAYLOAD, same
+ * division as mt_matter_rows_get() above. Must hold ChipStackLock, same
+ * convention as mt_matter_rows_apply() above.
+ *
+ * Task 2's weak stub (mt_at.c) always answers MT_ROW_ERR_ENDPOINT and
+ * leaves *total set to 0.
+ */
+int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
+
 #ifdef __cplusplus
 }
 #endif
