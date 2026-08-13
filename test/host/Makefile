@@ -3,7 +3,7 @@
 
 CFLAGS = -std=c11 -Wall -Wextra -Werror -g -I../../main/include -DMT_HOST_TEST
 
-TESTS = test_mt_composition test_mt_transport test_mt_cmdbox
+TESTS = test_mt_composition test_mt_transport test_mt_cmdbox test_mt_rows
 
 all: $(TESTS)
 
@@ -16,10 +16,14 @@ test_mt_transport: test_mt_transport.c ../../main/mt_transport.c
 test_mt_cmdbox: test_mt_cmdbox.c ../../main/mt_cmdbox.c
 	$(CC) $(CFLAGS) -o $@ $^
 
+test_mt_rows: test_mt_rows.c ../../main/mt_rows.c
+	$(CC) $(CFLAGS) -o $@ $^
+
 run: all
 	./test_mt_composition
 	./test_mt_transport
 	./test_mt_cmdbox
+	./test_mt_rows
 
 clean:
 	rm -f $(TESTS)
