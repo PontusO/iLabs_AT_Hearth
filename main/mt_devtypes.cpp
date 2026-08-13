@@ -2303,6 +2303,141 @@ static endpoint_t *mk_dem(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * ---- Energy EVSE 0x050C (energy round C2, task 3) -------------------------
+ *
+ * Design record: ARCHITECTURE.md 8.6/8.11/8.12 (the two feature-bit rules
+ * and the declared-but-never-called disease), the round design spec
+ * (docs/superpowers/specs/2026-08-13-energy-round-c2-design.md section 5).
+ *
+ * UNLIKE solar/battery in C1, energy_evse::create() has NO silent SDK break:
+ * it is the first endpoint builder in the energy series callable unmodified,
+ * verified against esp_matter_endpoint.cpp's energy_evse::add() (device type
+ * + cluster::energy_evse::create() + energy_evse_mode::create() +
+ * cluster::device_energy_management::create(), nothing else, no feature_flags
+ * assignment to fight). So this thunk calls the SDK's own endpoint namespace,
+ * the mk_water_heater()/mk_rvc() shape, not the solar/battery hand-build.
+ *
+ * Two variants, split on SOC (state of charge) reporting, a genuine
+ * wire-visible difference and not decoration: with SOC set, CHIP's
+ * ValidateTargets() makes targetSoC mandatory in every charging target and
+ * answers InvalidCommand when it is missing (design spec 5.3). Variant 0 on,
+ * variant 1 off; both are conformant.
+ *
+ * PREF (charging preferences) needs no action here: esp_matter_cluster.cpp:
+ * 3395 calls feature::charging_preferences::add() unconditionally, OUTSIDE
+ * the CLUSTER_FLAG_SERVER guard that closes one line above it, so every
+ * EnergyEvse cluster this SDK builds already has it, the four NextCharge*
+ * attributes, and SetTargets/GetTargets/ClearTargets/GetTargetsResponse in
+ * its AcceptedCommandList (design spec 5.2). Implementing those is Task 4;
+ * this task only has to not fight the bit that is already there.
+ *
+ * RFID is NEVER added: feature::rfid::add() (esp_matter_feature.cpp,
+ * verified against the pinned tree before writing this thunk) sets the
+ * FeatureMap bit and creates nothing else, not even the Rfid event metadata
+ * the XML declares, so an advertising endpoint would answer an empty shell
+ * to any controller that subscribes.
+ *
+ * V2X and Plug-and-Charge are out of scope this round (design spec 5.3):
+ * parked, not wired, not hand-set. The DEM iron rule (ARCHITECTURE.md 8.12)
+ * applies identically to THIS cluster's own features, the reason V2X is
+ * named rather than merely omitted: v2x::add() creates
+ * command::create_enable_discharging, so a hand-set V2X bit would advertise
+ * a command with no ember entry behind it and every invoke would dispatch
+ * into silence, no status at all. Every feature bit this thunk sets
+ * therefore goes through feature::X::add(), never a FeatureMap write.
+ *
+ * StartDiagnostics is deliberately NOT hand-added: command::
+ * create_start_diagnostics has zero callers anywhere in esp-matter (grep
+ * evidence against the whole pinned tree), so the command never enters the
+ * AcceptedCommandList and an invoke answers UnsupportedCommand, which is
+ * coherent and requires no fix. Task 4's delegate still has to implement the
+ * pure virtual to compile; it can never be reached by a controller.
+ *
+ * The delegate itself (config.energy_evse.delegate, EnergyEvse::Delegate,
+ * 35 pure virtuals) is Task 4's, not this one: config->energy_evse.delegate
+ * stays null here, which esp_matter_cluster.cpp's energy_evse::create()
+ * tolerates (the delegate wiring is behind its own "if delegate != nullptr"
+ * gate; the cluster and its MANAGED_INTERNALLY attributes exist regardless).
+ * This task is the skeleton only, per its own brief.
+ *
+ * EnergyEvseMode DOES need a delegate before create(), the water_heater_mode
+ * shape every ModeBase-bearing endpoint in this file follows: the pool slot
+ * is handed out first, the real endpoint id fixed up after create() returns
+ * it. This is one of the two ModeBase slots this device type draws (the
+ * other is the DEM triple's DEM Mode below), which is why MT_MB_MAX_LISTS
+ * needed raising (task 3's own pool step, mt_matter.h).
+ *
+ * The mandatory composed Electrical Sensor (EVSE.xml revision 2: a composed
+ * 0x0510 carrying BOTH EPM 0x0090 and EEM 0x0091 as mandatory) is grafted
+ * with mt_graft_electrical_sensor(), with_eem true unconditionally (both
+ * variants): the SDK under-delivers here (no sensor at all), the exact
+ * water-heater/solar precedent this helper exists for.
+ *
+ * The DEM cluster (0x0098) the SDK over-delivers (energy_evse::add() bolts
+ * it on; EVSE.xml's body names it nowhere) is kept, not stripped: stripping
+ * would mean hand-building the whole endpoint to omit what add() adds
+ * unconditionally, strictly more work than leaving it (the same argument
+ * design spec 5.2 makes for PREF). Re-wired through mt_add_dem_triple(),
+ * the same call battery storage variant 0 and both mk_dem() variants make;
+ * safe to call after energy_evse::create() already made a bare, delegate-less
+ * DeviceEnergyManagement cluster, because esp_matter's generic cluster::
+ * create() returns the EXISTING cluster on a duplicate cluster_id (OR-ing
+ * flags) rather than erroring or duplicating it (esp_matter_data_model.cpp),
+ * and its own create() body's attribute::create() calls are equally
+ * idempotent (finds the existing attribute, logs a warning, leaves its
+ * value alone) - verified against source before relying on it here, not
+ * assumed from precedent elsewhere in this file. with_pa is false: nothing
+ * in this round's brief or design spec asks for PowerAdjustment on this
+ * over-delivered cluster, so it is left at the SDK's own FeatureMap-0
+ * default (a report-only, non-controllable ESA) rather than inventing scope
+ * the round did not ask for. DEM Mode is created either way, by the triple
+ * itself, which is the endpoint's second ModeBase slot.
+ */
+static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
+{
+    void *mode_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::EnergyEvseMode::Id);
+    if (mode_delegate == nullptr) {
+        ESP_LOGE(TAG, "modebase delegate pool exhausted (energy evse mode)");
+        return nullptr;
+    }
+
+    energy_evse::config_t c;
+    c.energy_evse_mode.delegate = mode_delegate;
+    /* c.energy_evse.delegate and c.device_energy_management.delegate both
+     * stay null: the former is Task 4's (see the class comment above), the
+     * latter is fixed up below through mt_add_dem_triple(), the one
+     * unambiguous DEM wiring site every other caller in this file uses. */
+    endpoint_t *ep = energy_evse::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+    uint16_t ep_id = endpoint::get_id(ep);
+    mt_matter_modebase_delegate_set_endpoint(mode_delegate, ep_id);
+
+    if (variant == 0) {
+        cluster_t *evse_cl = cluster::get(ep, chip::app::Clusters::EnergyEvse::Id);
+        if (evse_cl == nullptr) {
+            ESP_LOGE(TAG, "EnergyEvse cluster missing after create");
+            return nullptr;
+        }
+        if (cluster::energy_evse::feature::soc_reporting::add(evse_cl) != ESP_OK) {
+            ESP_LOGE(TAG, "adding SOC reporting feature failed (energy evse)");
+            return nullptr;
+        }
+    }
+
+    if (!mt_graft_electrical_sensor(ep, true, "energy evse")) {
+        return nullptr;
+    }
+
+    if (!mt_add_dem_triple(ep, false, "energy evse")) {
+        return nullptr;
+    }
+
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -2357,6 +2492,7 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { solar_power::get_device_type_id(),              mk_solar_power,             "solar_power",             1 },
     { battery_storage::get_device_type_id(),          mk_battery_storage,         "battery_storage",         1 },
     { device_energy_management::get_device_type_id(), mk_dem,                     "device_energy_management", 1 },
+    { energy_evse::get_device_type_id(),               mk_energy_evse,             "energy_evse",              1 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

@@ -77,3 +77,12 @@ CONFIG_BT_NIMBLE_HCI_EVT_BUF_SIZE=70
 # sets it to n; restated here so a future edit to the base file cannot quietly
 # re-enable it for the Thread image alone.
 CONFIG_ENABLE_OTA_REQUESTOR=n
+
+# Energy round C2 (design spec 2.7): the EVSE and Electrical Utility Meter
+# cluster gates. sdkconfig.defaults already sets all three to y; restated
+# here, same reasoning as CONFIG_ENABLE_OTA_REQUESTOR above, so the Thread
+# image's cluster surface cannot silently diverge from the WiFi image's if a
+# future edit changes the base file.
+CONFIG_SUPPORT_ENERGY_EVSE_CLUSTER=y
+CONFIG_SUPPORT_ENERGY_EVSE_MODE_CLUSTER=y
+CONFIG_SUPPORT_METER_IDENTIFICATION_CLUSTER=y

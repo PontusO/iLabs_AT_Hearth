@@ -188,13 +188,13 @@ CONFIG_SUPPORT_ECOSYSTEM_INFORMATION_CLUSTER=n
 # cluster_dir.cmake, shared with nothing else this firmware builds.
 CONFIG_SUPPORT_ELECTRICAL_ENERGY_MEASUREMENT_CLUSTER=y
 CONFIG_SUPPORT_ELECTRICAL_POWER_MEASUREMENT_CLUSTER=y
-# ENERGY_EVSE_CLUSTER / ENERGY_EVSE_MODE_CLUSTER: stay =n until energy round
-# C2 ships the EVSE device type (design spec 2.7). The first is the dedicated
-# energy-evse-server directory and becomes link-critical the moment firmware
-# code names EnergyEvse::Delegate; the second is the shared mode-base-server
-# directory, inert either way.
-CONFIG_SUPPORT_ENERGY_EVSE_CLUSTER=n
-CONFIG_SUPPORT_ENERGY_EVSE_MODE_CLUSTER=n
+# ENERGY_EVSE_CLUSTER / ENERGY_EVSE_MODE_CLUSTER: energy round C2 ships the
+# EVSE device type (design spec 2.7), so both are lifted. The first is the
+# dedicated energy-evse-server directory and is link-critical the moment
+# firmware code names EnergyEvse::Delegate (Task 4); the second is the
+# shared mode-base-server directory, inert either way.
+CONFIG_SUPPORT_ENERGY_EVSE_CLUSTER=y
+CONFIG_SUPPORT_ENERGY_EVSE_MODE_CLUSTER=y
 CONFIG_SUPPORT_ENERGY_PREFERENCE_CLUSTER=n
 CONFIG_SUPPORT_FAULT_INJECTION_CLUSTER=n
 CONFIG_SUPPORT_FIXED_LABEL_CLUSTER=n
@@ -324,7 +324,11 @@ CONFIG_SUPPORT_WATER_HEATER_MANAGEMENT_CLUSTER=y
 CONFIG_SUPPORT_WATER_HEATER_MODE_CLUSTER=y
 CONFIG_SUPPORT_ELECTRICAL_GRID_CONDITIONS_CLUSTER=n
 CONFIG_SUPPORT_COMMODITY_PRICE_CLUSTER=n
-CONFIG_SUPPORT_METER_IDENTIFICATION_CLUSTER=n
+# METER_IDENTIFICATION_CLUSTER: lifted for energy round C2's Electrical
+# Utility Meter device type (design spec 2.7, section 6). Dedicated
+# meter-identification-server directory, link-critical once firmware code
+# names MeterIdentification::Instance (Task 8/9).
+CONFIG_SUPPORT_METER_IDENTIFICATION_CLUSTER=y
 CONFIG_SUPPORT_UNIT_LOCALIZATION_CLUSTER=n
 CONFIG_SUPPORT_COMMODITY_METERING_CLUSTER=n
 CONFIG_SUPPORT_COMMODITY_TARIFF_CLUSTER=n

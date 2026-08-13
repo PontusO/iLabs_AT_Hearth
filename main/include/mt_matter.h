@@ -407,10 +407,16 @@ int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *la
  * Raised 8 -> 12 for energy round C1 (design spec 2.1): the round's Phase 3
  * composition adds two ModeBase slots (battery storage's DEM Mode and the
  * standalone DEM device's DEM Mode) on top of the eight the RVC/appliance
- * rounds consume, and round C2's EVSE adds two more (EVSE Mode plus its DEM
- * Mode), leaving zero headroom after C2, deliberately.
+ * rounds consume. Round C2's EVSE draws two more of its own (EnergyEvseMode
+ * plus its DEM Mode), which would have landed the pool at exactly zero
+ * headroom. B247 established that exact fit is a defect waiting to happen
+ * and C1 deliberately ended the exact-fit era, so this raises to 16 instead
+ * of leaving a future round to discover it the hard way. Measured cost
+ * (build_b4, WiFi image, this raise in isolation): 12 -> 16 cost 1264 bytes
+ * of .bss (316 bytes/slot) and 64 bytes of .data, diffed before and after
+ * the constant change with nothing else touched.
  */
-#define MT_MB_MAX_LISTS     12  /* (endpoint, cluster) lists this firmware can store */
+#define MT_MB_MAX_LISTS     16  /* (endpoint, cluster) lists this firmware can store */
 #define MT_MB_MAX_COUNT     8   /* mode/tag/label triples per list, 1..this many     */
 #define MT_MB_MAX_LABEL_LEN 32  /* bytes per label, excluding the NUL                */
 
@@ -1212,6 +1218,27 @@ int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
  * leaves *total set to 0.
  */
 int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
+
+/* ---- Energy EVSE / Electrical Utility Meter pools (energy round C2, task 3) --- */
+
+/*
+ * How many Energy EVSE endpoints one composition can carry. Task 4 sizes
+ * HearthEvseDelegate's pool by this constant (main.cpp); this task only
+ * reserves the name so mt_devtypes.cpp's thunk can be reviewed against a
+ * pool that is already accounted for in mt_matter.h, the same order C1's
+ * MT_DEM_MAX shipped in task 1 ahead of task 2's delegate. Headroom over the
+ * one EVSE endpoint Phase 3 adds, the C1 policy of deliberate headroom
+ * rather than an exact fit (B247).
+ */
+#define MT_EVSE_MAX 2  /* EnergyEvse endpoints per composition */
+
+/*
+ * How many Electrical Utility Meter endpoints one composition can carry.
+ * Task 8/9 size the MeterIdentification Instance pool this constant bounds
+ * (main.cpp), the same "name reserved ahead of the consumer" shape as
+ * MT_EVSE_MAX above. Headroom over the one meter endpoint Phase 3 adds.
+ */
+#define MT_METER_MAX 2  /* Electrical Utility Meter endpoints per composition */
 
 #ifdef __cplusplus
 }
