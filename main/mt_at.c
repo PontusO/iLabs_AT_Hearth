@@ -2439,9 +2439,40 @@ static int cmd_mtrowapply(at_type_t type, char *args)
                    s_row_stage.kind == (uint8_t)kind;
     int vr;
     if (count == 0) {
-        /* the documented clear request: always valid, independent of
-         * whatever else happens to be staged (mirrors mt_rows_validate()'s
-         * own count == 0 short-circuit) */
+        /*
+         * The documented clear request: a count of 0 means the host wants
+         * the STORED payload emptied, full stop, and any rows it happened
+         * to stage first for this (ep, kind) are ABANDONED, not committed.
+         * Neutralize the stage HERE, under the mux, before the unlocked
+         * bridge call below, and do it UNCONDITIONALLY: whether or not
+         * s_row_stage currently matches (ep, kind).
+         *
+         * This must not be gated on "!matches". mt_matter_rows_apply()'s
+         * documented contract (mt_matter.h) is: commit stage->row[] only
+         * when stage->active && stage->ep == ep && stage->kind == kind,
+         * otherwise apply zero rows. If matches is true here (a set IS
+         * staged for exactly this ep/kind) and we skip the reset, the
+         * stage sails into the bridge still active with its real,
+         * nonzero count, matching perfectly, so the bridge commits it.
+         * Apply MERGES rather than replaces (design spec 2.6), so the
+         * host's "give me an empty schedule" request would silently
+         * commit whatever it had staged instead, answered with a plain
+         * OK: exactly the bug the review caught (AT+MTROW=5,1,0,64,480,
+         * 80, then AT+MTROW=5,1,1,32,600,90, then AT+MTROWAPPLY=5,1,0
+         * must empty ep 5's schedule, not merge those two rows into it).
+         * Resetting unconditionally means the bridge always sees a
+         * non-matching (inactive) stage for a count-0 call, so its own
+         * "no match -> zero rows" rule is what actually clears, with no
+         * special case to keep in sync on either side.
+         *
+         * This is the SECOND time count == 0's semantics have needed a
+         * deliberate, commented carve-out in this function: the first was
+         * Task 1's review catching a guard that rejected this same path
+         * outright (a count of 0 with nothing staged used to answer
+         * +MTERR:1 instead of clearing). Read both defects before
+         * touching this branch again.
+         */
+        mt_rows_init(&s_row_stage);
         vr = MT_ROW_OK;
     } else if (!matches) {
         /* nothing staged for THIS (ep, kind): a nonzero count cannot
