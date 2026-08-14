@@ -7039,27 +7039,47 @@ class TestStagedMeterPoolExhaustion(unittest.TestCase):
 
 
 DEVTYPES28_EVSE = "\n".join([
-    "[TOO]   DeviceTypeList: 1 entries",
+    # Bug fixed in fix round 1: mk_energy_evse composes the Electrical
+    # Sensor and DEM device types onto this SAME endpoint (mt_devtypes.cpp,
+    # traced: energy_evse::add() adds 1292 itself, mt_graft_electrical_
+    # sensor()'s electrical_sensor::add() adds 1296, mt_add_dem_triple()'s
+    # own explicit add_device_type() adds 1293), the same "three device
+    # types on one endpoint" shape as DEVTYPES24_HP above.
+    "[TOO]   DeviceTypeList: 3 entries",
     "[TOO]     [1]: {",
     "[TOO]       DeviceType: 1292 (Energy EVSE)",
     "[TOO]       Revision: 3",
     "[TOO]      }",
+    "[TOO]     [2]: {",
+    "[TOO]       DeviceType: 1296 (Electrical Sensor)",
+    "[TOO]       Revision: 1",
+    "[TOO]      }",
+    "[TOO]     [3]: {",
+    "[TOO]       DeviceType: 1293 (Device Energy Management)",
+    "[TOO]       Revision: 4",
+    "[TOO]      }",
 ])
 SERVER28_EVSE = "\n".join([
-    "[TOO]   ServerList: 3 entries",
+    "[TOO]   ServerList: 8 entries",
     "[TOO]     [1]: 29 (Descriptor)",
     "[TOO]     [2]: 153 (EnergyEvse)",
     "[TOO]     [3]: 157 (EnergyEvseMode)",
+    "[TOO]     [4]: 152 (DeviceEnergyManagement)",
+    "[TOO]     [5]: 159 (DeviceEnergyManagementMode)",
+    "[TOO]     [6]: 156 (PowerTopology)",
+    "[TOO]     [7]: 144 (ElectricalPowerMeasurement)",
+    "[TOO]     [8]: 145 (ElectricalEnergyMeasurement)",
 ])
 
 
 class TestStep327Evse(unittest.TestCase):
     """Energy round C2 (0.12.0), task 13: the persistent EVSE slot's
     identity (device-type-list, server-list), the SOC-variant rule's
-    positive arm, merge-by-day, and the full 70-row schedule written,
-    applied and read back row for row. Deliberately no chip-tool
-    adjudication (step_3_27_evse's own docstring): every command below
-    is either a read-only chip.run or a plain AT+MTROW-family call."""
+    positive arm, merge-by-day, the full 70-row schedule written,
+    applied and read back row for row, and (fix round 1, Finding 3) the
+    Disable/EnableCharging adjudication: both are ordinary scalar-tail
+    forwards on the unchanged 1000 ms path, unlike SetTargets (still
+    bench-only, step_3_27_evse's own docstring)."""
 
     EP = 28
     DAY_BITS = [1, 2, 4, 8, 16, 32, 64]
@@ -7080,7 +7100,8 @@ class TestStep327Evse(unittest.TestCase):
                 idx += 1
         return stage, expect
 
-    def _ctx(self, devtypes=None, servers=None):
+    def _ctx(self, devtypes=None, servers=None, ec_seqs=(10, 11),
+             disable_seqs=(12, 13), ec_results=None, disable_results=None):
         stage_cmds, full_expect = self._full_schedule_commands()
         cmds = {
             "AT+MTROW=28,1,0,2,480,,25000000": (0, []),
@@ -7099,17 +7120,44 @@ class TestStep327Evse(unittest.TestCase):
             "AT+MTROW=28,1,0,2,900,80,5000000": (0, []),
             "AT+MTROWAPPLY=28,1,0": (0, []),
             "AT+MTROWAPPLY=28,1,70": (0, []),
+            "AT+MTCMDRESP=%d,1" % ec_seqs[0]: (0, []),
+            "AT+MTCMDRESP=%d,0" % ec_seqs[1]: (0, []),
+            "AT+MTCMDRESP=%d,1" % disable_seqs[0]: (0, []),
+            "AT+MTCMDRESP=%d,0" % disable_seqs[1]: (0, []),
         }
         cmds.update(stage_cmds)
         link = FakeLink(cmds)
         script = [
             (0, devtypes if devtypes is not None else DEVTYPES28_EVSE),
             (0, servers if servers is not None else SERVER28_EVSE),
-        ]
-        runner = FakeChipRunner(script)
+        ] + list(ec_results if ec_results is not None
+                 else [(0, ""), (1, STATUS_FAILURE)]
+                 ) + list(disable_results if disable_results is not None
+                          else [(0, ""), (1, STATUS_FAILURE)])
+        counts = {"ec": 0, "disable": 0}
+
+        def on_call(argv):
+            if "enable-charging" in argv:
+                counts["ec"] += 1
+                if counts["ec"] == 1:
+                    link.push_urcs(["+MTCMD:%d,28,153,2,,6000,32000"
+                                    % ec_seqs[0]])
+                else:
+                    link.push_urcs(["+MTCMD:%d,28,153,2,1800,6000,32000"
+                                    % ec_seqs[1]])
+            elif "disable" in argv:
+                counts["disable"] += 1
+                if counts["disable"] == 1:
+                    link.push_urcs(["+MTCMD:%d,28,153,1" % disable_seqs[0]])
+                else:
+                    link.push_urcs(["+MTCMD:%d,28,153,1" % disable_seqs[1]])
+
+        runner = FakeChipRunner(script, on_call=on_call)
         d = tempfile.mkdtemp()
         chip = ChipTool("/bin/chip-tool", d, runner=runner)
-        return fresh_phase3_ctx(link, chip=chip), link
+        ctx = fresh_phase3_ctx(link, chip=chip)
+        ctx.chip_call = sync_chip_call
+        return ctx, link
 
     def test_happy_path(self):
         ctx, link = self._ctx()
@@ -7120,6 +7168,11 @@ class TestStep327Evse(unittest.TestCase):
         # The full schedule really was staged 70 times and cleared at
         # the end, not silently skipped.
         self.assertEqual(link.sent.count("AT+MTROWAPPLY=28,1,0"), 2)
+        # All four adjudicated invokes actually reached chip-tool.
+        self.assertEqual(link.sent.count("AT+MTCMDRESP=10,1"), 1)
+        self.assertEqual(link.sent.count("AT+MTCMDRESP=11,0"), 1)
+        self.assertEqual(link.sent.count("AT+MTCMDRESP=12,1"), 1)
+        self.assertEqual(link.sent.count("AT+MTCMDRESP=13,0"), 1)
 
     def test_wrong_device_type_fails(self):
         ctx, _ = self._ctx(devtypes=DEVTYPES28_EVSE.replace("1292", "9999"))
@@ -7157,6 +7210,46 @@ class TestStep327Evse(unittest.TestCase):
         ctx, _ = self._ctx()
         full = ctx.link.commands["AT+MTROWGET=28,1"][2]
         ctx.link.commands["AT+MTROWGET=28,1"][2] = (full[0], full[1][:-1])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_27_evse(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_enable_charging_null_rendered_as_non_empty_field_fails(self):
+        # The whole point of the null-as-empty-token row: a firmware
+        # regression that rendered null as a literal 0 (or any other
+        # non-empty token) instead of an empty tail position must be
+        # caught, not waved through as "some forward arrived".
+        ctx, _ = self._ctx()
+
+        def bad_on_call(argv):
+            if "enable-charging" in argv and "null" in argv:
+                ctx.link.push_urcs(["+MTCMD:10,28,153,2,0,6000,32000"])
+            elif "enable-charging" in argv:
+                ctx.link.push_urcs(["+MTCMD:11,28,153,2,1800,6000,32000"])
+            elif "disable" in argv:
+                seq = 12 if "AT+MTCMDRESP=12,1" not in ctx.link.sent else 13
+                ctx.link.push_urcs(["+MTCMD:%d,28,153,1" % seq])
+
+        ctx.chip._runner.on_call = bad_on_call
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_27_evse(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_disable_carrying_a_tail_fails(self):
+        # Disable is documented payload-less (the four-field line, no
+        # tail at all); a regression that appended fields must be caught.
+        ctx, _ = self._ctx()
+
+        def bad_on_call(argv):
+            if "enable-charging" in argv:
+                seq = 10 if "AT+MTCMDRESP=10,1" not in ctx.link.sent else 11
+                tail = ",,6000,32000" if seq == 10 else ",1800,6000,32000"
+                ctx.link.push_urcs(["+MTCMD:%d,28,153,2%s" % (seq, tail)])
+            elif "disable" in argv:
+                seq = 12 if "AT+MTCMDRESP=12,1" not in ctx.link.sent else 13
+                ctx.link.push_urcs(["+MTCMD:%d,28,153,1,99" % seq])
+
+        ctx.chip._runner.on_call = bad_on_call
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_27_evse(ctx)
         self.assertGreater(ctx.suite.failed, 0)

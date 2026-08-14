@@ -4502,23 +4502,34 @@ def step_3_27_evse(ctx):
     store rather than a stage: the SOC-variant rule's POSITIVE arm
     (SoC mandatory), merge-by-day and a full 70-row schedule.
 
-    Deliberately AT-only, no chip-tool adjudication: every command this
-    round added that a controller can INVOKE (SetTargets, Disable,
-    EnableCharging) is adjudicated through a brand new row-bearing
-    +MTCMD form this harness has never driven before (task 6's report:
-    the 3000 ms window, the seq-qualified AT+MTROWGET pull, the
-    two-buffer concurrency argument), and this task's own scope boundary
-    is to WRITE harness code, not to run any of it against hardware
-    first. Scripting an untested CmdResponder sequence for a form this
-    risky, with no way to catch a mistake before the consolidated bench
-    session, would be worse than not writing it: a broken automated step
-    silently reports the wrong thing forever, where a careful prose
-    procedure gets a human's judgement on the very first run. The
-    adjudicated flows (SetTargets ALLOWED and DENIED, Disable and
-    EnableCharging, the verdict-window etiquette, the WiFi mDNS pause)
-    are all in this task's report as an exact, ordered bench procedure
+    Adjudicates Disable and EnableCharging with CmdResponder (fix round
+    1, task 13 report Finding 3): both are ordinary scalar-tail forwards
+    on the UNCHANGED 1000 ms path, the same shape as WHM Boost and DEM
+    PowerAdjustRequest, both already proven in this harness. SetTargets
+    is deliberately still bench-only: it alone goes through the brand
+    new row-bearing +MTCMD form (the 3000 ms window, the seq-qualified
+    AT+MTROWGET pull, the two-buffer concurrency argument, task 6's
+    report), which is a genuinely different, unproven mechanic, not
+    merely "a command this round added". Scripting an untested
+    CmdResponder sequence for THAT form, with no way to catch a mistake
+    before the consolidated bench session, would be worse than not
+    writing it: a broken automated step silently reports the wrong thing
+    forever, where a careful prose procedure gets a human's judgement on
+    the very first run. SetTargets ALLOWED/DENIED, the empty-target-list
+    day clear, the verdict-window etiquette and the WiFi mDNS pause are
+    all in this task's report as an exact, ordered bench procedure
     instead, collecting task 6's own bench sections (8, 9, 10) rather
     than re-deriving them.
+
+    Disable/EnableCharging's exact chip-tool argument shape was verified
+    against the real binary's own --help before writing this, not
+    assumed from task 6's report (which used an unverified JSON-blob
+    form): "energyevse enable-charging ChargingEnabledUntil
+    MinimumChargeCurrent MaximumChargeCurrent destination-id
+    endpoint-id...", three plain positional scalars, and chip-tool
+    accepts the literal token "null" for the nullable first field (it
+    proceeds past argument parsing with no complaint). Task 14 should
+    correct the bench procedure text task 6's report seeded.
 
     Requires "3.5 commission" purely for the identity reads below
     (a real controller must exist to ask); every row after that is
@@ -4532,17 +4543,49 @@ def step_3_27_evse(ctx):
     ep = 28
 
     # ---- identity ----
+    # Bug caught during fix round 1 while researching Finding 2's precise
+    # expected lists (mt_devtypes.cpp traced, not assumed): mk_energy_evse
+    # composes TWO more device types onto this same endpoint, the same
+    # shape heat pump/solar/battery already use (step_3_23/24/25's own
+    # "three device types on one endpoint" membership checks, followed
+    # here rather than an exact-list equality). energy_evse::add() (the
+    # SDK) adds 0x050C (1292) itself; mt_graft_electrical_sensor(ep, true,
+    # ...) adds 0x0510 (1296, the composed Electrical Sensor,
+    # electrical_sensor::add()'s own add_device_type()); mt_add_dem_
+    # triple(ep, false, ...) adds 0x050D (1293) via its own explicit
+    # add_device_type() call (device-energy-management-server has no
+    # add() helper of its own to do it). An assertion of "1292 alone"
+    # here was WRONG and would have failed the very first live run.
     rc, out = chip.run(["descriptor", "read", "device-type-list", node,
                         str(ep)], timeout=30)
     types = parse_device_types(out)
-    s.check("3.27 device type list is 0x050C (1292) alone",
-            rc == 0 and types == [1292], tag="P3")
+    s.check("3.27 device type list carries 0x050C (1292), the composed "
+            "0x0510 sensor (1296) and 0x050D DEM (1293)",
+            rc == 0 and 1292 in types and 1296 in types and 1293 in types,
+            tag="P3")
+
+    # Server list: the full cluster surface the same three helpers above
+    # actually create, traced the same way. EnergyEvse/EnergyEvseMode
+    # from energy_evse::add(); PowerTopology/ElectricalPowerMeasurement/
+    # ElectricalEnergyMeasurement from mt_graft_electrical_sensor(ep,
+    # true, ...) (with_eem=true, so EEM is included); DeviceEnergyManagement/
+    # DeviceEnergyManagementMode from mt_add_dem_triple() (DEM itself is
+    # already created bare by energy_evse::add()'s own SDK path; the
+    # triple's create() call returns the SAME cluster and only attaches
+    # the delegate, so there is one DeviceEnergyManagement entry, not
+    # two). No Identify: unlike the meter, mk_energy_evse never hand-adds
+    # one, and energy_evse::add() does not either.
     rc, out = chip.run(["descriptor", "read", "server-list", node,
                         str(ep)], timeout=30)
     servers = parse_accepted_command_list(out)
-    s.check("3.27 server list carries EnergyEvse (153) and "
-            "EnergyEvseMode (157)",
-            rc == 0 and 153 in servers and 157 in servers, tag="P3")
+    s.check("3.27 server list carries EnergyEvse (153), EnergyEvseMode "
+            "(157), DeviceEnergyManagement (152), "
+            "DeviceEnergyManagementMode (159), PowerTopology (156), "
+            "ElectricalPowerMeasurement (144) and "
+            "ElectricalEnergyMeasurement (145)",
+            rc == 0 and 153 in servers and 157 in servers
+            and 152 in servers and 159 in servers and 156 in servers
+            and 144 in servers and 145 in servers, tag="P3")
 
     # ---- SOC-variant rule, the POSITIVE arm (variant 0: SoC mandatory)
     # ---- the NEGATIVE arm (variant 1, no SOC) is Phase 1's staged
@@ -4628,6 +4671,65 @@ def step_3_27_evse(ctx):
     res, _ = link.command("AT+MTROWAPPLY=%d,1,0" % ep)
     s.check("3.27 clear the full schedule at step end -> OK", res == 0,
             tag="P3")
+
+    # ---- Disable and EnableCharging: ordinary scalar-tail adjudicated
+    # forwards (0x0099 commands 1 and 2), unlike SetTargets untouched by
+    # this round's row-bearing machinery. Neither writes an attribute on
+    # allow (task 6 report section 4: the host is the single authority on
+    # what the hardware did), so there is no attribute readback here. ----
+    responder = CmdResponder(link)
+
+    # EnableCharging allow: null chargingEnabledUntil renders as an
+    # EMPTY tail field, not a presence mask (task 6 report: the empty
+    # token occupies the position the value would have, the
+    # SetCookingParameters interior-gap convention, not Boost's mask).
+    handle = invoke_chip(ctx, ["energyevse", "enable-charging", "null",
+                              "6000", "32000", node, str(ep)], timeout=30)
+    fwd = responder.expect(cluster=153, command=2, verdict=1,
+                           payload=[None, 6000, 32000], timeout=5.0)
+    s.check("3.27 EnableCharging allow: forward answered, null "
+            "chargingEnabledUntil rendered as an empty tail field",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.27 EnableCharging allow: chip-tool exits 0 (Success)",
+            rc == 0, tag="P3")
+
+    # EnableCharging deny: a non-null chargingEnabledUntil renders
+    # verbatim in the same tail position.
+    handle = invoke_chip(ctx, ["energyevse", "enable-charging", "1800",
+                              "6000", "32000", node, str(ep)], timeout=30)
+    fwd = responder.expect(cluster=153, command=2, verdict=0,
+                           payload=[1800, 6000, 32000], timeout=5.0)
+    s.check("3.27 EnableCharging deny: forward answered, non-null "
+            "chargingEnabledUntil (1800) rendered verbatim",
+            fwd is not None, tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.27 EnableCharging deny: chip-tool reports Failure "
+            "(rc != 0)", rc != 0, tag="P3")
+    s.check("3.27 EnableCharging deny: wire status 0x1 Failure",
+            parse_status(out) == 0x1, tag="P3")
+
+    # Disable allow: no tail at all (the four-field line, payload-less).
+    handle = invoke_chip(ctx, ["energyevse", "disable", node, str(ep)],
+                         timeout=30)
+    fwd = responder.expect(cluster=153, command=1, verdict=1, timeout=5.0)
+    s.check("3.27 Disable allow: forward answered, no tail",
+            fwd is not None and fwd["fields"] == [], tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.27 Disable allow: chip-tool exits 0 (Success)", rc == 0,
+            tag="P3")
+
+    # Disable deny.
+    handle = invoke_chip(ctx, ["energyevse", "disable", node, str(ep)],
+                         timeout=30)
+    fwd = responder.expect(cluster=153, command=1, verdict=0, timeout=5.0)
+    s.check("3.27 Disable deny: forward answered", fwd is not None,
+            tag="P3")
+    rc, out = handle.join(30)
+    s.check("3.27 Disable deny: chip-tool reports Failure (rc != 0)",
+            rc != 0, tag="P3")
+    s.check("3.27 Disable deny: wire status 0x1 Failure",
+            parse_status(out) == 0x1, tag="P3")
 
 
 def step_3_14_root_urc_sweep(ctx):
