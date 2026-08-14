@@ -213,9 +213,16 @@ void mt_cmd_notify(uint16_t ep, uint32_t cluster, uint32_t command);
  * while the sketch is inside loop() is defect B166 at scale, which is the
  * one failure this protocol has already been bitten by on hardware. So the
  * rows are PULLED, not pushed: the delegate stages them here, the "+MTCMD"
- * line carries only a row count, and the host fetches the rows with
- * AT+MTROWGET inside a command where it is doing nothing but draining the
- * response.
+ * line carries a row count and one kind-specific scalar, and the host
+ * fetches the rows with AT+MTROWGET inside a command where it is doing
+ * nothing but draining the response.
+ *
+ * The fetch must NAME THE SEQUENCE NUMBER from the "+MTCMD" line
+ * (AT+MTROWGET=<ep>,<kind>,,<seq> for all of them,
+ * AT+MTROWGET=<ep>,<kind>,<idx>,<seq> for one). An unqualified AT+MTROWGET
+ * always reads the live store, never the proposal. See cmd_mtrowget() in
+ * mt_at.c for why that is enforced in the protocol rather than asked for in
+ * the specification.
  *
  * These three functions are called from the CHIP event loop task, in this
  * order, exactly once each per forwarded command:
@@ -262,11 +269,18 @@ mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind);
 
 /*
  * Publish the staged set and forward the command: raises
- * "+MTCMD:<seq>,<ep>,<cluster>,<command>,<rowcount>", where <rowcount> is
- * read from the stage itself so the count on the wire can never disagree
+ * "+MTCMD:<seq>,<ep>,<cluster>,<command>,<rowcount>,<aux>", where <rowcount>
+ * is read from the stage itself so the count on the wire can never disagree
  * with what AT+MTROWGET will serve, then blocks for the host's verdict.
  * Returns true on allow, false on deny or timeout (the timeout also raises
  * "+MTCMDTO:<seq>", exactly as a scalar forward does).
+ *
+ * aux is one kind-specific scalar whose meaning belongs to
+ * (cluster, command), the same way every other +MTCMD tail field's does. It
+ * exists because a row count is not always enough to describe a proposal:
+ * EVSE SetTargets passes the affected-DAY mask, since a day whose targets
+ * are being deleted contributes no row and would otherwise be invisible to
+ * the host adjudicating it.
  *
  * The window is 3000 ms, not the 1000 ms every scalar forward uses, because
  * this is the only forward whose verdict requires a ROUND TRIP first: the
@@ -284,7 +298,7 @@ mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind);
  * (cluster, command), which is how the host knows which AT+MTROWGET <kind>
  * to ask for.
  */
-bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command);
+bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, uint32_t aux);
 
 /*
  * Give the inbound stage back. Must be called on every path out of the

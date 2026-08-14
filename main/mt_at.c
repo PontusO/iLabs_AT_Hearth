@@ -70,6 +70,16 @@
  * judging: the +MTCMD carries a row count, and the rows themselves have to
  * be pulled with AT+MTROWGET. See mt_at.h for what that costs a sketch that
  * blocks in loop().
+ *
+ * WHAT THE LONGER WINDOW COSTS THE CHIP TASK, and it is not the same on the
+ * two images. A forward blocks the CHIP event loop for its whole duration.
+ * The WiFi build sets CONFIG_USE_MINIMAL_MDNS=y, so the mDNS responder runs
+ * ON THAT TASK: for the whole window it answers nothing, and both
+ * operational discovery and commissionable advertising pause. The Thread
+ * build sets it =n, and is unaffected. That is worth knowing before this
+ * constant is raised again, because this project already carries a WiFi
+ * operational-discovery transient on its watch list and a 3 s responder gap
+ * is exactly the shape of thing that would feed it.
  */
 #define MT_CMD_VERDICT_MS      1000
 #define MT_CMD_VERDICT_ROWS_MS 3000
@@ -1986,7 +1996,16 @@ static SemaphoreHandle_t s_cmd_sem = NULL;
  * has to fetch the rows before it can judge them. Every other caller passes
  * MT_CMD_VERDICT_MS, which is the same 1000 ms they have always used; the
  * parameter exists so that stays visibly true at each call site instead of
- * depending on a shared constant nobody edits by accident. fields is the
+ * depending on a shared constant nobody edits by accident.
+ *
+ * seq_out, when non-NULL, receives the sequence number IMMEDIATELY after the
+ * mailbox slot is opened and BEFORE the URC is written. The ordering is the
+ * whole point of the parameter: AT+MTROWGET's seq-qualified form compares a
+ * host-supplied seq against the outstanding forward's, and the host can only
+ * learn that seq from the URC, so recording it first makes "the host knows
+ * the seq" imply "the firmware has published it". Written before the wire,
+ * never after. NULL for every scalar forward, none of which has anything to
+ * qualify. fields is the
  * already-formatted, comma-joined tail to append after <seq>,<ep>,<cluster>,
  * <command>; NULL or an empty string means no tail at all, reproducing
  * mt_cmd_forward()'s exact four-field line. The caller (mt_cmd_forward_payload()
@@ -2000,7 +2019,7 @@ static SemaphoreHandle_t s_cmd_sem = NULL;
  * three times.
  */
 static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t command,
-                                   const char *fields, uint32_t wait_ms)
+                                   const char *fields, uint32_t wait_ms, uint32_t *seq_out)
 {
     /* Fail closed with no URC at all if the AT link is not up yet: there is
      * no host to forward to, and raising one before mt_at_start() has run
@@ -2018,6 +2037,11 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
     taskENTER_CRITICAL(&s_cmdbox_mux);
     uint32_t seq = mt_cmdbox_open(ep, cluster, command);
     taskEXIT_CRITICAL(&s_cmdbox_mux);
+
+    /* Publish the seq before the URC, never after: see the header comment. */
+    if (seq_out != NULL) {
+        *seq_out = seq;
+    }
 
     /*
      * Drain any stale give before waiting, non-blocking.
@@ -2085,14 +2109,14 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
 
 bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command)
 {
-    return mt_cmd_forward_common(ep, cluster, command, NULL, MT_CMD_VERDICT_MS);
+    return mt_cmd_forward_common(ep, cluster, command, NULL, MT_CMD_VERDICT_MS, NULL);
 }
 
 bool mt_cmd_forward_payload(uint16_t ep, uint32_t cluster, uint32_t command, uint32_t payload)
 {
     char buf[12];
     snprintf(buf, sizeof(buf), "%lu", (unsigned long)payload);
-    return mt_cmd_forward_common(ep, cluster, command, buf, MT_CMD_VERDICT_MS);
+    return mt_cmd_forward_common(ep, cluster, command, buf, MT_CMD_VERDICT_MS, NULL);
 }
 
 /*
@@ -2106,7 +2130,7 @@ bool mt_cmd_forward_payload(uint16_t ep, uint32_t cluster, uint32_t command, uin
  */
 bool mt_cmd_forward_fields(uint16_t ep, uint32_t cluster, uint32_t command, const char *fields)
 {
-    return mt_cmd_forward_common(ep, cluster, command, fields, MT_CMD_VERDICT_MS);
+    return mt_cmd_forward_common(ep, cluster, command, fields, MT_CMD_VERDICT_MS, NULL);
 }
 
 /*
@@ -2295,6 +2319,23 @@ static portMUX_TYPE s_row_mux = portMUX_INITIALIZER_UNLOCKED;
  * mt_rows_init() to memset the array under the reader's feet. A claim is
  * therefore refused while a read is in flight, and the controller gets
  * Busy, which it can retry.
+ *
+ * ---- WHY THE READ IS QUALIFIED BY SEQUENCE NUMBER ----
+ *
+ * s_inbound_seq is the outstanding forward's seq, and AT+MTROWGET only
+ * serves the pending set when the host names it. Without that, the pending
+ * read is silently ambiguous: the response is byte-identical to a live-store
+ * read, and the override goes live before the URC is even written, so a host
+ * command already in flight could be answered from a PROPOSAL it has never
+ * heard of. A host that polls for its own reasons and caches the answer
+ * would then hold a schedule this device may never store, with nothing on
+ * the wire to tell it apart from the truth.
+ *
+ * Making that a rule in the spec and obeying it in the library would leave
+ * the protocol able to express the mistake. Requiring the seq makes it
+ * unrepresentable: the seq is only knowable from the +MTCMD line, so asking
+ * for a proposal is now an act a host cannot perform by accident, and an
+ * unqualified read is always the live store.
  */
 static mt_row_stage_t s_row_inbound;
 
@@ -2307,6 +2348,9 @@ typedef enum {
 
 static mt_inbound_state_t s_inbound_state   = MT_INBOUND_IDLE;
 static bool               s_inbound_reading = false;
+/* 0 when nothing is outstanding. mt_cmdbox_open() never issues 0, so the
+ * idle value cannot be matched by any seq a host could legitimately hold. */
+static uint32_t           s_inbound_seq     = 0;
 
 mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
 {
@@ -2343,7 +2387,7 @@ mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
     return &s_row_inbound;
 }
 
-bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command)
+bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, uint32_t aux)
 {
     /* The count comes off the stage, never from the caller: the number on
      * the wire and the number of rows AT+MTROWGET will hand back are then
@@ -2355,10 +2399,20 @@ bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command)
     }
     taskEXIT_CRITICAL(&s_row_mux);
 
-    char fields[8];
-    snprintf(fields, sizeof(fields), "%u", (unsigned)count);
+    /*
+     * "<rowcount>,<aux>". Worst case, with every head at its maximum:
+     * "+MTCMD:" 7 + seq 10 (u32) + 1 + ep 5 + 1 + cluster 10 + 1 +
+     * command 10 + 1 + rowcount 5 (u16) + 1 + aux 10 (u32) = 62, plus a NUL
+     * = 63, against MT_CMD_LINE_MAX 112. Today's only caller is far smaller
+     * (cluster 153, command 5, rowcount <= 70, aux <= 127), and the widest
+     * line this buffer must hold is still the generic four-field tail of
+     * mt_cmd_forward_fields(), unchanged by this task.
+     */
+    char fields[24];
+    snprintf(fields, sizeof(fields), "%u,%lu", (unsigned)count, (unsigned long)aux);
 
-    bool allow = mt_cmd_forward_common(ep, cluster, command, fields, MT_CMD_VERDICT_ROWS_MS);
+    bool allow = mt_cmd_forward_common(ep, cluster, command, fields, MT_CMD_VERDICT_ROWS_MS,
+                                       &s_inbound_seq);
 
     /* Verdict in (or timed out): stop admitting new readers before the
      * caller starts merging. A reader already streaming is unaffected, see
@@ -2382,6 +2436,7 @@ void mt_rows_inbound_release(void)
     s_row_inbound.active = false;
     s_row_inbound.count  = 0;
     s_inbound_state      = MT_INBOUND_IDLE;
+    s_inbound_seq        = 0;
     taskEXIT_CRITICAL(&s_row_mux);
 }
 
@@ -2745,14 +2800,29 @@ static void emit_row_line(uint16_t idx, uint16_t total, const mt_row_t *row, int
  *
  * ---- THE ONE CASE THIS DOES NOT READ THE LIVE STORE (task 6) ----
  *
- * While a fabric-originated set is awaiting the host's verdict for exactly
- * this (ep, kind), this command serves THAT set instead: the rows a
- * controller is proposing, which is what the host has just been asked to
- * judge and the only thing it can usefully be reading at that moment. The
- * live store is what AT+MTROWGET answers at every other time, including
- * immediately after the verdict.
+ * AT+MTROWGET=<ep>,<kind>,<idx>,<seq>  one proposed row
+ * AT+MTROWGET=<ep>,<kind>,,<seq>       every proposed row
  *
- * That branch is not a convenience, it is a REQUIREMENT, and the reason is
+ * With a <seq> naming the forward that is currently awaiting a verdict for
+ * this (ep, kind), the command serves THAT set: the rows a controller is
+ * proposing, which is what the host has just been asked to judge. The empty
+ * <idx> token is the family's own absent-optional spelling, the same one
+ * AT+MTROW uses, so the bulk and single forms stay one grammar.
+ *
+ * WITHOUT a <seq> this command ALWAYS reads the live store, and that is the
+ * point of requiring one. The two responses are byte-identical, and the
+ * pending set becomes servable before the +MTCMD line is even written, so
+ * an unqualified override would let a host command already in flight be
+ * answered from a proposal the host has never heard of; a host that polls
+ * for its own reasons would cache a schedule this device may never store.
+ * Since a <seq> can only be learned from the +MTCMD line, asking for a
+ * proposal is now something a host cannot do by accident rather than
+ * something a specification asks it not to do. A <seq> that does not match
+ * the outstanding forward, or one supplied when nothing is pending, answers
+ * +MTERR:1: it is a value that is wrong, not a command form that is.
+ *
+ * The pending branch is not merely a convenience, it is a REQUIREMENT, and
+ * the reason is
  * the same one cmd_mtcmdresp() carries: mt_matter_rows_total() and
  * mt_matter_rows_get() take ChipStackLock, and the CHIP event loop task is
  * sitting inside its command dispatch (holding the stack) blocked on the
@@ -2774,9 +2844,12 @@ static int cmd_mtrowget(at_type_t type, char *args)
         return MT_R_ERROR;
     }
 
-    char *f[3];
-    int n = at_split_args(args, f, 3);
-    if (n != 2 && n != 3) {
+    char *f[4];
+    int n = at_split_args(args, f, 4);
+    if (n < 2 || n > 4) {
+        /* Two tokens minimum, four maximum. A short line is still a form
+         * error, exactly as before the seq form existed: the arity widened
+         * at the tail, it did not become elastic. */
         return MT_R_ERROR;
     }
 
@@ -2800,19 +2873,48 @@ static int cmd_mtrowget(at_type_t type, char *args)
         return MT_ERR_NO_CLUSTER;
     }
 
-    bool single = (n == 3);
+    /*
+     * <idx> is present for a single-row read and an EMPTY TOKEN for a bulk
+     * read, but only when a <seq> follows it: with no <seq> there is no
+     * later token to hold the position open, so a two-token line is the
+     * bulk form and an empty third token is a form error, not a bulk
+     * request spelled the long way. One spelling per shape.
+     */
+    bool single;
     unsigned long idx = 0;
-    if (single) {
-        if (!parse_u(f[2], &idx)) {
+    if (n == 2) {
+        single = false;
+    } else {
+        bool idx_empty = (f[2][0] == '\0');
+        if (idx_empty && n != 4) {
             return MT_R_ERROR;
         }
-        if (idx > 0xFFFF) {
+        single = !idx_empty;
+        if (single) {
+            if (!parse_u(f[2], &idx)) {
+                return MT_R_ERROR;
+            }
+            if (idx > 0xFFFF) {
+                return MT_ERR_BAD_PARAM;
+            }
+        }
+    }
+
+    bool          qualified = (n == 4);
+    unsigned long seq       = 0;
+    if (qualified) {
+        if (!parse_u(f[3], &seq)) {
+            return MT_R_ERROR;
+        }
+        if (seq > 0xFFFFFFFFUL || seq == 0) {
+            /* 0 is never issued by mt_cmdbox_open() and is the idle marker
+             * here, so naming it can never be a legitimate request. */
             return MT_ERR_BAD_PARAM;
         }
     }
 
     /*
-     * Inbound first, and before any bridge call: see the header comment for
+     * The qualified read, before any bridge call: see the header comment for
      * why going near ChipStackLock during a verdict window would make the
      * whole adjudication unanswerable. Everything needed to serve the read
      * is snapshotted here under the mux; the rows themselves are then read
@@ -2820,15 +2922,28 @@ static int cmd_mtrowget(at_type_t type, char *args)
      * whole of MT_INBOUND_PENDING and no claim can start while
      * s_inbound_reading is set.
      */
-    taskENTER_CRITICAL(&s_row_mux);
-    bool inbound = (s_inbound_state == MT_INBOUND_PENDING && s_row_inbound.active &&
-                    s_row_inbound.ep == (uint16_t)ep && s_row_inbound.kind == (uint8_t)kind);
-    uint16_t itotal = 0;
-    if (inbound) {
-        itotal            = s_row_inbound.count;
-        s_inbound_reading = true;
+    bool     inbound = false;
+    uint16_t itotal  = 0;
+    if (qualified) {
+        taskENTER_CRITICAL(&s_row_mux);
+        inbound = (s_inbound_state == MT_INBOUND_PENDING && s_inbound_seq == (uint32_t)seq &&
+                   s_row_inbound.active && s_row_inbound.ep == (uint16_t)ep &&
+                   s_row_inbound.kind == (uint8_t)kind);
+        if (inbound) {
+            itotal            = s_row_inbound.count;
+            s_inbound_reading = true;
+        }
+        taskEXIT_CRITICAL(&s_row_mux);
+
+        if (!inbound) {
+            /* Named a seq that is not the outstanding one, or named one when
+             * nothing is pending for this (ep, kind). NOT a silent fallback
+             * to the live store: the host asked for a specific proposal, and
+             * answering with something else is the confusion this form
+             * exists to prevent. */
+            return MT_ERR_BAD_PARAM;
+        }
     }
-    taskEXIT_CRITICAL(&s_row_mux);
 
     if (inbound) {
         if (single) {

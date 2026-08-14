@@ -41,12 +41,27 @@ int mt_evse_meas_apply_locked(uint16_t ep, const uint8_t *fields, const int64_t 
  * (mt_matter_rows_apply()'s contract in mt_matter.h; the merge rule and the
  * count-0 exception are documented at the implementation).
  *
- * stage points at mt_at.c's file-static staging buffer and is consumed
- * before this call returns; the pointer is never retained.
+ * stage points at ONE OF mt_at.c's two file-static staging buffers (the AT
+ * parser task's, or the CHIP task's inbound one that the fabric path
+ * passes) and is consumed before this call returns; the pointer is never
+ * retained.
+ *
+ * clear_days names days to empty that the rows do not mention, as a bitmap
+ * of the seven TargetDayOfWeekBitmap bits. It exists for one case the rows
+ * cannot express: a controller sending a schedule entry with an EMPTY
+ * chargingTargets list, which is a valid command meaning "this day now has
+ * no targets" and produces no row at all. The fabric path passes the full
+ * affected-day mask taken from the schedule ENTRIES; the AT path passes 0,
+ * where a day with no rows is simply a day the host did not mention.
+ *
+ * clear_days is also what distinguishes an emptied day from the AT path's
+ * clear-everything request: with no rows AND no clear_days the whole store
+ * is emptied (the AT count-0 verb), while with no rows and a non-zero
+ * clear_days only those days are emptied.
  *
  * Returns an MT_ROW_* code.
  */
-int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage);
+int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage, uint8_t clear_days);
 
 /*
  * Read stored row idx of ep's charging schedule into *out, and ep's total

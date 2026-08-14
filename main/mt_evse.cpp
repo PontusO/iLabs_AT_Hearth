@@ -553,7 +553,19 @@ public:
         const chip::app::DataModel::Nullable<uint32_t> &enableChargeTime,
         const int64_t &minimumChargeCurrent, const int64_t &maximumChargeCurrent) override
     {
-        char fields[48];
+        /*
+         * 64, not 48, and the arithmetic matters because snprintf truncates
+         * in SILENCE: a truncated tail hands the host a wrong, smaller
+         * maximum current, which is a safety-relevant number.
+         * HandleEnableCharging bounds these only from below (negative, and
+         * min > max, energy-evse-server.cpp:296-322), never from above, so
+         * the real worst case is a non-null chargingEnabledUntil at
+         * UINT32_MAX with both currents at INT64_MAX: 10 + 1 + 19 + 1 + 19
+         * = 50, plus a NUL = 51. 48 truncated it. A negative current cannot
+         * reach here, but would only add two sign characters (53), so 64
+         * has headroom either way.
+         */
+        char fields[64];
         if (enableChargeTime.IsNull()) {
             snprintf(fields, sizeof(fields), ",%lld,%lld", (long long)minimumChargeCurrent,
                      (long long)maximumChargeCurrent);
@@ -609,14 +621,18 @@ public:
      * of it on the CHIP event loop task:
      *
      *   1. claim the inbound row stage and decode the schedule into it
-     *   2. raise "+MTCMD:<seq>,<ep>,153,5,<rowcount>" (cluster 0x0099,
-     *      command 0x05) and block 3000 ms
-     *   3. the host pulls the rows with AT+MTROWGET=<ep>,1 and answers
-     *      AT+MTCMDRESP=<seq>,<0|1>
+     *   2. raise "+MTCMD:<seq>,<ep>,153,5,<rowcount>,<daymask>" (cluster
+     *      0x0099, command 0x05) and block 3000 ms
+     *   3. the host pulls the rows with AT+MTROWGET=<ep>,1,,<seq> and
+     *      answers AT+MTCMDRESP=<seq>,<0|1>
      *   4. on allow, merge through mt_evse_targets_apply_locked(), which is
      *      the SAME function an AT+MTROWAPPLY commits through, so the two
      *      paths cannot end up storing different things from the same rows
      *   5. release the claim, on every path out
+     *
+     * <daymask> is the set of days the proposal touches, which is NOT
+     * derivable from the rows: a day being emptied carries none. See the
+     * `affected` comment in the body.
      *
      * The rows never travel in the +MTCMD line. 70 rows is about 2450
      * bytes, MT_CMD_LINE_MAX is 112 and snprintf truncates in silence, and
@@ -673,11 +689,26 @@ public:
          */
         Status decode_err = Status::Success;
         uint16_t n = 0;
+        /*
+         * The affected-day mask, taken from the schedule ENTRIES and not
+         * from the flattened rows. That distinction is the whole of defect
+         * 1 of this task's review: an entry may carry an EMPTY
+         * chargingTargets list, which ValidateTargets() accepts (innerIdx
+         * starts at 0, only innerIdx > 10 is rejected) and which means
+         * "this day now has no targets". It produces no row, so a mask
+         * derived from rows would never mention that day, subtract_days()
+         * would leave it alone, and the device would answer SUCCESS to a
+         * deletion it did not perform. CHIP's reference store clears the
+         * day in both of its arms (EnergyEvseTargetsStore.cpp:305-315 and
+         * :347-370).
+         */
+        uint8_t affected = 0;
         auto sched_iter = chargingTargetSchedules.begin();
         while (decode_err == Status::Success && sched_iter.Next()) {
             const auto &entry = sched_iter.GetValue();
             uint8_t bits = entry.dayOfWeekForSequence.GetField(
                 static_cast<EE::TargetDayOfWeekBitmap>(kAllDaysMask));
+            affected = (uint8_t)(affected | bits);
 
             auto tgt_iter = entry.chargingTargets.begin();
             while (tgt_iter.Next()) {
@@ -727,40 +758,67 @@ public:
             return decode_err;
         }
 
-        /* Blocks up to 3000 ms. The host fetches the rows and answers in
-         * that window; see mt_at.h for what a slow loop() costs. */
-        bool allow = mt_rows_inbound_forward(mEndpointId, EE::Id, EE::Commands::SetTargets::Id);
+        /*
+         * Blocks up to 3000 ms. The host fetches the rows and answers in
+         * that window; see mt_at.h for what a slow loop() costs.
+         *
+         * The affected-day mask rides along as the +MTCMD line's second
+         * tail field, after the row count, because the host cannot
+         * otherwise SEE a day it is being asked to empty: there is no row
+         * to pull for it. Without it a sketch adjudicating
+         * [{Mon, []}, {Tue, [t]}] would be shown one Tuesday row and would
+         * have no idea Monday was being deleted.
+         */
+        bool allow = mt_rows_inbound_forward(mEndpointId, EE::Id, EE::Commands::SetTargets::Id,
+                                             affected);
 
         Status out;
         if (!allow) {
             /* Deny or timeout: nothing was touched, the stored schedule is
              * byte-identical, and the controller is told so. */
             out = Status::Failure;
-        } else if (n == 0) {
+        } else if (n == 0 && affected == 0) {
             /*
-             * AN EMPTY SET IS A NO-OP HERE AND A CLEAR ON THE AT PATH, and
-             * that asymmetry is deliberate rather than an inconsistency to
-             * be tidied away.
+             * AN EMPTY TOP-LEVEL LIST IS A NO-OP HERE AND A CLEAR ON THE AT
+             * PATH, and that asymmetry is deliberate rather than an
+             * inconsistency to be tidied away.
              *
              * The fabric has a separate ClearTargets command, so an empty
              * SetTargets means "I am setting no days", which merges to
              * nothing; CHIP's own reference store behaves identically (its
              * merge loop simply never iterates). The AT surface has NO
              * clear verb, so AT+MTROWAPPLY=<ep>,1,0 had to become one, and
-             * mt_evse_targets_apply_locked() treats a zero-row set as
-             * "empty the store" for exactly that reason.
+             * mt_evse_targets_apply_locked() treats a rowless, dayless call
+             * as "empty the store" for exactly that reason.
              *
-             * Which means this branch must NOT call the merge: handing it a
-             * count of 0 would wipe the user's whole schedule because a
-             * controller sent an empty list. Both paths still agree about
-             * every set that has rows in it, which is the property that
-             * matters; they disagree only about a request the two surfaces
-             * genuinely spell differently.
+             * Which means this branch must NOT call the merge: handing it
+             * no rows and no days would wipe the user's whole schedule
+             * because a controller sent an empty list.
+             *
+             * The gate is "no rows AND no days", not "no rows". Those
+             * differ precisely for the case above: a non-empty list whose
+             * entries carry no targets has n == 0 but names real days, and
+             * it must CLEAR those days rather than fall in here and do
+             * nothing. "Empty request" and "request to empty" are different
+             * commands and conflating them was the defect.
+             *
+             * Counting entries instead would have been the obvious gate and
+             * is wrong twice over: the count can exceed 255 through the same
+             * zero-bitmap hole (so a uint8_t wraps), and entries that name
+             * no day and carry no targets genuinely ARE a no-op, since there
+             * is nothing to clear. n and affected are both derived from real
+             * content and cannot overflow: affected is seven bits and n is
+             * capped at 70.
+             *
+             * n > 0 with affected == 0 is unrepresentable, which is what
+             * makes this gate safe: a row only exists for an entry, and
+             * mt_rows_stage() refuses a row whose day bitmap is 0, so any
+             * row implies a day bit.
              */
             ESP_LOGI(TAG, "ep %u: SetTargets with no schedules, nothing to merge", mEndpointId);
             out = Status::Success;
         } else {
-            int rc = mt_evse_targets_apply_locked(mEndpointId, stage);
+            int rc = mt_evse_targets_apply_locked(mEndpointId, stage, affected);
             /* Already on the CHIP task inside a command dispatch, so the
              * stack lock is held and the _locked variant is the right call;
              * going through mt_matter_evse_targets_apply() would take
@@ -1332,7 +1390,7 @@ static int locate(uint16_t ep, HearthEvseDelegate **out)
     return MT_ROW_OK;
 }
 
-int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
+int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage, uint8_t clear_days)
 {
     HearthEvseDelegate *d = nullptr;
     int rc = locate(ep, &d);
@@ -1342,16 +1400,25 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
 
     /*
      * The stage belongs to this (ep, kind) only when all three agree; when it
-     * does not, the call applies ZERO rows, which is the documented clear
-     * (mt_matter.h's contract, and the count-0 exception in the file
-     * comment). Do not read stage->row[] outside that match: the buffer is
-     * mt_at.c's file-static staging area and may hold another endpoint's
-     * half-built set.
+     * does not, the call carries ZERO rows. Do not read stage->row[] outside
+     * that match: the pointer is one of the TWO file-static staging buffers
+     * in mt_at.c (the AT parser task's s_row_stage, or the CHIP task's
+     * s_row_inbound, which the fabric path passes), and either may hold a
+     * set for a different endpoint entirely.
      */
     bool match = (stage != nullptr && stage->active && stage->ep == ep &&
                   stage->kind == MT_ROW_KIND_EVSE_TARGET && stage->count > 0);
 
-    if (!match) {
+    /*
+     * No rows AND no days named: the documented clear-EVERYTHING request
+     * (mt_matter.h's contract, and the count-0 exception in the file
+     * comment). This is the AT path's clear verb, and only the AT path
+     * reaches it: the fabric passes clear_days from the schedule entries it
+     * was actually sent, and its own "empty list" case never calls here at
+     * all (SetTargets above documents why an empty SetTargets is a no-op
+     * where an AT+MTROWAPPLY count of 0 is a clear).
+     */
+    if (!match && clear_days == 0) {
         d->clear_store();
         d->m_loaded = true; /* empty is now the truth, whatever a failed
                              * earlier load left behind */
@@ -1360,6 +1427,14 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
         }
         return MT_ROW_OK;
     }
+
+    /*
+     * Rows to merge, or none when only clear_days brought us here. Every
+     * loop below is bounded by this rather than by stage->count, so the
+     * "day named with no targets" case walks the stage zero times and is
+     * still a merge, not a wholesale clear.
+     */
+    uint16_t nrows = match ? stage->count : 0;
 
     /*
      * A MERGE needs the stored schedule to be known, and m_loaded false
@@ -1417,7 +1492,7 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
     bool soc_feature = (esp_matter::attribute::get(ep, EE::Id,
                                                    EE::Attributes::StateOfCharge::Id) != nullptr);
 
-    for (uint16_t r = 0; r < stage->count; r++) {
+    for (uint16_t r = 0; r < nrows; r++) {
         const mt_row_t *row = &stage->row[r];
         if (row->nfields != kRowFields || !row->present[kRowDay] ||
             !row->present[kRowTime]) {
@@ -1471,6 +1546,30 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
     }
 
     /*
+     * Fold in the days the caller named that carry no rows, and do it HERE,
+     * after the loop, never inside it: the loop's "this day already belongs
+     * to a different bitmap" check is about the ROWS, and the fabric passes
+     * the full affected mask (row-bearing days included), so folding early
+     * would make every fabric merge reject itself on its own days.
+     *
+     * These are days a controller asked to EMPTY: a schedule entry with a
+     * dayOfWeekForSequence and an empty chargingTargets list.
+     * Instance::ValidateTargets() places no minimum on that list (innerIdx
+     * starts at 0 and only innerIdx > 10 is rejected), so it arrives as a
+     * perfectly valid command, and CHIP's own reference store clears the day
+     * in both of its arms (EnergyEvseTargetsStore.cpp:305-315 copies the new
+     * empty list over a matching bitmask, :347-370 appends the new entry with
+     * its empty list). Deriving the mask from the flattened ROWS instead
+     * would drop such a day silently: the user deletes Monday's targets, the
+     * device answers SUCCESS, GetTargets keeps returning them, and the car
+     * charges on a schedule that was deleted.
+     *
+     * Masked to the seven real days so a caller cannot subtract a bit that
+     * is not a day.
+     */
+    all_bits = (uint8_t)(all_bits | (clear_days & kAllDaysMask));
+
+    /*
      * Last read-only check: how many stored schedules will survive the
      * subtraction, and does the merged result still fit. Provably it always
      * does (every surviving schedule and every appended group owns at least
@@ -1495,7 +1594,9 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
      * Pass 2, the mutation, which can no longer fail. Subtract every day the
      * incoming set mentions from what is stored (dropping a stored schedule
      * that loses all of its days), then append the incoming groups. Days the
-     * set never mentioned are untouched, which is the whole point.
+     * set never mentioned are untouched, which is the whole point. A day in
+     * all_bits with no group of its own is subtracted and never re-appended,
+     * which is exactly how an emptied day ends up empty.
      *
      * The result cannot overflow kMaxDays: after the subtraction every
      * surviving schedule and every appended group owns at least one day, they
@@ -1511,7 +1612,7 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
     }
     d->m_schedule_count = (uint8_t)(first_new + groups);
 
-    for (uint16_t r = 0; r < stage->count; r++) {
+    for (uint16_t r = 0; r < nrows; r++) {
         const mt_row_t *row = &stage->row[r];
         uint8_t bits = (uint8_t)row->value[kRowDay];
         uint8_t slot = first_new;

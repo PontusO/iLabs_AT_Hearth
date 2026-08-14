@@ -1371,9 +1371,13 @@ int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value);
  * Instance::ValidateTargets() (energy-evse-server.cpp:411-432), which
  * enforces the same rule on the fabric path.
  *
- * stage points at mt_at.c's file-static staging buffer, not a copy (the
- * struct is several KB and the AT parser task's stack is 6144 bytes); it is
- * consumed before the call returns and the pointer is never retained.
+ * stage points at mt_at.c's HOST-side file-static staging buffer, not a copy
+ * (the struct is several KB and the AT parser task's stack is 6144 bytes);
+ * it is consumed before the call returns and the pointer is never retained.
+ * This bridge only ever carries that one: the fabric's inbound stage reaches
+ * the same store through mt_evse_targets_apply_locked() directly, because
+ * its caller is already on the CHIP task holding the stack lock and taking
+ * it again here would deadlock (mChipStackLock is a plain mutex).
  *
  * Task 5 routes mt_matter_rows_apply()'s kind-1 arm here. Returns an MT_ROW_*
  * code. Holds ChipStackLock.

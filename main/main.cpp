@@ -6122,7 +6122,10 @@ extern "C" int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value)
 extern "C" int mt_matter_evse_targets_apply(uint16_t ep, const mt_row_stage_t *stage)
 {
     ChipStackLock lock;
-    return mt_evse_targets_apply_locked(ep, stage);
+    /* clear_days 0: this is the AT path, where a day the host did not send
+     * rows for is simply a day it did not mention. Only the fabric path has
+     * a way to say "this day now has no targets" (mt_evse.h). */
+    return mt_evse_targets_apply_locked(ep, stage, 0);
 }
 
 extern "C" int mt_matter_evse_targets_get(uint16_t ep, uint16_t idx, mt_row_t *out,

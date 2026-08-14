@@ -13,6 +13,20 @@
  * a row for a different (ep, kind) than the one currently held discards the
  * old set first: a host that is mid-upload for one target never has stale
  * rows from an earlier, abandoned upload silently merged into a new one.
+ *
+ * ---- THIS CODEC HOLDS NO MUTABLE STATE OF ITS OWN ----
+ *
+ * Every function here is pure with respect to file scope: all state lives in
+ * the caller's mt_row_stage_t, and mt_rows.c's only statics are the const
+ * field tables. That is not an aesthetic preference, it is the fact two
+ * separate stages depend on. mt_at.c runs two of them concurrently, one
+ * written by the AT parser task and one by the CHIP event loop task, and
+ * they are safe against each other only because calling into this codec for
+ * one stage cannot touch the other. A single mutable static added here (a
+ * cached last-kind, a scratch row, an error code) would silently couple the
+ * two tasks through a file nobody would think to look in, and the symptom
+ * would be a charging schedule from the wrong source. Add nothing to file
+ * scope here that is not const.
  */
 
 #pragma once
