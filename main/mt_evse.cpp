@@ -584,7 +584,6 @@ public:
         using chip::Protocols::InteractionModel::Status;
 
         clear_store();
-        m_loaded = true;
 
         char key[16];
         key_for(mEndpointId, key, sizeof(key));
@@ -592,9 +591,17 @@ public:
         nvs_handle_t h;
         esp_err_t err = nvs_open(MT_EVSE_NVS_NS, NVS_READONLY, &h);
         if (err == ESP_ERR_NVS_NOT_FOUND) {
-            return Status::Success; /* namespace never written */
+            m_loaded = true; /* namespace never written: empty IS the truth */
+            return Status::Success;
         }
         if (err != ESP_OK) {
+            /* m_loaded stays FALSE, and the distinction is the whole point:
+             * "there is nothing stored" and "I could not find out what is
+             * stored" are different facts, and only the first one makes an
+             * empty store authoritative. A transient read failure that
+             * marked the store loaded would let the next apply merge into
+             * nothing and then save that over a schedule which was intact
+             * all along, which is silent data loss. */
             ESP_LOGE(TAG, "ep %u: nvs_open failed: %s", mEndpointId, esp_err_to_name(err));
             return Status::Failure;
         }
@@ -602,18 +609,27 @@ public:
         err = nvs_get_blob(h, key, s_blob, &len);
         nvs_close(h);
         if (err == ESP_ERR_NVS_NOT_FOUND) {
-            return Status::Success; /* no schedule stored for this endpoint */
+            m_loaded = true; /* no schedule for this endpoint: also the truth */
+            return Status::Success;
         }
         if (err != ESP_OK) {
+            /* Transient again, same reasoning as the open failure above. */
             ESP_LOGE(TAG, "ep %u: reading charging targets failed: %s", mEndpointId,
                      esp_err_to_name(err));
             return Status::Failure;
         }
         if (!decode(len)) {
+            /* CORRUPT is not transient: the bytes were read successfully and
+             * they are not a schedule. Empty is then the only honest state,
+             * re-reading would produce the same bytes forever, and an apply
+             * overwriting them loses nothing that was ever a schedule. So
+             * this arm DOES mark the store loaded, unlike the two above. */
+            m_loaded = true;
             ESP_LOGE(TAG, "ep %u: stored charging targets are corrupt (%u bytes), ignored",
                      mEndpointId, (unsigned)len);
             return Status::Failure;
         }
+        m_loaded = true;
         ESP_LOGI(TAG, "ep %u: loaded %u charging target schedule(s)", mEndpointId,
                  m_schedule_count);
         return Status::Success;
@@ -1101,10 +1117,29 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
 
     if (!match) {
         d->clear_store();
+        d->m_loaded = true; /* empty is now the truth, whatever a failed
+                             * earlier load left behind */
         if (!d->save()) {
             return MT_ROW_ERR_PERSIST;
         }
         return MT_ROW_OK;
+    }
+
+    /*
+     * A MERGE needs the stored schedule to be known, and m_loaded false
+     * means a previous load hit a transient NVS failure and this store is
+     * empty only because nobody could read it (see LoadTargets()). Retry
+     * once, and refuse if it still cannot be read: merging into an
+     * assumed-empty store and saving the result would overwrite a schedule
+     * that may be perfectly intact. The clear path above is deliberately
+     * exempt, because there the host is asking for the stored payload to go
+     * away regardless of what it says.
+     */
+    if (!d->m_loaded) {
+        (void)d->LoadTargets();
+        if (!d->m_loaded) {
+            return MT_ROW_ERR_PERSIST;
+        }
     }
 
     /*
@@ -1125,6 +1160,27 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
     uint8_t groups   = 0;
     uint8_t all_bits = 0;
 
+    /*
+     * The SOC-variant rule, which is the one rule in this pass that is about
+     * a single target rather than the shape of the set.
+     * Instance::ValidateTargets() (energy-evse-server.cpp:411-432) enforces
+     * it on the FABRIC path: with the SOC feature present every target MUST
+     * carry targetSoC (InvalidCommand otherwise), and without it targetSoC
+     * must be absent or exactly 100 (ConstraintError otherwise). Nothing
+     * enforced it on the AT path, so a host could install exactly the
+     * schedule a controller's SetTargets would have been refused, and
+     * GetTargets would then hand that schedule back to the controller.
+     *
+     * Read from this endpoint's OWN metadata, the same existence gate
+     * mt_evse_meas_apply_locked() uses: StateOfCharge exists precisely when
+     * soc_reporting::add() ran on this endpoint, which is the variant axis.
+     * Asking the metadata rather than a variant argument means the two can
+     * never disagree, and it is the same fact ValidateTargets reads from the
+     * Instance's FeatureMap snapshot.
+     */
+    bool soc_feature = (esp_matter::attribute::get(ep, EE::Id,
+                                                   EE::Attributes::StateOfCharge::Id) != nullptr);
+
     for (uint16_t r = 0; r < stage->count; r++) {
         const mt_row_t *row = &stage->row[r];
         if (row->nfields != kRowFields || !row->present[kRowDay] ||
@@ -1132,6 +1188,16 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage)
             /* Defensive: mt_rows_stage() canonicalises nfields and refuses a
              * row missing a mandatory field, so this cannot fire from the AT
              * path. */
+            return MT_ROW_ERR_VALUE;
+        }
+        if (soc_feature) {
+            if (!row->present[kRowSoC]) {
+                return MT_ROW_ERR_VALUE; /* SOC endpoint: SoC is mandatory */
+            }
+        } else if (row->present[kRowSoC] && row->value[kRowSoC] != 100) {
+            /* No SOC feature: the only SoC a target may state is "full",
+             * which is the XML's way of saying "charge it completely" on a
+             * device that cannot report state of charge. */
             return MT_ROW_ERR_VALUE;
         }
         uint8_t bits = (uint8_t)row->value[kRowDay];

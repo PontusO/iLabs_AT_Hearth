@@ -2405,11 +2405,11 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
     energy_evse::config_t c;
     c.energy_evse_mode.delegate = mode_delegate;
     /* c.energy_evse.delegate and c.device_energy_management.delegate both
-     * stay null here: the former is attached after create() below (the pool
-     * alloc needs the real endpoint id, and the SOC feature must be added
-     * before the init callback snapshots the FeatureMap), the latter is
-     * fixed up through mt_add_dem_triple(), the one unambiguous DEM wiring
-     * site every other caller in this file uses. */
+     * stay null here: the EVSE pool alloc needs the real endpoint id, so
+     * that delegate is attached after create() below (see the class
+     * comment; init CBs run at enable), and the DEM one is fixed up through
+     * mt_add_dem_triple(), the one unambiguous DEM wiring site every other
+     * caller in this file uses. */
     endpoint_t *ep = energy_evse::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
     if (ep == nullptr) {
         return nullptr;
@@ -2431,17 +2431,29 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
     }
 
     /*
-     * The 34-pure-virtual delegate (task 4, mt_evse.cpp), attached LAST of
-     * the EnergyEvse work and deliberately so: EnergyEvseDelegateInitCB
-     * snapshots this endpoint's FeatureMap when it news the cluster Instance
-     * (esp_matter_delegate_callbacks.cpp:257-268), and that snapshot is what
-     * makes Instance::ValidateTargets() demand a targetSoC in every charging
-     * target on a variant-0 endpoint. Attaching through
-     * config.energy_evse.delegate before create() would have been Instance'd
-     * against a FeatureMap the soc_reporting::add() above had not touched
-     * yet. The alloc also loads the endpoint's stored schedule from NVS,
+     * The 34-pure-virtual delegate (task 4, mt_evse.cpp), attached here
+     * rather than through config.energy_evse.delegate for one reason only:
+     * mt_matter_evse_delegate_alloc() takes the endpoint id, and the id is
+     * what create() has just returned. The same post-create attach the
+     * water heater's WHM delegate uses, for the same reason.
+     *
+     * The ORDER relative to soc_reporting::add() above does not matter, and
+     * nothing here should be read as claiming it does:
+     * set_delegate_and_init_callback() only stores the pointer
+     * (esp_matter_data_model.cpp:1566-1572), and EnergyEvseDelegateInitCB
+     * reads the FeatureMap when it news the Instance at endpoint enable
+     * (esp_matter_delegate_callbacks.cpp:257-268), driven from
+     * provider::Startup() during esp_matter::start() for endpoints built
+     * before it. That is the same "snapshot at enable" rule the water
+     * heater's hand-set FeatureMap depends on, and it is why esp-matter's
+     * own energy_evse::create() can attach the delegate at
+     * esp_matter_cluster.cpp:3373-3375 and only add charging preferences at
+     * :3396. The variant-0 FeatureMap reaches ValidateTargets() whichever
+     * order the thunk uses.
+     *
+     * The alloc also loads the endpoint's stored schedule from NVS,
      * satisfying the SDK's unenforced "LoadTargets before GetTargets"
-     * contract. Same post-create attach the water heater's WHM delegate uses.
+     * contract.
      */
     void *evse_delegate = mt_matter_evse_delegate_alloc(ep_id);
     if (evse_delegate == nullptr) {

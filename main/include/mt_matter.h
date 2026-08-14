@@ -1180,9 +1180,10 @@ int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *q
  * but not saved), or MT_ROW_ERR_VALUE for a semantic rejection only the live
  * model can see (e.g. CHIP's own day-bit reuse check running against the
  * MERGED result, not just the applied set; for kind 1, more than seven
- * distinct day bitmaps or more than ten targets sharing one, neither of
- * which the row codec knows about because neither is a property of a
- * row). Must hold ChipStackLock, the standing mt_matter_* bridge convention
+ * distinct day bitmaps, more than ten targets sharing one, or a target
+ * breaking the endpoint's SOC-variant rule, none of which the row codec
+ * knows about because none is a property of a row on its own). Must hold
+ * ChipStackLock, the standing mt_matter_* bridge convention
  * (every bridge function that touches the CHIP stack takes it; see the
  * project's "Every mt_matter_* bridge function must hold the CHIP stack
  * lock" note).
@@ -1266,13 +1267,17 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
  * esp_matter::cluster::set_delegate_and_init_callback() and the SDK's own
  * EnergyEvseDelegateInitCB.
  *
- * The attach must come AFTER the thunk's feature::add() calls, not through
- * config.energy_evse.delegate before create(): EnergyEvseDelegateInitCB
- * (esp_matter_delegate_callbacks.cpp:257-268) snapshots the endpoint's
- * FeatureMap when it news the Instance, and that snapshot is what makes
- * Instance::ValidateTargets() demand a targetSoC in every charging target on
- * a variant-0 (SOC) endpoint. A delegate attached before the SOC bit is
- * added would be Instance'd against a FeatureMap without it.
+ * The post-create attach is about the endpoint id and nothing else. The
+ * ORDER relative to the thunk's feature::add() calls does not matter:
+ * set_delegate_and_init_callback() only stores the pointer
+ * (esp_matter_data_model.cpp:1566-1572), and EnergyEvseDelegateInitCB
+ * (esp_matter_delegate_callbacks.cpp:257-268) reads the FeatureMap when it
+ * news the Instance at endpoint ENABLE, driven from provider::Startup()
+ * during esp_matter::start(). esp-matter's own energy_evse::create()
+ * attaches the delegate before it adds charging preferences, which would be
+ * broken if attach order mattered. What DOES have to happen in the thunk is
+ * any hand-SET of a FeatureMap, since the enable-time read is what the
+ * Instance keeps: see mk_water_heater()'s comment for that rule.
  *
  * Allocation also LOADS the endpoint's stored schedule from NVS, which is
  * how the SDK's unenforced "LoadTargets() must be called before
@@ -1348,6 +1353,15 @@ int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value);
  * no rows clears the whole stored schedule. See mt_matter_rows_apply() above
  * for the shared contract and mt_evse.cpp for why the merge is not a
  * wholesale replace.
+ *
+ * The SOC-variant rule is enforced here, so a host cannot install over AT a
+ * schedule a controller's SetTargets would have been refused: on a variant-0
+ * (SOC) endpoint every target must carry <soc>, and on a variant-1 endpoint
+ * <soc> must be absent or exactly 100. Both answer MT_ROW_ERR_VALUE
+ * (+MTERR:1), the value-rejected half of the grammar, because the row itself
+ * is well formed and it is the endpoint that refuses it. This mirrors
+ * Instance::ValidateTargets() (energy-evse-server.cpp:411-432), which
+ * enforces the same rule on the fabric path.
  *
  * stage points at mt_at.c's file-static staging buffer, not a copy (the
  * struct is several KB and the AT parser task's stack is 6144 bytes); it is
