@@ -55,6 +55,25 @@
  * task's stack rather than the 512-byte MT_AT_LINE_MAX buffer. */
 #define MT_CMD_LINE_MAX 112
 
+/*
+ * The verdict window mt_cmd_forward_common() blocks for, in milliseconds.
+ *
+ * MT_CMD_VERDICT_MS is EVERY scalar forward's window and is 1000 ms exactly,
+ * unchanged since C1. Every shipped +MTCMD consumer, and every host sketch
+ * written against them, was validated against this number; it is named here
+ * rather than raised so that the row-bearing window below cannot be
+ * mistaken for a general relaxation of the deadline.
+ *
+ * MT_CMD_VERDICT_ROWS_MS is used by nothing but mt_rows_inbound_forward()
+ * below. It is longer because a row-bearing forward is the only one whose
+ * verdict requires a round trip before the host can even see what it is
+ * judging: the +MTCMD carries a row count, and the rows themselves have to
+ * be pulled with AT+MTROWGET. See mt_at.h for what that costs a sketch that
+ * blocks in loop().
+ */
+#define MT_CMD_VERDICT_MS      1000
+#define MT_CMD_VERDICT_ROWS_MS 3000
+
 /* +MTERR:<n> code space (mirrors the ESP-NOW layout: 1..99 carry a code,
  * >= MT_ERR_GENERIC is a plain "ERROR"). Real codes are assigned in B4. */
 #define MT_ERR_BAD_PARAM    1   /* bad parameter or out of range          */
@@ -1957,9 +1976,17 @@ static portMUX_TYPE s_cmdbox_mux = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t s_cmd_sem = NULL;
 
 /*
- * Shared body of mt_cmd_forward(), mt_cmd_forward_payload() and
- * mt_cmd_forward_fields(): open a mailbox slot, raise the "+MTCMD:<seq>,..."
- * URC, and block up to 1000 ms for the host's verdict. fields is the
+ * Shared body of mt_cmd_forward(), mt_cmd_forward_payload(),
+ * mt_cmd_forward_fields() and mt_rows_inbound_forward(): open a mailbox
+ * slot, raise the "+MTCMD:<seq>,..." URC, and block up to wait_ms for the
+ * host's verdict.
+ *
+ * wait_ms is a parameter rather than a constant for exactly one caller:
+ * mt_rows_inbound_forward() passes MT_CMD_VERDICT_ROWS_MS because its host
+ * has to fetch the rows before it can judge them. Every other caller passes
+ * MT_CMD_VERDICT_MS, which is the same 1000 ms they have always used; the
+ * parameter exists so that stays visibly true at each call site instead of
+ * depending on a shared constant nobody edits by accident. fields is the
  * already-formatted, comma-joined tail to append after <seq>,<ep>,<cluster>,
  * <command>; NULL or an empty string means no tail at all, reproducing
  * mt_cmd_forward()'s exact four-field line. The caller (mt_cmd_forward_payload()
@@ -1973,7 +2000,7 @@ static SemaphoreHandle_t s_cmd_sem = NULL;
  * three times.
  */
 static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t command,
-                                   const char *fields)
+                                   const char *fields, uint32_t wait_ms)
 {
     /* Fail closed with no URC at all if the AT link is not up yet: there is
      * no host to forward to, and raising one before mt_at_start() has run
@@ -2007,7 +2034,7 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
      * microseconds without ever waiting for the host; the same trap would
      * then repeat for every call after this one, forever, since a stale
      * give is left behind every time an answer wins that race. One narrow
-     * race at the 1000 ms boundary would otherwise cascade into permanent,
+     * race at the deadline would otherwise cascade into permanent,
      * silent instant-deny of the whole forwarding feature until reboot.
      * This drain and the one in the timeout branch below are what make the
      * mailbox self-healing: every forward() starts from a guaranteed-empty
@@ -2027,7 +2054,7 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
     }
     mt_at_urc(line);
 
-    if (xSemaphoreTake(s_cmd_sem, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (xSemaphoreTake(s_cmd_sem, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
         taskENTER_CRITICAL(&s_cmdbox_mux);
         int verdict = mt_cmdbox_take(seq);
         taskEXIT_CRITICAL(&s_cmdbox_mux);
@@ -2058,14 +2085,14 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
 
 bool mt_cmd_forward(uint16_t ep, uint32_t cluster, uint32_t command)
 {
-    return mt_cmd_forward_common(ep, cluster, command, NULL);
+    return mt_cmd_forward_common(ep, cluster, command, NULL, MT_CMD_VERDICT_MS);
 }
 
 bool mt_cmd_forward_payload(uint16_t ep, uint32_t cluster, uint32_t command, uint32_t payload)
 {
     char buf[12];
     snprintf(buf, sizeof(buf), "%lu", (unsigned long)payload);
-    return mt_cmd_forward_common(ep, cluster, command, buf);
+    return mt_cmd_forward_common(ep, cluster, command, buf, MT_CMD_VERDICT_MS);
 }
 
 /*
@@ -2079,7 +2106,7 @@ bool mt_cmd_forward_payload(uint16_t ep, uint32_t cluster, uint32_t command, uin
  */
 bool mt_cmd_forward_fields(uint16_t ep, uint32_t cluster, uint32_t command, const char *fields)
 {
-    return mt_cmd_forward_common(ep, cluster, command, fields);
+    return mt_cmd_forward_common(ep, cluster, command, fields, MT_CMD_VERDICT_MS);
 }
 
 /*
@@ -2179,21 +2206,26 @@ static int cmd_mtcmdresp(at_type_t type, char *args)
  * kind defines. */
 #define MT_ROW_MAX_TOKENS (3 + MT_ROW_MAX_FIELDS)
 
-/* One global staging buffer, matching s_staged/s_staging above: a host
- * stages one (ep, kind) set at a time, and mt_rows_stage() itself discards
- * a set staged for a different (ep, kind) before starting a new one. */
+/* One global staging buffer for the HOST's row sets, matching
+ * s_staged/s_staging above: a host stages one (ep, kind) set at a time, and
+ * mt_rows_stage() itself discards a set staged for a different (ep, kind)
+ * before starting a new one.
+ *
+ * WRITTEN ONLY BY THE AT PARSER TASK. The fabric-originated sets a
+ * controller's SetTargets brings in live in s_row_inbound below, a
+ * separate buffer written only by the CHIP event loop task; see that
+ * block's comment for why the two are not one buffer, and mt_at.h for the
+ * host-facing contract. */
 static mt_row_stage_t s_row_stage;
 
 /*
  * Guards every call into mt_rows.c's mutators (mt_rows_stage(),
- * mt_rows_clear(), mt_rows_validate()) against s_row_stage: same reason and
- * the same pattern as s_cmdbox_mux above. mt_rows.c has no locking of its
- * own, by design (it stays host-testable with no FreeRTOS headers, see
+ * mt_rows_clear(), mt_rows_validate()) against s_row_stage, and every
+ * access to the inbound stage's ownership state below: same reason and the
+ * same pattern as s_cmdbox_mux above. mt_rows.c has no locking of its own,
+ * by design (it stays host-testable with no FreeRTOS headers, see
  * mt_rows.h's file comment), so the critical section lives here, never in
- * mt_rows.c. Today only the AT parser task (the handlers below) touches
- * s_row_stage; the inbound SetTargets path (a later task) will write it
- * from the CHIP event loop task too, which is exactly the second writer
- * this mux exists for.
+ * mt_rows.c.
  *
  * The mux is deliberately NOT held across mt_matter_rows_apply(): that call
  * may block (it takes ChipStackLock, the standing mt_matter_* bridge
@@ -2203,12 +2235,155 @@ static mt_row_stage_t s_row_stage;
  * whether to proceed, then passes the struct to the bridge by pointer,
  * unguarded: a full copy does not fit the AT parser task's 6144-byte
  * stack (mt_row_stage_t holds MT_ROW_MAX_ROWS rows and runs to several KB,
- * see mt_rows.h). Once the inbound path exists this is a real, narrow race
- * window (the CHIP task could restage between the validate and the
- * apply); closing it is that task's problem to solve, since it is the one
- * that introduces the second writer.
+ * see mt_rows.h).
+ *
+ * That unguarded pointer pass was flagged when it shipped (task 2) as
+ * something the inbound SetTargets path would have to close, because it is
+ * only safe while the AT parser task is s_row_stage's ONLY writer. Task 6
+ * closed it by keeping that true: the inbound path never touches this
+ * buffer. Anything added here that writes s_row_stage from another task
+ * re-opens the window, and the failure mode is a host's AT+MTROWAPPLY
+ * committing rows it never staged.
  */
 static portMUX_TYPE s_row_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* ---- the inbound row stage (energy round C2, task 6) ------------------- *
+ *
+ * The buffer a fabric-originated multi-row command (today only EnergyEvse
+ * SetTargets) stages its payload into so the host can PULL it with
+ * AT+MTROWGET during the verdict window. mt_at.h carries the caller's
+ * contract and the reasoning for the pull; this block is the concurrency
+ * argument, which is the part that cannot be seen from the header.
+ *
+ * ---- WHO WRITES WHAT, AND WHEN ----
+ *
+ * s_row_stage      written only by the AT parser task (cmd_mtrow,
+ *                  cmd_mtrowclear, cmd_mtrowapply).
+ * s_row_inbound    written only by the CHIP event loop task, and only
+ *                  while it owns the claim.
+ * the state below  written by both, always inside s_row_mux.
+ *
+ * There is no buffer either task can write while the other reads. That is
+ * the whole design, and it is why the ~5.6 KB of a second mt_row_stage_t is
+ * spent rather than sharing one: with one buffer, a controller's SetTargets
+ * lands on top of whatever set the host is half way through uploading for
+ * the same (ep, kind), and when the two happen to hold the same number of
+ * rows the host's next AT+MTROWAPPLY validates cleanly and commits THE
+ * CONTROLLER'S rows as its own. No unit test can see that, no build can see
+ * that, and on the bench it looks like a schedule the user never wrote.
+ *
+ * ---- THE CLAIM STATES ----
+ *
+ * IDLE     nobody owns the buffer.
+ * STAGING  the CHIP task is filling it. NOT readable: a reader would see a
+ *          half-built set.
+ * PENDING  fully staged, the +MTCMD is on the wire, the CHIP task is
+ *          BLOCKED in xSemaphoreTake and touches nothing. This is the only
+ *          state cmd_mtrowget() serves from, and the CHIP task's quiescence
+ *          for the whole of it is what makes that read safe with no lock
+ *          around the row data itself.
+ * CLOSED   the verdict is in and the CHIP task is merging (a read of the
+ *          stage, never a write). No NEW reader is admitted, because the
+ *          set is no longer what a host would be asking about, but a reader
+ *          already streaming keeps going: mt_rows_inbound_release() below
+ *          deliberately does NOT clear row[], so the bytes under an
+ *          in-flight reader stay intact.
+ *
+ * s_inbound_reading is the one flag that guards the other direction: a
+ * bulk AT+MTROWGET of 70 rows takes on the order of 300 ms at 115200, long
+ * enough for a forward to time out, a second SetTargets to arrive, and its
+ * mt_rows_init() to memset the array under the reader's feet. A claim is
+ * therefore refused while a read is in flight, and the controller gets
+ * Busy, which it can retry.
+ */
+static mt_row_stage_t s_row_inbound;
+
+typedef enum {
+    MT_INBOUND_IDLE = 0,
+    MT_INBOUND_STAGING,
+    MT_INBOUND_PENDING,
+    MT_INBOUND_CLOSED,
+} mt_inbound_state_t;
+
+static mt_inbound_state_t s_inbound_state   = MT_INBOUND_IDLE;
+static bool               s_inbound_reading = false;
+
+mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
+{
+    taskENTER_CRITICAL(&s_row_mux);
+    bool got = (s_inbound_state == MT_INBOUND_IDLE && !s_inbound_reading);
+    if (got) {
+        s_inbound_state = MT_INBOUND_STAGING;
+    }
+    taskEXIT_CRITICAL(&s_row_mux);
+
+    if (!got) {
+        return NULL;
+    }
+
+    /* Outside the critical section on purpose: this memsets several KB, and
+     * a portMUX_TYPE critical section disables interrupts. The STAGING
+     * state is what keeps everyone else out meanwhile, which is exactly
+     * what a state machine buys over holding a lock. */
+    mt_rows_init(&s_row_inbound);
+
+    /*
+     * Stamp the identity HERE rather than leaving it to the first
+     * mt_rows_stage() call, so that a set of ZERO rows is still identified
+     * as belonging to (ep, kind). Without this, an empty inbound set would
+     * fail cmd_mtrowget()'s match, fall through to the live-store read, and
+     * block on ChipStackLock for the whole verdict window: the one
+     * unanswerable-forward trap this whole branch exists to avoid, hiding
+     * in the one case with no rows in it. An empty set must answer "total
+     * 0, no rows" exactly as promptly as a full one.
+     */
+    s_row_inbound.active = true;
+    s_row_inbound.ep     = ep;
+    s_row_inbound.kind   = kind;
+    return &s_row_inbound;
+}
+
+bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command)
+{
+    /* The count comes off the stage, never from the caller: the number on
+     * the wire and the number of rows AT+MTROWGET will hand back are then
+     * the same fact read once, not two values to keep in step. */
+    taskENTER_CRITICAL(&s_row_mux);
+    uint16_t count = s_row_inbound.count;
+    if (s_inbound_state == MT_INBOUND_STAGING) {
+        s_inbound_state = MT_INBOUND_PENDING;
+    }
+    taskEXIT_CRITICAL(&s_row_mux);
+
+    char fields[8];
+    snprintf(fields, sizeof(fields), "%u", (unsigned)count);
+
+    bool allow = mt_cmd_forward_common(ep, cluster, command, fields, MT_CMD_VERDICT_ROWS_MS);
+
+    /* Verdict in (or timed out): stop admitting new readers before the
+     * caller starts merging. A reader already streaming is unaffected, see
+     * the state comment above. */
+    taskENTER_CRITICAL(&s_row_mux);
+    if (s_inbound_state == MT_INBOUND_PENDING) {
+        s_inbound_state = MT_INBOUND_CLOSED;
+    }
+    taskEXIT_CRITICAL(&s_row_mux);
+
+    return allow;
+}
+
+void mt_rows_inbound_release(void)
+{
+    taskENTER_CRITICAL(&s_row_mux);
+    /* active/count only. row[] is deliberately left alone: a reader that
+     * snapshotted the count under this same mux is still walking it, and
+     * the next claim's mt_rows_init() is the thing that actually clears the
+     * array, which cannot run while that reader holds s_inbound_reading. */
+    s_row_inbound.active = false;
+    s_row_inbound.count  = 0;
+    s_inbound_state      = MT_INBOUND_IDLE;
+    taskEXIT_CRITICAL(&s_row_mux);
+}
 
 /*
  * Map every mt_rows.h / mt_matter.h MT_ROW_* code onto this personality's
@@ -2567,6 +2742,31 @@ static void emit_row_line(uint16_t idx, uint16_t total, const mt_row_t *row, int
  * is also where +MTERR:2 (unknown ep) and +MTERR:4 (ep exists, no payload
  * of this kind) are answered, before any row read is attempted. Set-only:
  * bare/query forms answer ERROR.
+ *
+ * ---- THE ONE CASE THIS DOES NOT READ THE LIVE STORE (task 6) ----
+ *
+ * While a fabric-originated set is awaiting the host's verdict for exactly
+ * this (ep, kind), this command serves THAT set instead: the rows a
+ * controller is proposing, which is what the host has just been asked to
+ * judge and the only thing it can usefully be reading at that moment. The
+ * live store is what AT+MTROWGET answers at every other time, including
+ * immediately after the verdict.
+ *
+ * That branch is not a convenience, it is a REQUIREMENT, and the reason is
+ * the same one cmd_mtcmdresp() carries: mt_matter_rows_total() and
+ * mt_matter_rows_get() take ChipStackLock, and the CHIP event loop task is
+ * sitting inside its command dispatch (holding the stack) blocked on the
+ * verdict semaphore. An AT+MTROWGET that went through the bridge during
+ * that window would block on the stack lock for the whole deadline, so the
+ * host could never fetch the rows, could never answer, and every schedule a
+ * controller ever sent would time out and be denied. The inbound set is
+ * therefore read straight out of RAM here, with no bridge call and no lock.
+ *
+ * The corollary, which belongs in the host's notes: during a verdict window
+ * the ONLY two commands that make progress are this one and AT+MTCMDRESP.
+ * Anything else that touches the data model blocks on the stack lock, and a
+ * host that issues one before answering has queued its own verdict behind a
+ * command that cannot complete until the verdict times out.
  */
 static int cmd_mtrowget(at_type_t type, char *args)
 {
@@ -2609,6 +2809,43 @@ static int cmd_mtrowget(at_type_t type, char *args)
         if (idx > 0xFFFF) {
             return MT_ERR_BAD_PARAM;
         }
+    }
+
+    /*
+     * Inbound first, and before any bridge call: see the header comment for
+     * why going near ChipStackLock during a verdict window would make the
+     * whole adjudication unanswerable. Everything needed to serve the read
+     * is snapshotted here under the mux; the rows themselves are then read
+     * outside it, which is safe because the CHIP task is blocked for the
+     * whole of MT_INBOUND_PENDING and no claim can start while
+     * s_inbound_reading is set.
+     */
+    taskENTER_CRITICAL(&s_row_mux);
+    bool inbound = (s_inbound_state == MT_INBOUND_PENDING && s_row_inbound.active &&
+                    s_row_inbound.ep == (uint16_t)ep && s_row_inbound.kind == (uint8_t)kind);
+    uint16_t itotal = 0;
+    if (inbound) {
+        itotal            = s_row_inbound.count;
+        s_inbound_reading = true;
+    }
+    taskEXIT_CRITICAL(&s_row_mux);
+
+    if (inbound) {
+        if (single) {
+            /* Same "at or past total answers OK with no line" rule as the
+             * live read below, so a host parses one response shape. */
+            if (idx < itotal) {
+                emit_row_line((uint16_t)idx, itotal, &s_row_inbound.row[idx], nfields);
+            }
+        } else {
+            for (uint16_t i = 0; i < itotal; i++) {
+                emit_row_line(i, itotal, &s_row_inbound.row[i], nfields);
+            }
+        }
+        taskENTER_CRITICAL(&s_row_mux);
+        s_inbound_reading = false;
+        taskEXIT_CRITICAL(&s_row_mux);
+        return AT_R_OK;
     }
 
     uint16_t total;

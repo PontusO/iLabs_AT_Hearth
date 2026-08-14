@@ -56,7 +56,10 @@
  * task, which holds the stack lock throughout; every mutation of this store
  * from the AT parser task goes through a bridge function in main.cpp that
  * takes the same lock, so no host apply can land between the view being
- * handed out and the encoder reading it.
+ * handed out and the encoder reading it. The OTHER mutator, task 6's
+ * adjudicated SetTargets, needs no argument at all: it runs on the CHIP
+ * event loop task itself, so it and the encode are the same thread of
+ * execution and cannot interleave.
  *
  * ---- THE MERGE RULE ----
  *
@@ -103,6 +106,7 @@
  * MatterReportingAttributeChangeCallback. */
 #include <app/clusters/energy-evse-server/energy-evse-server.h>
 
+#include "mt_at.h"
 #include "mt_evse.h"
 #include "mt_matter.h"
 
@@ -493,31 +497,76 @@ public:
     /* ---- the 8 command handlers ------------------------------------------- */
 
     /*
-     * Disable / EnableCharging: both commands ARE in the accepted list,
-     * unconditionally (esp_matter_cluster.cpp:3397-3398 creates them), so a
-     * controller can invoke them today. This round gives the host no
-     * adjudication surface for either (design spec 7.2 lists the MatterEvse
-     * API and it has none), and the firmware cannot honour them on its own:
-     * SupplyState is host-pushed state, so "enabled" is a claim only the host
-     * can make. Failure, not Success, for the HearthDemDelegate reason
-     * (main.cpp): an unimplemented handler that answers Success is a silent
-     * lie on the wire, while a failure is a visible one. Forwarding them over
-     * +MTCMD the way Round B forwards Boost is the natural way to implement
-     * them and is a deliberate non-goal of this round.
+     * ---- Disable / EnableCharging: the EVSE's entire control surface ----
+     *
+     * Both are MANDATORY commands on this cluster and esp-matter creates
+     * both unconditionally (esp_matter_cluster.cpp:3397-3398), so a
+     * controller can invoke them the moment the endpoint exists. They used
+     * to answer Failure, on the reasoning that the round gave the host no
+     * adjudication surface for them; that reasoning was right about the
+     * firmware being unable to honour them alone and wrong about the
+     * conclusion. An EVSE that appears in a controller and refuses both to
+     * start and to stop charging is not a partially implemented EVSE, it is
+     * one with no control surface at all: everything else on the cluster is
+     * a reading. So they forward, as ORDINARY SCALAR +MTCMD commands on the
+     * standard 1000 ms path, the shape Round B gave the water heater's
+     * Boost.
+     *
+     * Neither one writes any attribute on allow, and that is deliberate.
+     * SupplyState, State and ChargingEnabledUntil are host-pushed
+     * (AT+MTMEAS cluster 0x0099); the host is the single authority on what
+     * the hardware actually did, and a firmware that also wrote them would
+     * make two authorities disagree the first time a relay failed to close.
+     * The host reports the resulting state by pushing it, the same division
+     * HearthWhmDelegate::HandleBoost keeps with BoostState.
      */
     chip::Protocols::InteractionModel::Status Disable() override
     {
-        return chip::Protocols::InteractionModel::Status::Failure;
+        /* No fields: NULL reproduces mt_cmd_forward()'s exact four-field
+         * +MTCMD line. */
+        bool allow = mt_cmd_forward_fields(mEndpointId, EE::Id, EE::Commands::Disable::Id, NULL);
+        return allow ? chip::Protocols::InteractionModel::Status::Success
+                     : chip::Protocols::InteractionModel::Status::Failure;
     }
 
+    /*
+     * EnableCharging forwards three fields:
+     * "<chargingEnabledUntil>,<minimumChargeCurrent>,<maximumChargeCurrent>".
+     *
+     * chargingEnabledUntil is NULLABLE (null means "charge indefinitely"),
+     * and null is rendered as an EMPTY TOKEN between its commas, which is
+     * mt_cmd_forward_fields()'s documented convention for a field position
+     * that carries no value (mt_at.h, and the microwave's
+     * SetCookingParameters is the shipped precedent). Round B's Boost uses
+     * a presence MASK instead, but that exists to carry the VALUES of
+     * optional BOOLEANS, which an empty token cannot express, and it costs
+     * a field of its own; with one nullable number and no booleans here,
+     * the empty token says the same thing in the position the value would
+     * have occupied.
+     *
+     * No validation of the two currents: Instance::HandleEnableCharging
+     * (energy-evse-server.cpp:296-322) has already rejected either below
+     * kMinimumChargeCurrentLimit and min > max with ConstraintError before
+     * this is reached.
+     */
     chip::Protocols::InteractionModel::Status EnableCharging(
         const chip::app::DataModel::Nullable<uint32_t> &enableChargeTime,
         const int64_t &minimumChargeCurrent, const int64_t &maximumChargeCurrent) override
     {
-        (void)enableChargeTime;
-        (void)minimumChargeCurrent;
-        (void)maximumChargeCurrent;
-        return chip::Protocols::InteractionModel::Status::Failure;
+        char fields[48];
+        if (enableChargeTime.IsNull()) {
+            snprintf(fields, sizeof(fields), ",%lld,%lld", (long long)minimumChargeCurrent,
+                     (long long)maximumChargeCurrent);
+        } else {
+            snprintf(fields, sizeof(fields), "%lu,%lld,%lld",
+                     (unsigned long)enableChargeTime.Value(), (long long)minimumChargeCurrent,
+                     (long long)maximumChargeCurrent);
+        }
+
+        bool allow = mt_cmd_forward_fields(mEndpointId, EE::Id, EE::Commands::EnableCharging::Id,
+                                           fields);
+        return allow ? chip::Protocols::InteractionModel::Status::Success
+                     : chip::Protocols::InteractionModel::Status::Failure;
     }
 
     /*
@@ -553,24 +602,186 @@ public:
     }
 
     /*
-     * SetTargets is TASK 6's, and is deliberately left refusing until then.
-     * The adjudicated design (design spec 3.2) stages the incoming rows into
-     * the shared staging buffer, raises +MTCMD carrying only a row count,
-     * lets the host pull the rows with AT+MTROWGET inside its own command
-     * window and answer AT+MTCMDRESP, and only then merges through the same
-     * path an AT-side apply uses. None of that machinery exists yet, and the
-     * honest intermediate state is a refusal: accepting the schedule without
-     * the host's verdict would apply a charging plan the sketch never saw,
-     * which is precisely the decision this round hands to the host.
+     * ---- SetTargets: the adjudicated path ----------------------------------
+     *
+     * A controller's charging schedule does not become this device's
+     * schedule until the host has seen it and said yes. The sequence, all
+     * of it on the CHIP event loop task:
+     *
+     *   1. claim the inbound row stage and decode the schedule into it
+     *   2. raise "+MTCMD:<seq>,<ep>,153,5,<rowcount>" (cluster 0x0099,
+     *      command 0x05) and block 3000 ms
+     *   3. the host pulls the rows with AT+MTROWGET=<ep>,1 and answers
+     *      AT+MTCMDRESP=<seq>,<0|1>
+     *   4. on allow, merge through mt_evse_targets_apply_locked(), which is
+     *      the SAME function an AT+MTROWAPPLY commits through, so the two
+     *      paths cannot end up storing different things from the same rows
+     *   5. release the claim, on every path out
+     *
+     * The rows never travel in the +MTCMD line. 70 rows is about 2450
+     * bytes, MT_CMD_LINE_MAX is 112 and snprintf truncates in silence, and
+     * pushing that as unsolicited URCs into a sketch sitting in loop() is
+     * B166 at scale (mt_at.h's inbound-stage comment carries the full
+     * argument). The host pulls, inside a command where it is doing nothing
+     * but draining the response.
+     *
+     * ---- WHAT IS NOT RE-VALIDATED HERE ----
+     *
+     * Instance::ValidateTargets() (energy-evse-server.cpp:370-468) has
+     * already run and returned Success, so day-bit reuse across entries,
+     * a time past 1439, both SoC rules of the SOC feature, a target with
+     * neither optional, a negative added energy, and more than ten targets
+     * in one day are all impossible by the time this is called. None of
+     * them is checked again.
+     *
+     * mt_rows_stage() below is nonetheless the WRITER for this buffer, and
+     * it validates as it writes. That is not a second opinion on CHIP's
+     * work, it is the codec's own field table doing what it does on the AT
+     * path too, and it catches the three things CHIP's validation does NOT
+     * reject and this firmware cannot represent: a schedule entry with a
+     * dayOfWeekForSequence of ZERO (ValidateTargets accepts it, since
+     * `bitmap & 0` never collides and `|= 0` never marks a day), the
+     * unbounded NUMBER of such entries that follows from it, and any total
+     * row count past the 70 a stage holds. Those answer ConstraintError and
+     * ResourceExhausted respectively, before the host is ever woken.
      */
     chip::Protocols::InteractionModel::Status SetTargets(
         const chip::app::DataModel::DecodableList<
             EE::Structs::ChargingTargetScheduleStruct::DecodableType> &chargingTargetSchedules)
         override
     {
-        (void)chargingTargetSchedules;
-        ESP_LOGW(TAG, "ep %u: SetTargets refused (adjudication lands in task 6)", mEndpointId);
-        return chip::Protocols::InteractionModel::Status::Failure;
+        using chip::Protocols::InteractionModel::Status;
+
+        mt_row_stage_t *stage = mt_rows_inbound_claim(mEndpointId, MT_ROW_KIND_EVSE_TARGET);
+        if (stage == nullptr) {
+            /* Another forward owns the stage, or the host is still
+             * streaming the previous one out. Busy is retryable and true;
+             * Failure would tell the controller its schedule was rejected. */
+            ESP_LOGW(TAG, "ep %u: SetTargets busy, inbound stage in use", mEndpointId);
+            return Status::Busy;
+        }
+
+        /*
+         * Flatten (schedule, target) into rows, the same flattening
+         * mt_evse_targets_get_locked() uses in the other direction: the day
+         * bitmap is repeated on every row of its group, which is what lets
+         * one row shape carry a nested payload.
+         *
+         * Re-iterating the DecodableList is sound: ValidateTargets() has
+         * already walked this very list, begin() takes a copy of the TLV
+         * reader, and the message buffer is alive for the whole invoke.
+         */
+        Status decode_err = Status::Success;
+        uint16_t n = 0;
+        auto sched_iter = chargingTargetSchedules.begin();
+        while (decode_err == Status::Success && sched_iter.Next()) {
+            const auto &entry = sched_iter.GetValue();
+            uint8_t bits = entry.dayOfWeekForSequence.GetField(
+                static_cast<EE::TargetDayOfWeekBitmap>(kAllDaysMask));
+
+            auto tgt_iter = entry.chargingTargets.begin();
+            while (tgt_iter.Next()) {
+                if (n >= MT_ROW_MAX_ROWS) {
+                    /* Only reachable through the zero-bitmap hole described
+                     * above: seven real day groups cap at 7 x 10 = 70. */
+                    decode_err = Status::ResourceExhausted;
+                    break;
+                }
+                const auto &t = tgt_iter.GetValue();
+
+                mt_row_t row;
+                memset(&row, 0, sizeof(row));
+                row.nfields = kRowFields;
+                row.present[kRowDay]   = true;
+                row.value[kRowDay]     = bits;
+                row.present[kRowTime]  = true;
+                row.value[kRowTime]    = t.targetTimeMinutesPastMidnight;
+                if (t.targetSoC.HasValue()) {
+                    row.present[kRowSoC] = true;
+                    row.value[kRowSoC]   = t.targetSoC.Value();
+                }
+                if (t.addedEnergy.HasValue()) {
+                    row.present[kRowEnergy] = true;
+                    row.value[kRowEnergy]   = t.addedEnergy.Value();
+                }
+
+                if (mt_rows_stage(stage, mEndpointId, MT_ROW_KIND_EVSE_TARGET, n, &row) !=
+                    MT_ROW_OK) {
+                    decode_err = Status::ConstraintError;
+                    break;
+                }
+                n++;
+            }
+            if (decode_err == Status::Success && tgt_iter.GetStatus() != CHIP_NO_ERROR) {
+                decode_err = Status::InvalidCommand;
+            }
+        }
+        if (decode_err == Status::Success && sched_iter.GetStatus() != CHIP_NO_ERROR) {
+            decode_err = Status::InvalidCommand;
+        }
+
+        if (decode_err != Status::Success) {
+            ESP_LOGW(TAG, "ep %u: SetTargets not representable, status 0x%02x", mEndpointId,
+                     (unsigned)chip::to_underlying(decode_err));
+            mt_rows_inbound_release();
+            return decode_err;
+        }
+
+        /* Blocks up to 3000 ms. The host fetches the rows and answers in
+         * that window; see mt_at.h for what a slow loop() costs. */
+        bool allow = mt_rows_inbound_forward(mEndpointId, EE::Id, EE::Commands::SetTargets::Id);
+
+        Status out;
+        if (!allow) {
+            /* Deny or timeout: nothing was touched, the stored schedule is
+             * byte-identical, and the controller is told so. */
+            out = Status::Failure;
+        } else if (n == 0) {
+            /*
+             * AN EMPTY SET IS A NO-OP HERE AND A CLEAR ON THE AT PATH, and
+             * that asymmetry is deliberate rather than an inconsistency to
+             * be tidied away.
+             *
+             * The fabric has a separate ClearTargets command, so an empty
+             * SetTargets means "I am setting no days", which merges to
+             * nothing; CHIP's own reference store behaves identically (its
+             * merge loop simply never iterates). The AT surface has NO
+             * clear verb, so AT+MTROWAPPLY=<ep>,1,0 had to become one, and
+             * mt_evse_targets_apply_locked() treats a zero-row set as
+             * "empty the store" for exactly that reason.
+             *
+             * Which means this branch must NOT call the merge: handing it a
+             * count of 0 would wipe the user's whole schedule because a
+             * controller sent an empty list. Both paths still agree about
+             * every set that has rows in it, which is the property that
+             * matters; they disagree only about a request the two surfaces
+             * genuinely spell differently.
+             */
+            ESP_LOGI(TAG, "ep %u: SetTargets with no schedules, nothing to merge", mEndpointId);
+            out = Status::Success;
+        } else {
+            int rc = mt_evse_targets_apply_locked(mEndpointId, stage);
+            /* Already on the CHIP task inside a command dispatch, so the
+             * stack lock is held and the _locked variant is the right call;
+             * going through mt_matter_evse_targets_apply() would take
+             * ChipStackLock a second time and deadlock on it. */
+            if (rc == MT_ROW_OK) {
+                out = Status::Success;
+            } else {
+                /* Includes MT_ROW_ERR_PERSIST, "merged but not saved".
+                 * Failure, matching ClearTargets() below, which answers
+                 * Failure for its own save() failure: within one cluster
+                 * the two write commands report a durability failure the
+                 * same way. The AT path reports it as +MTERR:7 instead,
+                 * because it has a code for exactly that and the fabric
+                 * does not. */
+                ESP_LOGE(TAG, "ep %u: SetTargets merge failed, rc %d", mEndpointId, rc);
+                out = Status::Failure;
+            }
+        }
+
+        mt_rows_inbound_release();
+        return out;
     }
 
     /*
@@ -643,6 +854,23 @@ public:
      * loaded at boot, and this guard is here so a future path that reaches a
      * delegate before the rebuild has loaded it cannot encode a view over an
      * uninitialised store.
+     *
+     * A RETRY THAT STILL CANNOT READ THE STORE NOW FAILS THE READ, and this
+     * changed when the fabric write path landed. m_loaded false means a
+     * previous LoadTargets() hit a TRANSIENT NVS failure, so this store is
+     * empty only because nobody could find out what is in it (a corrupt
+     * blob marks itself loaded, precisely so it does not land here). The
+     * retry's outcome used to be discarded, which made an unreadable store
+     * block a merge but not a read: a controller was told "no schedule",
+     * confidently, about a schedule that may be sitting intact in flash.
+     * That was survivable while the fabric could only read. It is not now:
+     * the natural response to an empty schedule is to send a new one, and
+     * the user would be re-authoring a plan that was never lost. An honest
+     * failure is retryable; a confident empty list is not recoverable
+     * because nothing about it looks wrong. Instance::HandleGetTargets
+     * (energy-evse-server.cpp:472-485) passes a non-Success status straight
+     * through as the command status and sends no response, which is exactly
+     * the shape wanted.
      */
     chip::Protocols::InteractionModel::Status GetTargets(
         chip::app::DataModel::List<const EE::Structs::ChargingTargetScheduleStruct::Type>
@@ -650,6 +878,14 @@ public:
     {
         if (!m_loaded) {
             (void)LoadTargets();
+            if (!m_loaded) {
+                chargingTargetSchedules =
+                    chip::app::DataModel::List<
+                        const EE::Structs::ChargingTargetScheduleStruct::Type>();
+                ESP_LOGE(TAG, "ep %u: charging targets unreadable, failing GetTargets",
+                         mEndpointId);
+                return chip::Protocols::InteractionModel::Status::Failure;
+            }
         }
         refresh_views();
         chargingTargetSchedules =

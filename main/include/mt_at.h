@@ -13,6 +13,11 @@
 
 #include <stdint.h>
 
+/* mt_row_stage_t, for the inbound (fabric-originated) row stage at the end
+ * of this header. Pure C with no IDF dependency, so it costs a C++ caller
+ * nothing. */
+#include "mt_rows.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -198,6 +203,96 @@ bool mt_cmd_forward_fields(uint16_t ep, uint32_t cluster, uint32_t command, cons
  * consumer: SelfTestRequest.
  */
 void mt_cmd_notify(uint16_t ep, uint32_t cluster, uint32_t command);
+
+/* ---- the inbound row stage (energy round C2, task 6) ------------------- *
+ *
+ * A fabric-originated command that carries a MULTI-ROW payload (today only
+ * EnergyEvse SetTargets) cannot put that payload in its "+MTCMD" line: a
+ * full charging schedule is 70 rows, about 2450 bytes, and MT_CMD_LINE_MAX
+ * is 112 with snprintf truncating silently. Pushing it as unsolicited URCs
+ * while the sketch is inside loop() is defect B166 at scale, which is the
+ * one failure this protocol has already been bitten by on hardware. So the
+ * rows are PULLED, not pushed: the delegate stages them here, the "+MTCMD"
+ * line carries only a row count, and the host fetches the rows with
+ * AT+MTROWGET inside a command where it is doing nothing but draining the
+ * response.
+ *
+ * These three functions are called from the CHIP event loop task, in this
+ * order, exactly once each per forwarded command:
+ *
+ *   1. mt_rows_inbound_claim(ep, kind)
+ *                                take the buffer, fill it with mt_rows_stage()
+ *   2. mt_rows_inbound_forward() raise the +MTCMD, block for the verdict
+ *   3. mt_rows_inbound_release() give the buffer back, ALWAYS
+ *
+ * Between 2 and 3 the caller may read the stage (that is where the merge
+ * happens on an allow); it must not write it.
+ *
+ * ---- WHY THIS IS A SEPARATE BUFFER FROM THE HOST'S OWN STAGE ----
+ *
+ * The AT+MTROW family stages the HOST's row sets in its own file-static
+ * buffer, written only by the AT parser task. This one is written only by
+ * the CHIP event loop task. They are deliberately not the same buffer, and
+ * the ~5.6 KB that costs buys the elimination of a defect class that
+ * nothing but a bench run could ever have caught: sharing one buffer means
+ * a controller's SetTargets overwrites whatever set the host happens to
+ * have half-uploaded for the same (ep, kind), and if the two happen to hold
+ * the same number of rows, the host's next AT+MTROWAPPLY passes every check
+ * and commits THE CONTROLLER'S rows as if they were its own. Separate
+ * buffers make that unrepresentable rather than merely unlikely, and they
+ * leave cmd_mtrowapply()'s existing unlocked pass of the host stage by
+ * pointer exactly as safe as it was before this task, because the second
+ * writer it was warned about never materialised in that buffer.
+ */
+
+/*
+ * Take ownership of the inbound row stage and return it, emptied and
+ * stamped with (ep, kind), ready to be filled with mt_rows_stage(). The
+ * identity is stamped at claim time so that a set of ZERO rows is still
+ * addressable by AT+MTROWGET; staging no rows at all is a legitimate
+ * outcome (a controller may send an empty schedule list) and the host must
+ * be able to fetch "nothing" as promptly as it fetches seventy rows.
+ *
+ * Returns NULL if the stage is already owned by another forward, or if the
+ * AT parser task is streaming a previous set out; the caller must then
+ * refuse the command (Status::Busy is the honest answer) rather than
+ * proceed.
+ */
+mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind);
+
+/*
+ * Publish the staged set and forward the command: raises
+ * "+MTCMD:<seq>,<ep>,<cluster>,<command>,<rowcount>", where <rowcount> is
+ * read from the stage itself so the count on the wire can never disagree
+ * with what AT+MTROWGET will serve, then blocks for the host's verdict.
+ * Returns true on allow, false on deny or timeout (the timeout also raises
+ * "+MTCMDTO:<seq>", exactly as a scalar forward does).
+ *
+ * The window is 3000 ms, not the 1000 ms every scalar forward uses, because
+ * this is the only forward whose verdict requires a ROUND TRIP first: the
+ * host has to pull the rows before it can judge them. The host library's
+ * HearthLink::command() refuses a re-entrant call, so a sketch that
+ * receives the +MTCMD inside its URC dispatch cannot fetch from there and
+ * has to defer to the next loop() iteration. THE CONSEQUENCE A SKETCH
+ * AUTHOR MUST KNOW: a loop() iteration that blocks for more than roughly
+ * 2.7 seconds (3000 ms less the fetch and the two line turnarounds) has its
+ * schedules DENIED. Denied, not silently mis-applied: the deny path returns
+ * a failure status to the controller and leaves the stored schedule
+ * byte-identical, so a slow sketch loses the update visibly.
+ *
+ * <rowcount> may be 0. The row kind is not on the wire: it is implied by
+ * (cluster, command), which is how the host knows which AT+MTROWGET <kind>
+ * to ask for.
+ */
+bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command);
+
+/*
+ * Give the inbound stage back. Must be called on every path out of the
+ * command handler, including the ones that never forwarded: nothing else
+ * ever frees the claim, and a leaked claim makes every later forward on any
+ * endpoint answer Busy until reboot.
+ */
+void mt_rows_inbound_release(void);
 
 #ifdef __cplusplus
 }
