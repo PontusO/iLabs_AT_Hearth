@@ -373,9 +373,31 @@ static bool parse_u64(const char *s, uint64_t *out)
  *
  * Governs cmd_mtrow/cmd_mtrowclear/cmd_mtrowapply/cmd_mtrowget (the
  * AT+MTROW family) and cmd_mtmeterid, all normalised to this rule in fix
- * round 1. cmd_mtdemcap and cmd_mtmodes/cmd_mtchimesounds already followed
- * it and are unchanged. The next hand-parsed command should follow it from
- * the start rather than re-deriving the split.
+ * round 1. cmd_mtdemcap already followed the FULL rule (its at_split_args()
+ * arity check answers a bare ERROR for the wrong token count, exactly the
+ * SHAPE half above) and is unchanged.
+ *
+ * cmd_mtmodes and cmd_mtchimesounds do NOT follow the SHAPE half of this
+ * rule, and this is a PRE-EXISTING divergence this round found but did not
+ * change: both answer +MTERR:1 for every parse failure without exception,
+ * including a structurally missing token (mt_at.c's own ":805-807"/
+ * ":1419-1421" empty-args checks, a mode/id with no label/name to follow it)
+ * and an unterminated quote (":862", ":960", ":1460"), all of which this
+ * rule's SHAPE arm says should be a bare ERROR instead. What this round's
+ * fix round 1 (task 9) actually normalised across cmd_mtdemcap/cmd_mtmodes/
+ * cmd_mtchimesounds and the AT+MTROW family/cmd_mtmeterid was ONE specific
+ * case only: a present-but-unparseable NUMERIC token, which the three older
+ * commands already answered +MTERR:1 for and the newer ones were changed to
+ * match. It did not touch, and was never asked to touch, the older two
+ * commands' SHAPE-error behaviour, which predates this round and is left
+ * alone: they are shipped, and a host may already depend on their answer.
+ * Do not "fix" cmd_mtmodes/cmd_mtchimesounds into matching the SHAPE half
+ * of this rule without treating it as its own deliberate, version-noted
+ * change; it would alter what a shipped command answers for a line a host
+ * may already be sending today.
+ *
+ * The next hand-parsed command should follow the full rule (both halves)
+ * from the start rather than re-deriving the split.
  */
 
 /* Map a bridge attribute result onto this personality's +MTERR code space. */
@@ -2564,9 +2586,10 @@ static int row_err_to_mterr(int r)
  * <kind> selects the field table (mt_rows_field_count()); the number of
  * trailing field tokens must equal it EXACTLY, always, including a
  * present-but-empty token for an absent optional: "AT+MTROW=5,1,0,64,480,80"
- * for a 4-field kind is five tokens, one short, a form error (bare ERROR),
- * while "AT+MTROW=5,1,0,64,480,80," (trailing comma) is a complete,
- * well-formed row whose last field is an absent optional. That is what
+ * for a 4-field kind is six comma-separated tokens, one short of the seven
+ * the line needs (3 header tokens plus 4 fields), a form error (bare ERROR),
+ * while "AT+MTROW=5,1,0,64,480,80," (trailing comma) is seven tokens, a
+ * complete, well-formed row whose last field is an absent optional. That is what
  * keeps "the line was too short" (form) distinguishable from "the host
  * chose not to supply this optional" (a value-level concept): the token
  * must still be present, only its content may be empty.
