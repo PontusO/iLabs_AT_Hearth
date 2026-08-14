@@ -1143,6 +1143,15 @@ int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *q
 #define MT_ROW_ERR_ENDPOINT   (-4) /* unknown endpoint: mt_at.c answers +MTERR:2   */
 #define MT_ROW_ERR_NO_PAYLOAD (-5) /* endpoint exists, no payload of this row kind:
                                      * mt_at.c answers +MTERR:4                    */
+/*
+ * The set was applied to the live data model but could not be written to
+ * NVS, so it will not survive a reboot (energy round C2 task 4). Reported
+ * rather than rolled back: a controller reading the payload back would
+ * already see the new value, so "applied but not durable" is the only true
+ * answer. mt_at.c answers +MTERR:7, the same MT_ERR_PERSIST every other NVS
+ * failure in this firmware answers.
+ */
+#define MT_ROW_ERR_PERSIST    (-6)
 
 /*
  * Commit a validated staged set for (ep, kind) (design spec 2.6, "AT+MTROW
@@ -1167,10 +1176,13 @@ int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *q
  * NOT read stage->row[] when the match fails.
  *
  * Returns MT_ROW_OK, MT_ROW_ERR_ENDPOINT (unknown ep), MT_ROW_ERR_NO_PAYLOAD
- * (ep exists, no cluster stores this row kind), or MT_ROW_ERR_VALUE for a
- * semantic rejection only the live model can see (e.g. CHIP's own day-bit
- * reuse check running against the MERGED result, not just the applied
- * set). Must hold ChipStackLock, the standing mt_matter_* bridge convention
+ * (ep exists, no cluster stores this row kind), MT_ROW_ERR_PERSIST (applied
+ * but not saved), or MT_ROW_ERR_VALUE for a semantic rejection only the live
+ * model can see (e.g. CHIP's own day-bit reuse check running against the
+ * MERGED result, not just the applied set; for kind 1, more than seven
+ * distinct day bitmaps or more than ten targets sharing one, neither of
+ * which the row codec knows about because neither is a property of a
+ * row). Must hold ChipStackLock, the standing mt_matter_* bridge convention
  * (every bridge function that touches the CHIP stack takes it; see the
  * project's "Every mt_matter_* bridge function must hold the CHIP stack
  * lock" note).
@@ -1243,6 +1255,138 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
  * MT_EVSE_MAX above. Headroom over the one meter endpoint Phase 3 adds.
  */
 #define MT_METER_MAX 2  /* Electrical Utility Meter endpoints per composition */
+
+/* ---- Energy EVSE delegate and targets store (energy round C2, task 4) ---- */
+
+/*
+ * The EVSE delegate-pool handout, mt_devtypes.cpp's thunk protocol, and the
+ * mt_matter_whm_delegate_alloc() shape exactly: the endpoint id is taken at
+ * handout, and the thunk calls this AFTER energy_evse::create() has returned
+ * the real id, attaching the result with
+ * esp_matter::cluster::set_delegate_and_init_callback() and the SDK's own
+ * EnergyEvseDelegateInitCB.
+ *
+ * The attach must come AFTER the thunk's feature::add() calls, not through
+ * config.energy_evse.delegate before create(): EnergyEvseDelegateInitCB
+ * (esp_matter_delegate_callbacks.cpp:257-268) snapshots the endpoint's
+ * FeatureMap when it news the Instance, and that snapshot is what makes
+ * Instance::ValidateTargets() demand a targetSoC in every charging target on
+ * a variant-0 (SOC) endpoint. A delegate attached before the SOC bit is
+ * added would be Instance'd against a FeatureMap without it.
+ *
+ * Allocation also LOADS the endpoint's stored schedule from NVS, which is
+ * how the SDK's unenforced "LoadTargets() must be called before
+ * GetTargets()" contract is satisfied on this firmware (mt_evse.cpp's file
+ * comment carries the citation).
+ *
+ * Returns nullptr once MT_EVSE_MAX slots are handed out, the same
+ * abort-the-boot-rebuild contract as every other pool in this file.
+ */
+void *mt_matter_evse_delegate_alloc(uint16_t ep);
+
+/*
+ * AT+MTMEAS field ids for the EnergyEvse cluster (0x0099), the wire contract
+ * task 7's 0x99 branch serves. Same family-selection rule as MT_MEAS_F_* /
+ * MT_WHM_F_* / MT_DEM_F_* above: the cluster id the host passes decides
+ * which table applies, so the spaces may overlap numerically.
+ *
+ * Every EnergyEvse attribute is served by the cluster's Instance from the
+ * delegate's cache, so this push is the ONLY way a host can set any of them
+ * and none of them ever raises a +MTATTR URC. Three of them
+ * (UserMaximumChargeCurrent, RandomizationDelayWindow,
+ * ApproximateEVEfficiency) are additionally writable from the fabric, and
+ * routing the host side through here rather than AT+MTATTR is a deliberate
+ * avoidance of DE270 (a write to a delegate-served attribute over AT+MTATTR
+ * collapses to a bare ERROR because the SDK discards the provider's status),
+ * not a fix for it.
+ *
+ * A field whose attribute is absent from the endpoint answers
+ * MT_ATTR_ERR_ATTRIBUTE rather than being silently cached: fields 14/15 on a
+ * variant-1 (no SOC) endpoint, and today also fields 7, 8 and 13, whose
+ * attributes esp-matter declares creators for and never calls (see
+ * mt_evse.cpp).
+ */
+#define MT_EVSE_F_STATE                   0  /* enum8 0..6,  unsigned */
+#define MT_EVSE_F_SUPPLY_STATE            1  /* enum8 0..5,  unsigned */
+#define MT_EVSE_F_FAULT_STATE             2  /* enum8 0..15, unsigned */
+#define MT_EVSE_F_CHARGING_ENABLED_UNTIL  3  /* u32 epoch-s, unsigned, nullable */
+#define MT_EVSE_F_CIRCUIT_CAPACITY        4  /* int64 mA, signed, min 0 */
+#define MT_EVSE_F_MIN_CHARGE_CURRENT      5  /* int64 mA, signed, min 0 */
+#define MT_EVSE_F_MAX_CHARGE_CURRENT      6  /* int64 mA, signed, min 0 */
+#define MT_EVSE_F_USER_MAX_CHARGE_CURRENT 7  /* int64 mA, signed, min 0, optional attr */
+#define MT_EVSE_F_RANDOMIZATION_WINDOW    8  /* u32 s 0..86400, unsigned, optional attr */
+#define MT_EVSE_F_NEXT_CHARGE_START       9  /* u32 epoch-s, unsigned, nullable, PREF */
+#define MT_EVSE_F_NEXT_CHARGE_TARGET     10  /* u32 epoch-s, unsigned, nullable, PREF */
+#define MT_EVSE_F_NEXT_CHARGE_ENERGY     11  /* int64 mWh, signed, min 0, nullable, PREF */
+#define MT_EVSE_F_NEXT_CHARGE_SOC        12  /* u8 0..100, unsigned, nullable, PREF */
+#define MT_EVSE_F_APPROX_EFFICIENCY      13  /* u16, unsigned, nullable, optional attr */
+#define MT_EVSE_F_STATE_OF_CHARGE        14  /* u8 0..100, unsigned, nullable, SOC */
+#define MT_EVSE_F_BATTERY_CAPACITY       15  /* int64 mWh, signed, min 0, nullable, SOC */
+#define MT_EVSE_F_SESSION_ID             16  /* u32, unsigned, nullable */
+#define MT_EVSE_F_SESSION_DURATION       17  /* u32 s, unsigned, nullable */
+#define MT_EVSE_F_SESSION_ENERGY_CHARGED 18  /* int64 mWh, signed, min 0, nullable */
+
+/*
+ * Push ONE EnergyEvse attribute onto ep, the single-pair form of the
+ * measurement-push contract (task 7 adds the multi-pair AT+MTMEAS branch on
+ * top of the same code path, so the two cannot drift). Validates before it
+ * applies and reports the attribute dirty on success.
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT unknown ep,
+ * MT_ATTR_ERR_CLUSTER ep carries no EnergyEvse cluster, MT_ATTR_ERR_ATTRIBUTE
+ * the field's attribute is not present on this endpoint (wrong variant, or
+ * one of the three esp-matter never creates), MT_ATTR_ERR_VALUE unknown field
+ * id or a value outside that field's XML range, MT_ATTR_ERR_FAILED internal
+ * (no pool slot serves ep). Holds ChipStackLock.
+ */
+int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value);
+
+/*
+ * Commit a staged charging-target set (row kind 1) as ep's schedule, MERGING
+ * by day: days present in the applied set replace those days entirely, days
+ * absent are unchanged, and a stage that does not match (ep, kind) or carries
+ * no rows clears the whole stored schedule. See mt_matter_rows_apply() above
+ * for the shared contract and mt_evse.cpp for why the merge is not a
+ * wholesale replace.
+ *
+ * stage points at mt_at.c's file-static staging buffer, not a copy (the
+ * struct is several KB and the AT parser task's stack is 6144 bytes); it is
+ * consumed before the call returns and the pointer is never retained.
+ *
+ * Task 5 routes mt_matter_rows_apply()'s kind-1 arm here. Returns an MT_ROW_*
+ * code. Holds ChipStackLock.
+ */
+int mt_matter_evse_targets_apply(uint16_t ep, const mt_row_stage_t *stage);
+
+/*
+ * Read stored row idx of ep's charging schedule, and ep's total stored row
+ * count. Rows are the flattened (schedule, target) sequence in stored order;
+ * out->present[] carries the absent-optional convention (SoC and added energy
+ * are each optional, at least one is always present). Task 5 routes
+ * mt_matter_rows_get()'s kind-1 arm here. Returns an MT_ROW_* code, plus
+ * MT_ROW_ERR_VALUE if idx is at or past the total. Holds ChipStackLock.
+ */
+int mt_matter_evse_targets_get(uint16_t ep, uint16_t idx, mt_row_t *out, uint16_t *total);
+
+/*
+ * Number of stored rows for ep, AT+MTROWGET's bulk-loop bound and the check
+ * that answers +MTERR:2 / +MTERR:4 before any row is read. Task 5 routes
+ * mt_matter_rows_total()'s kind-1 arm here. MT_ROW_* code, ChipStackLock.
+ */
+int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total);
+
+/*
+ * Erase every stored charging schedule, RAM and NVS, for AT+MTFRESET only.
+ * The schedule is USER DATA: it survives AT+MTRESET and a power cycle, and
+ * only a factory reset removes it. That is the exact opposite of the
+ * composition, which survives AT+MTFRESET's Matter reset half because it is a
+ * product definition rather than something an end user chose; the two live in
+ * the same NVS partition with deliberately opposite lifetimes.
+ *
+ * Returns 0 on success, -1 if the NVS erase failed (the RAM stores are
+ * cleared either way, and the caller reboots immediately after).
+ */
+int mt_matter_evse_targets_erase_all(void);
 
 #ifdef __cplusplus
 }

@@ -2405,9 +2405,11 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
     energy_evse::config_t c;
     c.energy_evse_mode.delegate = mode_delegate;
     /* c.energy_evse.delegate and c.device_energy_management.delegate both
-     * stay null: the former is Task 4's (see the class comment above), the
-     * latter is fixed up below through mt_add_dem_triple(), the one
-     * unambiguous DEM wiring site every other caller in this file uses. */
+     * stay null here: the former is attached after create() below (the pool
+     * alloc needs the real endpoint id, and the SOC feature must be added
+     * before the init callback snapshots the FeatureMap), the latter is
+     * fixed up through mt_add_dem_triple(), the one unambiguous DEM wiring
+     * site every other caller in this file uses. */
     endpoint_t *ep = energy_evse::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
     if (ep == nullptr) {
         return nullptr;
@@ -2415,17 +2417,39 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
     uint16_t ep_id = endpoint::get_id(ep);
     mt_matter_modebase_delegate_set_endpoint(mode_delegate, ep_id);
 
+    cluster_t *evse_cl = cluster::get(ep, chip::app::Clusters::EnergyEvse::Id);
+    if (evse_cl == nullptr) {
+        ESP_LOGE(TAG, "EnergyEvse cluster missing after create");
+        return nullptr;
+    }
+
     if (variant == 0) {
-        cluster_t *evse_cl = cluster::get(ep, chip::app::Clusters::EnergyEvse::Id);
-        if (evse_cl == nullptr) {
-            ESP_LOGE(TAG, "EnergyEvse cluster missing after create");
-            return nullptr;
-        }
         if (cluster::energy_evse::feature::soc_reporting::add(evse_cl) != ESP_OK) {
             ESP_LOGE(TAG, "adding SOC reporting feature failed (energy evse)");
             return nullptr;
         }
     }
+
+    /*
+     * The 34-pure-virtual delegate (task 4, mt_evse.cpp), attached LAST of
+     * the EnergyEvse work and deliberately so: EnergyEvseDelegateInitCB
+     * snapshots this endpoint's FeatureMap when it news the cluster Instance
+     * (esp_matter_delegate_callbacks.cpp:257-268), and that snapshot is what
+     * makes Instance::ValidateTargets() demand a targetSoC in every charging
+     * target on a variant-0 endpoint. Attaching through
+     * config.energy_evse.delegate before create() would have been Instance'd
+     * against a FeatureMap the soc_reporting::add() above had not touched
+     * yet. The alloc also loads the endpoint's stored schedule from NVS,
+     * satisfying the SDK's unenforced "LoadTargets before GetTargets"
+     * contract. Same post-create attach the water heater's WHM delegate uses.
+     */
+    void *evse_delegate = mt_matter_evse_delegate_alloc(ep_id);
+    if (evse_delegate == nullptr) {
+        ESP_LOGE(TAG, "EVSE delegate pool exhausted (energy evse)");
+        return nullptr;
+    }
+    esp_matter::cluster::set_delegate_and_init_callback(
+        evse_cl, esp_matter::cluster::delegate_cb::EnergyEvseDelegateInitCB, evse_delegate);
 
     if (!mt_graft_electrical_sensor(ep, true, "energy evse")) {
         return nullptr;

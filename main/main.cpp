@@ -199,6 +199,9 @@
 #include "mt_comp_store.h"
 #include "mt_composition.h"
 #include "mt_devtypes.h"
+/* Energy round C2 task 4: the lock-held internals of mt_evse.cpp, which the
+ * five mt_matter_evse_* bridge functions below wrap in ChipStackLock. */
+#include "mt_evse.h"
 #include "mt_matter.h"
 #include "mt_transport.h"
 
@@ -6084,6 +6087,61 @@ extern "C" int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value)
         return MT_ATTR_ERR_VALUE;
     }
     return (st == Status::Success) ? MT_ATTR_OK : MT_ATTR_ERR_VALUE;
+}
+
+/*
+ * ---- Energy EVSE (energy round C2, task 4) ---------------------------------
+ *
+ * The delegate, its charging-target store and that store's NVS persistence
+ * all live in mt_evse.cpp; only these five bridge functions live here, and
+ * they exist here for exactly one reason: ChipStackLock is defined in this
+ * file and nowhere else. Each is a thin lock-and-forward to the matching
+ * mt_evse_*_locked() (mt_evse.h), which is where the _locked suffix comes
+ * from and what it means.
+ *
+ * The lock is not bookkeeping here, it is the load-bearing half of the
+ * "GetTargets() returns a non-owning view" contract: the CHIP task calls
+ * GetTargets() and the response encoder back to back while holding the
+ * stack, so taking the same lock is what stops an AT-side apply from
+ * rewriting the schedule between the view being handed out and the encoder
+ * reading it. See mt_evse.cpp's file comment.
+ */
+extern "C" int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value)
+{
+    ChipStackLock lock;
+
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::EnergyEvse::Id) == nullptr) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    return mt_evse_meas_apply_locked(ep, &field, &value, 1);
+}
+
+extern "C" int mt_matter_evse_targets_apply(uint16_t ep, const mt_row_stage_t *stage)
+{
+    ChipStackLock lock;
+    return mt_evse_targets_apply_locked(ep, stage);
+}
+
+extern "C" int mt_matter_evse_targets_get(uint16_t ep, uint16_t idx, mt_row_t *out,
+                                          uint16_t *total)
+{
+    ChipStackLock lock;
+    return mt_evse_targets_get_locked(ep, idx, out, total);
+}
+
+extern "C" int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total)
+{
+    ChipStackLock lock;
+    return mt_evse_targets_total_locked(ep, total);
+}
+
+extern "C" int mt_matter_evse_targets_erase_all(void)
+{
+    ChipStackLock lock;
+    return mt_evse_targets_erase_all_locked();
 }
 
 /* --------------------------------------------------------------------------- */

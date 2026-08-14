@@ -230,6 +230,13 @@ static int cmd_mtfreset(at_type_t type, char *args)
     if (mt_comp_store_erase() != 0) {
         return MT_ERR_PERSIST;
     }
+    /* Same reason, and the deliberate asymmetry with the composition: a
+     * charging schedule is USER data, so it survives AT+MTRESET and only a
+     * factory reset removes it, where the composition is a product
+     * definition and survives this command's Matter-reset half. */
+    if (mt_matter_evse_targets_erase_all() != 0) {
+        return MT_ERR_PERSIST;
+    }
     at_uart_write_line("OK");
     vTaskDelay(pdMS_TO_TICKS(100));
     mt_matter_factory_reset();
@@ -2219,6 +2226,11 @@ static int row_err_to_mterr(int r)
     case MT_ROW_ERR_KIND:       return MT_ERR_NO_CLUSTER;
     case MT_ROW_ERR_ENDPOINT:   return MT_ERR_NO_ENDPOINT;
     case MT_ROW_ERR_NO_PAYLOAD: return MT_ERR_NO_ATTRIBUTE;
+    /* Applied to the live model but not written to NVS (energy round C2
+     * task 4): the same +MTERR:7 every other persistence failure in this
+     * file answers, so a host can tell "it will not survive a reboot" from
+     * "it was rejected". */
+    case MT_ROW_ERR_PERSIST:    return MT_ERR_PERSIST;
     case MT_ROW_ERR_FORM:       return MT_R_ERROR;
     default:                    return MT_R_ERROR;
     }
