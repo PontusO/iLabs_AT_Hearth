@@ -463,20 +463,21 @@ PHASE3_COMPOSITION = [
     # endpoint ids are assigned sequentially from 1, so index = endpoint
     # id - 1 throughout this table (index 13 = ep 14, and so on).
     #
-    # ModeBase delegate pool budget (MT_MB_MAX_LISTS = 12, mt_matter.h,
-    # raised from 8 by energy round C1): this composition consumes 10 of
-    # the 12 slots: RVC 2 (RvcRunMode + RvcCleanMode, slot 12), microwave
-    # 1 (slot 13), fridge parent 1 (slot 14, its own
+    # ModeBase delegate pool budget (MT_MB_MAX_LISTS = 16, mt_matter.h:
+    # 8 -> 12 in energy round C1, 12 -> 16 in C2): this composition
+    # consumes 12 of the 16 slots: RVC 2 (RvcRunMode + RvcCleanMode, slot
+    # 12), microwave 1 (slot 13), fridge parent 1 (slot 14, its own
     # RefrigeratorAndTCCMode), the two fridge cabinets 2 (slots 15-16,
     # Cooler conditional cluster each), oven cavity 1 (slot 18, OvenMode),
     # water heater 1 (slot 23, WaterHeaterMode, energy round B), battery
     # storage 1 and standalone DEM 1 (slots 26-27, DeviceEnergyManagement
-    # Mode each, energy round C1). The remaining 2 are DELIBERATE
-    # headroom (see the round C1 comment at slot 25); a table edit that
-    # took the pool past 12 without raising MT_MB_MAX_LISTS would abort
-    # the boot rebuild when the pool ran dry (mk_* thunks return null on
-    # exhaustion and a failed create aborts the whole composition,
-    # CLAUDE.md).
+    # Mode each, energy round C1), and the EVSE 2 (slot 28,
+    # EnergyEvseMode plus the DEM triple's DeviceEnergyManagementMode,
+    # energy round C2). The remaining 4 are DELIBERATE headroom (see the
+    # round C1 comment at slot 25); a table edit that took the pool past
+    # 16 without raising MT_MB_MAX_LISTS would abort the boot rebuild
+    # when the pool ran dry (mk_* thunks return null on exhaustion and a
+    # failed create aborts the whole composition, CLAUDE.md).
     (14, "0x0070"),        # refrigerator parent (composed trio round)
     (15, "0x0071,0,13"),   # number cabinet under the fridge (index 13 = ep 14)
     (16, "0x0071,1,13"),   # levels cabinet under the fridge
@@ -534,13 +535,22 @@ PHASE3_COMPOSITION = [
     #
     # Budget HEADROOM IS DELIBERATE this round, unlike round B's three
     # exact fits: the pools are proven and the exact-fit experiment ended
-    # with B247 (design spec section 5). Endpoints 27 of
-    # MT_COMP_MAX_ENDPOINTS 28 (CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_
-    # COUNT stays MT_COMP_MAX_ENDPOINTS + 1 = 29, the B247 invariant:
-    # root endpoint 0 counts against the SDK's limit); measurement pool 6
-    # of MT_MEAS_MAX 8; ModeBase pool 10 of MT_MB_MAX_LISTS 12; DEM
-    # delegate pool 2 of MT_DEM_MAX 4. All four budgets are pinned by
-    # their own self-tests, so a table edit that overruns one fails the
+    # with B247 (design spec section 5).
+    #
+    # The standing figures, updated by round C2 and by its final review
+    # (which found the three pool self-tests had gone BLIND to slot 28:
+    # their if-chains had no 0x050C arm, so they kept asserting the
+    # pre-C2 constants and passed while measuring nothing about the slot
+    # the round added). Endpoints 28 of MT_COMP_MAX_ENDPOINTS 28, i.e.
+    # ZERO headroom, the table's last free slot spent (CONFIG_ESP_MATTER_
+    # MAX_DYNAMIC_ENDPOINT_COUNT stays MT_COMP_MAX_ENDPOINTS + 1 = 29,
+    # the B247 invariant: root endpoint 0 counts against the SDK's
+    # limit); measurement pool 7 of MT_MEAS_MAX 8; ModeBase pool 12 of
+    # MT_MB_MAX_LISTS 16; DEM delegate pool 3 of MT_DEM_MAX 4; EVSE
+    # delegate pool 1 of MT_EVSE_MAX 2; MeterIdentification pool 0 of
+    # MT_METER_MAX 2 (the meter is a Phase 1 staged type only). All six
+    # budgets are now pinned by their own self-tests in
+    # test_mt_regression.py, so a table edit that overruns one fails the
     # host suite instead of the bench's boot rebuild.
     (25, "0x0017"),        # solar power, variant 0 FULL (the composed
                             # 0x0510 sensor graft WITH EEM; variant 1 is
@@ -4495,6 +4505,29 @@ def step_3_26_dem(ctx):
             tag="P3")
 
 
+# Energy round C2 final review, C1: EVERY EnergyEvse command is
+# mustUseTimedInvoke="true" (energy-evse-cluster.xml lines 241-283, all
+# seven of Disable, EnableCharging, EnableDischarging, StartDiagnostics,
+# SetTargets, GetTargets, ClearTargets, checked one by one, not sampled).
+# Without --timedInteractionTimeoutMs the SDK answers 0xc6
+# NEEDS_TIMED_INTERACTION before HearthEvseDelegate ever runs, so NO
+# +MTCMD is raised at all: the allow arm's responder.expect() times out
+# and fails, and, worse, the DENY arm PASSES VACUOUSLY, because its
+# assertion is rc != 0 and rc is nonzero for entirely the wrong reason.
+# The four invocations below were all shipped in that state and could
+# never have exercised the EVSE command surface on any bench.
+#
+# Same value and same reasoning as DOORLOCK_TIMED_INVOKE_MS above (see
+# its comment for why 5000 ms cannot race the adjudication delay: the
+# timed-interaction timer's job is finished the instant the
+# InvokeRequest arrives, which is BEFORE the delegate, the CmdResponder
+# round trip and the firmware's own 1000 ms AT+MTCMDRESP deadline).
+# Kept as a separate constant rather than reusing the door lock's so
+# that a future change to either cluster's window cannot silently move
+# the other's.
+EVSE_TIMED_INVOKE_MS = "5000"
+
+
 def step_3_27_evse(ctx):
     """Energy round C2 (0.12.0), task 13: the EVSE endpoint's identity
     (PHASE3_COMPOSITION 28, endpoint 28, 0x050C variant 0) and the
@@ -4684,7 +4717,9 @@ def step_3_27_evse(ctx):
     # token occupies the position the value would have, the
     # SetCookingParameters interior-gap convention, not Boost's mask).
     handle = invoke_chip(ctx, ["energyevse", "enable-charging", "null",
-                              "6000", "32000", node, str(ep)], timeout=30)
+                              "6000", "32000", node, str(ep),
+                              "--timedInteractionTimeoutMs",
+                              EVSE_TIMED_INVOKE_MS], timeout=30)
     fwd = responder.expect(cluster=153, command=2, verdict=1,
                            payload=[None, 6000, 32000], timeout=5.0)
     s.check("3.27 EnableCharging allow: forward answered, null "
@@ -4697,7 +4732,9 @@ def step_3_27_evse(ctx):
     # EnableCharging deny: a non-null chargingEnabledUntil renders
     # verbatim in the same tail position.
     handle = invoke_chip(ctx, ["energyevse", "enable-charging", "1800",
-                              "6000", "32000", node, str(ep)], timeout=30)
+                              "6000", "32000", node, str(ep),
+                              "--timedInteractionTimeoutMs",
+                              EVSE_TIMED_INVOKE_MS], timeout=30)
     fwd = responder.expect(cluster=153, command=2, verdict=0,
                            payload=[1800, 6000, 32000], timeout=5.0)
     s.check("3.27 EnableCharging deny: forward answered, non-null "
@@ -4710,8 +4747,9 @@ def step_3_27_evse(ctx):
             parse_status(out) == 0x1, tag="P3")
 
     # Disable allow: no tail at all (the four-field line, payload-less).
-    handle = invoke_chip(ctx, ["energyevse", "disable", node, str(ep)],
-                         timeout=30)
+    handle = invoke_chip(ctx, ["energyevse", "disable", node, str(ep),
+                              "--timedInteractionTimeoutMs",
+                              EVSE_TIMED_INVOKE_MS], timeout=30)
     fwd = responder.expect(cluster=153, command=1, verdict=1, timeout=5.0)
     s.check("3.27 Disable allow: forward answered, no tail",
             fwd is not None and fwd["fields"] == [], tag="P3")
@@ -4720,8 +4758,9 @@ def step_3_27_evse(ctx):
             tag="P3")
 
     # Disable deny.
-    handle = invoke_chip(ctx, ["energyevse", "disable", node, str(ep)],
-                         timeout=30)
+    handle = invoke_chip(ctx, ["energyevse", "disable", node, str(ep),
+                              "--timedInteractionTimeoutMs",
+                              EVSE_TIMED_INVOKE_MS], timeout=30)
     fwd = responder.expect(cluster=153, command=1, verdict=0, timeout=5.0)
     s.check("3.27 Disable deny: forward answered", fwd is not None,
             tag="P3")
@@ -7573,6 +7612,76 @@ def register_phase1_t12_negative():
     n('MTMETERID=1,0,"A","B","C",100,200,zz -> +MTERR:1 (src not '
       "numeric)",
       expect_err('AT+MTMETERID=1,0,"A","B","C",100,200,zz', 1))
+
+    # ==== AT+MTMEAS cluster 0x0099 (153, EnergyEvse) ====
+    # Added by round C2's FINAL REVIEW: the round shipped a whole new
+    # AT+MTMEAS cluster branch (mt_at.c's mt_meas_field_signed() 0x0099
+    # arm, mt_matter_evse_set(), mt_evse.cpp's nineteen-field table) with
+    # NO Phase 1 row and no Phase 3 push. Its four sibling clusters
+    # (0x0091, 0x0094, 0x0098, 0x0090/0x0091's pure-form rows) each got
+    # this treatment in their own round; this closes the gap.
+    #
+    # ep 1 (the standard rig's OnOff light) is "any endpoint" here, the
+    # register_phase1_t8/t9/t10 convention, and the rows split into two
+    # groups that prove different things:
+    #
+    #   - The SIGN rows die inside cmd_mtmeas()'s own parse, BEFORE the
+    #     endpoint lookup ever runs (parse_i64 is handed
+    #     mt_meas_field_signed(cluster, field) and refuses a leading
+    #     minus on an unsigned field), so they answer +MTERR:1 on any
+    #     endpoint at all and are state-safe on the single-light rig.
+    #   - The rows on fields the table marks SIGNED parse cleanly and
+    #     reach mt_matter_meas_set(), where ep 1 carries no EnergyEvse
+    #     cluster and answers +MTERR:3. That +MTERR:3 is the POSITIVE
+    #     evidence: getting that far proves the minus was accepted, the
+    #     same differential trick t10's AbsMinPower row uses for 0x0098.
+    #
+    # The signedness split is transcribed from mt_at.c's 0x0099 arm, not
+    # guessed: SIGNED are 4 (CircuitCapacity), 5 (MinChargeCurrent), 6
+    # (MaxChargeCurrent), 7 (UserMaximumChargeCurrent), 11
+    # (NextChargeRequiredEnergy), 15 (BatteryCapacity) and 18
+    # (SessionEnergyCharged); everything else in 0..18 is unsigned, and a
+    # field id ABOVE 18 falls through to the function's signed default.
+    n("MTMEAS=1,153,0 -> +MTERR:1 (0x99 odd tail: field 0 has no value, "
+      "the shape check that runs before any endpoint lookup)",
+      expect_err("AT+MTMEAS=1,153,0", 1))
+    n("MTMEAS=1,153,0,-1 -> +MTERR:1 (minus on State, an unsigned enum8)",
+      expect_err("AT+MTMEAS=1,153,0,-1", 1))
+    n("MTMEAS=1,153,1,-1 -> +MTERR:1 (minus on SupplyState, an unsigned "
+      "enum8)",
+      expect_err("AT+MTMEAS=1,153,1,-1", 1))
+    n("MTMEAS=1,153,3,-1 -> +MTERR:1 (minus on ChargingEnabledUntil, an "
+      "unsigned u32 epoch)",
+      expect_err("AT+MTMEAS=1,153,3,-1", 1))
+    n("MTMEAS=1,153,8,-1 -> +MTERR:1 (minus on RandomizationDelay"
+      "Window, an unsigned u32)",
+      expect_err("AT+MTMEAS=1,153,8,-1", 1))
+    n("MTMEAS=1,153,14,-1 -> +MTERR:1 (minus on StateOfCharge, an "
+      "unsigned u8)",
+      expect_err("AT+MTMEAS=1,153,14,-1", 1))
+    n("MTMEAS=1,153,4,-5000000000 -> +MTERR:3 (CircuitCapacity IS "
+      "signed, so the minus AND the 64-bit width both parse and the "
+      "call reaches the bridge, where ep 1 carries no EnergyEvse "
+      "cluster: the +MTERR:3 is the positive evidence)",
+      expect_err("AT+MTMEAS=1,153,4,-5000000000", 3))
+    n("MTMEAS=1,153,15,-1 -> +MTERR:3 (BatteryCapacity is signed too, "
+      "the same differential)",
+      expect_err("AT+MTMEAS=1,153,15,-1", 3))
+    n("MTMEAS=1,153,18,5000000000 -> +MTERR:3 (SessionEnergyCharged "
+      "past 32 bits parses, the 64-bit value pipeline: same "
+      "differential)",
+      expect_err("AT+MTMEAS=1,153,18,5000000000", 3))
+    n("MTMEAS=1,153,0,1 -> +MTERR:3 (a perfectly well formed push at a "
+      "light endpoint: cluster-not-present, not endpoint-not-present)",
+      expect_err("AT+MTMEAS=1,153,0,1", 3))
+    n("MTMEAS=99,153,0,1 -> +MTERR:2 (unknown endpoint outranks the "
+      "cluster check)",
+      expect_err("AT+MTMEAS=99,153,0,1", 2))
+    n("MTMEAS=1,153,zz,1 -> +MTERR:1 (field token not numeric, before "
+      "the signedness lookup can be consulted at all)",
+      expect_err("AT+MTMEAS=1,153,zz,1", 1))
+    n("MTMEAS=1,153,300,1 -> +MTERR:1 (field id above u8)",
+      expect_err("AT+MTMEAS=1,153,300,1", 1))
 
     n("MTROWAPPLY count-0, both directions, on a real EVSE endpoint "
       "(case a: nothing staged; case b: two rows staged, must be "

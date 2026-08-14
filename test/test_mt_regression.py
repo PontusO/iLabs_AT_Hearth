@@ -3733,28 +3733,43 @@ class TestPhase3Composition(unittest.TestCase):
         self.assertEqual(by_slot[20], "0x0077,0,18")
 
     def test_modebase_pool_budget_holds(self):
-        # MT_MB_MAX_LISTS is 12 (raised from 8 by energy round C1) and
-        # this composition must consume exactly 10 ModeBase delegate
-        # slots (RVC 2, microwave 1, fridge parent 1, two parented
-        # cabinets 2, oven cavity 1, water heater 1, battery storage 1,
-        # standalone DEM 1). The two remaining are DELIBERATE headroom
-        # (design spec section 5), and a table edit that took the pool
-        # past 12 without raising the firmware pool would abort the boot
-        # rebuild on the bench. Consumers by construction: 0x0074 counts
-        # twice (RvcRunMode + RvcCleanMode), 0x0079, 0x0070 and 0x050F
-        # (WaterHeaterMode, either variant) once each, every PARENTED
-        # 0x0071 cabinet once (Cooler or Heater conditional cluster;
-        # standalone cabinets carry no ModeBase cluster), 0x050D once
-        # (DeviceEnergyManagementMode rides BOTH variants: the XML makes
-        # it otherwiseConform, so mt_add_dem_triple() always creates it),
-        # and 0x0018 once but only on VARIANT 0, whose DEM triple is the
-        # over-delivery variant 1 drops.
+        # MT_MB_MAX_LISTS is 16 (mt_matter.h: 8 -> 12 in energy round C1,
+        # 12 -> 16 in C2) and this composition must consume exactly 12
+        # ModeBase delegate slots (RVC 2, microwave 1, fridge parent 1,
+        # two parented cabinets 2, oven cavity 1, water heater 1, battery
+        # storage 1, standalone DEM 1, EVSE 2). The four remaining are
+        # DELIBERATE headroom (design spec section 5), and a table edit
+        # that took the pool past 16 without raising the firmware pool
+        # would abort the boot rebuild on the bench. Consumers by
+        # construction: 0x0074 counts twice (RvcRunMode + RvcCleanMode),
+        # 0x0079, 0x0070 and 0x050F (WaterHeaterMode, either variant)
+        # once each, every PARENTED 0x0071 cabinet once (Cooler or Heater
+        # conditional cluster; standalone cabinets carry no ModeBase
+        # cluster), 0x050D once (DeviceEnergyManagementMode rides BOTH
+        # variants: the XML makes it otherwiseConform, so
+        # mt_add_dem_triple() always creates it), 0x0018 once but only on
+        # VARIANT 0, whose DEM triple is the over-delivery variant 1
+        # drops, and 0x050C TWICE on either variant.
+        #
+        # The 0x050C arm is C2's final-review fix: this test, its
+        # measurement sibling and its DEM sibling all shipped with NO
+        # 0x050C arm at all, so slot 28 fell through every if-chain and
+        # the three assertEquals still matched their pre-C2 constants.
+        # They passed while measuring nothing about the slot the round
+        # added, which is the only automated guard this project has
+        # against a pool overrun. mk_energy_evse() (mt_devtypes.cpp)
+        # consumes two of these on BOTH variants: EnergyEvseMode from its
+        # own config, and DeviceEnergyManagementMode from
+        # mt_add_dem_triple(), which the thunk's own comment calls "the
+        # endpoint's second ModeBase slot". The SOC feature is the only
+        # thing variant 0 adds and it is not a ModeBase cluster, so there
+        # is no variant condition here.
         consumed = 0
         for _slot, dt in PHASE3_COMPOSITION:
             parts = dt.split(",")
             base, parented = parts[0], len(parts) == 3
             variant = parts[1] if len(parts) > 1 else "0"
-            if base == "0x0074":
+            if base in ("0x0074", "0x050C"):
                 consumed += 2
             elif base in ("0x0079", "0x0070", "0x050F", "0x050D"):
                 consumed += 1
@@ -3762,55 +3777,103 @@ class TestPhase3Composition(unittest.TestCase):
                 consumed += 1
             elif base == "0x0018" and variant == "0":
                 consumed += 1
-        self.assertEqual(consumed, 10)
-        self.assertLessEqual(consumed, 12)
+        self.assertEqual(consumed, 12)
+        self.assertLessEqual(consumed, 16)
 
     def test_measurement_pool_budget_holds(self):
         # MT_MEAS_MAX is 8 (raised from 4 by energy round C1) and this
-        # composition must consume exactly 6 EPM/PowerTopology pool
+        # composition must consume exactly 7 EPM/PowerTopology pool
         # pairs: the sensor (21, variant 1 still draws its EPM slot),
         # the meter (22), the FULL water heater (23, the sensor graft),
-        # the heat pump (24), solar power (25) and battery storage (26).
-        # Round B's table hit the then-cap of 4 exactly; this round's
-        # two spare slots are DELIBERATE headroom (design spec section
-        # 5), and a seventh consumer is still fine while an ninth would
-        # abort the boot rebuild, the ModeBase rule's sibling. A
-        # variant-1 water heater would consume nothing, which is part of
-        # why Phase 1 stages it instead of this table carrying it; the
-        # variant-1 solar and battery endpoints Phase 1 stages DO draw a
-        # pair each, but never at the same time as this composition.
+        # the heat pump (24), solar power (25), battery storage (26) and
+        # the EVSE (28, the same mt_graft_electrical_sensor() call, which
+        # mk_energy_evse() makes unconditionally on both variants).
+        # Round B's table hit the then-cap of 4 exactly; the one spare
+        # slot left is DELIBERATE headroom (design spec section 5), and a
+        # ninth consumer would abort the boot rebuild, the ModeBase
+        # rule's sibling. A variant-1 water heater would consume nothing,
+        # which is part of why Phase 1 stages it instead of this table
+        # carrying it; the variant-1 solar and battery endpoints Phase 1
+        # stages DO draw a pair each, but never at the same time as this
+        # composition.
+        #
+        # The 0x050C arm is C2's final-review fix: see the ModeBase
+        # sibling above for why all three of these budget tests shipped
+        # blind to slot 28.
         consumed = 0
         for _slot, dt in PHASE3_COMPOSITION:
             parts = dt.split(",")
             base = parts[0]
             variant = parts[1] if len(parts) > 1 else "0"
-            if base in ("0x0510", "0x0514", "0x0309", "0x0017", "0x0018"):
+            if base in ("0x0510", "0x0514", "0x0309", "0x0017", "0x0018",
+                        "0x050C"):
                 consumed += 1
             elif base == "0x050F" and variant == "0":
                 consumed += 1
-        self.assertEqual(consumed, 6)
+        self.assertEqual(consumed, 7)
         self.assertLessEqual(consumed, 8)
 
     def test_dem_pool_budget_holds(self):
         # MT_DEM_MAX is 4 (new in energy round C1) and this composition
-        # must consume exactly 2 HearthDemDelegate slots: battery
-        # storage variant 0 (26) and the standalone ESA (27). Headroom
-        # is deliberate (design spec section 5): C2's EVSE pair takes
-        # one more and the last stays spare. The delegate is pooled on
-        # BOTH DEM variants (the five ESA attributes are Instance-served
-        # either way, design spec 2.4), which is why the 0x050D arm has
-        # no variant condition while the battery arm does.
+        # must consume exactly 3 HearthDemDelegate slots: battery
+        # storage variant 0 (26), the standalone ESA (27) and the EVSE
+        # (28, whose mt_add_dem_triple() call is unconditional on both
+        # variants). The last slot is deliberate headroom (design spec
+        # section 5). The delegate is pooled on BOTH DEM variants (the
+        # five ESA attributes are Instance-served either way, design spec
+        # 2.4), which is why the 0x050D and 0x050C arms have no variant
+        # condition while the battery arm does.
+        #
+        # The 0x050C arm is C2's final-review fix: see the ModeBase
+        # sibling above for why all three of these budget tests shipped
+        # blind to slot 28.
         consumed = 0
         for _slot, dt in PHASE3_COMPOSITION:
             parts = dt.split(",")
             base = parts[0]
             variant = parts[1] if len(parts) > 1 else "0"
-            if base == "0x050D":
+            if base in ("0x050D", "0x050C"):
                 consumed += 1
             elif base == "0x0018" and variant == "0":
                 consumed += 1
-        self.assertEqual(consumed, 2)
+        self.assertEqual(consumed, 3)
         self.assertLessEqual(consumed, 4)
+
+    def test_evse_pool_budget_holds(self):
+        # MT_EVSE_MAX is 2 (mt_matter.h, new in energy round C2) and this
+        # composition must consume exactly 1 HearthEvseDelegate slot,
+        # slot 28. Added by C2's final review alongside the three fixes
+        # above: the round created a fifth firmware pool and pinned none
+        # of it here, while its three siblings were being corrected for
+        # having gone blind. Every 0x050C endpoint draws a slot on either
+        # variant (the delegate serves all nineteen attributes on both;
+        # the SOC feature only changes what ValidateTargets() enforces).
+        #
+        # The bound matters more than usual for this pool: the final
+        # review also found mk_energy_evse() taking its capacity decision
+        # AFTER energy_evse::create(), so an overrun left a live,
+        # delegate-less endpoint a controller could see and AT+MTEP?
+        # could not. That is fixed in-firmware by
+        # mt_matter_evse_reserve(), but this assertion is what keeps a
+        # table edit from reaching the boundary at all.
+        consumed = sum(1 for _slot, dt in PHASE3_COMPOSITION
+                       if dt.split(",")[0] == "0x050C")
+        self.assertEqual(consumed, 1)
+        self.assertLessEqual(consumed, 2)
+
+    def test_meter_pool_budget_holds(self):
+        # MT_METER_MAX is 2 (mt_matter.h, new in energy round C2). The
+        # PERMANENT composition declares NO Electrical Utility Meter at
+        # all: 0x0511 has no cluster commands, so Phase 3 has nothing to
+        # drive on it and Phase 1's staged scratch compositions carry it
+        # instead (t_row_evse_meter_staged, t_row_meter_pool_exhaustion,
+        # which deliberately declares three to prove the third is
+        # refused). Pinned at zero so a future table edit that adds one
+        # has to come here and think about the staged rows first.
+        consumed = sum(1 for _slot, dt in PHASE3_COMPOSITION
+                       if dt.split(",")[0] == "0x0511")
+        self.assertEqual(consumed, 0)
+        self.assertLessEqual(consumed, 2)
 
     def test_slot_twentyone_and_twentytwo_are_the_electrical_pair(self):
         # Energy round A, task 5: the variant assignment is deliberately
