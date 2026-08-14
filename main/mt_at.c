@@ -2644,49 +2644,6 @@ static int cmd_mtrowget(at_type_t type, char *args)
     return AT_R_OK;
 }
 
-/*
- * Weak, fail-closed stubs for the three mt_matter_rows_* bridge functions
- * (declared and fully documented in mt_matter.h): they exist ONLY so the
- * firmware links before the C++ implementation (main.cpp, a later task
- * that wires a row kind to a live store) exists. "weak" so a later strong
- * definition in main.cpp silently wins at final link with no edit needed
- * here; remove this block once that definition exists (grep
- * "mt_matter_rows_" in main.cpp to check). Every call answers as if the
- * endpoint does not exist: a real, defined MT_ROW_* code, not a crash and
- * not an uninitialised out-param, and honest about there being no real
- * bridge behind it yet.
- */
-__attribute__((weak)) int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
-{
-    (void)ep;
-    (void)kind;
-    (void)stage;
-    return MT_ROW_ERR_ENDPOINT;
-}
-
-__attribute__((weak)) int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
-                                              mt_row_t *out, uint16_t *total)
-{
-    (void)ep;
-    (void)kind;
-    (void)idx;
-    (void)out;
-    if (total) {
-        *total = 0;
-    }
-    return MT_ROW_ERR_ENDPOINT;
-}
-
-__attribute__((weak)) int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
-{
-    (void)ep;
-    (void)kind;
-    if (total) {
-        *total = 0;
-    }
-    return MT_ROW_ERR_ENDPOINT;
-}
-
 /* ---- dispatch table & registration ------------------------------------ */
 
 static const at_command_t s_cmds[] = {

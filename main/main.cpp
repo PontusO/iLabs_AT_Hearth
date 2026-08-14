@@ -6144,6 +6144,70 @@ extern "C" int mt_matter_evse_targets_erase_all(void)
     return mt_evse_targets_erase_all_locked();
 }
 
+/*
+ * ---- nested row payloads (AT+MTROW family, energy round C2 task 5) --------
+ *
+ * mt_matter_rows_apply/get/total are the single entry points mt_at.c calls
+ * (declared and documented in mt_matter.h); they dispatch on <kind> to
+ * whichever store actually owns that row shape. Kind 1
+ * (MT_ROW_KIND_EVSE_TARGET) is the only kind this firmware knows today: it
+ * forwards straight into the mt_matter_evse_targets_* bridge functions
+ * above, which already take ChipStackLock and forward again into
+ * mt_evse.cpp's _locked store. This dispatcher therefore takes no lock of
+ * its own and never touches the CHIP stack directly, only through the
+ * callee, so there is no recursive-lock question to answer.
+ *
+ * mt_at.c's cmd_mtrow/cmd_mtrowapply/cmd_mtrowget already reject any kind
+ * mt_rows_field_count() does not know (an unknown row shape, +MTERR:3)
+ * before ever reaching here, so the default arm below is only reachable if
+ * a future kind is added to mt_rows.c's field table without a matching
+ * store being wired in here yet. MT_ROW_ERR_KIND is exactly the "no such
+ * kind" answer mt_at.c's row_err_to_mterr() maps to +MTERR:3, the same code
+ * the earlier guard already gives, so the two layers agree even though this
+ * arm should never fire in practice.
+ *
+ * Task 2 shipped weak, fail-closed stub definitions of these three symbols
+ * in mt_at.c purely so the firmware could link before this store existed;
+ * this task removes those stubs, and this strong definition is what the
+ * linker now resolves to.
+ */
+extern "C" int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
+{
+    switch (kind) {
+    case MT_ROW_KIND_EVSE_TARGET:
+        return mt_matter_evse_targets_apply(ep, stage);
+    default:
+        return MT_ROW_ERR_KIND;
+    }
+}
+
+extern "C" int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx, mt_row_t *out,
+                                  uint16_t *total)
+{
+    switch (kind) {
+    case MT_ROW_KIND_EVSE_TARGET:
+        return mt_matter_evse_targets_get(ep, idx, out, total);
+    default:
+        if (total) {
+            *total = 0;
+        }
+        return MT_ROW_ERR_KIND;
+    }
+}
+
+extern "C" int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
+{
+    switch (kind) {
+    case MT_ROW_KIND_EVSE_TARGET:
+        return mt_matter_evse_targets_total(ep, total);
+    default:
+        if (total) {
+            *total = 0;
+        }
+        return MT_ROW_ERR_KIND;
+    }
+}
+
 /* --------------------------------------------------------------------------- */
 
 /*
