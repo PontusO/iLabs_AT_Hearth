@@ -2474,6 +2474,109 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
     return ep;
 }
 
+/*
+ * ---- Electrical Utility Meter 0x0511 (energy round C2, task 8) -----------
+ *
+ * Design record: ARCHITECTURE.md 8.6/8.10/8.12 (the declared-but-never-
+ * called disease, now in its third organ, and the two feature-bit rules),
+ * mt_meter.cpp's file comment (the MeterIdentification Instance fix this
+ * device type exists to exercise).
+ *
+ * electrical_utility_meter::config_t (esp_matter_endpoint.h:1121-1125) is a
+ * descriptor plus a bare meter_identification::config_t (common::config_t,
+ * no delegate field: mt_meter.cpp's file comment has the full citation for
+ * why there is not even a hook). add() (esp_matter_endpoint.cpp:2209-2231)
+ * calls add_device_type() and cluster::meter_identification::create() and
+ * nothing else: no identify, no feature, the same "descriptor-only
+ * config_t" shape mk_refrigerator()/mk_oven() above already hand-add
+ * Identify onto.
+ *
+ * meter_identification::create() (esp_matter_cluster.cpp:4652-4677) builds
+ * only THREE of the cluster's five attributes beyond the two globals
+ * (FeatureMap, ClusterRevision): MeterType, PointOfDelivery and
+ * MeterSerialNumber, all still MANAGED_INTERNALLY (dead reads until
+ * mt_meter_register_all() runs; see mt_meter.cpp). Two are missing and
+ * hand-added here:
+ *
+ *   - ProtocolVersion: cluster::meter_identification::attribute::
+ *     create_protocol_version() exists (esp_matter_attribute.cpp:5313-5318)
+ *     but create() never calls it (verified against the create() body
+ *     above: no reference to it anywhere in that function), so without this
+ *     line it would not even be a dead MANAGED_INTERNALLY attribute; it
+ *     would not exist on the wire at all.
+ *   - PowerThreshold: only feature::power_threshold::add() creates it
+ *     (esp_matter_feature.cpp:4694-4703, its body calls
+ *     attribute::create_power_threshold()), which is also what advertises
+ *     the feature bit. The DEM iron rule (ARCHITECTURE.md 8.12) applies to
+ *     this cluster identically to DeviceEnergyManagement: a hand-set
+ *     FeatureMap bit with no matching feature::add() call would advertise
+ *     PowerThreshold conformance with no ember attribute and no command
+ *     entry behind it, so this always goes through
+ *     feature::power_threshold::add(), never a raw FeatureMap write.
+ *
+ * Identify is hand-added for a conformance reason, not decoration: the
+ * device type XML (data_model/1.5.1/device_types/
+ * ElectricalUtilityMeter.xml) declares
+ * classification superset="Meter Reference Point", and Meter Reference
+ * Point's own body (MeterReferencePoint.xml) makes Identify
+ * mandatoryConform. A superset conformance is transitive: this device type
+ * inherits every mandatory element of the device type it is a superset of.
+ * esp-matter's electrical_utility_meter::add() delivers neither cluster
+ * (see above), so this thunk hand-adds Identify, the same after-create()
+ * shape mk_refrigerator()/mk_oven() use for their own superset-inherited
+ * Identify.
+ *
+ * TimeSyncCond (both XMLs' conditionRequirements: the Root Node must carry
+ * Time Synchronization) was checked against this firmware's ACTUAL root
+ * endpoint, not inferred from a Kconfig symbol, and found ABSENT:
+ * root_node::add() (esp_matter_endpoint.cpp:60-104) creates access_control,
+ * basic_information, general_commissioning, network_commissioning,
+ * general_diagnostics, administrator_commissioning,
+ * operational_credentials, group_key_management, ICD (if enabled), and the
+ * WiFi/Thread diagnostics clusters. Time Synchronization is not among them.
+ * CONFIG_SUPPORT_TIME_SYNCHRONIZATION_CLUSTER is never set to y anywhere in
+ * sdkconfig.defaults (its one mention there is a comment explaining a
+ * LINK-TIME dependency the water valve has on the cluster's symbols, not an
+ * enablement of the cluster itself), and no file in this firmware ever
+ * calls cluster::time_synchronization::create() on any endpoint. This is
+ * disclosed, not fixed: adding Time Synchronization to the root endpoint is
+ * a decision with consequences for every device type in the composition,
+ * out of this task's scope and out of this round's (task 8 brief, step 3).
+ */
+static endpoint_t *mk_electrical_utility_meter(node_t *n, uint8_t variant)
+{
+    (void)variant;
+    electrical_utility_meter::config_t c;
+    endpoint_t *ep = electrical_utility_meter::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep == nullptr) {
+        return nullptr;
+    }
+
+    /* Identify: transitively mandatory (superset of Meter Reference Point,
+     * see above), not delivered by add(). Hand-added, same shape as every
+     * other descriptor-only device type in this file. */
+    cluster::identify::config_t ic;
+    if (cluster::identify::create(ep, &ic, CLUSTER_FLAG_SERVER) == nullptr) {
+        return nullptr;
+    }
+
+    cluster_t *mi_cl = cluster::get(ep, chip::app::Clusters::MeterIdentification::Id);
+    if (mi_cl == nullptr) {
+        ESP_LOGE(TAG, "MeterIdentification cluster missing after create");
+        return nullptr;
+    }
+    if (cluster::meter_identification::feature::power_threshold::add(mi_cl) != ESP_OK) {
+        ESP_LOGE(TAG, "adding power threshold feature failed (electrical utility meter)");
+        return nullptr;
+    }
+    if (cluster::meter_identification::attribute::create_protocol_version(mi_cl, NULL, 0) == nullptr) {
+        ESP_LOGE(TAG, "adding ProtocolVersion attribute failed (electrical utility meter)");
+        return nullptr;
+    }
+
+    return ep;
+}
+
 /* IDs come from esp_matter, never from a literal. */
 static const mt_devtype_entry_t s_devtypes[] = {
     { on_off_light::get_device_type_id(),            mk_on_off_light,            "on_off_light",            0 },
@@ -2529,6 +2632,8 @@ static const mt_devtype_entry_t s_devtypes[] = {
     { battery_storage::get_device_type_id(),          mk_battery_storage,         "battery_storage",         1 },
     { device_energy_management::get_device_type_id(), mk_dem,                     "device_energy_management", 1 },
     { energy_evse::get_device_type_id(),               mk_energy_evse,             "energy_evse",              1 },
+    { electrical_utility_meter::get_device_type_id(), mk_electrical_utility_meter,
+      "electrical_utility_meter", 0 },
 };
 
 static const size_t s_devtype_count = sizeof(s_devtypes) / sizeof(s_devtypes[0]);

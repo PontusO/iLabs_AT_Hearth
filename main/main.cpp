@@ -6518,6 +6518,16 @@ extern "C" void app_main(void)
      */
     mt_chime_register_all();
 
+    /*
+     * Energy round C2, task 8: the MeterIdentification cluster's own
+     * disease, same window and same "must land before esp_matter::start()"
+     * reasoning as AirQuality and Chime just above. Full citation trail
+     * (esp-matter never constructs the Instance this cluster needs, and why
+     * that is only discoverable by reading the SDK, not by testing this
+     * firmware) is mt_meter.cpp's file comment.
+     */
+    mt_meter_register_all();
+
     /* Bring up the Matter stack (BLE commissioning + WiFi or Thread transport). */
     esp_err_t err = esp_matter::start(app_event_cb);
     if (err != ESP_OK) {

@@ -1259,11 +1259,48 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
 
 /*
  * How many Electrical Utility Meter endpoints one composition can carry.
- * Task 8/9 size the MeterIdentification Instance pool this constant bounds
- * (main.cpp), the same "name reserved ahead of the consumer" shape as
- * MT_EVSE_MAX above. Headroom over the one meter endpoint Phase 3 adds.
+ * Task 8 sizes the MeterIdentification Instance pool this constant bounds
+ * (mt_meter.cpp, not main.cpp: reserved by name here in task 3 before task 8
+ * decided the implementation earned its own translation unit), the same
+ * "name reserved ahead of the consumer" shape as MT_EVSE_MAX above. Headroom
+ * over the one meter endpoint Phase 3 adds.
  */
 #define MT_METER_MAX 2  /* Electrical Utility Meter endpoints per composition */
+
+/* ---- Meter Identification Instance pool (energy round C2, task 8) ------ */
+
+/*
+ * Feature bitmask every chip::app::Clusters::MeterIdentification::Instance
+ * in mt_meter.cpp's pool is constructed with, and
+ * mk_electrical_utility_meter()'s (mt_devtypes.cpp) single source of truth
+ * for its own feature::power_threshold::add() call, so the ember FeatureMap
+ * and the Instance's own copy cannot independently drift: the same "one
+ * accessor, two callers" shape mt_air_quality_feature_mask() above uses for
+ * AirQuality. The two calls do NOT need to run in any particular order
+ * relative to each other: Instance::Read() (meter-identification-server.cpp)
+ * answers Attributes::FeatureMap::Id by encoding the BitMask given at
+ * construction, never by reading ember's FeatureMap back, so neither call is
+ * a snapshot of the other's output. See mt_meter.cpp's file comment for the
+ * full citation trail, including why this needed checking at all (an
+ * earlier task in this round recorded a false ordering claim of exactly
+ * this shape for the EVSE delegate, corrected in f5a3ad9).
+ */
+uint32_t mt_meter_feature_mask(void);
+
+/*
+ * Construct a chip::app::Clusters::MeterIdentification::Instance for every
+ * live endpoint carrying the MeterIdentification cluster, and Init() it.
+ * Nothing in esp-matter does this: mt_meter.cpp's file comment has the full
+ * citation trail for why. Call once, from app_main's pre-esp_matter::start()
+ * window, the mt_chime_register_all() call site: Instance::Init() only
+ * touches AttributeAccessInterfaceRegistry, which needs the composition's
+ * clusters to already exist but neither the CHIP event loop nor a timer,
+ * the same safety argument mt_air_quality_register_all() and
+ * mt_chime_register_all() both state in full.
+ *
+ * Defined in mt_meter.cpp, which owns the MT_METER_MAX pool above.
+ */
+void mt_meter_register_all(void);
 
 /* ---- Energy EVSE delegate and targets store (energy round C2, task 4) ---- */
 

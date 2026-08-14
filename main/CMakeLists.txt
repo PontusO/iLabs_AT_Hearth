@@ -10,6 +10,7 @@ idf_component_register(
         "mt_comp_store.c"
         "mt_devtypes.cpp"
         "mt_evse.cpp"
+        "mt_meter.cpp"
         "mt_rows.c"
         "mt_transport.c"
     INCLUDE_DIRS
