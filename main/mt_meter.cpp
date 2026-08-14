@@ -117,12 +117,15 @@
  * counter as matching endpoints are found, not by composition index.
  */
 
+#include <cstring>
+
 #include <esp_log.h>
 #include <esp_matter.h>
 
 #include <app/clusters/meter-identification-server/meter-identification-server.h>
 
 #include "mt_matter.h"
+#include "mt_meter.h"
 
 static const char *TAG = "mt_meter";
 
@@ -219,6 +222,22 @@ alignas(Instance) uint8_t s_meter_storage[MT_METER_MAX][sizeof(Instance)];
  */
 uint16_t s_meter_reserved = 0;
 
+/*
+ * Find the Instance mt_meter_register_all() built for ep, or nullptr. Linear
+ * scan over MT_METER_MAX (2) slots: not worth a map for a pool this small,
+ * the same reasoning the EVSE/DEM/WHM pools in mt_evse.cpp and main.cpp give
+ * for their own evse_for()/dem_for()/whm_for() helpers.
+ */
+Instance *find_instance(uint16_t ep)
+{
+    for (uint16_t i = 0; i < MT_METER_MAX; i++) {
+        if (s_meter[i].used && s_meter[i].ep == ep) {
+            return s_meter[i].instance;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 extern "C" uint32_t mt_meter_feature_mask(void)
@@ -292,4 +311,140 @@ extern "C" void mt_meter_register_all(void)
         s_meter[slot].instance = inst;
         slot++;
     }
+}
+
+/*
+ * AT+MTMETERID's bridge (energy round C2, task 9). The caller
+ * (mt_matter_meter_set_identity(), main.cpp) holds ChipStackLock and has
+ * already confirmed ep exists and carries the MeterIdentification cluster;
+ * this function does the pool lookup, the field-level validation, and the
+ * apply. See mt_meter.h for why the split between the two files falls
+ * exactly here.
+ *
+ * ---- WHY THERE IS NO READ-BACK VERB (design spec 6.3) ----
+ *
+ * Deliberate, not missing. Two independent reasons, either one sufficient
+ * on its own:
+ *
+ *   1. The identity is host-originated. The host already knows every value
+ *      it pushed, and the round A reconcile pattern re-pushes configuration
+ *      like this after a co-processor reboot, so a read-back would only
+ *      ever return what the host already has.
+ *   2. A full identity line does not fit the host's own receive limit.
+ *      HEARTH_LINE_MAX is 255 bytes (src/HearthLink.h, the host library)
+ *      and a worst-case AT+MTMETERID push comes to 265 bytes (13-byte
+ *      command prefix, a 5-digit endpoint, a 1-digit type, three 64-byte
+ *      quoted strings, two 20-character signed int64 fields and one
+ *      1-digit enum, comma-separated: cmd_mtmeterid's comment in mt_at.c
+ *      has the field-by-field arithmetic). A +MTMETERID reply carrying the
+ *      same five fields back would be the same order of size: over the
+ *      255-byte limit HearthLink::readLine() enforces by silently
+ *      discarding the whole line (src/HearthLink.cpp), not by erroring, so
+ *      a read-back verb here would not fail loudly, it would vanish.
+ *      Splitting the read across several lines would work around the limit
+ *      rather than respect it, and nothing in this round's
+ *      AT+MTROWGET-style paging fits five differently-typed scalar fields
+ *      cleanly. Simplest to have no read at all, which reason 1 already
+ *      makes safe.
+ */
+int mt_meter_set_identity_locked(uint16_t ep, const mt_meter_identity_t *id)
+{
+    using namespace chip::app::Clusters::MeterIdentification;
+    using chip::app::Clusters::Globals::PowerThresholdSourceEnum;
+    /* PowerThresholdStruct is a namespace (its payload type is
+     * PowerThresholdStruct::Type), not a type itself, so it needs a
+     * namespace alias here rather than a using-declaration. */
+    namespace PowerThresholdStruct = chip::app::Clusters::Globals::Structs::PowerThresholdStruct;
+    using chip::app::DataModel::MakeNullable;
+
+    Instance *inst = find_instance(ep);
+    if (inst == nullptr) {
+        /* Cluster present (the caller already checked) but no pool slot
+         * serves this endpoint: cannot happen once mt_meter_register_all()
+         * has run over the whole composition at boot, the same defensive
+         * answer mt_evse_meas_apply_locked() gives for its own pool. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    /* ---- validate everything before applying anything (all-or-nothing,
+     * the AT+MTMEAS / AT+MTDEMCAP precedent): once this block passes, every
+     * SetXxx() call below is expected to succeed, so a bad later field can
+     * never leave an earlier one applied. ---- */
+
+    if (id->meter_type > static_cast<uint8_t>(MeterTypeEnum::kGeneric)) {
+        return MT_ATTR_ERR_VALUE;
+    }
+    if (!id->pwr_present && !id->apparent_present) {
+        /* PowerThresholdStruct's "choice b" (meter-identification-cluster
+         * .xml): at least one of powerThreshold/apparentPowerThreshold is
+         * required. cmd_mtmeterid (mt_at.c) already rejects this at parse
+         * time; re-checked here too, the same double gate
+         * mt_matter_demcap_set() keeps for its own caller's shape checks. */
+        return MT_ATTR_ERR_VALUE;
+    }
+    if (id->src_present &&
+        id->src > static_cast<uint8_t>(PowerThresholdSourceEnum::kEquipment)) {
+        return MT_ATTR_ERR_VALUE;
+    }
+    size_t pod_len      = strlen(id->pod);
+    size_t serial_len   = strlen(id->serial);
+    size_t protocol_len = strlen(id->protocol);
+    if (pod_len > MT_METERID_MAX_STR || serial_len > MT_METERID_MAX_STR ||
+        protocol_len > MT_METERID_MAX_STR) {
+        /* Defensive: cmd_mtmeterid already enforces this length while
+         * scanning the quoted string. Checked again here because this is
+         * the last point before any SetXxx() call, and the whole point of
+         * validating up front is that none of the calls below can fail on
+         * a length it could still have caught. */
+        return MT_ATTR_ERR_VALUE;
+    }
+
+    /* ---- apply ---- */
+
+    PowerThresholdStruct::Type pt;
+    if (id->pwr_present) {
+        pt.powerThreshold.SetValue(id->pwr);
+    }
+    if (id->apparent_present) {
+        pt.apparentPowerThreshold.SetValue(id->apparent);
+    }
+    if (id->src_present) {
+        pt.powerThresholdSource.SetNonNull(static_cast<PowerThresholdSourceEnum>(id->src));
+    } else {
+        pt.powerThresholdSource.SetNull();
+    }
+
+    /*
+     * Every call below is expected to return CHIP_NO_ERROR: the block above
+     * already checked everything each SetXxx() would otherwise reject. A
+     * failure here would be an internal SDK invariant violation, not a
+     * host-recoverable condition, the same class of "should be unreachable"
+     * failure mt_meter_register_all()'s own Init() check documents above;
+     * logged rather than treated as a reason to stop, so one unexpected
+     * failure does not also abandon the fields that would have applied
+     * cleanly after it.
+     */
+    CHIP_ERROR err;
+    err = inst->SetMeterType(MakeNullable(static_cast<MeterTypeEnum>(id->meter_type)));
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "SetMeterType failed for endpoint %u: %" CHIP_ERROR_FORMAT, ep, err.Format());
+    }
+    err = inst->SetPointOfDelivery(MakeNullable(chip::CharSpan(id->pod, pod_len)));
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "SetPointOfDelivery failed for endpoint %u: %" CHIP_ERROR_FORMAT, ep, err.Format());
+    }
+    err = inst->SetMeterSerialNumber(MakeNullable(chip::CharSpan(id->serial, serial_len)));
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "SetMeterSerialNumber failed for endpoint %u: %" CHIP_ERROR_FORMAT, ep, err.Format());
+    }
+    err = inst->SetProtocolVersion(MakeNullable(chip::CharSpan(id->protocol, protocol_len)));
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "SetProtocolVersion failed for endpoint %u: %" CHIP_ERROR_FORMAT, ep, err.Format());
+    }
+    err = inst->SetPowerThreshold(MakeNullable(pt));
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "SetPowerThreshold failed for endpoint %u: %" CHIP_ERROR_FORMAT, ep, err.Format());
+    }
+
+    return MT_ATTR_OK;
 }

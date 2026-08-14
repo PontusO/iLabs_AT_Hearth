@@ -1335,6 +1335,85 @@ bool mt_meter_reserve(void);
  */
 void mt_meter_register_all(void);
 
+/* ---- AT+MTMETERID identity push (energy round C2, task 9) -------------- */
+
+/*
+ * CHIP's own kMaximumStringSize, meter-identification-server.h (private,
+ * so it cannot be referenced by name from here; verify by reading that
+ * header again if the pinned SDK ever moves). PointOfDelivery,
+ * MeterSerialNumber and ProtocolVersion each carry up to this many bytes;
+ * mt_matter_meter_set_identity() rejects anything longer BEFORE calling any
+ * of the Instance's SetXxx() members, since Instance::SetPointOfDelivery()
+ * et al. would reject an oversized span too, but only after
+ * mt_matter_meter_set_identity() may already have applied an earlier field,
+ * which would break the all-or-nothing contract below.
+ */
+#define MT_METERID_MAX_STR 64
+
+/*
+ * AT+MTMETERID's identity payload, hand-parsed off the raw line in mt_at.c:
+ * a quoted string may carry a comma, so at_split_args() cannot be used here,
+ * the same reason AT+MTMODES and AT+MTCHIMESOUNDS parse by hand (see
+ * cmd_mtmeterid's own comment, mt_at.c). Plain C only: no CHIP type may
+ * cross into mt_at.c.
+ *
+ * pod/serial/protocol are NUL-terminated, printable ASCII (0x20..0x7E), up
+ * to MT_METERID_MAX_STR bytes, and point into cmd_mtmeterid's own stack
+ * buffers: valid only for the duration of the
+ * mt_matter_meter_set_identity() call. The Instance copies every byte it
+ * needs before returning (fixed internal buffers, meter-identification-
+ * server.h), so nothing here is held past the call.
+ *
+ * pwr_present/apparent_present/src_present follow the AT+MTROW empty-field
+ * convention (design spec 2.2, "an empty field means absent"): the token is
+ * present on the wire but its content may be empty, represented here as
+ * present=false rather than as a sentinel value in pwr/apparent/src
+ * themselves. At least one of pwr_present and apparent_present must be
+ * true (PowerThresholdStruct's own "choice b",
+ * meter-identification-cluster.xml); mt_matter_meter_set_identity() is
+ * where that rule is enforced, not mt_at.c, so it lives with the struct it
+ * constrains rather than being duplicated at the parse site.
+ */
+typedef struct {
+    uint8_t meter_type;   /* MeterTypeEnum: 0 Utility, 1 Private, 2 Generic */
+    const char *pod;
+    const char *serial;
+    const char *protocol;
+    bool pwr_present;        int64_t pwr;
+    bool apparent_present;   int64_t apparent;
+    bool src_present;        uint8_t src;  /* PowerThresholdSourceEnum:
+                                             * 0 Contract, 1 Regulator,
+                                             * 2 Equipment */
+} mt_meter_identity_t;
+
+/*
+ * Push a full MeterIdentification identity onto <ep> in one call: MeterType,
+ * PointOfDelivery, MeterSerialNumber, ProtocolVersion and PowerThreshold,
+ * all five of the Instance's own SetXxx() members (task 8, mt_meter.cpp).
+ * This is the ONLY way any of these five attributes ever gets a value:
+ * there is no other write path (design spec 6.2, 6.3).
+ *
+ * ALL-OR-NOTHING (the AT+MTMEAS / AT+MTDEMCAP precedent): every field in
+ * *id is validated before any SetXxx() call is made, so a bad later field
+ * never leaves an earlier one applied.
+ *
+ * There is deliberately no matching read-back verb. See
+ * mt_matter_meter_set_identity()'s comment in mt_meter.cpp for the two
+ * reasons (the identity is host-originated and re-pushed on reconcile, and
+ * a full identity line is longer than the host's own receive limit).
+ *
+ * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
+ * MT_ATTR_ERR_ATTRIBUTE when ep exists but carries no MeterIdentification
+ * Instance (deliberately not MT_ATTR_ERR_CLUSTER: cmd_mtmeterid, mt_at.c,
+ * maps this command's "no such cluster" case to +MTERR:4, the AT+MTROW
+ * family's "endpoint exists but carries no payload of that kind" code, not
+ * the generic attribute lookup's +MTERR:3 every other AT+MTATTR-shaped
+ * command uses; see cmd_mtmeterid's own comment for why), MT_ATTR_ERR_VALUE
+ * for an out-of-range MeterTypeEnum or PowerThresholdSourceEnum, an
+ * oversized string, or both power optionals absent.
+ */
+int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity_t *id);
+
 /* ---- Energy EVSE delegate and targets store (energy round C2, task 4) ---- */
 
 /*

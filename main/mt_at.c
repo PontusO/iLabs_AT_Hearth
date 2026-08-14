@@ -3035,6 +3035,252 @@ static int cmd_mtrowget(at_type_t type, char *args)
     return AT_R_OK;
 }
 
+/*
+ * Scan one quoted string field of AT+MTMETERID starting at **pp, which must
+ * point at the opening '"'. On success, *start and *len describe the
+ * content (still inside the caller's line buffer, not copied) and *pp is
+ * advanced past the closing quote.
+ *
+ * MT_R_ERROR: no opening quote, or the closing quote is never found before
+ * the end of the line. An unterminated string is a FORM error for this
+ * command (cmd_mtmeterid's own comment below explains why that differs from
+ * AT+MTMODES/AT+MTCHIMESOUNDS, which answer +MTERR:1 for the identical
+ * case).
+ * MT_ERR_BAD_PARAM: content over MT_METERID_MAX_STR bytes, or a
+ * non-printable byte (0x20..0x7E only accepted). An embedded raw quote is
+ * not caught here directly: it always ends the scan early, and the
+ * unintended remainder shows up at the call site as junk before the next
+ * required separator, which is where it is rejected.
+ */
+static int mtmeterid_scan_string(char **pp, const char **start, size_t *len)
+{
+    char *p = *pp;
+    if (*p != '"') {
+        return MT_R_ERROR;
+    }
+    p++;
+    char *s = p;
+    while (*p != '"') {
+        if (*p == '\0') {
+            return MT_R_ERROR;  /* unterminated quote: form */
+        }
+        p++;
+    }
+    size_t n = (size_t)(p - s);
+    p++;  /* past the closing quote */
+
+    if (n > MT_METERID_MAX_STR) {
+        return MT_ERR_BAD_PARAM;
+    }
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c > 0x7E) {
+            return MT_ERR_BAD_PARAM;
+        }
+    }
+
+    *start = s;
+    *len = n;
+    *pp = p;
+    return 0;
+}
+
+/*
+ * AT+MTMETERID=<ep>,<type>,"<pod>","<serial>","<protocol>",<pwr>,<apparent>,<src>
+ *   -> push a full MeterIdentification identity onto <ep> in one call
+ * (energy round C2, design spec 6.2): MeterType, PointOfDelivery,
+ * MeterSerialNumber, ProtocolVersion and PowerThreshold. Set-only: bare/query
+ * forms answer a plain ERROR. This is the ONLY way any of these five
+ * attributes ever gets a value; see mt_meter_set_identity_locked()'s comment
+ * (mt_meter.cpp) for why there is deliberately no matching read-back verb.
+ *
+ * Hand-parsed off the raw argument string, the AT+MTMODES/AT+MTCHIMESOUNDS
+ * reason: a comma inside a quoted field is legal content and at_split_args()
+ * would split on it. This command's grammar is FIXED arity (eight fields,
+ * always), unlike those two commands' repeated-pair lists, so its
+ * error-code split follows this round's AT+MTROW family (design spec 2.5)
+ * rather than copying MTMODES/MTCHIMESOUNDS's per-field choices:
+ *
+ *   - a token genuinely missing (the line ends before a structurally
+ *     required comma or quote is found) is a FORM error (bare ERROR): the
+ *     shape of the command itself is wrong, not any one value in it;
+ *   - an unterminated quote is also FORM (bare ERROR), by this command's
+ *     own contract, even though AT+MTMODES/AT+MTCHIMESOUNDS answer
+ *     +MTERR:1 for the identical case;
+ *   - a present, correctly delimited token that fails to parse as the
+ *     numeric type it should be is also FORM (bare ERROR): mirrors
+ *     AT+MTROW's cmd_mtrow, whose per-field parse_i64() failure is bare
+ *     ERROR too, on the reasoning that "this is not a number" is a
+ *     malformed-shape problem, not a value that was judged and rejected;
+ *   - a token that DOES parse but violates a range (ep > 0xFFFF, type > 2,
+ *     src > 2), a string over MT_METERID_MAX_STR bytes, a non-printable
+ *     byte, junk after a quoted field's closing quote (an embedded quote is
+ *     exactly this: the raw quote ends the scan early and the intended
+ *     remainder becomes junk before the next comma), or both <pwr> and
+ *     <apparent> absent, is a VALUE error (+MTERR:1).
+ *
+ * <type>: MeterTypeEnum, 0 Utility, 1 Private, 2 Generic.
+ * "<pod>"/"<serial>"/"<protocol>": quoted strings, printable ASCII
+ * (0x20..0x7E) only, 0..MT_METERID_MAX_STR (64) bytes; no raw double-quote
+ * character may appear inside one (see "junk after the closing quote"
+ * above).
+ * <pwr>/<apparent>: the PowerThresholdStruct's powerThreshold/
+ * apparentPowerThreshold, signed 64-bit milliwatts. Optional: an empty
+ * token (two adjacent commas) means absent, the AT+MTROW empty-field
+ * convention (design spec 2.2, "an empty field means absent") extended to
+ * this command. At least one of the two must be present (the XML's
+ * PowerThresholdStruct "choice b").
+ * <src>: PowerThresholdSourceEnum, 0 Contract, 1 Regulator, 2 Equipment, or
+ * an empty token for null. The last field: an empty token here is simply
+ * nothing left on the line after <apparent>'s comma.
+ *
+ * Lookup errors, from mt_matter_meter_set_identity() (mt_matter.h):
+ * +MTERR:2 unknown endpoint, +MTERR:4 the endpoint has no
+ * MeterIdentification cluster (this command's own table, not the generic
+ * +MTERR:3 lookup failures elsewhere in this file use: see
+ * mt_matter_meter_set_identity()'s comment in main.cpp for why). A bare
+ * ERROR covers an unclassified runtime failure, routed through
+ * attr_err_to_mterr() like every other bridge call in this file.
+ */
+static int cmd_mtmeterid(at_type_t type, char *args)
+{
+    if (type != AT_SET) {
+        return MT_R_ERROR;
+    }
+    if (!args || *args == '\0') {
+        return MT_R_ERROR;  /* every field missing: form */
+    }
+
+    char *p = args;
+
+    /* <ep>: bare token up to the comma before <type>. */
+    char *comma = strchr(p, ',');
+    if (!comma) {
+        return MT_R_ERROR;
+    }
+    *comma = '\0';
+    unsigned long ep;
+    if (!parse_u(p, &ep)) {
+        return MT_R_ERROR;
+    }
+    if (ep > 0xFFFF) {
+        return MT_ERR_BAD_PARAM;
+    }
+    p = comma + 1;
+
+    /* <type>: bare token up to the comma before "<pod>". */
+    comma = strchr(p, ',');
+    if (!comma) {
+        return MT_R_ERROR;
+    }
+    *comma = '\0';
+    unsigned long mtype;
+    if (!parse_u(p, &mtype)) {
+        return MT_R_ERROR;
+    }
+    if (mtype > 2) {
+        return MT_ERR_BAD_PARAM;
+    }
+    p = comma + 1;
+
+    /*
+     * "<pod>", "<serial>", "<protocol>": three quoted strings, each
+     * followed by a comma except the last, which is followed by <pwr>'s
+     * own leading digit (or comma, if <pwr> is absent). Copied into
+     * NUL-terminated local buffers rather than passed as raw spans: the
+     * bridge's mt_meter_identity_t (mt_matter.h) takes plain C strings, the
+     * same shape mt_matter_modes_set()'s labels use.
+     */
+    char pod_buf[MT_METERID_MAX_STR + 1];
+    char serial_buf[MT_METERID_MAX_STR + 1];
+    char protocol_buf[MT_METERID_MAX_STR + 1];
+    char *bufs[3] = { pod_buf, serial_buf, protocol_buf };
+
+    for (int i = 0; i < 3; i++) {
+        const char *s;
+        size_t n;
+        int r = mtmeterid_scan_string(&p, &s, &n);
+        if (r != 0) {
+            return r;
+        }
+        memcpy(bufs[i], s, n);
+        bufs[i][n] = '\0';
+
+        if (*p == '\0') {
+            return MT_R_ERROR;  /* the remaining fields are missing: form */
+        }
+        if (*p != ',') {
+            return MT_ERR_BAD_PARAM;  /* junk after the closing quote, e.g. an embedded quote */
+        }
+        p++;
+    }
+
+    /* <pwr>: optional int64, an empty token means absent. */
+    comma = strchr(p, ',');
+    if (!comma) {
+        return MT_R_ERROR;  /* <apparent>/<src> missing entirely: form */
+    }
+    *comma = '\0';
+    bool pwr_present = (*p != '\0');
+    int64_t pwr = 0;
+    if (pwr_present) {
+        if (!parse_i64(p, true, &pwr)) {
+            return MT_R_ERROR;
+        }
+    }
+    p = comma + 1;
+
+    /* <apparent>: same shape. */
+    comma = strchr(p, ',');
+    if (!comma) {
+        return MT_R_ERROR;  /* <src> missing entirely: form */
+    }
+    *comma = '\0';
+    bool apparent_present = (*p != '\0');
+    int64_t apparent = 0;
+    if (apparent_present) {
+        if (!parse_i64(p, true, &apparent)) {
+            return MT_R_ERROR;
+        }
+    }
+    p = comma + 1;
+
+    if (!pwr_present && !apparent_present) {
+        return MT_ERR_BAD_PARAM;  /* choice b: at least one is required */
+    }
+
+    /* <src>: the last field, no trailing comma. An empty token means null. */
+    bool src_present = (*p != '\0');
+    unsigned long src = 0;
+    if (src_present) {
+        if (!parse_u(p, &src)) {
+            return MT_R_ERROR;
+        }
+        if (src > 2) {
+            return MT_ERR_BAD_PARAM;
+        }
+    }
+
+    mt_meter_identity_t id = {
+        .meter_type      = (uint8_t)mtype,
+        .pod             = pod_buf,
+        .serial          = serial_buf,
+        .protocol        = protocol_buf,
+        .pwr_present     = pwr_present,
+        .pwr             = pwr,
+        .apparent_present = apparent_present,
+        .apparent        = apparent,
+        .src_present     = src_present,
+        .src             = (uint8_t)src,
+    };
+
+    int r = mt_matter_meter_set_identity((uint16_t)ep, &id);
+    if (r != MT_ATTR_OK) {
+        return attr_err_to_mterr(r);
+    }
+    return AT_R_OK;
+}
+
 /* ---- dispatch table & registration ------------------------------------ */
 
 static const at_command_t s_cmds[] = {
@@ -3073,6 +3319,7 @@ static const at_command_t s_cmds[] = {
     { "MTROWCLEAR",   cmd_mtrowclear  },
     { "MTROWAPPLY",   cmd_mtrowapply  },
     { "MTROWGET",     cmd_mtrowget    },
+    { "MTMETERID",    cmd_mtmeterid   },
 #if MT_COMBINED_IMAGE
     { "MTTRANSPORT",  cmd_mttransport },
 #endif

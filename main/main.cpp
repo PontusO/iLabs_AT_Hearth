@@ -203,6 +203,9 @@
  * five mt_matter_evse_* bridge functions below wrap in ChipStackLock. */
 #include "mt_evse.h"
 #include "mt_matter.h"
+/* Energy round C2 task 9: the lock-held internals of mt_meter.cpp, which
+ * mt_matter_meter_set_identity() below wraps in ChipStackLock. */
+#include "mt_meter.h"
 #include "mt_transport.h"
 
 static const char *TAG = "mt_main";
@@ -6221,6 +6224,37 @@ extern "C" int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
         }
         return MT_ROW_ERR_KIND;
     }
+}
+
+/*
+ * AT+MTMETERID (energy round C2, task 9). The pool, the field validation
+ * and the apply all live in mt_meter.cpp (mt_meter_set_identity_locked(),
+ * mt_meter.h); this is here, the mt_matter_evse_* shape, for exactly one
+ * reason: ChipStackLock is defined in this file and nowhere else.
+ *
+ * The cluster lookup below answers MT_ATTR_ERR_ATTRIBUTE, not the generic
+ * MT_ATTR_ERR_CLUSTER every other AT+MTATTR-shaped bridge in this file uses
+ * for "endpoint exists, wrong cluster". That is deliberate, not a copy-paste
+ * slip: this command's own error table (cmd_mtmeterid, mt_at.c) maps "ep
+ * exists but has no MeterIdentification cluster" to +MTERR:4, following the
+ * AT+MTROW family's "endpoint exists but carries no payload of that kind"
+ * code (design spec 2.5) rather than AT+MTATTR's own lookup-error ladder
+ * (+MTERR:2/3/4/5). attr_err_to_mterr() (mt_at.c) maps MT_ATTR_ERR_ATTRIBUTE
+ * to +MTERR:4 unchanged, so returning it here needs no new mapping code:
+ * only the choice of which existing mt_attr_result_t member to return had
+ * to change.
+ */
+extern "C" int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity_t *id)
+{
+    ChipStackLock lock;
+
+    if (esp_matter::endpoint::get(ep) == nullptr) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (esp_matter::cluster::get(ep, chip::app::Clusters::MeterIdentification::Id) == nullptr) {
+        return MT_ATTR_ERR_ATTRIBUTE;
+    }
+    return mt_meter_set_identity_locked(ep, id);
 }
 
 /* --------------------------------------------------------------------------- */
