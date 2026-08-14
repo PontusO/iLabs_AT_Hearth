@@ -1288,6 +1288,27 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
 uint32_t mt_meter_feature_mask(void);
 
 /*
+ * Fix round 1: claim one of the MT_METER_MAX slots the pool below is sized
+ * to, or fail. Call from mk_electrical_utility_meter() (mt_devtypes.cpp)
+ * once its MeterIdentification cluster is confirmed to exist, BEFORE the
+ * thunk returns success, and return nullptr from the thunk (logging which
+ * constant to raise) when this returns false. This is the check that was
+ * missing before fix round 1: AT+MTEP enforces only the whole-composition
+ * endpoint cap, never a per-devtype one, so nothing stopped a host
+ * declaring more meters than MT_METER_MAX, and a meter built past the pool
+ * limit had its cluster created but no Instance ever registered for it,
+ * silently reintroducing the exact dead-attribute symptom this task exists
+ * to fix, for that one endpoint only. Failing in the thunk (not later, in
+ * mt_meter_register_all()) is what makes main.cpp's standard "any failed
+ * endpoint::create() aborts the whole composition rebuild" contract catch
+ * it, the same mechanism mk_energy_evse() relies on for its own delegate
+ * pool via mt_matter_evse_delegate_alloc(). See mt_meter.cpp's comment on
+ * s_meter_reserved for the full reasoning, including why the capacity
+ * check and the Instance construction happen at two different times.
+ */
+bool mt_meter_reserve(void);
+
+/*
  * Construct a chip::app::Clusters::MeterIdentification::Instance for every
  * live endpoint carrying the MeterIdentification cluster, and Init() it.
  * Nothing in esp-matter does this: mt_meter.cpp's file comment has the full

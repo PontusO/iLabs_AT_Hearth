@@ -2565,6 +2565,34 @@ static endpoint_t *mk_electrical_utility_meter(node_t *n, uint8_t variant)
         ESP_LOGE(TAG, "MeterIdentification cluster missing after create");
         return nullptr;
     }
+
+    /*
+     * Fix round 1: claim a slot in mt_meter.cpp's MT_METER_MAX pool NOW,
+     * with the cluster confirmed to exist but before anything else about
+     * this endpoint is finalized. AT+MTEP enforces only the whole-
+     * composition endpoint cap, never a per-devtype one, so nothing before
+     * this line stopped a host declaring three or more meters; past
+     * MT_METER_MAX, mt_meter_register_all() (mt_meter.cpp, runs later, in
+     * app_main's pre-start window) would have simply run out of pool slots
+     * and left this endpoint's MeterIdentification cluster with no
+     * Instance behind it, silently reintroducing this task's own bug for
+     * that one endpoint: five attributes advertised, every read a failure,
+     * indistinguishable on the wire from the disease this task fixes.
+     * Checking and failing HERE, in the thunk, is what matters: returning
+     * nullptr now aborts the whole composition rebuild (main.cpp's
+     * standard "a failed endpoint::create() consumes no id, so abort
+     * rather than skip" contract), the same mechanism
+     * mk_energy_evse()'s mt_matter_evse_delegate_alloc() check above
+     * relies on for its own pool. A failure noticed only later, inside
+     * mt_meter_register_all(), would be too late: the cluster already
+     * exists on the wire by then and nothing there can un-create it.
+     */
+    if (!mt_meter_reserve()) {
+        ESP_LOGE(TAG, "MeterIdentification instance pool exhausted (electrical utility meter, MT_METER_MAX=%u)",
+                 (unsigned)MT_METER_MAX);
+        return nullptr;
+    }
+
     if (cluster::meter_identification::feature::power_threshold::add(mi_cl) != ESP_OK) {
         ESP_LOGE(TAG, "adding power threshold feature failed (electrical utility meter)");
         return nullptr;

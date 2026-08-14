@@ -24,11 +24,29 @@
  *   - The ember codegen name a hand-written app would reach for instead,
  *     emberAfMeterIdentificationClusterInitCallback() (declared at
  *     zap-generated/callback.h:1410, and the shape the upstream reference
- *     app below actually defines), is never called either: its own generic
- *     dispatcher, emberAfClusterInitCallback(endpoint, clusterId)
- *     (util/generic-callbacks.h:36), has no definition anywhere in this
- *     pinned tree. Nothing invokes it for ANY cluster on this SDK revision,
- *     so wiring that name here would be exactly as dead as the two above.
+ *     app below actually defines), is never reached on THIS firmware
+ *     either, but not because its dispatcher does not exist. Fix round 1
+ *     correction: an earlier version of this comment claimed
+ *     emberAfClusterInitCallback(endpoint, clusterId) (declared
+ *     util/generic-callbacks.h:36) "has no definition anywhere in this
+ *     pinned tree" and "nothing invokes it for ANY cluster on this SDK
+ *     revision". That was wrong: it is defined and called, from
+ *     initializeEndpoint() in src/app/util/attribute-storage.cpp:486. The
+ *     real reason it never fires here is that attribute-storage.cpp is
+ *     never linked into THIS build at all: esp-matter drives endpoint
+ *     enable through its own C++ data model provider
+ *     (data_model_provider/esp_matter_data_model_provider.cpp, the same
+ *     path mt_chime_register_all()'s doc comment in main.cpp cites), not
+ *     through the classic ember/zap attribute-storage.cpp machinery.
+ *     Checked on the built binary, not assumed from reading source alone:
+ *     `riscv32-esp-elf-nm build_b4/ilabs_at_hearth.elf` has no symbol for
+ *     either emberAfClusterInitCallback or emAfInitializeAttributes
+ *     (attribute-storage.cpp's own distinctive top-level entry point), so
+ *     neither the dispatcher nor its caller exists in the firmware that
+ *     actually runs. This is a per-build fact, not a permanent SDK one: if
+ *     a future Kconfig change ever pulled attribute-storage.cpp into the
+ *     link, this reasoning would need re-checking against the binary
+ *     again, not assumed to still hold.
  *
  * The chime and EEM disease (ARCHITECTURE.md 8.6, 8.10), a third organ:
  * esp-matter ships the metadata for a cluster and nothing that answers a
@@ -123,6 +141,52 @@ mt_meter_entry_t s_meter[MT_METER_MAX];
 
 alignas(Instance) uint8_t s_meter_storage[MT_METER_MAX][sizeof(Instance)];
 
+/*
+ * How many electrical_utility_meter endpoints the composition rebuild has
+ * successfully created so far THIS boot. Fix round 1: this counter is what
+ * closes the pool-exhaustion gap review found. AT+MTEP enforces only the
+ * whole-composition endpoint cap (MT_COMP_MAX_ENDPOINTS, 28), not a
+ * per-devtype limit, so nothing upstream of the thunk stops a host declaring
+ * more than MT_METER_MAX (2) meters. Before this counter existed, a third
+ * meter's thunk always succeeded, its cluster was created, and
+ * mt_meter_register_all() below simply stopped handing out slots once
+ * MT_METER_MAX was reached (the `slot < MT_METER_MAX` bound in its loop),
+ * silently: no log, no host-visible signal, and the third endpoint's five
+ * attributes went back to answering read failures forever, the identical
+ * symptom the whole cluster had before this task, just for one endpoint
+ * instead of every one.
+ *
+ * mt_meter_reserve() (below) is called from mk_electrical_utility_meter()
+ * (mt_devtypes.cpp) once its MeterIdentification cluster is confirmed to
+ * exist, BEFORE the thunk returns success. Reservation and Instance
+ * construction happen at two different times for the same reason they
+ * always did (construction has to wait for mt_meter_register_all()'s
+ * pre-start window, see the file comment above), but the CAPACITY check
+ * has to happen at thunk time, not registration time: only a thunk
+ * returning nullptr triggers the "abort the whole composition rebuild"
+ * path (main.cpp's comp.count = 0 on any mt_devtype_create() failure), the
+ * same mechanism mk_energy_evse() relies on for its own delegate pool via
+ * mt_matter_evse_delegate_alloc(). A failure discovered only later, inside
+ * mt_meter_register_all(), cannot un-create the cluster that already exists
+ * on the wire by then.
+ *
+ * Boot-scoped, deliberately not reset by anything: the composition rebuild
+ * this counter tracks runs exactly once per boot (main.cpp's app_main,
+ * before esp_matter::start()), so there is no second call to reset it
+ * against.
+ *
+ * Today this is the ONLY creator of a MeterIdentification cluster (grep
+ * confirms electrical_utility_meter::add(), esp_matter_endpoint.cpp, is the
+ * one call site for cluster::meter_identification::create() anywhere in
+ * this firmware or the SDK's endpoint namespaces), so gating in this one
+ * thunk is complete coverage as of this task. If a future device type ever
+ * also carries this cluster, ITS thunk needs its own mt_meter_reserve()
+ * call too: the gate lives per-creator, not in the generic
+ * mt_meter_register_all() scan, because only a thunk's return value can
+ * abort the rebuild.
+ */
+uint16_t s_meter_reserved = 0;
+
 } // namespace
 
 extern "C" uint32_t mt_meter_feature_mask(void)
@@ -130,11 +194,34 @@ extern "C" uint32_t mt_meter_feature_mask(void)
     return static_cast<uint32_t>(Feature::kPowerThreshold);
 }
 
+extern "C" bool mt_meter_reserve(void)
+{
+    if (s_meter_reserved >= MT_METER_MAX) {
+        return false;
+    }
+    s_meter_reserved++;
+    return true;
+}
+
 extern "C" void mt_meter_register_all(void)
 {
     chip::BitMask<Feature> features(mt_meter_feature_mask());
     uint16_t slot = 0;
 
+    /*
+     * slot < MT_METER_MAX below is now a defensive backstop, not the
+     * primary gate: mt_meter_reserve() (above) already bounds how many
+     * electrical_utility_meter endpoints mk_electrical_utility_meter()
+     * could ever have created this boot to MT_METER_MAX, a composition
+     * rebuild that exceeded it would already have aborted before this
+     * function ever runs, so this scan can never actually find more than
+     * MT_METER_MAX matching endpoints in practice. Kept anyway: cheap, and
+     * worth calling out explicitly as defensive rather than leaving a
+     * reader to wonder whether it is still load-bearing, the same "cannot
+     * happen in practice" labelling main.cpp uses for bounds a prior check
+     * has already made unreachable (e.g. the comments at
+     * mt_chime_find_slot()'s call sites).
+     */
     for (uint16_t i = 0; i < mt_matter_endpoint_count() && slot < MT_METER_MAX; i++) {
         uint32_t devtype;
         uint16_t ep;
@@ -152,6 +239,18 @@ extern "C" void mt_meter_register_all(void)
 
         Instance *inst = new (&s_meter_storage[slot]) Instance(ep, features);
         if (inst->Init() != CHIP_NO_ERROR) {
+            /*
+             * Logged, not aborted: this is the same shape
+             * mt_air_quality_register_all() (main.cpp) already uses for an
+             * identical Instance::Init() failure, and it is not the pool-
+             * exhaustion gap fixed above. Init() failing here means
+             * AttributeAccessInterfaceRegistry::Instance().Register()
+             * refused an endpoint/cluster pair this same boot's thunk just
+             * created moments earlier, an internal invariant violation with
+             * no ordinary host action (unlike AT+MTEP over-declaring
+             * meters) that can trigger it, so there is nothing a host could
+             * have done differently and no host-facing signal to raise.
+             */
             ESP_LOGE(TAG, "MeterIdentification instance init failed for endpoint %u", ep);
             inst->~Instance();
             continue;
