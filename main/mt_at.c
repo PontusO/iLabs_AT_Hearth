@@ -336,14 +336,24 @@ static bool parse_u64(const char *s, uint64_t *out)
  *
  *   - a bare ERROR when the SHAPE of the line is wrong: the wrong number of
  *     fields, an unterminated quote, a required token that is
- *     structurally MISSING (as distinct from a token that IS present but
- *     empty, which in AT+MTROW/AT+MTMETERID means an absent optional and is
- *     a value-level concept, not a shape one), or the wrong command form
- *     (e.g. a query where only a set exists);
+ *     structurally MISSING, or the wrong command form (e.g. a query where
+ *     only a set exists);
  *   - +MTERR:1 when the shape is right and a VALUE within it cannot be
  *     accepted, whether because it fails to parse as the type it should be
  *     (a present, correctly delimited token that is not a number) or
  *     because it parses but is out of range.
+ *
+ * A token that IS present but empty is a value-level concept, not a shape
+ * one, ONLY for a field the command's own table designates optional (AT+MTROW
+ * kind 1's <soc>/<energy>; AT+MTMETERID's <pwr>/<apparent>/<src>): there, and
+ * only there, an empty token means "absent optional" and is accepted. Do NOT
+ * read this as "an empty token is never a shape problem in these two
+ * commands": it is scoped to specific field positions, not to the command as
+ * a whole. A MANDATORY field's token being present-but-empty is not a special
+ * case at all: it is simply a value that fails to parse (there is no integer
+ * spelled by zero characters), so it falls straight out of the ordinary VALUE
+ * arm above and answers +MTERR:1 like any other unparseable token, the same
+ * way it would in a command with no absent-optional convention at all.
  *
  * This was NOT applied consistently when first written: cmd_mtrow (and the
  * rest of the AT+MTROW family it shares a grammar with) answered a bare
