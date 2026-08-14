@@ -142,38 +142,70 @@ mt_meter_entry_t s_meter[MT_METER_MAX];
 alignas(Instance) uint8_t s_meter_storage[MT_METER_MAX][sizeof(Instance)];
 
 /*
- * How many electrical_utility_meter endpoints the composition rebuild has
- * successfully created so far THIS boot. Fix round 1: this counter is what
- * closes the pool-exhaustion gap review found. AT+MTEP enforces only the
- * whole-composition endpoint cap (MT_COMP_MAX_ENDPOINTS, 28), not a
- * per-devtype limit, so nothing upstream of the thunk stops a host declaring
- * more than MT_METER_MAX (2) meters. Before this counter existed, a third
- * meter's thunk always succeeded, its cluster was created, and
- * mt_meter_register_all() below simply stopped handing out slots once
- * MT_METER_MAX was reached (the `slot < MT_METER_MAX` bound in its loop),
- * silently: no log, no host-visible signal, and the third endpoint's five
- * attributes went back to answering read failures forever, the identical
- * symptom the whole cluster had before this task, just for one endpoint
- * instead of every one.
+ * How many electrical_utility_meter endpoints this boot has RESERVED a pool
+ * slot for. Not "how many have been successfully created": fix round 2
+ * moved the reservation ahead of electrical_utility_meter::create() itself
+ * (see below), so this counts attempts admitted to try, not completions.
+ * That distinction is harmless here for the reason explained under "why
+ * reserving before create() is safe" below: any thunk failure for any
+ * reason, including one having nothing to do with this pool, aborts the
+ * entire composition rebuild for the rest of the boot, so an admitted
+ * attempt that then fails for an unrelated reason never gets a chance to
+ * matter either way.
  *
- * mt_meter_reserve() (below) is called from mk_electrical_utility_meter()
- * (mt_devtypes.cpp) once its MeterIdentification cluster is confirmed to
- * exist, BEFORE the thunk returns success. Reservation and Instance
- * construction happen at two different times for the same reason they
- * always did (construction has to wait for mt_meter_register_all()'s
- * pre-start window, see the file comment above), but the CAPACITY check
- * has to happen at thunk time, not registration time: only a thunk
- * returning nullptr triggers the "abort the whole composition rebuild"
- * path (main.cpp's comp.count = 0 on any mt_devtype_create() failure), the
- * same mechanism mk_energy_evse() relies on for its own delegate pool via
- * mt_matter_evse_delegate_alloc(). A failure discovered only later, inside
- * mt_meter_register_all(), cannot un-create the cluster that already exists
- * on the wire by then.
+ * Fix round 1: this counter is what closes the pool-exhaustion gap review
+ * found. AT+MTEP enforces only the whole-composition endpoint cap
+ * (MT_COMP_MAX_ENDPOINTS, 28), not a per-devtype limit, so nothing upstream
+ * of the thunk stops a host declaring more than MT_METER_MAX (2) meters.
+ * Before this counter existed, a third meter's thunk always succeeded, its
+ * cluster was created, and mt_meter_register_all() below simply stopped
+ * handing out slots once MT_METER_MAX was reached (the `slot < MT_METER_MAX`
+ * bound in its loop), silently: no log, no host-visible signal, and the
+ * third endpoint's five attributes went back to answering read failures
+ * forever, the identical symptom the whole cluster had before this task,
+ * just for one endpoint instead of every one.
  *
- * Boot-scoped, deliberately not reset by anything: the composition rebuild
- * this counter tracks runs exactly once per boot (main.cpp's app_main,
- * before esp_matter::start()), so there is no second call to reset it
- * against.
+ * Fix round 2: mt_meter_reserve() (below) is called from
+ * mk_electrical_utility_meter() (mt_devtypes.cpp) FIRST, before
+ * electrical_utility_meter::create() or anything else in the thunk, not
+ * after the cluster is confirmed to exist as fix round 1 had it.
+ * electrical_utility_meter::create() already allocates the endpoint, marks
+ * it enabled and appends it to the node's own endpoint list before the
+ * thunk gets a chance to check anything, so checking the pool after create()
+ * meant a reservation failure still correctly aborted the composition
+ * rebuild, but left a HALF-BUILT endpoint (a real Identify cluster, a bare
+ * Instance-less MeterIdentification cluster) already live in esp_matter's
+ * data model: visible to a controller through provider::Endpoints() (which
+ * walks the node's own list, independent of this firmware's AT+MTEP?
+ * bookkeeping), invisible to AT+MTEP? itself because
+ * mt_matter_record_endpoint() is never reached for a thunk that returns
+ * nullptr. Reserving first means a pool-exhausted meter builds nothing at
+ * all: there is no orphan to leak. See mt_devtypes.cpp's comment on this
+ * call site for the trace that found this.
+ *
+ * Reservation and Instance construction still happen at two different times
+ * for the same reason they always did (construction has to wait for
+ * mt_meter_register_all()'s pre-start window, see the file comment above),
+ * but the CAPACITY check has to happen at thunk time, not registration
+ * time: only a thunk returning nullptr triggers the "abort the whole
+ * composition rebuild" path (main.cpp's comp.count = 0 on any
+ * mt_devtype_create() failure), the same mechanism mk_energy_evse() relies
+ * on for its own delegate pool via mt_matter_evse_delegate_alloc(). A
+ * failure discovered only later, inside mt_meter_register_all(), cannot
+ * un-create the cluster that already exists on the wire by then.
+ *
+ * Why reserving before create() is safe: nothing can release a reservation
+ * and retry within the same boot. This counter is a monotonic claim with no
+ * matching "release" call anywhere, and ANY thunk returning nullptr for ANY
+ * reason aborts the WHOLE composition rebuild for the rest of THIS boot
+ * (main.cpp's comp.count = 0; break;, no retry). So there is no legitimate
+ * later reservation in the same boot that an earlier, now-abandoned one
+ * could ever block; the only way a fresh attempt happens at all is a full
+ * reboot, which reinitialises this counter to 0 along with every other
+ * static in this file. Deliberately no reset function of its own: the
+ * composition rebuild this counter tracks runs exactly once per boot
+ * (main.cpp's app_main, before esp_matter::start()), so nothing within one
+ * boot ever needs to reset it.
  *
  * Today this is the ONLY creator of a MeterIdentification cluster (grep
  * confirms electrical_utility_meter::add(), esp_matter_endpoint.cpp, is the

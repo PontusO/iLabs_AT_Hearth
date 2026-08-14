@@ -1288,23 +1288,35 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
 uint32_t mt_meter_feature_mask(void);
 
 /*
- * Fix round 1: claim one of the MT_METER_MAX slots the pool below is sized
- * to, or fail. Call from mk_electrical_utility_meter() (mt_devtypes.cpp)
- * once its MeterIdentification cluster is confirmed to exist, BEFORE the
- * thunk returns success, and return nullptr from the thunk (logging which
- * constant to raise) when this returns false. This is the check that was
- * missing before fix round 1: AT+MTEP enforces only the whole-composition
- * endpoint cap, never a per-devtype one, so nothing stopped a host
- * declaring more meters than MT_METER_MAX, and a meter built past the pool
- * limit had its cluster created but no Instance ever registered for it,
- * silently reintroducing the exact dead-attribute symptom this task exists
- * to fix, for that one endpoint only. Failing in the thunk (not later, in
- * mt_meter_register_all()) is what makes main.cpp's standard "any failed
- * endpoint::create() aborts the whole composition rebuild" contract catch
- * it, the same mechanism mk_energy_evse() relies on for its own delegate
- * pool via mt_matter_evse_delegate_alloc(). See mt_meter.cpp's comment on
- * s_meter_reserved for the full reasoning, including why the capacity
- * check and the Instance construction happen at two different times.
+ * Claim one of the MT_METER_MAX slots the pool below is sized to, or fail.
+ * Call from mk_electrical_utility_meter() (mt_devtypes.cpp) FIRST, before
+ * electrical_utility_meter::create() or anything else in the thunk, and
+ * return nullptr immediately (logging which constant to raise) when this
+ * returns false. This is the check that was missing before fix round 1:
+ * AT+MTEP enforces only the whole-composition endpoint cap, never a
+ * per-devtype one, so nothing stopped a host declaring more meters than
+ * MT_METER_MAX.
+ *
+ * Fix round 1 added the check but called it AFTER create(), once the
+ * cluster already existed; fix round 2 corrected that. create() already
+ * allocates the endpoint, marks it enabled and appends it to the node's
+ * endpoint list before a thunk gets a chance to check anything, so
+ * reserving after create() still left a HALF-BUILT endpoint live in
+ * esp_matter's own data model on a reservation failure: a real Identify
+ * cluster and a bare, Instance-less MeterIdentification cluster that
+ * provider::Endpoints() (which walks the node's own list, independent of
+ * this firmware's AT+MTEP? bookkeeping) exposes to a controller that
+ * AT+MTEP? itself has no record of. Calling this FIRST, before create(),
+ * means a pool-exhausted meter builds nothing at all: there is no orphan to
+ * leak. See mt_meter.cpp's comment on s_meter_reserved and
+ * mt_devtypes.cpp's comment on this call site for the full reasoning,
+ * including why reserving before create() is safe (reservations are
+ * boot-scoped and never released, but any thunk failure aborts the whole
+ * composition rebuild for the rest of the boot, so nothing in the same boot
+ * can ever be blocked by an unreleased one) and why the capacity check and
+ * the Instance construction still happen at two different times
+ * (construction has to wait for mt_meter_register_all()'s later pre-start
+ * scan regardless of when the capacity was checked).
  */
 bool mt_meter_reserve(void);
 

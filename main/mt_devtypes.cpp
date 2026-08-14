@@ -2546,6 +2546,52 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
 static endpoint_t *mk_electrical_utility_meter(node_t *n, uint8_t variant)
 {
     (void)variant;
+
+    /*
+     * Fix round 2: claim a slot in mt_meter.cpp's MT_METER_MAX pool BEFORE
+     * creating anything at all, not after. Fix round 1 put this check after
+     * electrical_utility_meter::create() and cluster::identify::create(),
+     * which was still a defect: electrical_utility_meter::create() already
+     * allocates the endpoint, marks it enabled and appends it to the node's
+     * endpoint list before this function ever gets a chance to check the
+     * pool, so a reservation failure at that point still returned nullptr
+     * (correctly aborting the composition rebuild) but left a HALF-BUILT
+     * endpoint already live in esp_matter's own data model: a real Identify
+     * cluster plus a bare MeterIdentification cluster (FeatureMap 0, no
+     * ProtocolVersion, no Instance) that a controller can see directly
+     * through provider::Endpoints() (which walks the node's own endpoint
+     * list, independently of this firmware's s_live_* bookkeeping), while
+     * AT+MTEP? cannot, because mt_matter_record_endpoint() is never reached
+     * for an endpoint whose thunk returned nullptr. That is this task's own
+     * dead-attribute bug again, now on an endpoint the host has no way to
+     * even know exists. This is the pre-existing "abort mid-rebuild leaves
+     * the already-created prefix live for that boot" property (recorded
+     * under B247): aborting does not call endpoint::destroy() on what was
+     * already built, in this thunk or any other in this file. The fix here
+     * is narrow and specific to THIS thunk, reordering so nothing is built
+     * at all when the pool is already full: it does not touch the general
+     * orphan-prefix property, which is pre-existing, affects other device
+     * types in this file too, and wants its own decision on whether a
+     * failed thunk should destroy what it already built (noted for the
+     * round's documentation pass, not fixed here).
+     *
+     * Reserving first is safe because nothing can release a reservation and
+     * try again within the same boot: mt_meter_reserve() is a monotonic
+     * counter with no matching "release" (mt_meter.cpp's s_meter_reserved
+     * comment), and ANY thunk returning nullptr aborts the WHOLE composition
+     * rebuild for the rest of this boot (main.cpp's comp.count = 0; break;),
+     * so there is no later retry in this boot that an unreleased reservation
+     * could ever block. A reservation that turns out to belong to an
+     * aborted, never-completed endpoint simply expires with the rest of RAM
+     * at the next reboot, when the counter is reinitialised to 0 along with
+     * everything else.
+     */
+    if (!mt_meter_reserve()) {
+        ESP_LOGE(TAG, "MeterIdentification instance pool exhausted (electrical utility meter, MT_METER_MAX=%u)",
+                 (unsigned)MT_METER_MAX);
+        return nullptr;
+    }
+
     electrical_utility_meter::config_t c;
     endpoint_t *ep = electrical_utility_meter::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
     if (ep == nullptr) {
@@ -2567,32 +2613,21 @@ static endpoint_t *mk_electrical_utility_meter(node_t *n, uint8_t variant)
     }
 
     /*
-     * Fix round 1: claim a slot in mt_meter.cpp's MT_METER_MAX pool NOW,
-     * with the cluster confirmed to exist but before anything else about
-     * this endpoint is finalized. AT+MTEP enforces only the whole-
-     * composition endpoint cap, never a per-devtype one, so nothing before
-     * this line stopped a host declaring three or more meters; past
-     * MT_METER_MAX, mt_meter_register_all() (mt_meter.cpp, runs later, in
-     * app_main's pre-start window) would have simply run out of pool slots
-     * and left this endpoint's MeterIdentification cluster with no
-     * Instance behind it, silently reintroducing this task's own bug for
-     * that one endpoint: five attributes advertised, every read a failure,
-     * indistinguishable on the wire from the disease this task fixes.
-     * Checking and failing HERE, in the thunk, is what matters: returning
-     * nullptr now aborts the whole composition rebuild (main.cpp's
-     * standard "a failed endpoint::create() consumes no id, so abort
-     * rather than skip" contract), the same mechanism
-     * mk_energy_evse()'s mt_matter_evse_delegate_alloc() check above
-     * relies on for its own pool. A failure noticed only later, inside
-     * mt_meter_register_all(), would be too late: the cluster already
-     * exists on the wire by then and nothing there can un-create it.
+     * feature::power_threshold::add(), create_protocol_version() and the
+     * two create() calls above cannot be pre-flighted the way the pool
+     * reservation was: each one operates on an endpoint_t* or cluster_t*
+     * esp_matter itself only hands back from the PREVIOUS call in this same
+     * function, so there is no local, side-effect-free state (unlike
+     * s_meter_reserved, a plain counter this file owns outright) to check
+     * any of them against before making the call. Their failure modes are
+     * generic SDK/allocation failures, not a predictable capacity limit
+     * like the pool, so "check before create()" has no meaning for them.
+     * A failure in any of these still leaves the same half-built-endpoint
+     * shape this comment opened with (identify may already exist, the
+     * cluster may already be partially configured), which is the general
+     * orphan-prefix property noted above, out of this task's scope to
+     * close for every failure path in every thunk.
      */
-    if (!mt_meter_reserve()) {
-        ESP_LOGE(TAG, "MeterIdentification instance pool exhausted (electrical utility meter, MT_METER_MAX=%u)",
-                 (unsigned)MT_METER_MAX);
-        return nullptr;
-    }
-
     if (cluster::meter_identification::feature::power_threshold::add(mi_cl) != ESP_OK) {
         ESP_LOGE(TAG, "adding power threshold feature failed (electrical utility meter)");
         return nullptr;
