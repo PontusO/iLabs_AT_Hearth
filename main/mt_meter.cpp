@@ -342,13 +342,18 @@ extern "C" void mt_meter_register_all(void)
  *      like this after a co-processor reboot, so a read-back would only
  *      ever return what the host already has.
  *   2. A full identity line does not fit the host's own receive limit.
- *      HEARTH_LINE_MAX is 255 bytes (src/HearthLink.h, the host library)
- *      and a worst-case AT+MTMETERID push comes to 265 bytes (13-byte
- *      command prefix, a 5-digit endpoint, a 1-digit type, three 64-byte
- *      quoted strings, two 20-character signed int64 fields and one
- *      1-digit enum, comma-separated: cmd_mtmeterid's comment in mt_at.c
- *      has the field-by-field arithmetic). A +MTMETERID reply carrying the
- *      same five fields back would be the same order of size: over the
+ *      HEARTH_LINE_MAX is 256 bytes (src/HearthLink.h, the host library),
+ *      of which 255 bytes are usable payload (HearthLink.cpp's
+ *      accumulator guards on `_acc_len < HEARTH_LINE_MAX - 1`, reserving
+ *      the last byte for the terminator), and a worst-case AT+MTMETERID
+ *      push comes to 265 bytes (13-byte command prefix, a 5-digit
+ *      endpoint, a 1-digit type, three 64-byte quoted strings, two
+ *      20-character signed int64 fields and one 1-digit enum,
+ *      comma-separated; the arithmetic is spelled out right here, not in
+ *      cmd_mtmeterid's own comment in mt_at.c, which documents the
+ *      command's grammar and error codes but carries no byte count). A
+ *      +MTMETERID reply carrying the same five fields back would be the
+ *      same order of size: over the
  *      255-byte limit HearthLink::readLine() enforces by silently
  *      discarding the whole line (src/HearthLink.cpp), not by erroring, so
  *      a read-back verb here would not fail loudly, it would vanish.

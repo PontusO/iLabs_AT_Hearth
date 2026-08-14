@@ -2355,7 +2355,7 @@ static endpoint_t *mk_dem(node_t *n, uint8_t variant)
  * pure virtual to compile; it can never be reached by a controller.
  *
  * The delegate itself (config.energy_evse.delegate, EnergyEvse::Delegate,
- * 35 pure virtuals) is Task 4's, not this one: config->energy_evse.delegate
+ * 34 pure virtuals) is Task 4's, not this one: config->energy_evse.delegate
  * stays null here, which esp_matter_cluster.cpp's energy_evse::create()
  * tolerates (the delegate wiring is behind its own "if delegate != nullptr"
  * gate; the cluster and its MANAGED_INTERNALLY attributes exist regardless).
