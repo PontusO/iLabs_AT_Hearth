@@ -1182,17 +1182,19 @@ int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *q
  * MERGED result, not just the applied set; for kind 1, more than seven
  * distinct day bitmaps, more than ten targets sharing one, or a target
  * breaking the endpoint's SOC-variant rule, none of which the row codec
- * knows about because none is a property of a row on its own). Must hold
- * ChipStackLock, the standing mt_matter_* bridge convention
- * (every bridge function that touches the CHIP stack takes it; see the
- * project's "Every mt_matter_* bridge function must hold the CHIP stack
- * lock" note).
+ * knows about because none is a property of a row on its own).
  *
- * Task 2 ships a weak, fail-closed stub in mt_at.c (always
- * MT_ROW_ERR_ENDPOINT) purely so the firmware links before the real
- * implementation lands; whichever task wires kind 1 to a live store
- * provides the strong definition here and the stub silently stops being
- * linked in.
+ * This dispatcher does NOT take ChipStackLock itself. It is a plain <kind>
+ * switch (main.cpp) that forwards to a per-kind bridge, kind 1's being
+ * mt_matter_evse_targets_apply(), and that callee is what actually takes the
+ * lock and touches the CHIP stack. ChipStackLock (main.cpp) wraps a plain
+ * LockChipStack()/Unlock() pair, not a recursive mutex, so taking it a
+ * second time here, around the switch, would DEADLOCK against the callee's
+ * own lock rather than merely be redundant. A future row kind whose handler
+ * calls into CHIP directly from inside this dispatcher's switch, instead of
+ * forwarding to its own locking bridge the way kind 1 does, must take
+ * ChipStackLock itself at that call site. Do not "fix" this function by
+ * wrapping the switch in a lock.
  */
 int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage);
 
@@ -1211,11 +1213,14 @@ int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
  * calls are not atomic with each other.
  *
  * Returns MT_ROW_OK, MT_ROW_ERR_ENDPOINT (unknown ep) or
- * MT_ROW_ERR_NO_PAYLOAD (ep exists, no payload of this kind). Must hold
- * ChipStackLock, same convention as mt_matter_rows_apply() above.
+ * MT_ROW_ERR_NO_PAYLOAD (ep exists, no payload of this kind).
  *
- * Task 2's weak stub (mt_at.c) always answers MT_ROW_ERR_ENDPOINT and
- * leaves *out untouched, *total set to 0.
+ * Same locking shape as mt_matter_rows_apply() above: this dispatcher takes
+ * no lock of its own and forwards to a callee (kind 1:
+ * mt_matter_evse_targets_get()) that takes ChipStackLock. Taking it here too
+ * would deadlock against that non-recursive lock; see
+ * mt_matter_rows_apply()'s comment for the full reasoning, which applies
+ * unchanged here.
  */
 int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
                        mt_row_t *out, uint16_t *total);
@@ -1228,11 +1233,14 @@ int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
  * on MT_ROW_OK.
  *
  * Returns MT_ROW_OK, MT_ROW_ERR_ENDPOINT or MT_ROW_ERR_NO_PAYLOAD, same
- * division as mt_matter_rows_get() above. Must hold ChipStackLock, same
- * convention as mt_matter_rows_apply() above.
+ * division as mt_matter_rows_get() above.
  *
- * Task 2's weak stub (mt_at.c) always answers MT_ROW_ERR_ENDPOINT and
- * leaves *total set to 0.
+ * Same locking shape as mt_matter_rows_apply() above: this dispatcher takes
+ * no lock of its own and forwards to a callee (kind 1:
+ * mt_matter_evse_targets_total()) that takes ChipStackLock. Taking it here
+ * too would deadlock against that non-recursive lock; see
+ * mt_matter_rows_apply()'s comment for the full reasoning, which applies
+ * unchanged here.
  */
 int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
 
