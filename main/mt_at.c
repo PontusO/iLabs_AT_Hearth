@@ -1102,22 +1102,30 @@ static int cmd_mtalarm(at_type_t type, char *args)
 }
 
 /* Signedness per (cluster, field) for AT+MTMEAS value parsing, mirroring the
- * MT_MEAS_F_* / MT_ENERGY_F_* / MT_WHM_F_* / MT_DEM_F_* unit comments in
- * mt_matter.h: every ElectricalPowerMeasurement (0x0090) field is signed,
- * both ElectricalEnergyMeasurement (0x0091) cumulative counters are unsigned,
- * of the WaterHeaterManagement (0x0094) fields only EstimatedHeatRequired
- * (field 4, int64 mWh) is signed, kept signed for 64-bit pipeline symmetry
- * even though the XML pins its minimum at 0: the min-0 range check is the
- * bridge's business (feature gating likewise; this C side only classifies
- * signedness), so "-1" on field 4 parses here and answers +MTERR:1 from the
- * bridge's validate pass instead of the parse gate. Of the
- * DeviceEnergyManagement (0x0098, energy round C1) fields the two int64 mW
- * powers (3-4) and the int64 mWh event carrier (6) are signed and the three
- * enums/bool (0-2, 5) are unsigned. Unknown fields (and unknown clusters)
- * default to signed: the accept set only shapes the parse, and the bridge
- * rejects an unknown field with MT_ATTR_ERR_VALUE in its validate pass
- * regardless of how the value was parsed, so nothing wrongly admitted here
- * is ever applied. */
+ * MT_MEAS_F_* / MT_ENERGY_F_* / MT_WHM_F_* / MT_DEM_F_* / MT_EVSE_F_* unit
+ * comments in mt_matter.h: every ElectricalPowerMeasurement (0x0090) field is
+ * signed, both ElectricalEnergyMeasurement (0x0091) cumulative counters are
+ * unsigned, of the WaterHeaterManagement (0x0094) fields only
+ * EstimatedHeatRequired (field 4, int64 mWh) is signed, kept signed for
+ * 64-bit pipeline symmetry even though the XML pins its minimum at 0: the
+ * min-0 range check is the bridge's business (feature gating likewise; this
+ * C side only classifies signedness), so "-1" on field 4 parses here and
+ * answers +MTERR:1 from the bridge's validate pass instead of the parse
+ * gate. Of the DeviceEnergyManagement (0x0098, energy round C1) fields the
+ * two int64 mW powers (3-4) and the int64 mWh event carrier (6) are signed
+ * and the three enums/bool (0-2, 5) are unsigned. Of the EnergyEvse (0x0099,
+ * energy round C2) fields, seven are int64 currents or energies and signed
+ * for the same 64-bit pipeline symmetry, every one of them XML-pinned to a
+ * minimum of 0 and enforced there rather than here: CircuitCapacity (4),
+ * MinimumChargeCurrent (5), MaximumChargeCurrent (6),
+ * UserMaximumChargeCurrent (7), NextChargeRequiredEnergy (11),
+ * BatteryCapacity (15), SessionEnergyCharged (18). The other twelve fields
+ * (0-3, 8-10, 12-14, 16-17: the three enums, the u32 timestamps/window/
+ * session fields and the u8/u16 percentages) are unsigned. Unknown fields
+ * (and unknown clusters) default to signed: the accept set only shapes the
+ * parse, and the bridge rejects an unknown field with MT_ATTR_ERR_VALUE in
+ * its validate pass regardless of how the value was parsed, so nothing
+ * wrongly admitted here is ever applied. */
 static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
 {
     if (cluster == 0x0091 &&
@@ -1132,6 +1140,13 @@ static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
         field != MT_DEM_F_ABS_MIN_POWER && field != MT_DEM_F_ABS_MAX_POWER) {
         return false;
     }
+    if (cluster == 0x0099 && field <= MT_EVSE_F_SESSION_ENERGY_CHARGED &&
+        field != MT_EVSE_F_CIRCUIT_CAPACITY && field != MT_EVSE_F_MIN_CHARGE_CURRENT &&
+        field != MT_EVSE_F_MAX_CHARGE_CURRENT && field != MT_EVSE_F_USER_MAX_CHARGE_CURRENT &&
+        field != MT_EVSE_F_NEXT_CHARGE_ENERGY && field != MT_EVSE_F_BATTERY_CAPACITY &&
+        field != MT_EVSE_F_SESSION_ENERGY_CHARGED) {
+        return false;
+    }
     return true;
 }
 
@@ -1139,13 +1154,30 @@ static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
  * AT+MTMEAS=<ep>,<cluster>,<field>,<value>[,<field>,<value>,...] -> push
  * 1..MT_MEAS_MAX_PAIRS (field, value) measurement/state pairs onto <ep>'s
  * push-served cluster in one call (energy round A; round B adds 0x0094,
- * round C1 adds 0x0098). <cluster> selects the family, 0x0090
- * ElectricalPowerMeasurement, 0x0091 ElectricalEnergyMeasurement, 0x0094
- * WaterHeaterManagement or 0x0098 DeviceEnergyManagement; the field ids
- * (MT_MEAS_F_* / MT_ENERGY_F_* / MT_WHM_F_* / MT_DEM_F_*, mt_matter.h) are
+ * round C1 adds 0x0098, round C2 task 7 adds 0x0099). <cluster> selects the
+ * family, 0x0090 ElectricalPowerMeasurement, 0x0091
+ * ElectricalEnergyMeasurement, 0x0094 WaterHeaterManagement, 0x0098
+ * DeviceEnergyManagement or 0x0099 EnergyEvse; the field ids (MT_MEAS_F_* /
+ * MT_ENERGY_F_* / MT_WHM_F_* / MT_DEM_F_* / MT_EVSE_F_*, mt_matter.h) are
  * per-cluster spaces that may overlap numerically. Set-only, the
  * AT+MTLOCK/AT+MTVALVE/AT+MTOPSTATE/AT+MTALARM convention: bare/query
  * forms answer a plain ERROR.
+ *
+ * EnergyEvse is entirely delegate-served (all its scalar attributes, unlike
+ * every earlier family here, so this is the ONLY way the host can set any
+ * of them) and is the one family where AT+MTMEAS is also an avoidance: three
+ * of its attributes (UserMaximumChargeCurrent, RandomizationDelayWindow,
+ * ApproximateEVEfficiency) are additionally writable over the fabric, which
+ * would make them this project's first writable delegate-served attributes
+ * reachable over AT+MTATTR too. DE270 (firmware 0.10.1) resolved that write
+ * path's read-only case but left the writable one collapsing to a bare
+ * ERROR (the SDK's WriteAttribute() detour discards the provider's real
+ * status there); routing these three through AT+MTMEAS instead sidesteps
+ * that gap rather than closing it. See mt_evse.cpp's
+ * mt_evse_meas_apply_locked() for the field table and the metadata
+ * existence gate (esp_matter::attribute::get()) that answers
+ * +MTERR:4 for a field esp-matter never creates or a variant that lacks it,
+ * without a second table to keep in sync.
  *
  * <value> is a full-width 64-bit integer (hex or decimal), signed per the
  * field's own signedness (mt_meas_field_signed() above): a leading minus is
@@ -1158,11 +1190,18 @@ static bool mt_meas_field_signed(uint32_t cluster, uint8_t field)
  * pair leaves the first two unapplied.
  *
  * Lookup errors follow the established division: +MTERR:2 unknown endpoint,
- * +MTERR:3 <cluster> is not one of the four push-served ids, <ep> does not
+ * +MTERR:3 <cluster> is not one of the five push-served ids, <ep> does not
  * carry it, or (0x0094 only) a pushed field's backing feature is absent on
  * that endpoint (the bridge-side gate; see mt_matter.h's MT_WHM_F_* note).
- * A bare ERROR covers an unclassified runtime failure, routed through
- * attr_err_to_mterr() like every other bridge call in this file.
+ * +MTERR:4 (0x0099 only) a pushed field names an attribute esp-matter never
+ * created on that endpoint at all, whether because the field is one of the
+ * three esp-matter ships no caller for or because it is SoC-gated and this
+ * is a variant-1 endpoint (mt_matter.h's MT_EVSE_F_* note; the two cases
+ * share one metadata-driven gate and one error code, deliberately not the
+ * same code 0x0094's feature gate uses, since 0x0099 has no feature-bit
+ * table to consult in mt_at.c). A bare ERROR covers an unclassified runtime
+ * failure, routed through attr_err_to_mterr() like every other bridge call
+ * in this file.
  */
 #define MT_MEAS_MAX_PAIRS 7
 static int cmd_mtmeas(at_type_t type, char *args)

@@ -4040,6 +4040,14 @@ static int mt_meas_dem_apply(uint16_t ep, const uint8_t *fields, const int64_t *
  * (the 0x94 family, energy round B), and the atomic apply. Two passes, a
  * hard contract from the task brief: every pair is validated before any
  * pair is applied, so a bad third pair leaves the first two unapplied.
+ *
+ * The EnergyEvse (0x0099) branch, energy round C2 task 7, does not have a
+ * body here: mt_evse_meas_apply_locked() (mt_evse.cpp, task 4) already
+ * implements the same two-pass validate-then-apply and its own metadata
+ * existence gate, so this bridge only needs to admit the cluster id and
+ * forward. See mt_evse.h for why that function lives in its own
+ * translation unit and mt_evse.cpp's file comment for why the gate reads
+ * esp_matter::attribute::get() rather than a feature-bit table.
  */
 extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
                                   const int64_t *values, uint8_t count)
@@ -4051,7 +4059,8 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
         return MT_ATTR_ERR_ENDPOINT;
     }
     if (cluster != ElectricalPowerMeasurement::Id && cluster != ElectricalEnergyMeasurement::Id &&
-        cluster != WaterHeaterManagement::Id && cluster != DeviceEnergyManagement::Id) {
+        cluster != WaterHeaterManagement::Id && cluster != DeviceEnergyManagement::Id &&
+        cluster != EnergyEvse::Id) {
         return MT_ATTR_ERR_CLUSTER;
     }
     if (esp_matter::cluster::get(ep, cluster) == nullptr) {
@@ -4067,6 +4076,9 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
     }
     if (cluster == DeviceEnergyManagement::Id) {
         return mt_meas_dem_apply(ep, fields, values, count);
+    }
+    if (cluster == EnergyEvse::Id) {
+        return mt_evse_meas_apply_locked(ep, fields, values, count);
     }
 
     if (cluster == ElectricalPowerMeasurement::Id) {

@@ -1152,7 +1152,30 @@ extern "C" void *mt_matter_evse_delegate_alloc(uint16_t ep)
  * The EVSE's whole attribute surface is delegate-served, so this is the only
  * way the host can set any of it (design spec 5.5). Two-pass
  * validate-then-apply, the mt_matter_meas_set() hard contract: a bad third
- * pair leaves the first two unapplied.
+ * pair leaves the first two unapplied. Task 7 (energy round C2) wires this
+ * into the AT+MTMEAS dispatcher (mt_at.c, mt_matter_meas_set() in main.cpp);
+ * this function and its field table were already built here in task 4,
+ * ahead of that wiring, because mt_matter_evse_set()'s single-pair form
+ * needed the same validate/apply pass to exist.
+ *
+ * Why AT+MTMEAS and not AT+MTATTR, for the three attributes that are also
+ * WRITABLE (UserMaximumChargeCurrent, RandomizationDelayWindow,
+ * ApproximateEVEfficiency, the delegate's three setters below): those would
+ * be the first writable delegate-served (managed-internally + WRITABLE)
+ * attributes this project ships. DE270 (firmware 0.10.1) resolved the
+ * read-only half of that write path (a non-writable managed-internally
+ * attribute now answers +MTERR:11 instead of a bare ERROR) but its own
+ * resolution note says the writable half is still deferred: none shipped as
+ * of that fix, set_val_via_write_attribute() discards the provider's real
+ * status regardless of value, and the documented remedy if one ever ships
+ * is to call provider::WriteAttribute() from the bridge directly rather than
+ * fork the SDK. Routing every EVSE scalar through AT+MTMEAS instead sidesteps
+ * that gap rather than closing it: this is an AVOIDANCE, not a fix. The
+ * irony worth keeping in mind while reading the table below: the three
+ * writable attributes are exactly the three esp-matter never creates (see
+ * the existence-gate paragraph), so today the avoidance is doubly
+ * theoretical, on both the write path it sidesteps and the attributes it
+ * would have applied to.
  *
  * Existence gate: every field is checked against the endpoint's OWN metadata
  * (esp_matter::attribute::get) rather than against a feature-bit table.
