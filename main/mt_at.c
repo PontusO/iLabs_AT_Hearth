@@ -327,6 +327,47 @@ static bool parse_u64(const char *s, uint64_t *out)
     return true;
 }
 
+/*
+ * THE FORM/VALUE BOUNDARY for a hand-parsed command's own tokens (as
+ * distinct from attr_err_to_mterr()/row_err_to_mterr() below it, which map
+ * a BRIDGE result onto +MTERR once a command has already decided its own
+ * wire shape is fine). Every command that parses fields off the raw line
+ * itself, rather than relying entirely on a downstream codec, answers:
+ *
+ *   - a bare ERROR when the SHAPE of the line is wrong: the wrong number of
+ *     fields, an unterminated quote, a required token that is
+ *     structurally MISSING (as distinct from a token that IS present but
+ *     empty, which in AT+MTROW/AT+MTMETERID means an absent optional and is
+ *     a value-level concept, not a shape one), or the wrong command form
+ *     (e.g. a query where only a set exists);
+ *   - +MTERR:1 when the shape is right and a VALUE within it cannot be
+ *     accepted, whether because it fails to parse as the type it should be
+ *     (a present, correctly delimited token that is not a number) or
+ *     because it parses but is out of range.
+ *
+ * This was NOT applied consistently when first written: cmd_mtrow (and the
+ * rest of the AT+MTROW family it shares a grammar with) answered a bare
+ * ERROR for an unparseable-but-present field, on the reasoning that "not a
+ * number" is itself a shape problem; AT+MTMETERID copied that choice
+ * verbatim. cmd_mtdemcap and cmd_mtmodes/cmd_mtchimesounds had already
+ * shipped answering +MTERR:1 for the identical case. A review of all three
+ * shapes together (fix round 1, task 9 report,
+ * .superpowers/sdd/2026-08-14-energy-round-c2/task-9-report.md) found the
+ * split and ruled in favour of the two ALREADY-SHIPPED commands, both
+ * because a host may already depend on their answer and because "a token
+ * that cannot be parsed as a number" is, on balance, a value judgement
+ * (this specific piece of content is unacceptable) rather than a shape one
+ * (the command's structure is wrong), the same way an out-of-range number
+ * is: only the missing/unterminated/wrong-arity cases genuinely prevent the
+ * parser from even establishing where a token's content is.
+ *
+ * Governs cmd_mtrow/cmd_mtrowclear/cmd_mtrowapply/cmd_mtrowget (the
+ * AT+MTROW family) and cmd_mtmeterid, all normalised to this rule in fix
+ * round 1. cmd_mtdemcap and cmd_mtmodes/cmd_mtchimesounds already followed
+ * it and are unchanged. The next hand-parsed command should follow it from
+ * the start rather than re-deriving the split.
+ */
+
 /* Map a bridge attribute result onto this personality's +MTERR code space. */
 static int attr_err_to_mterr(int r)
 {
@@ -2550,7 +2591,7 @@ static int cmd_mtrow(at_type_t type, char *args)
 
     unsigned long ep;
     if (!parse_u(f[0], &ep)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (ep > 0xFFFF) {
         return MT_ERR_BAD_PARAM;
@@ -2558,7 +2599,7 @@ static int cmd_mtrow(at_type_t type, char *args)
 
     unsigned long kind;
     if (!parse_u(f[1], &kind)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (kind > 0xFF) {
         return MT_ERR_NO_CLUSTER;
@@ -2574,7 +2615,7 @@ static int cmd_mtrow(at_type_t type, char *args)
 
     unsigned long idx;
     if (!parse_u(f[2], &idx)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (idx > 0xFFFF) {
         return MT_ERR_BAD_PARAM;
@@ -2593,7 +2634,7 @@ static int cmd_mtrow(at_type_t type, char *args)
         }
         int64_t v;
         if (!parse_i64(tok, true, &v)) {
-            return MT_R_ERROR;
+            return MT_ERR_BAD_PARAM;
         }
         row.present[i] = true;
         row.value[i] = v;
@@ -2633,7 +2674,7 @@ static int cmd_mtrowclear(at_type_t type, char *args)
 
     unsigned long ep;
     if (!parse_u(f[0], &ep)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (ep > 0xFFFF) {
         return MT_ERR_BAD_PARAM;
@@ -2641,7 +2682,7 @@ static int cmd_mtrowclear(at_type_t type, char *args)
 
     unsigned long kind;
     if (!parse_u(f[1], &kind)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (kind > 0xFF || mt_rows_field_count((uint8_t)kind) < 0) {
         return MT_ERR_NO_CLUSTER;
@@ -2693,7 +2734,7 @@ static int cmd_mtrowapply(at_type_t type, char *args)
 
     unsigned long ep;
     if (!parse_u(f[0], &ep)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (ep > 0xFFFF) {
         return MT_ERR_BAD_PARAM;
@@ -2701,7 +2742,7 @@ static int cmd_mtrowapply(at_type_t type, char *args)
 
     unsigned long kind;
     if (!parse_u(f[1], &kind)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (kind > 0xFF || mt_rows_field_count((uint8_t)kind) < 0) {
         return MT_ERR_NO_CLUSTER;
@@ -2709,7 +2750,7 @@ static int cmd_mtrowapply(at_type_t type, char *args)
 
     unsigned long count;
     if (!parse_u(f[2], &count)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (count > 0xFFFF) {
         return MT_ERR_BAD_PARAM;
@@ -2894,7 +2935,7 @@ static int cmd_mtrowget(at_type_t type, char *args)
 
     unsigned long ep;
     if (!parse_u(f[0], &ep)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (ep > 0xFFFF) {
         return MT_ERR_BAD_PARAM;
@@ -2902,7 +2943,7 @@ static int cmd_mtrowget(at_type_t type, char *args)
 
     unsigned long kind;
     if (!parse_u(f[1], &kind)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (kind > 0xFF) {
         return MT_ERR_NO_CLUSTER;
@@ -2931,7 +2972,7 @@ static int cmd_mtrowget(at_type_t type, char *args)
         single = !idx_empty;
         if (single) {
             if (!parse_u(f[2], &idx)) {
-                return MT_R_ERROR;
+                return MT_ERR_BAD_PARAM;
             }
             if (idx > 0xFFFF) {
                 return MT_ERR_BAD_PARAM;
@@ -2943,7 +2984,7 @@ static int cmd_mtrowget(at_type_t type, char *args)
     unsigned long seq       = 0;
     if (qualified) {
         if (!parse_u(f[3], &seq)) {
-            return MT_R_ERROR;
+            return MT_ERR_BAD_PARAM;
         }
         if (seq > 0xFFFFFFFFUL || seq == 0) {
             /* 0 is never issued by mt_cmdbox_open() and is the idle marker
@@ -3042,10 +3083,17 @@ static int cmd_mtrowget(at_type_t type, char *args)
  * advanced past the closing quote.
  *
  * MT_R_ERROR: no opening quote, or the closing quote is never found before
- * the end of the line. An unterminated string is a FORM error for this
- * command (cmd_mtmeterid's own comment below explains why that differs from
- * AT+MTMODES/AT+MTCHIMESOUNDS, which answer +MTERR:1 for the identical
- * case).
+ * the end of the line. Both are FORM errors (see the FORM/VALUE rule above
+ * attr_err_to_mterr()), and for the same reason as each other: neither lets
+ * this function establish where the quoted field's content is supposed to
+ * start or end at all, which is a different failure from a token whose
+ * boundary IS known (already isolated by a comma) but whose content will
+ * not parse. "No opening quote" is this command's own required-token-
+ * missing case (the position calls for a quoted string and nothing shaped
+ * like one is there); "unterminated quote" is named explicitly in the rule
+ * above as staying FORM even though AT+MTMODES/AT+MTCHIMESOUNDS answer
+ * +MTERR:1 for the identical case, which is exactly the inconsistency fix
+ * round 1 (task 9 report) normalised everything else to avoid repeating.
  * MT_ERR_BAD_PARAM: content over MT_METERID_MAX_STR bytes, or a
  * non-printable byte (0x20..0x7E only accepted). An embedded raw quote is
  * not caught here directly: it always ends the scan early, and the
@@ -3096,28 +3144,27 @@ static int mtmeterid_scan_string(char **pp, const char **start, size_t *len)
  *
  * Hand-parsed off the raw argument string, the AT+MTMODES/AT+MTCHIMESOUNDS
  * reason: a comma inside a quoted field is legal content and at_split_args()
- * would split on it. This command's grammar is FIXED arity (eight fields,
- * always), unlike those two commands' repeated-pair lists, so its
- * error-code split follows this round's AT+MTROW family (design spec 2.5)
- * rather than copying MTMODES/MTCHIMESOUNDS's per-field choices:
+ * would split on it. Its error-code split follows the FORM/VALUE rule
+ * documented above attr_err_to_mterr(), which this command helped establish
+ * (fix round 1, task 9 report, .superpowers/sdd/2026-08-14-energy-round-c2/
+ * task-9-report.md):
  *
  *   - a token genuinely missing (the line ends before a structurally
- *     required comma or quote is found) is a FORM error (bare ERROR): the
- *     shape of the command itself is wrong, not any one value in it;
- *   - an unterminated quote is also FORM (bare ERROR), by this command's
- *     own contract, even though AT+MTMODES/AT+MTCHIMESOUNDS answer
- *     +MTERR:1 for the identical case;
- *   - a present, correctly delimited token that fails to parse as the
- *     numeric type it should be is also FORM (bare ERROR): mirrors
- *     AT+MTROW's cmd_mtrow, whose per-field parse_i64() failure is bare
- *     ERROR too, on the reasoning that "this is not a number" is a
- *     malformed-shape problem, not a value that was judged and rejected;
- *   - a token that DOES parse but violates a range (ep > 0xFFFF, type > 2,
- *     src > 2), a string over MT_METERID_MAX_STR bytes, a non-printable
- *     byte, junk after a quoted field's closing quote (an embedded quote is
- *     exactly this: the raw quote ends the scan early and the intended
- *     remainder becomes junk before the next comma), or both <pwr> and
- *     <apparent> absent, is a VALUE error (+MTERR:1).
+ *     required comma or quote is found), or an unterminated quote, is a
+ *     FORM error (bare ERROR): the shape of the command itself is wrong,
+ *     not any one value in it. (Fix round 1 corrected an earlier draft of
+ *     this comment, and this function's own behaviour, which had also
+ *     treated a present-but-unparseable numeric token as FORM; that was the
+ *     exact inconsistency the round-level ruling normalised away, see the
+ *     rule comment above attr_err_to_mterr().)
+ *   - a token that is present, is correctly delimited, and either fails to
+ *     parse as the numeric type it should be OR parses but violates a
+ *     range (ep > 0xFFFF, type > 2, src > 2), a string over
+ *     MT_METERID_MAX_STR bytes, a non-printable byte, junk after a quoted
+ *     field's closing quote (an embedded quote is exactly this: the raw
+ *     quote ends the scan early and the intended remainder becomes junk
+ *     before the next comma), or both <pwr> and <apparent> absent, is a
+ *     VALUE error (+MTERR:1).
  *
  * <type>: MeterTypeEnum, 0 Utility, 1 Private, 2 Generic.
  * "<pod>"/"<serial>"/"<protocol>": quoted strings, printable ASCII
@@ -3161,7 +3208,7 @@ static int cmd_mtmeterid(at_type_t type, char *args)
     *comma = '\0';
     unsigned long ep;
     if (!parse_u(p, &ep)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (ep > 0xFFFF) {
         return MT_ERR_BAD_PARAM;
@@ -3176,7 +3223,7 @@ static int cmd_mtmeterid(at_type_t type, char *args)
     *comma = '\0';
     unsigned long mtype;
     if (!parse_u(p, &mtype)) {
-        return MT_R_ERROR;
+        return MT_ERR_BAD_PARAM;
     }
     if (mtype > 2) {
         return MT_ERR_BAD_PARAM;
@@ -3225,7 +3272,7 @@ static int cmd_mtmeterid(at_type_t type, char *args)
     int64_t pwr = 0;
     if (pwr_present) {
         if (!parse_i64(p, true, &pwr)) {
-            return MT_R_ERROR;
+            return MT_ERR_BAD_PARAM;
         }
     }
     p = comma + 1;
@@ -3240,7 +3287,7 @@ static int cmd_mtmeterid(at_type_t type, char *args)
     int64_t apparent = 0;
     if (apparent_present) {
         if (!parse_i64(p, true, &apparent)) {
-            return MT_R_ERROR;
+            return MT_ERR_BAD_PARAM;
         }
     }
     p = comma + 1;
@@ -3254,7 +3301,7 @@ static int cmd_mtmeterid(at_type_t type, char *args)
     unsigned long src = 0;
     if (src_present) {
         if (!parse_u(p, &src)) {
-            return MT_R_ERROR;
+            return MT_ERR_BAD_PARAM;
         }
         if (src > 2) {
             return MT_ERR_BAD_PARAM;
