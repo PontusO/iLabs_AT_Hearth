@@ -1441,10 +1441,35 @@ int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity_t *id);
  * GetTargets()" contract is satisfied on this firmware (mt_evse.cpp's file
  * comment carries the citation).
  *
- * Returns nullptr once MT_EVSE_MAX slots are handed out, the same
- * abort-the-boot-rebuild contract as every other pool in this file.
+ * Returns nullptr unless mt_matter_evse_reserve() (below) claimed a slot
+ * first, the same abort-the-boot-rebuild contract as every other pool in
+ * this file.
  */
 void *mt_matter_evse_delegate_alloc(uint16_t ep);
+
+/*
+ * Claim one of the MT_EVSE_MAX delegate slots, WITHOUT needing an endpoint
+ * id. Call from mk_energy_evse() (mt_devtypes.cpp) FIRST, before
+ * energy_evse::create() or anything else in the thunk, and return nullptr
+ * immediately (logging which constant to raise) when this returns false.
+ *
+ * This exists because the capacity decision and the delegate handout cannot
+ * happen at the same moment: mt_matter_evse_delegate_alloc() needs the
+ * endpoint id, which only create() can produce, and by then create() has
+ * already allocated the endpoint, marked it enabled and appended it to the
+ * node's own endpoint list. A pool-exhausted third EVSE therefore used to
+ * leave a live, delegate-less EnergyEvse endpoint behind: reachable by a
+ * controller through provider::Endpoints(), absent from AT+MTEP? (which
+ * only ever records endpoints whose thunk succeeded), and failing every
+ * attribute read because no Instance was newed for it. That is the same
+ * defect task 8 fixed for the meter's MT_METER_MAX pool, in the one shape
+ * mt_meter_reserve()'s fix could not simply be copied into: the meter's
+ * reserve IS the whole gate, this one is half of a split gate whose other
+ * half is the alloc's consumption check. mt_evse.cpp's s_evse_reserved
+ * comment carries the full reasoning, including why a boot-scoped
+ * reservation that is never released is safe.
+ */
+bool mt_matter_evse_reserve(void);
 
 /*
  * AT+MTMEAS field ids for the EnergyEvse cluster (0x0099), the wire contract

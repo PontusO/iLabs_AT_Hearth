@@ -192,10 +192,21 @@ alignas(Instance) uint8_t s_meter_storage[MT_METER_MAX][sizeof(Instance)];
  * but the CAPACITY check has to happen at thunk time, not registration
  * time: only a thunk returning nullptr triggers the "abort the whole
  * composition rebuild" path (main.cpp's comp.count = 0 on any
- * mt_devtype_create() failure), the same mechanism mk_energy_evse() relies
- * on for its own delegate pool via mt_matter_evse_delegate_alloc(). A
- * failure discovered only later, inside mt_meter_register_all(), cannot
- * un-create the cluster that already exists on the wire by then.
+ * mt_devtype_create() failure). A failure discovered only later, inside
+ * mt_meter_register_all(), cannot un-create the cluster that already exists
+ * on the wire by then.
+ *
+ * Final review of this round corrected what this comment used to claim
+ * here. It cited mk_energy_evse()'s mt_matter_evse_delegate_alloc() as the
+ * precedent this reservation follows, and that was wrong in the one way
+ * that mattered: the EVSE alloc needs the endpoint id, so it could only ever
+ * run AFTER energy_evse::create(), which is precisely the ordering fix
+ * round 2 had just rejected here. Aborting the rebuild is genuinely the
+ * shared mechanism, but the EVSE thunk was aborting it too late and leaking
+ * a live, delegate-less endpoint exactly as fix round 1 did. It now takes a
+ * count-only mt_matter_evse_reserve() before create() and consumes it in the
+ * alloc afterwards (mt_evse.cpp's s_evse_reserved), so the two thunks agree
+ * again: nothing is built at all when the pool is already full.
  *
  * Why reserving before create() is safe: nothing can release a reservation
  * and retry within the same boot. This counter is a monotonic claim with no

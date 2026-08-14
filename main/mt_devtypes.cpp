@@ -2396,6 +2396,34 @@ static endpoint_t *mk_dem(node_t *n, uint8_t variant)
  */
 static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
 {
+    /*
+     * Final-review fix: claim an EVSE delegate slot BEFORE creating
+     * anything, the mk_electrical_utility_meter() ordering below, and for
+     * the identical reason. mt_matter_evse_delegate_alloc() cannot be the
+     * capacity gate on its own because it needs the endpoint id, so it can
+     * only run after energy_evse::create() has already allocated the
+     * endpoint, marked it enabled and appended it to the node's own endpoint
+     * list. A third declared EVSE therefore failed at the alloc and returned
+     * nullptr (correctly aborting the composition rebuild) but left a LIVE,
+     * delegate-less EnergyEvse endpoint behind: visible to a controller
+     * through provider::Endpoints(), invisible to AT+MTEP?, and answering
+     * Failure on every one of its nineteen Instance-served attributes.
+     * Reserving here means a pool-exhausted EVSE builds nothing at all.
+     *
+     * The ModeBase delegate above this in the original ordering is NOT the
+     * same case and is deliberately left where it is: it is alloc'd before
+     * create() already (it goes into the config struct), so its exhaustion
+     * path never built anything either.
+     *
+     * See mt_evse.cpp's s_evse_reserved comment for why a reservation that
+     * is never released is safe within a boot.
+     */
+    if (!mt_matter_evse_reserve()) {
+        ESP_LOGE(TAG, "EVSE delegate pool exhausted (energy evse, MT_EVSE_MAX=%u)",
+                 (unsigned)MT_EVSE_MAX);
+        return nullptr;
+    }
+
     void *mode_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::EnergyEvseMode::Id);
     if (mode_delegate == nullptr) {
         ESP_LOGE(TAG, "modebase delegate pool exhausted (energy evse mode)");
@@ -2451,9 +2479,11 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
      * :3396. The variant-0 FeatureMap reaches ValidateTargets() whichever
      * order the thunk uses.
      *
-     * The alloc also loads the endpoint's stored schedule from NVS,
-     * satisfying the SDK's unenforced "LoadTargets before GetTargets"
-     * contract.
+     * The alloc CONSUMES the reservation taken at the top of this thunk (it
+     * refuses a handout with no outstanding reservation), so it can no
+     * longer be the first place a full pool is discovered. It also loads the
+     * endpoint's stored schedule from NVS, satisfying the SDK's unenforced
+     * "LoadTargets before GetTargets" contract.
      */
     void *evse_delegate = mt_matter_evse_delegate_alloc(ep_id);
     if (evse_delegate == nullptr) {

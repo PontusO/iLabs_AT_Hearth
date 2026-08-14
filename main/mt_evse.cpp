@@ -1110,6 +1110,43 @@ public:
 HearthEvseDelegate s_evse_delegates[MT_EVSE_MAX];
 size_t             s_evse_next = 0;
 
+/*
+ * Reservations claimed by mt_matter_evse_reserve(), the count-only gate
+ * mk_energy_evse() (mt_devtypes.cpp) calls BEFORE energy_evse::create().
+ *
+ * The final whole-branch review of this round found the EVSE thunk with
+ * exactly the ordering task 8 had just fixed for the meter: energy_evse::
+ * create() allocates the endpoint, marks it enabled and appends it to the
+ * node's own endpoint list, and only afterwards did the thunk reach
+ * mt_matter_evse_delegate_alloc(). A third declared EVSE therefore left a
+ * LIVE, delegate-less EnergyEvse endpoint behind: visible to a controller
+ * through provider::Endpoints() (which walks the node's own list), invisible
+ * to AT+MTEP? (mt_matter_record_endpoint() is never reached for a thunk that
+ * returned nullptr), and answering Failure on every attribute read because
+ * no Instance was ever newed for it.
+ *
+ * The meter's fix does not transfer verbatim, which is why this is a second
+ * counter rather than a reuse of that shape: mt_meter_reserve() is the WHOLE
+ * gate there, because the meter's Instance is built much later by
+ * mt_meter_register_all()'s scan. Here the delegate handout itself already
+ * exists and needs the endpoint id create() has not produced yet, so the
+ * gate is SPLIT: reserve() takes the capacity decision before anything is
+ * built, and mt_matter_evse_delegate_alloc() CONSUMES that reservation
+ * afterwards, once the id exists. The consumption check below
+ * (s_evse_next >= s_evse_reserved) is what makes the split safe: alloc can
+ * never hand out a slot that was not reserved first, so the two counters
+ * cannot drift into a state where the reservation said no and the alloc
+ * said yes.
+ *
+ * Monotonic with no release, boot-scoped, for the identical reason
+ * s_meter_reserved is (mt_meter.cpp): ANY thunk returning nullptr aborts the
+ * WHOLE composition rebuild for the rest of this boot (main.cpp's
+ * comp.count = 0; break;), so no later attempt in the same boot can be
+ * blocked by a reservation an aborted endpoint never consumed. A reboot
+ * reinitialises both counters along with every other static here.
+ */
+size_t             s_evse_reserved = 0;
+
 /* The by-endpoint lookup every bridge below starts from, the whm_for() shape. */
 HearthEvseDelegate *evse_for(chip::EndpointId ep)
 {
@@ -1125,8 +1162,32 @@ HearthEvseDelegate *evse_for(chip::EndpointId ep)
     * is also what lets the class's inline members use the file-static blob
     * buffer without an ODR argument. */
 
+extern "C" bool mt_matter_evse_reserve(void)
+{
+    if (s_evse_reserved >= MT_EVSE_MAX) {
+        return false;
+    }
+    s_evse_reserved++;
+    return true;
+}
+
 extern "C" void *mt_matter_evse_delegate_alloc(uint16_t ep)
 {
+    /*
+     * Consume a reservation mt_matter_evse_reserve() made before create()
+     * ran (see s_evse_reserved's comment). This, not the MT_EVSE_MAX bound
+     * below, is now the live capacity check: reserved can never exceed
+     * MT_EVSE_MAX, so a handout with no outstanding reservation is either a
+     * caller that skipped reserve() or a pool that is genuinely full, and
+     * both must fail here.
+     */
+    if (s_evse_next >= s_evse_reserved) {
+        return nullptr;
+    }
+    /* Defensive backstop only, unreachable given the check above, kept for
+     * the same reason mt_meter_register_all()'s slot bound is: cheap, and
+     * worth labelling as defensive rather than leaving a reader to wonder
+     * whether it is still load-bearing. */
     if (s_evse_next >= MT_EVSE_MAX) {
         return nullptr;
     }
