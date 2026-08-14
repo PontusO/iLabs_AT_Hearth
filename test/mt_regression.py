@@ -554,6 +554,28 @@ PHASE3_COMPOSITION = [
                             # (ControllableESA: the PowerAdjustment feature,
                             # so PowerAdjustmentCapability, both PA commands
                             # and both PA events exist)
+    # Energy round C2 (0.12.0), task 13: the AT+MTROW nested-payload family
+    # and Energy EVSE 0x050C. ONE new permanent slot, not the design
+    # spec's aspirational three (8.3): the design spec's OWN pool table
+    # (section 4) earmarked exactly one new endpoint for this round
+    # against MT_COMP_MAX_ENDPOINTS 28 with 27 already declared here
+    # ("one for C2's EVSE", sdkconfig.defaults's own comment above
+    # CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT), and this task's file
+    # list (test/mt_regression.py, test/test_mt_regression.py, test/
+    # baselines/*) carries no firmware/Kconfig files to raise the cap
+    # with. Variant 0 (the SOC feature) gets the permanent slot, matching
+    # the water heater precedent (round B: the FULL/richer variant is
+    # permanent, the minimal one is staged): every SOC-mandatory row, the
+    # 70-row full-schedule proof and merge-by-day all need the SOC-feature
+    # arm anyway, since the SOC-optional arm's negative rows are cheaper
+    # to prove on a scratch endpoint. EVSE variant 1 (no SOC) and the
+    # Electrical Utility Meter (0x0511, no cluster COMMANDS at all, so no
+    # controller interaction this round's checks need) are both covered
+    # by Phase 1's staged scratch composition instead (t_row_evse_meter_
+    # staged, t_row_meter_pool_exhaustion, register_phase1_t12_negative),
+    # the t_meas_staged_wh_min / t_staged_variant1_energy_c1 division.
+    (28, "0x050C,0"),      # energy EVSE, variant 0 (SOC feature: every
+                            # charging target must carry targetSoC)
 ]
 
 
@@ -1518,6 +1540,27 @@ def step_3_2_grammar(ctx):
       ok('AT+MTTEMPLEVELS=10,"Low","Medium","High"'))
     c("MTTEMPLEVELS comma inside a label -> OK",
       ok('AT+MTTEMPLEVELS=10,"Wine, red","Wine, white"'))
+
+    # AT+MTROW / AT+MTROWAPPLY / AT+MTROWGET (energy round C2, task 13):
+    # ep 28 is the EVSE, variant 0 (SOC feature). Every lookup-error and
+    # value-boundary row for this family lives in Phase 1
+    # (register_phase1_t12_negative), using ep 1/ep 99 as the "any
+    # endpoint"/"unknown endpoint" stand-ins, since AT+MTROW's own
+    # staging never checks ep against the composition (mt_rows.c's file
+    # comment: it is pure RAM). This is the one round trip Phase 1
+    # cannot stage: a real commit reaching a real EnergyEvse store, and a
+    # real readback of it. The full-schedule, merge-by-day and
+    # SOC-variant-rule proofs on this same endpoint are step_3_27_evse's
+    # job; the unscored clear below leaves the schedule EMPTY again
+    # before handing off, the MTALARM precedent above.
+    c("MTROW=28,1,0,2,480,80,25000000 -> OK (staging a real target; SOC "
+      "feature present on variant 0, so SoC is supplied)",
+      ok("AT+MTROW=28,1,0,2,480,80,25000000"))
+    c("MTROWAPPLY=28,1,1 -> OK (commits to the real EnergyEvse store)",
+      ok("AT+MTROWAPPLY=28,1,1"))
+    c("MTROWGET=28,1 -> the committed row read back verbatim",
+      ok("AT+MTROWGET=28,1", line_re=r"\+MTROW:0,1,2,480,80,25000000"))
+    link.command("AT+MTROWAPPLY=28,1,0")  # unscored: clear before 3.27
 
 
 def step_3_3_selftest_wedge(ctx):
@@ -4452,6 +4495,141 @@ def step_3_26_dem(ctx):
             tag="P3")
 
 
+def step_3_27_evse(ctx):
+    """Energy round C2 (0.12.0), task 13: the EVSE endpoint's identity
+    (PHASE3_COMPOSITION 28, endpoint 28, 0x050C variant 0) and the
+    AT+MTROW-family behaviours that need a REAL, committed EnergyEvse
+    store rather than a stage: the SOC-variant rule's POSITIVE arm
+    (SoC mandatory), merge-by-day and a full 70-row schedule.
+
+    Deliberately AT-only, no chip-tool adjudication: every command this
+    round added that a controller can INVOKE (SetTargets, Disable,
+    EnableCharging) is adjudicated through a brand new row-bearing
+    +MTCMD form this harness has never driven before (task 6's report:
+    the 3000 ms window, the seq-qualified AT+MTROWGET pull, the
+    two-buffer concurrency argument), and this task's own scope boundary
+    is to WRITE harness code, not to run any of it against hardware
+    first. Scripting an untested CmdResponder sequence for a form this
+    risky, with no way to catch a mistake before the consolidated bench
+    session, would be worse than not writing it: a broken automated step
+    silently reports the wrong thing forever, where a careful prose
+    procedure gets a human's judgement on the very first run. The
+    adjudicated flows (SetTargets ALLOWED and DENIED, Disable and
+    EnableCharging, the verdict-window etiquette, the WiFi mDNS pause)
+    are all in this task's report as an exact, ordered bench procedure
+    instead, collecting task 6's own bench sections (8, 9, 10) rather
+    than re-deriving them.
+
+    Requires "3.5 commission" purely for the identity reads below
+    (a real controller must exist to ask); every row after that is
+    AT-only and would work identically on an uncommissioned device.
+    Deliberately NOT requiring anything from step_3_2_grammar's own
+    AT+MTROW round trip beyond it having left the schedule EMPTY (its
+    own unscored clear, matching the MTALARM precedent), since this
+    step's own first action is a fresh apply-count-0 in any case."""
+    link, s, chip = ctx.link, ctx.suite, ctx.chip
+    node = "0x%X" % ctx.node_id
+    ep = 28
+
+    # ---- identity ----
+    rc, out = chip.run(["descriptor", "read", "device-type-list", node,
+                        str(ep)], timeout=30)
+    types = parse_device_types(out)
+    s.check("3.27 device type list is 0x050C (1292) alone",
+            rc == 0 and types == [1292], tag="P3")
+    rc, out = chip.run(["descriptor", "read", "server-list", node,
+                        str(ep)], timeout=30)
+    servers = parse_accepted_command_list(out)
+    s.check("3.27 server list carries EnergyEvse (153) and "
+            "EnergyEvseMode (157)",
+            rc == 0 and 153 in servers and 157 in servers, tag="P3")
+
+    # ---- SOC-variant rule, the POSITIVE arm (variant 0: SoC mandatory)
+    # ---- the NEGATIVE arm (variant 1, no SOC) is Phase 1's staged
+    # t_row_evse_meter_staged. mt_evse_targets_apply_locked()'s pass 1
+    # (mt_evse.cpp) enforces this identically on the AT path and the
+    # fabric SetTargets path (task 4's review finding).
+    res, _ = link.command("AT+MTROW=%d,1,0,2,480,,25000000" % ep)
+    s.check("3.27 stage a target with SoC absent -> OK (staging never "
+            "enforces the SOC-variant rule; only apply does)",
+            res == 0, tag="P3")
+    res, _ = link.command("AT+MTROWAPPLY=%d,1,1" % ep)
+    s.check("3.27 apply: SoC absent on the SOC-feature endpoint -> "
+            "+MTERR:1", res == 1, tag="P3")
+    # A failed apply leaves the stage active (cmd_mtrowapply's own
+    # comment): discard it explicitly, unscored, so it cannot bleed into
+    # the merge-by-day rows below.
+    link.command("AT+MTROWCLEAR=%d,1" % ep)
+
+    # ---- merge by day: the case a wholesale-replace implementation
+    # passes every naive apply-then-read test and fails only this one
+    # (design spec 8.4 item 1a) ----
+    res, _ = link.command("AT+MTROW=%d,1,0,2,480,80,25000000" % ep)
+    s.check("3.27 merge-by-day: stage a Monday target -> OK", res == 0,
+            tag="P3")
+    res, _ = link.command("AT+MTROW=%d,1,1,4,600,80,10000000" % ep)
+    s.check("3.27 merge-by-day: stage a Tuesday target -> OK", res == 0,
+            tag="P3")
+    res, _ = link.command("AT+MTROWAPPLY=%d,1,2" % ep)
+    s.check("3.27 merge-by-day: apply Monday+Tuesday -> OK", res == 0,
+            tag="P3")
+    res, lines = cmd_retry(link, "AT+MTROWGET=%d,1" % ep)
+    s.check("3.27 merge-by-day: readback carries both targets",
+            res == 0 and lines == ["+MTROW:0,2,2,480,80,25000000",
+                                   "+MTROW:1,2,4,600,80,10000000"],
+            tag="P3")
+    res, _ = link.command("AT+MTROW=%d,1,0,2,900,80,5000000" % ep)
+    s.check("3.27 merge-by-day: stage a REPLACEMENT Monday target -> OK",
+            res == 0, tag="P3")
+    res, _ = link.command("AT+MTROWAPPLY=%d,1,1" % ep)
+    s.check("3.27 merge-by-day: apply Monday-only -> OK", res == 0,
+            tag="P3")
+    res, lines = cmd_retry(link, "AT+MTROWGET=%d,1" % ep)
+    s.check("3.27 merge-by-day: Monday REPLACED, Tuesday SURVIVES "
+            "untouched (subtract_days() only ever removes the day bits "
+            "the CURRENT apply names)",
+            res == 0 and lines == ["+MTROW:0,2,4,600,80,10000000",
+                                   "+MTROW:1,2,2,900,80,5000000"],
+            tag="P3")
+
+    # ---- a full 70-row schedule, written, applied and read back row for
+    # row (design spec 8.4 item 1) ----
+    res, _ = link.command("AT+MTROWAPPLY=%d,1,0" % ep)
+    s.check("3.27 clear before the full-schedule test -> OK", res == 0,
+            tag="P3")
+    day_bits_list = [1, 2, 4, 8, 16, 32, 64]  # 7 distinct single-bit days
+    idx = 0
+    stage_ok = True
+    for day in day_bits_list:
+        for t in range(10):
+            minutes = t * 120  # 0..1080, all inside 0..1439
+            energy = (day * 100 + t) * 1000
+            cmd = "AT+MTROW=%d,1,%d,%d,%d,80,%d" % (ep, idx, day, minutes,
+                                                     energy)
+            if link.command(cmd)[0] != 0:
+                stage_ok = False
+            idx += 1
+    s.check("3.27 all 70 rows staged -> OK", stage_ok, tag="P3")
+    res, _ = link.command("AT+MTROWAPPLY=%d,1,70" % ep)
+    s.check("3.27 apply the full 70-row schedule -> OK", res == 0,
+            tag="P3")
+    res, lines = cmd_retry(link, "AT+MTROWGET=%d,1" % ep)
+    expect = []
+    idx = 0
+    for day in day_bits_list:
+        for t in range(10):
+            minutes = t * 120
+            energy = (day * 100 + t) * 1000
+            expect.append("+MTROW:%d,70,%d,%d,80,%d"
+                          % (idx, day, minutes, energy))
+            idx += 1
+    s.check("3.27 the full 70-row schedule reads back row for row",
+            res == 0 and lines == expect, tag="P3")
+    res, _ = link.command("AT+MTROWAPPLY=%d,1,0" % ep)
+    s.check("3.27 clear the full schedule at step end -> OK", res == 0,
+            tag="P3")
+
+
 def step_3_14_root_urc_sweep(ctx):
     """Design spec 4.3's standing-disciplines bullet ("no
     `+MTATTR:0,...` ever"), pinned by a dedicated sweep for the same
@@ -4637,6 +4815,8 @@ PHASE3_STEPS[:] = [
     {"name": "3.25 battery storage", "fn": step_3_25_battery_storage,
      "requires": ["3.5 commission"]},
     {"name": "3.26 device energy management", "fn": step_3_26_dem,
+     "requires": ["3.5 commission"]},
+    {"name": "3.27 energy evse", "fn": step_3_27_evse,
      "requires": ["3.5 commission"]},
     {"name": "3.14 root-endpoint URC sweep", "fn": step_3_14_root_urc_sweep},
 ]
@@ -6695,6 +6875,615 @@ def register_phase1_t11_negative():
 
 
 register_phase1_t11_negative()
+
+
+def _mtrow_stage_then_clear(cmd, ep=1, kind=1):
+    """AT+MTROW succeeds (OK) and is immediately cleared with
+    AT+MTROWCLEAR, so the single global s_row_stage returns to inactive
+    for every later Phase 1 row: the t_evt_mask_set_read_restore
+    discipline ("the one piece of state Phase 1 may touch, restored
+    immediately"), applied to the one piece of RAM state AT+MTROW
+    touches. Every row below that expects OK from a stage uses this
+    instead of a bare expect_ok, so no successful stage row can ever
+    leak into a later, unrelated AT+MTROWCLEAR/AT+MTROWAPPLY row."""
+    def fn(link):
+        if link.command(cmd)[0] != 0:
+            return False
+        return link.command("AT+MTROWCLEAR=%d,%d" % (ep, kind))[0] == 0
+    return fn
+
+
+def t_row_evse_meter_staged(link):
+    """Energy round C2, task 13: the AT+MTROW family and AT+MTMETERID
+    rows that need a REAL endpoint but not a controller, staged the
+    t_meas_staged_wh_min / t_staged_variant1_energy_c1 way: a scratch
+    composition (standard light + EVSE variant 1, no SOC feature, ep 2 +
+    the utility meter, ep 3), AT+MTEPAPPLY (persists and reboots), VERIFY
+    the composition actually took effect via AT+MTEP?, run every row,
+    then restore the single-light standard state in a finally block.
+
+    Why these three things are staged together in ONE reboot cycle
+    rather than three: each staged Phase 1 row costs two reboots (apply
+    + restore), and none of the checks below touch each other's state,
+    so bundling saves four reboots for identical coverage (the same
+    reasoning t_meas_staged_wh_min and t_staged_variant1_energy_c1 give
+    for their own bundling).
+
+    Why EVSE variant 1 rather than variant 0 here: this function's job is
+    the AT+MTROWAPPLY count-0 semantics (task 2's review caught two
+    separate defects in opposite directions here, task 6 report's ledger
+    entry) and the SOC-variant rule's NEGATIVE arm (no SOC feature: a
+    target may only claim SoC 100 or omit it). The POSITIVE arm (SOC
+    feature: SoC is mandatory) runs against the persistent Phase 3 slot
+    (variant 0, PHASE3_COMPOSITION 28), where the round's own full
+    70-row-schedule and merge-by-day proofs also live: the design spec's
+    own pool table earmarked exactly ONE new permanent Phase 3 endpoint
+    for this round (sdkconfig.defaults's "one for C2's EVSE" comment,
+    MT_COMP_MAX_ENDPOINTS 28 with 27 already declared), so a second
+    permanent EVSE endpoint plus a permanent meter endpoint would need a
+    composition-cap raise this task's file list (test/mt_regression.py,
+    test/test_mt_regression.py, test/baselines/*) does not include. The
+    utility meter needs no controller for anything round C2 added (it is
+    an attributes-only cluster with no commands at all, and AT+MTATTR
+    reads through the same ember/Instance path a real Matter read would),
+    so staging it here rather than spending the one free composition slot
+    on it costs nothing this round's own checks need.
+
+    The meter's five attributes no longer answering a bare ERROR (design
+    spec 6.1) is the direct, AT-only test of this round's dead-shell fix:
+    before it, MeterIdentification's Instance AttrAccess was declared but
+    never registered, so esp_matter::attribute::get_val()'s call into the
+    real ReadAttribute() dispatch failed outright for every one of the
+    five, regardless of what AT+MTMETERID had pushed. AT+MTATTR's own
+    pipeline only converts integer-carrying types past that point, so
+    four of the five (three char_strings, one struct) answer +MTERR:5
+    once the Instance runs, not a value; only MeterType (an enum) can
+    prove the stronger "answers a value" claim at this layer. The full
+    five-attribute value proof is a controller-read bench item (this
+    report's bench procedure), the only path that can carry a string or
+    a struct back at all."""
+    def diag(msg):
+        print("    (staged EVSE/meter c2: %s)" % msg)
+
+    def apply_and_wait():
+        link.drain(0.3)
+        if link.command("AT+MTEPAPPLY", timeout=5.0)[0] != 0:
+            return False
+        return link.await_urc(r"\+MTREADY$", timeout=15.0) is not None
+
+    ok = True
+    try:
+        if not stage_composition(link, ["0x0100", "0x050C,1", "0x0511"]):
+            diag("staging the scratch composition failed")
+            return False
+        if not apply_and_wait():
+            diag("AT+MTEPAPPLY or the +MTREADY wait failed")
+            return False
+        res, lines = cmd_retry(link, "AT+MTEP?")
+        if res != 0 or lines != ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x050C,1",
+                                 "+MTEP:2,3,0x0511"]:
+            diag("composition readback wrong: %r" % lines)
+            return False
+
+        # ---- AT+MTROWAPPLY count-0, case (a): nothing staged ----
+        # The documented clear request must succeed even when nothing was
+        # ever staged for this (ep, kind) (task 1's review: a guard that
+        # rejected this used to answer +MTERR:1 instead of clearing).
+        res, _ = link.command("AT+MTROWAPPLY=2,1,0")
+        if res != 0:
+            diag("count-0 case (a), nothing staged: apply answered %r"
+                 % res)
+            ok = False
+        res, lines = cmd_retry(link, "AT+MTROWGET=2,1")
+        if res != 0 or lines != []:
+            diag("count-0 case (a): readback not empty: %r" % lines)
+            ok = False
+
+        # ---- AT+MTROWAPPLY count-0, case (b): rows ARE staged ----
+        # The exact repro task 2's review caught: stage two rows, apply
+        # count 0, and the two staged rows must be ABANDONED, not
+        # committed. A wholesale-replace implementation (or the original,
+        # buggy "if matches, pass the stage through unchanged" reading)
+        # passes every naive apply-then-read test and fails only this one.
+        if link.command("AT+MTROW=2,1,0,2,480,,25000000")[0] != 0:
+            diag("count-0 case (b): staging row 0 failed")
+            ok = False
+        if link.command("AT+MTROW=2,1,1,4,600,,10000000")[0] != 0:
+            diag("count-0 case (b): staging row 1 failed")
+            ok = False
+        res, _ = link.command("AT+MTROWAPPLY=2,1,0")
+        if res != 0:
+            diag("count-0 case (b): apply answered %r" % res)
+            ok = False
+        res, lines = cmd_retry(link, "AT+MTROWGET=2,1")
+        if res != 0 or lines != []:
+            diag("count-0 case (b): the two staged rows were committed "
+                 "instead of abandoned: %r" % lines)
+            ok = False
+
+        # ---- SOC-variant rule, the NEGATIVE arm (no SOC feature) ----
+        # mt_evse_targets_apply_locked()'s pass 1 (mt_evse.cpp) enforces
+        # this on the AT path too, not only on a fabric SetTargets: task
+        # 4's review found the AT path could otherwise install a schedule
+        # a controller's SetTargets would have been refused.
+        if link.command("AT+MTROW=2,1,0,2,480,50,25000000")[0] != 0:
+            diag("SOC-variant negative: staging soc=50 failed")
+            ok = False
+        res, _ = link.command("AT+MTROWAPPLY=2,1,1")
+        if res != 1:
+            diag("SOC-variant negative: soc=50 on a no-SOC endpoint "
+                 "answered %r, wanted +MTERR:1" % res)
+            ok = False
+        if link.command("AT+MTROWCLEAR=2,1")[0] != 0:
+            diag("SOC-variant negative: clearing the rejected stage "
+                 "failed")
+            ok = False
+        # SoC 100 ("charge it completely") IS legal on a no-SOC endpoint.
+        if link.command("AT+MTROW=2,1,0,2,480,100,25000000")[0] != 0:
+            diag("SOC-variant negative: staging soc=100 failed")
+            ok = False
+        res, _ = link.command("AT+MTROWAPPLY=2,1,1")
+        if res != 0:
+            diag("SOC-variant negative: soc=100 answered %r, wanted OK"
+                 % res)
+            ok = False
+        # SoC absent is legal too.
+        if link.command("AT+MTROW=2,1,0,2,480,,25000000")[0] != 0:
+            diag("SOC-variant negative: staging soc-absent failed")
+            ok = False
+        res, _ = link.command("AT+MTROWAPPLY=2,1,1")
+        if res != 0:
+            diag("SOC-variant negative: soc-absent answered %r, wanted "
+                 "OK" % res)
+            ok = False
+        # Clear back to empty so this scratch endpoint carries nothing
+        # into its next reboot (none is expected before AT+MTFRESET, but
+        # leaving a real schedule behind in NVS is exactly the kind of
+        # residue this discipline exists to avoid).
+        res, _ = link.command("AT+MTROWAPPLY=2,1,0")
+        if res != 0:
+            diag("final clear answered %r" % res)
+            ok = False
+
+        # ---- the utility meter: identity push, then the dead-shell
+        # fix's direct test ----
+        res, _ = link.command(
+            'AT+MTMETERID=3,1,"POD-1","SN-123","V1.0",1500000,2000000,1')
+        if res != 0:
+            diag("meter identity push answered %r" % res)
+            ok = False
+        # MeterIdentification 0x0B06: MeterType(0), PointOfDelivery(1),
+        # MeterSerialNumber(2), ProtocolVersion(3), PowerThreshold(4).
+        # esp_matter::attribute::get_val() (mt_matter_attr_read's own
+        # path, main.cpp) calls through to the REAL CHIP data-model
+        # provider's ReadAttribute(), the same dispatch a Matter wire
+        # read uses, so it DOES reach Instance::Read() once the round's
+        # fix registers one. Before the fix nothing implements Read() at
+        # all and ReadAttribute() answers failure outright, which
+        # mt_matter_attr_read() cannot distinguish from any other
+        # unclassified bridge failure and so reports as a bare ERROR
+        # (MT_ATTR_ERR_FAILED has no entry in attr_err_to_mterr()'s
+        # switch, mt_at.c).
+        #
+        # AT+MTATTR's OWN pipeline past that point only converts
+        # integer-carrying types (attr_val_to_i64(), main.cpp); the
+        # cluster's own XML types PointOfDelivery/MeterSerialNumber/
+        # ProtocolVersion char_string and PowerThreshold a struct, none
+        # of which attr_val_to_i64() can represent, so a SUCCESSFUL read
+        # of any of those four still answers +MTERR:5 (MT_ATTR_ERR_TYPE),
+        # not a value: that is a real, permanent limit of AT+MTATTR (the
+        # project's own "AT+MTATTRX for opaque types is specified but
+        # unimplemented"), not evidence the fix regressed. The
+        # DISTINGUISHING signal available at this layer is therefore "not
+        # a bare ERROR" (Instance::Read() ran at all), not "answers OK":
+        # only MeterType (an enum, genuinely integer-carrying) can prove
+        # the stronger claim. The full "all five answer values" proof
+        # needs a real controller read of each attribute by name (the
+        # bench procedure), which is the only path that can carry a
+        # string or a struct back at all.
+        res, lines = link.command("AT+MTATTR=3,2822,0")
+        if res != 0:
+            diag("MeterType read answered %r, wanted a value" % res)
+            ok = False
+        elif not lines or not re.fullmatch(r"\+MTATTR:3,2822,0,1", lines[0]):
+            diag("MeterType read: %r, wanted MeterType=1 (Private)"
+                 % lines)
+            ok = False
+        res, _ = link.command("AT+MTATTR=3,2822,1")
+        if res == -1:
+            diag("PointOfDelivery read answered a bare ERROR: the "
+                 "Instance was never reached, the dead-shell bug")
+            ok = False
+        res, _ = link.command("AT+MTATTR=3,2822,2")
+        if res == -1:
+            diag("MeterSerialNumber read answered a bare ERROR: the "
+                 "Instance was never reached, the dead-shell bug")
+            ok = False
+        res, _ = link.command("AT+MTATTR=3,2822,3")
+        if res == -1:
+            diag("ProtocolVersion read answered a bare ERROR: the "
+                 "Instance was never reached, the dead-shell bug")
+            ok = False
+        res, _ = link.command("AT+MTATTR=3,2822,4")
+        if res == -1:
+            diag("PowerThreshold read answered a bare ERROR: the "
+                 "Instance was never reached, the dead-shell bug")
+            ok = False
+    finally:
+        restored = (stage_composition(link, ["0x0100"]) and apply_and_wait())
+        if restored:
+            res, lines = cmd_retry(link, "AT+MTEP?")
+            restored = res == 0 and lines == ["+MTEP:0,1,0x0100"]
+        if not restored:
+            diag("RESTORE FAILED: bench is not in the single-light "
+                 "standard state")
+            ok = False
+    return ok
+
+
+def t_row_meter_pool_exhaustion(link):
+    """Energy round C2: MT_METER_MAX is 2 (mt_matter.h), and declaring a
+    THIRD Electrical Utility Meter must abort the composition rebuild
+    without silently building a third, broken endpoint. Fix round 2
+    (task 8 report) moved the pool reservation to the FIRST statement of
+    mk_electrical_utility_meter(), before electrical_utility_meter::
+    create() runs, so the third meter's own endpoint is never created at
+    all: nothing is orphaned, unlike the fix round 1 shape the review
+    caught.
+
+    What is and is not observable over AT: mt_matter_record_endpoint()
+    only runs for a thunk that returned an endpoint id, so the boot log's
+    "composition rebuilt: N endpoint(s)" and this test's AT+MTEP? readback
+    both stop at the light plus the first TWO meters (endpoints 1-3), even
+    though FOUR entries (light + three meters) were declared and stored.
+    A controller-visible orphan (an endpoint AT+MTEP? cannot see but
+    provider::Endpoints() can) is what the bench's chip-tool parts-list
+    read (report section on bench items) checks for; this Phase 1 row is
+    the AT-only half: readback shows exactly the successful PREFIX, never
+    the declared count and never zero."""
+    def diag(msg):
+        print("    (staged meter pool exhaustion: %s)" % msg)
+
+    def apply_and_wait():
+        link.drain(0.3)
+        if link.command("AT+MTEPAPPLY", timeout=5.0)[0] != 0:
+            return False
+        return link.await_urc(r"\+MTREADY$", timeout=15.0) is not None
+
+    ok = True
+    try:
+        staged = ["0x0100", "0x0511", "0x0511", "0x0511"]
+        if not stage_composition(link, staged):
+            diag("staging the 4-entry scratch composition failed")
+            return False
+        if not apply_and_wait():
+            diag("AT+MTEPAPPLY or the +MTREADY wait failed")
+            return False
+        res, lines = cmd_retry(link, "AT+MTEP?")
+        expect = ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x0511", "+MTEP:2,3,0x0511"]
+        if res != 0 or lines != expect:
+            diag("readback after pool exhaustion: %r, wanted the "
+                 "light-plus-two-meters PREFIX %r (not the declared "
+                 "4-entry list, and not empty)" % (lines, expect))
+            ok = False
+    finally:
+        restored = (stage_composition(link, ["0x0100"]) and apply_and_wait())
+        if restored:
+            res, lines = cmd_retry(link, "AT+MTEP?")
+            restored = res == 0 and lines == ["+MTEP:0,1,0x0100"]
+        if not restored:
+            diag("RESTORE FAILED: bench is not in the single-light "
+                 "standard state")
+            ok = False
+    return ok
+
+
+def register_phase1_t12_negative():
+    """Energy round C2 (0.12.0), task 13: the AT+MTROW family
+    (AT+MTROW, AT+MTROWCLEAR, AT+MTROWAPPLY, AT+MTROWGET) and
+    AT+MTMETERID grammar rows design spec 8.2 asks for: arity, every
+    range boundary, the empty-field convention, every error code in the
+    spec's error table (2.5/6.2), and the bare-ERROR-versus-+MTERR
+    division at each boundary, transcribed against main/mt_at.c's own
+    handler comments rather than re-derived, the same discipline
+    register_phase1_t5..t11 established.
+
+    ep 1 (the standard rig's OnOff light) stands in for "any endpoint"
+    throughout, the register_phase1_t7/t8's role for it: AT+MTROW/
+    AT+MTROWCLEAR never touch the live data model at all (pure RAM
+    staging, mt_rows.c's file comment), so ep's value is irrelevant to
+    every one of their rows below. AT+MTROWAPPLY's count-0 form and
+    AT+MTROWGET's unqualified read DO reach the live model, and ep 1
+    there answers +MTERR:4 (endpoint exists, no EnergyEvse/
+    MeterIdentification cluster), which doubles as a DIFFERENTIAL signal
+    proving a value-level check passed: AT+MTMETERID's 64-byte-string-
+    accepted row and its comma-survives row both use "+MTERR:4 on ep 1"
+    as their positive evidence, since the alternative (some other
+    endpoint that carries the cluster) would need a Phase 3 slot these
+    rows do not need and should not spend one on.
+
+    ep 99 always answers +MTERR:2 (unknown endpoint): register_phase1_
+    t5's own convention.
+
+    Two rows need a REAL EVSE/meter endpoint (the AT+MTROWAPPLY count-0
+    semantics and the meter's dead-shell fix) and are staged the
+    t_meas_staged_wh_min way, in t_row_evse_meter_staged and
+    t_row_meter_pool_exhaustion above: see their docstrings for why a
+    scratch composition rather than a Phase 3 slot, and why the two are
+    kept as separate reboot cycles (the pool-exhaustion row's composition
+    is deliberately abnormal -- comp.count desyncs from what was staged
+    -- and mixing that into the same scratch session as the ordinary-path
+    rows above would make a diagnosis harder to attribute)."""
+    n = lambda name, fn: add_test(1, name, fn, tag="AT-")
+
+    # ==== AT+MTROW=<ep>,<kind>,<idx>,<field>[,<field>...] ====
+    # Kind 1 (MT_ROW_KIND_EVSE_TARGET) needs exactly 4 field tokens: day
+    # bitmap (1..0x7F, mandatory), minutes past midnight (0..1439,
+    # mandatory), target SoC (0..100, optional), added energy (0..
+    # INT64_MAX, optional; at least one of the last two is required).
+    n("MTROW? -> ERROR (query form on a set-only command)",
+      expect_err("AT+MTROW?", -1))
+    n("MTROW no args -> ERROR (exec form)", expect_err("AT+MTROW", -1))
+    n("MTROW=1,1 -> ERROR (fewer than <ep>,<kind>,<idx>)",
+      expect_err("AT+MTROW=1,1", -1))
+    n("MTROW=1,1,0,2,480,50 -> ERROR (3 field tokens, kind 1 needs "
+      "exactly 4: arity, not a value error)",
+      expect_err("AT+MTROW=1,1,0,2,480,50", -1))
+    n("MTROW=1,1,0,2,480,50,25000000,1 -> ERROR (5 field tokens, one "
+      "too many)",
+      expect_err("AT+MTROW=1,1,0,2,480,50,25000000,1", -1))
+    n("MTROW 12 tokens -> ERROR (at_split_args overflow, "
+      "MT_ROW_MAX_TOKENS is 11)",
+      expect_err("AT+MTROW=" + ",".join(str(i) for i in range(12)), -1))
+    n("MTROW=zz,1,0,2,480,,25000000 -> +MTERR:1 (ep not numeric)",
+      expect_err("AT+MTROW=zz,1,0,2,480,,25000000", 1))
+    n("MTROW=70000,1,0,2,480,,25000000 -> +MTERR:1 (ep > 0xFFFF)",
+      expect_err("AT+MTROW=70000,1,0,2,480,,25000000", 1))
+    n("MTROW=1,zz,0 -> +MTERR:1 (kind not numeric)",
+      expect_err("AT+MTROW=1,zz,0", 1))
+    n("MTROW=1,300,0 -> +MTERR:3 (kind > 0xFF)",
+      expect_err("AT+MTROW=1,300,0", 3))
+    n("MTROW=1,2,0 -> +MTERR:3 (kind 2 is not a registered row kind)",
+      expect_err("AT+MTROW=1,2,0", 3))
+    n("MTROW=1,1,zz,2,480,,25000000 -> +MTERR:1 (idx not numeric)",
+      expect_err("AT+MTROW=1,1,zz,2,480,,25000000", 1))
+    n("MTROW=1,1,70000,2,480,,25000000 -> +MTERR:1 (idx > 0xFFFF)",
+      expect_err("AT+MTROW=1,1,70000,2,480,,25000000", 1))
+    n("MTROW=1,1,70,2,480,,25000000 -> +MTERR:1 (idx 70 is at kind 1's "
+      "max_rows, valid range is 0..69)",
+      expect_err("AT+MTROW=1,1,70,2,480,,25000000", 1))
+    n("MTROW=1,1,0,,480,,25000000 -> +MTERR:1 (day bitmap is mandatory, "
+      "an empty token is not an absent-optional here)",
+      expect_err("AT+MTROW=1,1,0,,480,,25000000", 1))
+    n("MTROW=1,1,0,zz,480,,25000000 -> +MTERR:1 (day bitmap not numeric)",
+      expect_err("AT+MTROW=1,1,0,zz,480,,25000000", 1))
+    n("MTROW=1,1,0,0,480,,25000000 -> +MTERR:1 (day bitmap 0, below the "
+      "1..0x7F range)",
+      expect_err("AT+MTROW=1,1,0,0,480,,25000000", 1))
+    n("MTROW=1,1,0,128,480,,25000000 -> +MTERR:1 (day bitmap 0x80, "
+      "above the 1..0x7F range)",
+      expect_err("AT+MTROW=1,1,0,128,480,,25000000", 1))
+    n("MTROW=1,1,0,2,1440,,25000000 -> +MTERR:1 (minutes past midnight "
+      "1440, above the 0..1439 range)",
+      expect_err("AT+MTROW=1,1,0,2,1440,,25000000", 1))
+    n("MTROW=1,1,0,2,-1,,25000000 -> +MTERR:1 (minutes -1: sign always "
+      "parses, then the range check rejects it)",
+      expect_err("AT+MTROW=1,1,0,2,-1,,25000000", 1))
+    n("MTROW=1,1,0,2,zz,,25000000 -> +MTERR:1 (minutes not numeric)",
+      expect_err("AT+MTROW=1,1,0,2,zz,,25000000", 1))
+    n("MTROW=1,1,0,2,480,101,25000000 -> +MTERR:1 (SoC 101, above the "
+      "0..100 range)",
+      expect_err("AT+MTROW=1,1,0,2,480,101,25000000", 1))
+    n("MTROW=1,1,0,2,480,-1,25000000 -> +MTERR:1 (SoC -1, below 0)",
+      expect_err("AT+MTROW=1,1,0,2,480,-1,25000000", 1))
+    n("MTROW=1,1,0,2,480,,-1 -> +MTERR:1 (added energy -1, below 0: an "
+      "unsigned field, sign always parses, then range rejects)",
+      expect_err("AT+MTROW=1,1,0,2,480,,-1", 1))
+    n("MTROW=1,1,0,2,480,zz, -> +MTERR:1 (SoC not numeric)",
+      expect_err("AT+MTROW=1,1,0,2,480,zz,", 1))
+    n("MTROW=1,1,0,2,480,, -> +MTERR:1 (SoC and added energy both "
+      "absent: the kind-specific \"at least one\" rule)",
+      expect_err("AT+MTROW=1,1,0,2,480,,", 1))
+    n("MTROW=1,1,0,2,480,,25000000 -> OK (SoC absent, added energy "
+      "present: the empty-field convention), then AT+MTROWCLEAR -> OK",
+      _mtrow_stage_then_clear("AT+MTROW=1,1,0,2,480,,25000000"))
+    n('MTROW=1,1,0,2,480,80, -> OK (SoC present, added energy absent), '
+      "then AT+MTROWCLEAR -> OK",
+      _mtrow_stage_then_clear("AT+MTROW=1,1,0,2,480,80,"))
+    n("MTROW=1,1,0,127,480,,1 -> OK (day bitmap at its max, 0x7F), "
+      "then AT+MTROWCLEAR -> OK",
+      _mtrow_stage_then_clear("AT+MTROW=1,1,0,127,480,,1"))
+
+    # ==== AT+MTROWCLEAR=<ep>,<kind> ====
+    n("MTROWCLEAR? -> ERROR (query form)", expect_err("AT+MTROWCLEAR?", -1))
+    n("MTROWCLEAR no args -> ERROR (exec form)",
+      expect_err("AT+MTROWCLEAR", -1))
+    n("MTROWCLEAR=1 -> ERROR (one token, fewer than <ep>,<kind>)",
+      expect_err("AT+MTROWCLEAR=1", -1))
+    n("MTROWCLEAR=1,1,0 -> ERROR (three tokens, one too many)",
+      expect_err("AT+MTROWCLEAR=1,1,0", -1))
+    n("MTROWCLEAR=zz,1 -> +MTERR:1 (ep not numeric)",
+      expect_err("AT+MTROWCLEAR=zz,1", 1))
+    n("MTROWCLEAR=70000,1 -> +MTERR:1 (ep > 0xFFFF)",
+      expect_err("AT+MTROWCLEAR=70000,1", 1))
+    n("MTROWCLEAR=1,zz -> +MTERR:1 (kind not numeric)",
+      expect_err("AT+MTROWCLEAR=1,zz", 1))
+    n("MTROWCLEAR=1,300 -> +MTERR:3 (kind > 0xFF)",
+      expect_err("AT+MTROWCLEAR=1,300", 3))
+    n("MTROWCLEAR=1,2 -> +MTERR:3 (kind 2 is not registered)",
+      expect_err("AT+MTROWCLEAR=1,2", 3))
+    n("MTROWCLEAR=1,1 -> +MTERR:1 (nothing staged for this ep/kind: "
+      "mt_rows_clear() refuses rather than silently no-opping)",
+      expect_err("AT+MTROWCLEAR=1,1", 1))
+
+    # ==== AT+MTROWAPPLY=<ep>,<kind>,<count>, the pure-form/lookup-free
+    # rows only: the count-0 special cases need a real EVSE endpoint
+    # (t_row_evse_meter_staged above) because mt_matter_rows_apply() is
+    # called unconditionally on that path, even when nothing matched. ====
+    n("MTROWAPPLY? -> ERROR (query form)", expect_err("AT+MTROWAPPLY?", -1))
+    n("MTROWAPPLY no args -> ERROR (exec form)",
+      expect_err("AT+MTROWAPPLY", -1))
+    n("MTROWAPPLY=1,1 -> ERROR (two tokens, fewer than <ep>,<kind>,"
+      "<count>)", expect_err("AT+MTROWAPPLY=1,1", -1))
+    n("MTROWAPPLY=1,1,0,5 -> ERROR (four tokens, one too many)",
+      expect_err("AT+MTROWAPPLY=1,1,0,5", -1))
+    n("MTROWAPPLY=70000,1,0 -> +MTERR:1 (ep > 0xFFFF, checked before "
+      "kind or count)",
+      expect_err("AT+MTROWAPPLY=70000,1,0", 1))
+    n("MTROWAPPLY=1,300,0 -> +MTERR:3 (kind > 0xFF)",
+      expect_err("AT+MTROWAPPLY=1,300,0", 3))
+    n("MTROWAPPLY=1,2,0 -> +MTERR:3 (kind 2 is not registered)",
+      expect_err("AT+MTROWAPPLY=1,2,0", 3))
+    n("MTROWAPPLY=1,1,70000 -> +MTERR:1 (count > 0xFFFF)",
+      expect_err("AT+MTROWAPPLY=1,1,70000", 1))
+    n("MTROWAPPLY=1,1,zz -> +MTERR:1 (count not numeric)",
+      expect_err("AT+MTROWAPPLY=1,1,zz", 1))
+    n("MTROWAPPLY=1,1,5 -> +MTERR:1 (nonzero count, nothing staged for "
+      "this ep/kind: cannot possibly match, the same value error a "
+      "mismatched count against a real stage gives)",
+      expect_err("AT+MTROWAPPLY=1,1,5", 1))
+    # The two lookup errors mt_matter_rows_apply() itself can answer, once
+    # a matching, well-formed stage reaches the bridge: staging under the
+    # SAME ep the apply names makes "matches" true without needing any
+    # real endpoint at all (mt_rows_stage() never checks ep against the
+    # composition), so these need no Phase 3 slot. A failed apply leaves
+    # the stage untouched (cmd_mtrowapply's own comment), hence the
+    # explicit AT+MTROWCLEAR after each.
+    n("MTROWAPPLY=1,1,1 -> +MTERR:4 (stage matches, reaches the bridge: "
+      "ep 1 carries no EnergyEvse cluster), then AT+MTROWCLEAR -> OK",
+      lambda link: (
+          link.command("AT+MTROW=1,1,0,2,480,,25000000")[0] == 0
+          and link.command("AT+MTROWAPPLY=1,1,1")[0] == 4
+          and link.command("AT+MTROWCLEAR=1,1")[0] == 0))
+    n("MTROWAPPLY=99,1,1 -> +MTERR:2 (stage matches, reaches the bridge: "
+      "ep 99 is unknown), then AT+MTROWCLEAR -> OK",
+      lambda link: (
+          link.command("AT+MTROW=99,1,0,2,480,,25000000")[0] == 0
+          and link.command("AT+MTROWAPPLY=99,1,1")[0] == 2
+          and link.command("AT+MTROWCLEAR=99,1")[0] == 0))
+
+    # ==== AT+MTROWGET=<ep>,<kind>[,<idx>][,<seq>] ====
+    n("MTROWGET? -> ERROR (query form)", expect_err("AT+MTROWGET?", -1))
+    n("MTROWGET no args -> ERROR (exec form)",
+      expect_err("AT+MTROWGET", -1))
+    n("MTROWGET=1 -> ERROR (one token, fewer than the two-token minimum)",
+      expect_err("AT+MTROWGET=1", -1))
+    n("MTROWGET=1,1,0,5,9 -> ERROR (five tokens, at_split_args overflow "
+      "against the fixed 4-token array)",
+      expect_err("AT+MTROWGET=1,1,0,5,9", -1))
+    n("MTROWGET=1,1, -> ERROR (empty third token with no fourth: the "
+      "bulk form's own spelling is a bare two-token line, not a "
+      "long-hand empty idx)",
+      expect_err("AT+MTROWGET=1,1,", -1))
+    n("MTROWGET=zz,1 -> +MTERR:1 (ep not numeric)",
+      expect_err("AT+MTROWGET=zz,1", 1))
+    n("MTROWGET=70000,1 -> +MTERR:1 (ep > 0xFFFF)",
+      expect_err("AT+MTROWGET=70000,1", 1))
+    n("MTROWGET=1,zz -> +MTERR:1 (kind not numeric)",
+      expect_err("AT+MTROWGET=1,zz", 1))
+    n("MTROWGET=1,300 -> +MTERR:3 (kind > 0xFF)",
+      expect_err("AT+MTROWGET=1,300", 3))
+    n("MTROWGET=1,2 -> +MTERR:3 (kind 2 is not registered)",
+      expect_err("AT+MTROWGET=1,2", 3))
+    n("MTROWGET=1,1,zz -> +MTERR:1 (idx not numeric, single-row form)",
+      expect_err("AT+MTROWGET=1,1,zz", 1))
+    n("MTROWGET=1,1,70000 -> +MTERR:1 (idx > 0xFFFF)",
+      expect_err("AT+MTROWGET=1,1,70000", 1))
+    n("MTROWGET=99,1 -> +MTERR:2 (unknown ep, unqualified bulk form)",
+      expect_err("AT+MTROWGET=99,1", 2))
+    n("MTROWGET=1,1 -> +MTERR:4 (ep 1 carries no EnergyEvse cluster, "
+      "unqualified bulk form)",
+      expect_err("AT+MTROWGET=1,1", 4))
+    n("MTROWGET=1,1,0 -> +MTERR:4 (same lookup, single-row form)",
+      expect_err("AT+MTROWGET=1,1,0", 4))
+    n("MTROWGET=1,1,,0 -> +MTERR:1 (seq 0 is the idle marker, never a "
+      "legitimate seq, rejected before any pending-set check)",
+      expect_err("AT+MTROWGET=1,1,,0", 1))
+    n("MTROWGET=1,1,,12345 -> +MTERR:1 (seq well-formed but nothing is "
+      "pending for this ep/kind on the single-light rig)",
+      expect_err("AT+MTROWGET=1,1,,12345", 1))
+    n("MTROWGET=1,1,0,12345 -> +MTERR:1 (same, single-row qualified form)",
+      expect_err("AT+MTROWGET=1,1,0,12345", 1))
+    n("MTROWGET=1,1,,4294967296 -> +MTERR:1 (seq above uint32)",
+      expect_err("AT+MTROWGET=1,1,,4294967296", 1))
+    n("MTROWGET=1,1,,zz -> +MTERR:1 (seq not numeric)",
+      expect_err("AT+MTROWGET=1,1,,zz", 1))
+
+    # ==== AT+MTMETERID=<ep>,<type>,"<pod>","<serial>","<protocol>",
+    # <pwr>,<apparent>,<src> ====
+    n("MTMETERID? -> ERROR (query form)", expect_err("AT+MTMETERID?", -1))
+    n("MTMETERID no args -> ERROR (exec form)",
+      expect_err("AT+MTMETERID", -1))
+    n("MTMETERID=1 -> ERROR (no comma at all: <type> structurally "
+      "missing)", expect_err("AT+MTMETERID=1", -1))
+    n('MTMETERID=zz,0,"A","B","C",100,, -> +MTERR:1 (ep not numeric)',
+      expect_err('AT+MTMETERID=zz,0,"A","B","C",100,,', 1))
+    n('MTMETERID=70000,0,"A","B","C",100,, -> +MTERR:1 (ep > 0xFFFF)',
+      expect_err('AT+MTMETERID=70000,0,"A","B","C",100,,', 1))
+    n('MTMETERID=99,0,"A","B","C",100,, -> +MTERR:2 (unknown ep)',
+      expect_err('AT+MTMETERID=99,0,"A","B","C",100,,', 2))
+    n('MTMETERID=1,zz,"A","B","C",100,, -> +MTERR:1 (type not numeric)',
+      expect_err('AT+MTMETERID=1,zz,"A","B","C",100,,', 1))
+    n('MTMETERID=1,3,"A","B","C",100,, -> +MTERR:1 (type 3, above '
+      "MeterTypeEnum's 0..2)",
+      expect_err('AT+MTMETERID=1,3,"A","B","C",100,,', 1))
+    n('MTMETERID=1,0,A,"B","C",100,, -> ERROR (pod has no opening '
+      'quote: the position calls for a quoted string, form)',
+      expect_err('AT+MTMETERID=1,0,A,"B","C",100,,', -1))
+    n('MTMETERID=1,0,"ABC -> ERROR (unterminated quote: the parser can '
+      "never establish where the field ends, form)",
+      expect_err('AT+MTMETERID=1,0,"ABC', -1))
+    n('MTMETERID=1,0,"A"B","C","D",100,, -> +MTERR:1 (junk after the '
+      "closing quote, exactly what an embedded raw quote produces: the "
+      "boundary WAS found, so this is a value problem, not a shape one)",
+      expect_err('AT+MTMETERID=1,0,"A"B","C","D",100,,', 1))
+    n('MTMETERID comma survives inside a quoted pod -> +MTERR:4 (ep 1 '
+      "wrong cluster: reaching the bridge at all proves the comma did "
+      "NOT split the token)",
+      expect_err('AT+MTMETERID=1,0,"Meter, Point","S","P",100,,', 4))
+    n('MTMETERID 64-byte pod -> +MTERR:4 (ep 1 wrong cluster: reaching '
+      "the bridge proves the length was accepted)",
+      expect_err('AT+MTMETERID=1,0,"' + "A" * 64 + '","S","P",100,,', 4))
+    n('MTMETERID 65-byte pod -> +MTERR:1 (one byte over '
+      "MT_METERID_MAX_STR, caught before the bridge)",
+      expect_err('AT+MTMETERID=1,0,"' + "A" * 65 + '","S","P",100,,', 1))
+    n('MTMETERID non-printable byte in pod -> +MTERR:1 (0x01 is outside '
+      "0x20..0x7E)",
+      expect_err('AT+MTMETERID=1,0,"A\x01B","S","P",100,,', 1))
+    n('MTMETERID=1,0,"A","B","C",,, -> +MTERR:1 (pwr and apparent both '
+      'absent: PowerThresholdStruct\'s "choice b")',
+      expect_err('AT+MTMETERID=1,0,"A","B","C",,,', 1))
+    n('MTMETERID pwr only present -> +MTERR:4 (ep 1 wrong cluster: '
+      "reaching the bridge proves choice-b accepted a single value)",
+      expect_err('AT+MTMETERID=1,0,"A","B","C",100,,', 4))
+    n('MTMETERID apparent only present -> +MTERR:4 (same, the other '
+      "half of choice-b)",
+      expect_err('AT+MTMETERID=1,0,"A","B","C",,200,', 4))
+    n('MTMETERID=1,0,"A","B","C",100,200 -> ERROR (no separator comma '
+      "before <src> at all: structurally missing, form)",
+      expect_err('AT+MTMETERID=1,0,"A","B","C",100,200', -1))
+    n('MTMETERID=1,0,"A","B","C",100,200, -> +MTERR:4 (ep 1 wrong '
+      "cluster: the trailing comma makes an empty <src> legal, null)",
+      expect_err('AT+MTMETERID=1,0,"A","B","C",100,200,', 4))
+    n('MTMETERID=1,0,"A","B","C",100,200,3 -> +MTERR:1 (src 3, above '
+      "PowerThresholdSourceEnum's 0..2)",
+      expect_err('AT+MTMETERID=1,0,"A","B","C",100,200,3', 1))
+    n('MTMETERID=1,0,"A","B","C",100,200,zz -> +MTERR:1 (src not '
+      "numeric)",
+      expect_err('AT+MTMETERID=1,0,"A","B","C",100,200,zz', 1))
+
+    n("MTROWAPPLY count-0, both directions, on a real EVSE endpoint "
+      "(case a: nothing staged; case b: two rows staged, must be "
+      "abandoned not committed); SOC-variant rule negative arm; meter "
+      "identity push + AT+MTATTR readback (the dead-shell fix)",
+      t_row_evse_meter_staged)
+    n("Utility meter pool exhaustion (MT_METER_MAX=2): a third meter "
+      "aborts the rebuild and AT+MTEP? shows exactly the successful "
+      "prefix, never the declared count and never empty",
+      t_row_meter_pool_exhaustion)
+
+
+register_phase1_t12_negative()
 
 
 PHASE2_STEPS[:] = [

@@ -3636,6 +3636,8 @@ from mt_regression import (
     step_3_24_solar_power, step_3_25_battery_storage, step_3_26_dem,
     t_staged_variant1_energy_c1, parse_power_adjust_entries,
     parse_cause_values, parse_esa_state_reports, _hold_clock_gap,
+    step_3_27_evse, t_row_evse_meter_staged, t_row_meter_pool_exhaustion,
+    parse_accepted_command_list,
 )
 
 
@@ -3679,19 +3681,23 @@ class TestPhase3Composition(unittest.TestCase):
     (RVC + Microwave batch harness task) and 14-20 (composed appliance
     round, task 6) extend the same pin."""
 
-    def test_twentyseven_slots_sequential(self):
+    def test_twentyeight_slots_sequential(self):
         # The composition-size gate: energy round C1 grew the table to
         # 27 (round A had grown it to 22, round B to 24, which hit the
-        # then-cap of 24 exactly). MT_COMP_MAX_ENDPOINTS is 28 now, so
-        # this table leaves ONE slot of headroom, deliberately: the
-        # exact-fit experiment ended with B247 and is not repeated
-        # (design spec section 5). CONFIG_ESP_MATTER_MAX_DYNAMIC_
-        # ENDPOINT_COUNT (the setting CLAUDE.md warns silently refuses
-        # endpoints past its limit) is 29, not 28: the SDK counts the
-        # root endpoint 0 against it (B247), so it stays
+        # then-cap of 24 exactly). Energy round C2 (task 13) adds ONE
+        # more slot, EVSE variant 0, which is the table's last free one:
+        # MT_COMP_MAX_ENDPOINTS is 28, and the design spec's own pool
+        # table earmarked exactly this one endpoint for the round
+        # ("one for C2's EVSE", sdkconfig.defaults's comment above
+        # CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT), so the table now
+        # has ZERO headroom left: any future round's device type needs a
+        # cap raise first, not just a table edit. CONFIG_ESP_MATTER_MAX_
+        # DYNAMIC_ENDPOINT_COUNT (the setting CLAUDE.md warns silently
+        # refuses endpoints past its limit) is 29, not 28: the SDK counts
+        # the root endpoint 0 against it (B247), so it stays
         # MT_COMP_MAX_ENDPOINTS + 1.
         slots = [slot for slot, _ in PHASE3_COMPOSITION]
-        self.assertEqual(slots, list(range(1, 28)))
+        self.assertEqual(slots, list(range(1, 29)))
         self.assertLessEqual(len(slots), 28)
 
     def test_slot_ten_and_eleven_are_the_two_cabinet_variants(self):
@@ -3965,22 +3971,28 @@ def phase3_grammar_commands():
         'AT+MTTEMPLEVELS=11,"Low"': (4, []),
         'AT+MTTEMPLEVELS=10,"Low","Medium","High"': (0, []),
         'AT+MTTEMPLEVELS=10,"Wine, red","Wine, white"': (0, []),
+        "AT+MTROW=28,1,0,2,480,80,25000000": (0, []),
+        "AT+MTROWAPPLY=28,1,1": (0, []),
+        "AT+MTROWGET=28,1": (0, ["+MTROW:0,1,2,480,80,25000000"]),
+        "AT+MTROWAPPLY=28,1,0": (0, []),
     }
 
 
 class TestStep32Grammar(unittest.TestCase):
     """T5 task 4: 40 of Task 1's 41 deferred rows (the 41st needs a real
     forward, Task 5's job), plus the composed appliance round's
-    =<alarm ep>,0,0 migration row; see the step's own docstring."""
+    =<alarm ep>,0,0 migration row, plus energy round C2 (task 13)'s three
+    AT+MTROW-family round-trip rows against the real EVSE endpoint
+    (slot 28); see the step's own docstring."""
 
-    def test_forty_one_rows_all_pass(self):
+    def test_forty_four_rows_all_pass(self):
         link = FakeLink(phase3_grammar_commands())
         ctx = fresh_phase3_ctx(link)
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_2_grammar(ctx)
         self.assertEqual(ctx.suite.failed, 0,
                          msg=[n for n, ok, _ in ctx.suite.results if not ok])
-        self.assertEqual(len(ctx.suite.results), 41)
+        self.assertEqual(len(ctx.suite.results), 44)
 
     def test_a_wrong_code_fails_only_that_row(self):
         cmds = phase3_grammar_commands()
@@ -4159,7 +4171,7 @@ class TestRunPhase3(unittest.TestCase):
         # recover_after_abort's own AT+MTRESET)
         self.assertIn("AT+MTFRESET", link.sent)
 
-    def test_registered_steps_are_the_full_1_through_26_chain_plus_sweep(self):
+    def test_registered_steps_are_the_full_1_through_27_chain_plus_sweep(self):
         names = [s["name"] for s in PHASE3_STEPS]
         self.assertEqual(names, [
             "3.1 compose + boot-rebuild pin",
@@ -4186,6 +4198,7 @@ class TestRunPhase3(unittest.TestCase):
             "3.24 solar power",
             "3.25 battery storage",
             "3.26 device energy management",
+            "3.27 energy evse",
             "3.14 root-endpoint URC sweep",
         ])
 
@@ -6872,6 +6885,281 @@ class TestStagedVariant1EnergyC1(unittest.TestCase):
         ]})
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertFalse(t_staged_variant1_energy_c1(link))
+
+
+class TestStagedEvseMeterC2(unittest.TestCase):
+    """Energy round C2 (0.12.0), task 13: the Phase 1 staged EVSE/meter
+    row (t_row_evse_meter_staged): a scratch composition (light + EVSE
+    variant 1 + the utility meter), the AT+MTROWAPPLY count-0 semantics
+    in both directions, the SOC-variant rule's negative arm, the meter's
+    identity push, and the finally-block restore of the single-light
+    standard state on every exit path."""
+
+    RESTORE_TAIL = ["AT+MTEPCLEAR", "AT+MTEP=0x0100", "AT+MTEPAPPLY",
+                    "AT+MTEP?"]
+    STAGED_READBACK = ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x050C,1",
+                       "+MTEP:2,3,0x0511"]
+
+    def _link(self, overrides=None):
+        cmds = {
+            "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []),
+            "AT+MTEP=0x050C,1": (0, []),
+            "AT+MTEP=0x0511": (0, []),
+            "AT+MTEPAPPLY": (0, []),
+            "AT+MTEP?": [(0, list(self.STAGED_READBACK)),
+                         (0, ["+MTEP:0,1,0x0100"])],
+            # case (a): nothing staged
+            "AT+MTROWAPPLY=2,1,0": (0, []),
+            "AT+MTROWGET=2,1": (0, []),
+            # case (b): two rows staged, must be abandoned not committed.
+            # AT+MTROW=2,1,0,2,480,,25000000 is staged TWICE (case b's
+            # row 0, then again as the SOC-absent-arm row below); both
+            # calls expect OK, so one scalar entry serves both.
+            "AT+MTROW=2,1,0,2,480,,25000000": (0, []),
+            "AT+MTROW=2,1,1,4,600,,10000000": (0, []),
+            # SOC-variant rule, negative arm: AT+MTROWAPPLY=2,1,1 is
+            # called three times with three DIFFERENT verdicts (soc=50
+            # rejected, soc=100 accepted, soc-absent accepted), so this
+            # needs the list form, not a scalar.
+            "AT+MTROW=2,1,0,2,480,50,25000000": (0, []),
+            "AT+MTROWAPPLY=2,1,1": [(1, []), (0, []), (0, [])],
+            "AT+MTROWCLEAR=2,1": (0, []),
+            "AT+MTROW=2,1,0,2,480,100,25000000": (0, []),
+            # meter identity + dead-shell reads
+            'AT+MTMETERID=3,1,"POD-1","SN-123","V1.0",1500000,2000000,1':
+                (0, []),
+            "AT+MTATTR=3,2822,0": (0, ["+MTATTR:3,2822,0,1"]),
+            "AT+MTATTR=3,2822,1": (5, []),
+            "AT+MTATTR=3,2822,2": (5, []),
+            "AT+MTATTR=3,2822,3": (5, []),
+            "AT+MTATTR=3,2822,4": (5, []),
+        }
+        cmds.update(overrides or {})
+        return ApplyLink(cmds)
+
+    def test_happy_path(self):
+        link = self._link()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(t_row_evse_meter_staged(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_case_b_committing_the_staged_rows_instead_of_clearing_fails(self):
+        # The exact repro task 2's review caught: if AT+MTROWAPPLY=...,0
+        # commits the two staged rows instead of abandoning them, the
+        # readback is non-empty and this must fail.
+        link = self._link({"AT+MTROWGET=2,1": [
+            (0, []),                                     # case (a), fine
+            (0, ["+MTROW:0,2,2,480,,25000000",
+                "+MTROW:1,2,4,600,,10000000"]),           # case (b), WRONG
+        ]})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_row_evse_meter_staged(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_soc_50_wrongly_accepted_on_the_no_soc_variant_fails(self):
+        link = self._link({"AT+MTROWAPPLY=2,1,1": (0, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_row_evse_meter_staged(link))
+
+    def test_meter_read_answering_a_bare_error_fails(self):
+        # The dead-shell bug's own signature: before the fix, EVERY read
+        # of one of the five MeterIdentification attributes answered a
+        # bare ERROR (MT_ATTR_ERR_FAILED has no +MTERR mapping),
+        # regardless of what AT+MTMETERID had pushed.
+        link = self._link({"AT+MTATTR=3,2822,2": (-1, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_row_evse_meter_staged(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_apply_failure_fails_and_attempts_restore(self):
+        link = self._link({"AT+MTEPAPPLY": (-1, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_row_evse_meter_staged(link))
+        self.assertEqual(link.sent.count("AT+MTEPAPPLY"), 2)
+
+
+class TestStagedMeterPoolExhaustion(unittest.TestCase):
+    """Energy round C2 (0.12.0), task 13: the Phase 1 staged meter pool
+    exhaustion row (t_row_meter_pool_exhaustion): declaring three meters
+    against MT_METER_MAX=2, and the AT-only half of the proof (readback
+    is the successful PREFIX, never the declared count and never
+    empty)."""
+
+    RESTORE_TAIL = ["AT+MTEPCLEAR", "AT+MTEP=0x0100", "AT+MTEPAPPLY",
+                    "AT+MTEP?"]
+    PREFIX_READBACK = ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x0511",
+                       "+MTEP:2,3,0x0511"]
+
+    def _link(self, overrides=None):
+        cmds = {
+            "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []),
+            "AT+MTEP=0x0511": (0, []),
+            "AT+MTEPAPPLY": (0, []),
+            "AT+MTEP?": [(0, list(self.PREFIX_READBACK)),
+                         (0, ["+MTEP:0,1,0x0100"])],
+        }
+        cmds.update(overrides or {})
+        return ApplyLink(cmds)
+
+    def test_happy_path(self):
+        link = self._link()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(t_row_meter_pool_exhaustion(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+        # Exactly four "AT+MTEP=0x0511" sends: three from the scratch
+        # stage (only two of which succeed on real hardware) and none
+        # from the restore.
+        self.assertEqual(link.sent.count("AT+MTEP=0x0511"), 3)
+
+    def test_all_four_declared_endpoints_visible_fails(self):
+        # If a regression let the third meter's endpoint survive too
+        # (the fix round 1 orphan shape task 8's report describes),
+        # AT+MTEP? would read back all four entries instead of three.
+        link = self._link({"AT+MTEP?": [
+            (0, ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x0511",
+                "+MTEP:2,3,0x0511", "+MTEP:3,4,0x0511"]),
+            (0, ["+MTEP:0,1,0x0100"]),
+        ]})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_row_meter_pool_exhaustion(link))
+        self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
+
+    def test_empty_readback_fails(self):
+        # The other wrong direction: a regression that made the WHOLE
+        # rebuild abort with nothing recorded must also be caught, not
+        # confused with the correct light-plus-two-meters prefix.
+        link = self._link({"AT+MTEP?": [
+            (0, []),
+            (0, ["+MTEP:0,1,0x0100"]),
+        ]})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_row_meter_pool_exhaustion(link))
+
+
+DEVTYPES28_EVSE = "\n".join([
+    "[TOO]   DeviceTypeList: 1 entries",
+    "[TOO]     [1]: {",
+    "[TOO]       DeviceType: 1292 (Energy EVSE)",
+    "[TOO]       Revision: 3",
+    "[TOO]      }",
+])
+SERVER28_EVSE = "\n".join([
+    "[TOO]   ServerList: 3 entries",
+    "[TOO]     [1]: 29 (Descriptor)",
+    "[TOO]     [2]: 153 (EnergyEvse)",
+    "[TOO]     [3]: 157 (EnergyEvseMode)",
+])
+
+
+class TestStep327Evse(unittest.TestCase):
+    """Energy round C2 (0.12.0), task 13: the persistent EVSE slot's
+    identity (device-type-list, server-list), the SOC-variant rule's
+    positive arm, merge-by-day, and the full 70-row schedule written,
+    applied and read back row for row. Deliberately no chip-tool
+    adjudication (step_3_27_evse's own docstring): every command below
+    is either a read-only chip.run or a plain AT+MTROW-family call."""
+
+    EP = 28
+    DAY_BITS = [1, 2, 4, 8, 16, 32, 64]
+
+    def _full_schedule_commands(self):
+        stage = {}
+        expect = []
+        idx = 0
+        for day in self.DAY_BITS:
+            for t in range(10):
+                minutes = t * 120
+                energy = (day * 100 + t) * 1000
+                cmd = ("AT+MTROW=%d,1,%d,%d,%d,80,%d"
+                      % (self.EP, idx, day, minutes, energy))
+                stage[cmd] = (0, [])
+                expect.append("+MTROW:%d,70,%d,%d,80,%d"
+                              % (idx, day, minutes, energy))
+                idx += 1
+        return stage, expect
+
+    def _ctx(self, devtypes=None, servers=None):
+        stage_cmds, full_expect = self._full_schedule_commands()
+        cmds = {
+            "AT+MTROW=28,1,0,2,480,,25000000": (0, []),
+            "AT+MTROWAPPLY=28,1,1": [(1, []), (0, [])],
+            "AT+MTROWCLEAR=28,1": (0, []),
+            "AT+MTROW=28,1,0,2,480,80,25000000": (0, []),
+            "AT+MTROW=28,1,1,4,600,80,10000000": (0, []),
+            "AT+MTROWAPPLY=28,1,2": (0, []),
+            "AT+MTROWGET=28,1": [
+                (0, ["+MTROW:0,2,2,480,80,25000000",
+                    "+MTROW:1,2,4,600,80,10000000"]),
+                (0, ["+MTROW:0,2,4,600,80,10000000",
+                    "+MTROW:1,2,2,900,80,5000000"]),
+                (0, full_expect),
+            ],
+            "AT+MTROW=28,1,0,2,900,80,5000000": (0, []),
+            "AT+MTROWAPPLY=28,1,0": (0, []),
+            "AT+MTROWAPPLY=28,1,70": (0, []),
+        }
+        cmds.update(stage_cmds)
+        link = FakeLink(cmds)
+        script = [
+            (0, devtypes if devtypes is not None else DEVTYPES28_EVSE),
+            (0, servers if servers is not None else SERVER28_EVSE),
+        ]
+        runner = FakeChipRunner(script)
+        d = tempfile.mkdtemp()
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        return fresh_phase3_ctx(link, chip=chip), link
+
+    def test_happy_path(self):
+        ctx, link = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_27_evse(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        # The full schedule really was staged 70 times and cleared at
+        # the end, not silently skipped.
+        self.assertEqual(link.sent.count("AT+MTROWAPPLY=28,1,0"), 2)
+
+    def test_wrong_device_type_fails(self):
+        ctx, _ = self._ctx(devtypes=DEVTYPES28_EVSE.replace("1292", "9999"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_27_evse(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_missing_energyevse_from_server_list_fails(self):
+        bad_servers = "\n".join([
+            "[TOO]   ServerList: 2 entries",
+            "[TOO]     [1]: 29 (Descriptor)",
+            "[TOO]     [2]: 157 (EnergyEvseMode)",
+        ])
+        ctx, _ = self._ctx(servers=bad_servers)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_27_evse(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_soc_variant_rule_wrongly_accepting_absent_soc_fails(self):
+        ctx, _ = self._ctx()
+        ctx.link.commands["AT+MTROWAPPLY=28,1,1"] = [(0, []), (0, [])]
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_27_evse(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_merge_by_day_replacing_tuesday_too_fails(self):
+        ctx, _ = self._ctx()
+        ctx.link.commands["AT+MTROWGET=28,1"][1] = (
+            0, ["+MTROW:0,1,2,900,80,5000000"])  # Tuesday GONE
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_27_evse(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+    def test_truncated_70_row_readback_fails(self):
+        ctx, _ = self._ctx()
+        full = ctx.link.commands["AT+MTROWGET=28,1"][2]
+        ctx.link.commands["AT+MTROWGET=28,1"][2] = (full[0], full[1][:-1])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_27_evse(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
 
 
 class TestStep313Restore(unittest.TestCase):
