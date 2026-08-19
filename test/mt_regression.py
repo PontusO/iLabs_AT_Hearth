@@ -9,8 +9,9 @@ Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-des
 PORT HAZARD (C2 WiFi bench): resolve the link through /dev/serial/by-id,
 NEVER as /dev/ttyACM<n>. On this bench /dev/ttyACM0 is the Nabu Casa ZBT-2
 Thread RCP, and writing AT bytes into its live Spinel link kills otbr-agent
-(docs/TESTING.md section 2). --port still DEFAULTS to /dev/ttyACM0 for
-backward compatibility; treat that default as a trap and always pass it.
+(docs/TESTING.md section 2). There is deliberately NO default port: a run
+that guesses is worse than a run that refuses, so --port (or MT_PORT) is
+required.
 
     P=$(ls /dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_*-if00)
 
@@ -7828,14 +7829,15 @@ def exit_code(suite, truncated):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    # The default is a HAZARD on the current bench, kept only for backward
-    # compatibility: /dev/ttyACM0 there is the ZBT-2 Thread RCP, not the
-    # Challenger, and an AT write into its Spinel link kills otbr-agent.
-    # Always pass --port or MT_PORT as a /dev/serial/by-id path (module
-    # docstring, docs/TESTING.md section 2).
-    ap.add_argument("--port", default=os.environ.get("MT_PORT", "/dev/ttyACM0"),
-                    help="AT link; use a /dev/serial/by-id path, never "
-                         "/dev/ttyACM<n> (see the module docstring)")
+    # NO default, deliberately. /dev/ttyACM0 was the default until the C2
+    # bench, and on this rig that node is the ZBT-2 Thread RCP: an AT write
+    # into its live Spinel link kills otbr-agent within about four seconds,
+    # which is exactly what happened. A comment warning about a trap does
+    # not remove the trap, so the run now refuses rather than guessing
+    # (module docstring, docs/TESTING.md section 2).
+    ap.add_argument("--port", default=os.environ.get("MT_PORT"),
+                    help="AT link, REQUIRED; use a /dev/serial/by-id path, "
+                         "never /dev/ttyACM<n> (see the module docstring)")
     ap.add_argument("--phase", type=int, choices=[0, 1, 2, 3], default=None,
                     help="run only this phase (0 runs just the preflight "
                          "gate; 2 and 3 are stateful and never run by "
@@ -7872,6 +7874,12 @@ def main(argv=None):
         ap.error("--baseline with --phase 2 requires --include-slow and "
                  "--include-manual: a committed baseline must not contain "
                  "gated-out entries")
+    # After the baseline gate on purpose: the self-test for that gate calls
+    # main() without a port, and it must keep exiting for its own reason.
+    if not args.port:
+        ap.error("--port is required (or MT_PORT in the environment): pass a "
+                 "/dev/serial/by-id path, never /dev/ttyACM<n>, which moves "
+                 "across re-enumeration and may be another device entirely")
 
     chip = None
     if args.phase in (2, 3):

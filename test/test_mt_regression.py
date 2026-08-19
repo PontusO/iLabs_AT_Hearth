@@ -647,11 +647,48 @@ class TestMainBaselineRefusalGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             baseline_path = os.path.join(d, "baseline.json")
             with contextlib.redirect_stdout(io.StringIO()), \
-                 contextlib.redirect_stderr(io.StringIO()):
+                 contextlib.redirect_stderr(io.StringIO()) as err:
                 with self.assertRaises(SystemExit) as cm:
                     main(["--phase", "2", "--baseline", baseline_path])
             self.assertEqual(cm.exception.code, 2)
+            # The message, not just the code: this call passes no --port
+            # either, and that gate also exits 2. Without this the test
+            # would pass while measuring the wrong refusal.
+            self.assertIn("--baseline with --phase 2", err.getvalue())
             self.assertFalse(os.path.exists(baseline_path))
+
+
+class TestPortIsRequired(unittest.TestCase):
+    """C2 bench hazard: --port used to default to /dev/ttyACM0, which on
+    this rig is the ZBT-2 Thread RCP. An AT write into its Spinel link
+    kills otbr-agent. A run with no port must refuse rather than guess."""
+
+    def test_no_port_refuses(self):
+        with contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as cm:
+                main(["--phase", "0"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("--port is required", err.getvalue())
+
+    def test_env_port_is_accepted(self):
+        """MT_PORT still works, so the refusal is about guessing, not
+        about the flag. Parsing happens at import of main's argv, so a
+        bogus path is enough: it must get past the gate and fail later
+        on the open instead."""
+        old = os.environ.get("MT_PORT")
+        os.environ["MT_PORT"] = "/dev/definitely-not-a-real-port-xyz"
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                rc = main(["--phase", "0"])
+            self.assertEqual(rc, 2)
+            self.assertIn("cannot open", out.getvalue())
+        finally:
+            if old is None:
+                os.environ.pop("MT_PORT", None)
+            else:
+                os.environ["MT_PORT"] = old
 
 
 class TestExitCode(unittest.TestCase):
