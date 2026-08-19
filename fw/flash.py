@@ -45,7 +45,11 @@ Usage:
     python3 flash.py                 # interactive menu
     python3 flash.py --list          # list boards, verify esptool fork, exit
     python3 flash.py --board 1       # non-interactive board select (index or dir)
-    python3 flash.py --board Challenger_RP2350_WIFI6-BLE5 --port /dev/ttyACM0
+    python3 flash.py --board Challenger_RP2350_WIFI6-BLE5 \
+        --port /dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_*-if00
+        # by-id, never /dev/ttyACM<n>: the number moves across
+        # re-enumeration, and on the bench rig ttyACM0 is the ZBT-2 Thread
+        # RCP, whose Spinel link an AT write kills (docs/TESTING.md 2)
     python3 flash.py --skip-bridge   # bridge already running: flash the ESP only
     python3 flash.py --bridge espnow # flash, then leave the console-forwarding
                                      # bridge installed (one BOOTSEL press: the

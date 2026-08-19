@@ -155,9 +155,24 @@ class TestResponsePrefixAudit(unittest.TestCase):
     A new command lands here as a new row, and the test then proves
     _derive_expect() agrees with it."""
 
-    # cmd name -> the prefix its RESPONSE lines carry, or None for
-    # "OK-only, no response line".
+    # cmd name -> the prefix its RESPONSE lines carry, None for
+    # "OK-only, no response line", or BARE for "a response line with no
+    # prefix at all".
+    BARE = "<bare line, no prefix>"
+
     RESPONSE_PREFIX = {
+        # The three ETSI identity commands answer an unprefixed line
+        # (cmd_cgmi/cmd_cgmm/cmd_cgmr, mt_at.c:120-138). _derive_expect()
+        # gives them "+CGMI:" and friends, which matches nothing, and that
+        # is harmless rather than a B267: _collect() appends any line that
+        # does not start with "+" to the response regardless of expect.
+        # test_bare_line_responses_survive_a_mismatched_expect proves it
+        # rather than asserting it. They live here because the audit's
+        # value is that it covers the WHOLE dispatch table; a command
+        # missing from the table is a command nobody checked.
+        "CGMI":         BARE,             # cmd_cgmi, mt_at.c:120
+        "CGMM":         BARE,             # cmd_cgmm, :126
+        "CGMR":         BARE,             # cmd_cgmr, :132
         "MTVER":        "+MTVER:",        # cmd_ver, mt_at.c:150
         "MTSTATE":      "+MTSTATE:",      # cmd_mtstate, :164
         "MTFABRICS":    "+MTFABRICS:",    # cmd_mtfabrics, :175
@@ -210,7 +225,7 @@ class TestResponsePrefixAudit(unittest.TestCase):
 
     def test_derived_expect_matches_the_real_response_prefix(self):
         for name, prefix in sorted(self.RESPONSE_PREFIX.items()):
-            if prefix is None:
+            if prefix is None or prefix == self.BARE:
                 continue
             for form in ("AT+%s?" % name, "AT+%s=1" % name):
                 self.assertEqual(
@@ -235,7 +250,8 @@ class TestResponsePrefixAudit(unittest.TestCase):
 
     def test_every_command_with_an_odd_prefix_is_in_the_exception_table(self):
         odd = {n: p for n, p in self.RESPONSE_PREFIX.items()
-               if p is not None and p != "+" + n + ":"}
+               if p is not None and p != self.BARE
+               and p != "+" + n + ":"}
         self.assertEqual(odd, RESPONSE_PREFIX_EXCEPTIONS)
 
     def test_no_derived_prefix_swallows_a_urc_except_mtattr(self):
@@ -253,6 +269,37 @@ class TestResponsePrefixAudit(unittest.TestCase):
                 if urc.startswith(derived) and name != "MTATTR":
                     self.fail("AT+%s derives %r, which swallows the %s URC"
                               % (name, derived, urc))
+
+    def test_table_covers_every_dispatch_table_entry(self):
+        # The audit's whole claim is that it covers s_cmds[]. It said so
+        # while missing three entries, which is the same shape of error
+        # the audit exists to catch: a claim of completeness nobody
+        # checked against the source. Derived from mt_at.c, so a new
+        # command that lands without a row here fails this test.
+        src = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "main", "mt_at.c")
+        with open(src) as fh:
+            body = fh.read()
+        table = body.split("static const at_command_t s_cmds[] = {", 1)[1]
+        table = table.split("};", 1)[0]
+        names = re.findall(r'\{\s*"([A-Z0-9]+)"', table)
+        self.assertTrue(names, "could not parse s_cmds[] out of mt_at.c")
+        self.assertEqual(sorted(names), sorted(self.RESPONSE_PREFIX),
+                         "the prefix audit and mt_at.c's dispatch table "
+                         "disagree about which commands exist")
+
+    def test_bare_line_responses_survive_a_mismatched_expect(self):
+        # Why BARE rows are not B267s: _collect() appends any line that
+        # does not start with "+" to the response, whatever expect says.
+        # Shown on a real ATLink over wire bytes rather than argued, the
+        # way the C2 bench had to show the MTROWGET vacuity.
+        for name in [n for n, p in self.RESPONSE_PREFIX.items()
+                     if p == self.BARE]:
+            link, _ = link_with_reply(b"ESP32-C6 Hearth\r\nOK\r\n")
+            res, lines = link.command("AT+%s?" % name)
+            self.assertEqual(res, 0)
+            self.assertEqual(lines, ["ESP32-C6 Hearth"],
+                             "%s: a bare response line was lost" % name)
 
 
 class TestUrcQueue(unittest.TestCase):
