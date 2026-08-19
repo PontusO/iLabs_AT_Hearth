@@ -7,7 +7,8 @@ MCU drives over a simple UART AT interface (`AT+MT...`), the same way
 [`iLabs_AT_ESP-now`](https://github.com/PontusO/iLabs_AT_ESP-now) exposes ESP-NOW
 over `AT+EN...`. The two firmwares are **single-purpose images that share one
 engine**: the host reflashes the C6 over UART to switch personality. There is no
-combined ESP-NOW + Matter binary (see *Design* below for why).
+combined ESP-NOW + Matter binary (see `ARCHITECTURE.md` in the docs repository
+for why).
 
 ## Status
 
@@ -23,8 +24,8 @@ arduino-esp32-parity host library, has landed an unmodified upstream
 `MatterOnOffLight` sketch commissioned end to end (task C4) and is now
 through the seven-type device batch (tasks C1-C6) that brings the firmware's
 device-type table to 38 rows. See `CLAUDE.md` for current state and open
-questions, and the [integration plan](docs/hearth-integration-plan.md) for
-the original roadmap.
+questions, and `hearth-integration-plan.md` in the docs repository for the
+original roadmap.
 
 ## Architecture
 
@@ -96,7 +97,7 @@ Conventions are shared with the ESP-NOW firmware: `AT+CMD?` query,
 URCs (`+MT...`) may arrive at any time; the firmware emits `+MTREADY` once on
 boot.
 
-See [`docs/AT_MT_SPEC.md`](docs/AT_MT_SPEC.md) for the authoritative command
+See `AT_MT_SPEC.md` in the docs repository for the authoritative command
 reference. In brief: identity (`AT+CGMI/CGMM/CGMR`, `AT+MTVER?`), lifecycle
 (`AT+MTSTATE?`, `AT+MTFABRICS?`, `AT+MTCOMMISSION`, `AT+MTCODES?`),
 resets (`AT+MTRESET` keeps the endpoint composition, `AT+MTFRESET` erases it),
@@ -146,7 +147,7 @@ with the dedicated `AT+MTTEMPLEVELS` command rather than `AT+MTATTR`, since it
 is a string list served by a CHIP delegate, not an ordinary attribute.
 Deliberately absent, with reasons recorded in the design specs: Color Light
 (no distinct device type ID exists; the host library's `MatterColorLight`
-rides the `0x010D` row). See `docs/AT_MT_SPEC.md` section 3.9 for the
+rides the `0x010D` row). See `AT_MT_SPEC.md` section 3.9 for the
 authoritative table.
 
 The Door Lock (`0x000A`) is the first device type beyond arduino-esp32
@@ -158,7 +159,7 @@ command the host uses to report the lock's actual state once it has moved,
 so a subscribed controller sees the `LockOperation` event Matter expects.
 `+MTCMD`/`AT+MTCMDRESP` are a generic frame, not specific to locks: a future
 command needing the same kind of app-level verdict reuses it. See
-`docs/AT_MT_SPEC.md` sections 3.17 and 3.18.
+`AT_MT_SPEC.md` sections 3.17 and 3.18.
 
 Rows 31-38 (Water Valve, Mode Select, the OperationalState trio, Smoke/CO
 Alarm, Power Source, Chime) reuse that same `+MTCMD` frame for their own
@@ -169,16 +170,19 @@ app-adjudicated commands (`Open`/`Close`, `Pause`/`Resume`/`Start`/`Stop`,
 reachable attribute. Chime (`0x0146`) additionally papers over an esp-matter
 SDK gap: the one function that registers its cluster with the data model
 provider has no call site anywhere upstream, so the firmware calls it
-manually. See `docs/AT_MT_SPEC.md` sections 3.19-3.24 and `docs/ARCHITECTURE.md`
+manually. See `AT_MT_SPEC.md` sections 3.19-3.24 and `ARCHITECTURE.md`
 section 8.6 for the full detail.
 
-## Design
+## Documentation
 
-The two-firmware-one-engine approach, the C6-only Matter-over-WiFi scope and the
-mode-switch-by-reflash model are recorded in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), with the original roadmap in the
-[integration plan](docs/hearth-integration-plan.md). `CLAUDE.md` carries the
-build environment and the non-obvious constraints.
+The specifications, architecture decision record, testing plan and design
+history live in a separate private repository,
+[`iLabs_Hearth_docs`](https://github.com/PontusO/iLabs_Hearth_docs).
+
+Source comments in this repository cite documents by name and section, for
+example `AT_MT_SPEC.md 3.28`. Those citations resolve against that
+repository. It is tagged with the same version as each firmware release, so
+the documents matching a given firmware are a checkout rather than a guess.
 
 ## License
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """iLabs AT Hearth regression harness, stages T1-T5: Phases 0, 1, 2 and 3.
 
-Test inventory: docs/TESTING.md sections 5, 6 and 7 (2.1-2.5).
-Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-design.md,
+Test inventory: TESTING.md sections 5, 6 and 7 (2.1-2.5).
+Design decisions: superpowers/specs/2026-07-30-c5-regression-harness-t1-design.md,
 .../2026-07-30-c5-regression-harness-t2-design.md and
 .../2026-08-08-c5-regression-harness-t5-design.md (Phase 3).
 
 PORT HAZARD (C2 WiFi bench): resolve the link through /dev/serial/by-id,
 NEVER as /dev/ttyACM<n>. On this bench /dev/ttyACM0 is the Nabu Casa ZBT-2
 Thread RCP, and writing AT bytes into its live Spinel link kills otbr-agent
-(docs/TESTING.md section 2). There is deliberately NO default port: a run
+(TESTING.md section 2). There is deliberately NO default port: a run
 that guesses is worse than a run that refuses, so --port (or MT_PORT) is
 required.
 
@@ -6201,7 +6201,7 @@ register_phase1_negative()
 def register_phase1_t5_negative():
     """T5: state-safe grammar rows for the post-August-1 command families
     (TESTING.md 6.2 / AT_MT_SPEC.md 3.16), per the design spec's state-safety
-    split (docs/superpowers/specs/2026-08-08-c5-regression-harness-t5-design.md
+    split (superpowers/specs/2026-08-08-c5-regression-harness-t5-design.md
     section 3): bare-ERROR command-form rows and +MTERR:1 parse/range rows
     only, since every one of them is rejected inside the handler itself,
     before mt_at.c ever calls into a mt_matter_* bridge function (confirmed
@@ -7834,7 +7834,7 @@ def main(argv=None):
     # into its live Spinel link kills otbr-agent within about four seconds,
     # which is exactly what happened. A comment warning about a trap does
     # not remove the trap, so the run now refuses rather than guessing
-    # (module docstring, docs/TESTING.md section 2).
+    # (module docstring, TESTING.md section 2).
     ap.add_argument("--port", default=os.environ.get("MT_PORT"),
                     help="AT link, REQUIRED; use a /dev/serial/by-id path, "
                          "never /dev/ttyACM<n> (see the module docstring)")

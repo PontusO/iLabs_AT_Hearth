@@ -2242,7 +2242,7 @@ static endpoint_t *mk_battery_storage(node_t *n, uint8_t variant)
      * B264 rides along on all of this and is now FIXED: whichever bound is
      * created, a write that lands outside it is refused by ember and
      * answers +MTERR:1 (main.cpp's mt_matter_attr_write() maps
-     * ESP_ERR_INVALID_ARG to MT_ATTR_ERR_VALUE). See docs/TESTING.md
+     * ESP_ERR_INVALID_ARG to MT_ATTR_ERR_VALUE). See TESTING.md
      * section 12 and AT_MT_SPEC.md section 5 for the fix and its baseline
      * re-record. */
     cluster::power_source::attribute::create_bat_voltage(ps_cl, nullable<uint32_t>(), 0x00, 0xFFFFFFFF);
@@ -2308,7 +2308,7 @@ static endpoint_t *mk_dem(node_t *n, uint8_t variant)
  *
  * Design record: ARCHITECTURE.md 8.6/8.11/8.12 (the two feature-bit rules
  * and the declared-but-never-called disease), the round design spec
- * (docs/superpowers/specs/2026-08-13-energy-round-c2-design.md section 5).
+ * (superpowers/specs/2026-08-13-energy-round-c2-design.md section 5).
  *
  * UNLIKE solar/battery in C1, energy_evse::create() has NO silent SDK break:
  * it is the first endpoint builder in the energy series callable unmodified,
