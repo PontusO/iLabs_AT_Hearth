@@ -20,7 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mt_regression import ATLink, cmd_retry
+from mt_regression import ATLink, cmd_retry, RESPONSE_PREFIX_EXCEPTIONS
 
 
 class FakeTransport:
@@ -125,6 +125,134 @@ class TestResultMapping(unittest.TestCase):
         res, lines = link.command("AT+MTVER?")
         self.assertEqual(res, 0)
         self.assertEqual(lines, ["+MTVER:0.1.0"])
+
+
+class TestResponsePrefixAudit(unittest.TestCase):
+    """B267's systemic half: every AT+MT command audited against the
+    prefix its responses REALLY carry.
+
+    A wrong expect prefix is not a loud failure. ATLink._collect() routes
+    any "+" line the prefix does not match into the URC queue, so the
+    command still terminates OK and comes back with lines == [], which
+    means every "res == 0 and lines == []" assertion in the suite passes
+    no matter what the device answered. B267 disarmed two of those,
+    including the "staged rows must be abandoned, not committed"
+    regression, and they reported PASS for the whole of the C2 round
+    while measuring nothing.
+
+    The table below is written from AT_MT_SPEC.md section 3 and from
+    main/mt_at.c's handlers, NOT from mt_regression.py, so the two
+    disagree loudly if either drifts. One row per entry in mt_at.c's
+    s_cmds[] dispatch table (mt_at.c:3365-3403); the value is the prefix
+    the handler's own at_uart_write_line() emits, or None when the
+    command answers OK (or +MTERR:n then ERROR) with no response line at
+    all. Verified handler by handler: the only at_uart_write_line() calls
+    in mt_at.c that emit a "+"-prefixed line are cmd_ver, cmd_mtstate,
+    cmd_mtfabrics, cmd_mtcodes, cmd_mtattr, cmd_mtevt, cmd_mtnet,
+    cmd_mtthread, cmd_mtep, cmd_mtbaud, cmd_mtflow, cmd_mttransport and
+    emit_row_line() (whose only caller is cmd_mtrowget).
+
+    A new command lands here as a new row, and the test then proves
+    _derive_expect() agrees with it."""
+
+    # cmd name -> the prefix its RESPONSE lines carry, or None for
+    # "OK-only, no response line".
+    RESPONSE_PREFIX = {
+        "MTVER":        "+MTVER:",        # cmd_ver, mt_at.c:150
+        "MTSTATE":      "+MTSTATE:",      # cmd_mtstate, :164
+        "MTFABRICS":    "+MTFABRICS:",    # cmd_mtfabrics, :175
+        "MTCOMMISSION": None,
+        "MTCODES":      "+MTCODES:",      # cmd_mtcodes, :217
+        "MTRESET":      None,
+        "MTFRESET":     None,
+        "MTATTR":       "+MTATTR:",       # cmd_mtattr, :475/:478 (read
+                                          # only; a write answers OK)
+        "MTSWITCH":     None,
+        "MTTEMPLEVELS": None,
+        "MTEP":         "+MTEP:",         # cmd_mtep, :1845/:1849/:1852
+        "MTEPCLEAR":    None,
+        "MTEPAPPLY":    None,
+        # NOT "+MTEVT:", deliberately: spec 3.11 answers the query with
+        # +MTEVTMASK so a +MTEVT URC landing between the command and its
+        # terminal response cannot be mistaken for the reply
+        # (CLAUDE.md's "Things that will bite you" carries this one).
+        "MTEVT":        "+MTEVTMASK:",    # cmd_mtevt, :1609
+        "MTNET":        "+MTNET:",        # cmd_mtnet, :1679
+        "MTTHREAD":     "+MTTHREAD:",     # cmd_mtthread, :1771
+        "MTBAUD":       "+MTBAUD:",       # cmd_mtbaud, :1963
+        "MTFLOW":       "+MTFLOW:",       # cmd_mtflow, :2009
+        "MTCMDRESP":    None,
+        "MTLOCK":       None,
+        "MTVALVE":      None,
+        "MTMODES":      None,
+        "MTOPSTATE":    None,
+        "MTALARM":      None,
+        "MTCHIMESOUNDS": None,
+        "MTCHIME":      None,
+        "MTMEAS":       None,
+        "MTDEMCAP":     None,
+        "MTROW":        None,
+        "MTROWCLEAR":   None,
+        "MTROWAPPLY":   None,
+        # B267: the row payload is "+MTROW:", not "+MTROWGET:". The
+        # command name and its response prefix are different words on
+        # purpose (spec 3.28: AT+MTROW stages rows, AT+MTROWGET reads
+        # them back, and both speak the same +MTROW line shape).
+        "MTROWGET":     "+MTROW:",        # emit_row_line, :2897
+        "MTMETERID":    None,
+        "MTTRANSPORT":  "+MTTRANSPORT:",  # cmd_mttransport, :2056
+                                          # (MT_COMBINED_IMAGE only)
+    }
+
+    # Every URC prefix the firmware can raise (spec section 4).
+    URC_PREFIXES = ["+MTREADY", "+MTEVT:", "+MTATTR:", "+MTIDENT:",
+                    "+MTCMD:", "+MTCMDTO:"]
+
+    def test_derived_expect_matches_the_real_response_prefix(self):
+        for name, prefix in sorted(self.RESPONSE_PREFIX.items()):
+            if prefix is None:
+                continue
+            for form in ("AT+%s?" % name, "AT+%s=1" % name):
+                self.assertEqual(
+                    ATLink._derive_expect(form), prefix,
+                    "%s: _derive_expect gives %r but the device answers "
+                    "%r; every response line would be routed into the URC "
+                    "queue and every 'lines == []' assertion on this "
+                    "command would pass vacuously (B267)"
+                    % (form, ATLink._derive_expect(form), prefix))
+
+    def test_exception_table_has_no_stale_or_redundant_rows(self):
+        # Every exception must name a real command, and must really BE
+        # an exception: a row that agrees with the name rule is dead
+        # weight that hides the rule from the next reader.
+        for name, prefix in RESPONSE_PREFIX_EXCEPTIONS.items():
+            self.assertIn(name, self.RESPONSE_PREFIX,
+                          "%s is not an AT+MT command" % name)
+            self.assertEqual(prefix, self.RESPONSE_PREFIX[name])
+            self.assertNotEqual(prefix, "+" + name + ":",
+                               "%s agrees with the name rule and needs no "
+                               "exception row" % name)
+
+    def test_every_command_with_an_odd_prefix_is_in_the_exception_table(self):
+        odd = {n: p for n, p in self.RESPONSE_PREFIX.items()
+               if p is not None and p != "+" + n + ":"}
+        self.assertEqual(odd, RESPONSE_PREFIX_EXCEPTIONS)
+
+    def test_no_derived_prefix_swallows_a_urc_except_mtattr(self):
+        # The mirror-image failure: if a derived expect prefix is a
+        # prefix of a URC line, _collect() captures the URC as a response
+        # line and await_urc() can never see it. AT+MTATTR is the one
+        # inherent case (the read response and the change URC are the
+        # same line shape), and the module docstring's standing rule
+        # (T1 design section 8, N23) is how the suite lives with it.
+        # AT+MTEVT? used to be a second one ("+MTEVT:" would have
+        # swallowed +MTEVT URCs) and the exception table removes it.
+        for name in sorted(self.RESPONSE_PREFIX):
+            derived = ATLink._derive_expect("AT+%s?" % name)
+            for urc in self.URC_PREFIXES:
+                if urc.startswith(derived) and name != "MTATTR":
+                    self.fail("AT+%s derives %r, which swallows the %s URC"
+                              % (name, derived, urc))
 
 
 class TestUrcQueue(unittest.TestCase):
@@ -3923,6 +4051,45 @@ class TestPhase3Composition(unittest.TestCase):
         dupes = {b for b in bases if bases.count(b) > 1}
         self.assertEqual(dupes, {"0x0071"})
 
+    def test_every_entry_is_written_the_way_the_device_renders_it(self):
+        # B266 (C2 WiFi bench, BLOCKING): the EVSE slot was written
+        # "0x050C,0". step_3_1_compose uses ONE table string for two
+        # different grammars, the AT+MTEP= argument (where a redundant
+        # ",0" is legal and accepted) and the expected AT+MTEP? readback
+        # line, and those grammars are not the same. AT_MT_SPEC.md 3.9:
+        # the <variant> field renders "only when the variant is nonzero"
+        # and <parent_idx> "only when the endpoint has a parent, and
+        # never without the fourth also present". So an unparented
+        # variant-0 endpoint reads back bare, "3.1 composition readback
+        # exact" could never match, and all 25 later Phase 3 steps
+        # skipped: the whole phase, lost to one redundant token.
+        #
+        # The host suite was blind to it because every existing consumer
+        # of this table either splits on "," and looks at [0] (the three
+        # pool budgets) or builds its expected readback FROM the same
+        # string (TestStep31Compose), which is circular by construction.
+        # This test is the one place that re-derives the rendering from
+        # the spec rule instead, so a table entry whose declared form is
+        # not what the device will answer fails here rather than on the
+        # bench.
+        for slot, dt in PHASE3_COMPOSITION:
+            parts = dt.split(",")
+            self.assertIn(len(parts), (1, 2, 3),
+                          "slot %d: %r has too many fields" % (slot, dt))
+            variant = parts[1] if len(parts) > 1 else "0"
+            parent = parts[2] if len(parts) > 2 else None
+            if parent is None:
+                rendered = parts[0] if variant == "0" else \
+                    "%s,%s" % (parts[0], variant)
+            else:
+                rendered = "%s,%s,%s" % (parts[0], variant, parent)
+            self.assertEqual(
+                dt, rendered,
+                "slot %d declares %r but AT+MTEP? renders %r "
+                "(AT_MT_SPEC.md 3.9); step_3_1_compose compares the two "
+                "literally, so this aborts Phase 3 (B266)"
+                % (slot, dt, rendered))
+
 
 class TestPhase3Context(unittest.TestCase):
     def test_defaults(self):
@@ -7035,11 +7202,106 @@ class TestStagedEvseMeterC2(unittest.TestCase):
             self.assertFalse(t_row_evse_meter_staged(link))
         self.assertEqual(link.sent[-4:], self.RESTORE_TAIL)
 
+    def test_powerthreshold_bare_error_fails(self):
+        # B265: since firmware 0.12.0 the ARRAY refusal is mapped to
+        # +MTERR:5, so a bare ERROR here is a real regression again. It
+        # was NOT one before the mapping: PowerThreshold answered a bare
+        # ERROR unconditionally, which is why the old "not a bare ERROR"
+        # assertion failed the bench on a correct device.
+        link = self._link({"AT+MTATTR=3,2822,4": (-1, [])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_row_evse_meter_staged(link))
+
+    def test_string_attribute_answering_a_value_fails(self):
+        # The strengthening B265 bought. The old assertion was "res !=
+        # -1", so ANY non-bare-ERROR answer satisfied it, including a
+        # value on an attribute that cannot carry one. +MTERR:5 exactly
+        # is the documented post-fix answer for the three char_strings,
+        # and this is the case the loose form let through.
+        link = self._link({"AT+MTATTR=3,2822,1":
+                           (0, ["+MTATTR:3,2822,1,7"])})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_row_evse_meter_staged(link))
+
     def test_apply_failure_fails_and_attempts_restore(self):
         link = self._link({"AT+MTEPAPPLY": (-1, [])})
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertFalse(t_row_evse_meter_staged(link))
         self.assertEqual(link.sent.count("AT+MTEPAPPLY"), 2)
+
+
+class TestStagedEvseMeterC2OverTheWire(unittest.TestCase):
+    """B267: the same row, but driven through a REAL ATLink over scripted
+    wire bytes instead of FakeLink.
+
+    Why this class exists at all. TestStagedEvseMeterC2 above scripts
+    (res, lines) tuples directly into a FakeLink, which BYPASSES
+    ATLink._collect() and therefore bypasses the expect-prefix routing
+    entirely. So its test_case_b_committing_the_staged_rows_instead_of_
+    clearing_fails passed happily for the whole C2 round while the real
+    harness could not have caught that regression on hardware: on the
+    wire, _derive_expect() produced "+MTROWGET:", every "+MTROW:" line
+    was filed as a URC, and `lines == []` was true no matter what the
+    store held. A mock that hands the code the input under test cannot
+    show whether that input would ever arrive.
+
+    These two tests close that gap by putting the real prefix routing in
+    the path. Run them against the pre-fix _derive_expect() and the
+    committed-rows case passes (wrongly) while the happy path fails on
+    its OWN non-empty readbacks; with the fix both behave correctly."""
+
+    SCRATCH = ["+MTEP:0,1,0x0100", "+MTEP:1,2,0x050C,1", "+MTEP:2,3,0x0511"]
+    ROWS = ["+MTROW:0,2,2,480,,25000000", "+MTROW:1,2,4,600,,10000000"]
+
+    def _wire(self, rowget_lines):
+        """Script the whole t_row_evse_meter_staged conversation as wire
+        bytes. rowget_lines is the list of line-lists AT+MTROWGET=2,1
+        answers, in call order."""
+        rowget = list(rowget_lines)
+        seq = {
+            "AT+MTEP?": [self.SCRATCH, ["+MTEP:0,1,0x0100"]],
+            "AT+MTROWGET=2,1": rowget,
+            # soc=50 refused on the no-SOC variant, then two accepts
+            "AT+MTROWAPPLY=2,1,1": [["+MTERR:1"], [], []],
+            "AT+MTATTR=3,2822,0": [["+MTATTR:3,2822,0,1"]],
+        }
+        err5 = ["+MTERR:5"]
+        fixed = {
+            "AT+MTATTR=3,2822,1": err5, "AT+MTATTR=3,2822,2": err5,
+            "AT+MTATTR=3,2822,3": err5, "AT+MTATTR=3,2822,4": err5,
+        }
+
+        def on_write(data):
+            cmd = data.decode("ascii").strip()
+            if cmd in seq:
+                lines = seq[cmd].pop(0) if seq[cmd] else []
+            else:
+                lines = fixed.get(cmd, [])
+            term = "ERROR" if any(l.startswith("+MTERR:") for l in lines) \
+                else "OK"
+            out = "".join(l + "\r\n" for l in lines) + term + "\r\n"
+            if cmd == "AT+MTEPAPPLY":
+                out += "+MTREADY\r\n"
+            return out.encode("ascii")
+
+        return ATLink(FakeTransport(on_write=on_write), default_timeout=0.3)
+
+    def test_happy_path_over_the_wire(self):
+        # Both count-0 readbacks answer a genuinely empty store.
+        link = self._wire([[], []])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(t_row_evse_meter_staged(link))
+
+    def test_committed_rows_are_caught_over_the_wire(self):
+        # Case (b): the device wrongly COMMITS the two staged rows on a
+        # count-0 apply. This is the regression task 2's review demanded
+        # be pinned, and it is the exact assertion B267 disarmed.
+        link = self._wire([[], list(self.ROWS)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(t_row_evse_meter_staged(link))
+        # And the rows really did travel as response lines, not as URCs:
+        # if they had been misrouted the check above would have passed.
+        self.assertEqual([u for _, u in link.urc_history], ["+MTREADY"] * 2)
 
 
 class TestStagedMeterPoolExhaustion(unittest.TestCase):

@@ -6,15 +6,23 @@ Design decisions: docs/superpowers/specs/2026-07-30-c5-regression-harness-t1-des
 .../2026-07-30-c5-regression-harness-t2-design.md and
 .../2026-08-08-c5-regression-harness-t5-design.md (Phase 3).
 
-Phase 1 run: python3 test/mt_regression.py --port /dev/ttyACM0
+PORT HAZARD (C2 WiFi bench): resolve the link through /dev/serial/by-id,
+NEVER as /dev/ttyACM<n>. On this bench /dev/ttyACM0 is the Nabu Casa ZBT-2
+Thread RCP, and writing AT bytes into its live Spinel link kills otbr-agent
+(docs/TESTING.md section 2). --port still DEFAULTS to /dev/ttyACM0 for
+backward compatibility; treat that default as a trap and always pass it.
+
+    P=$(ls /dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_*-if00)
+
+Phase 1 run: python3 test/mt_regression.py --port "$P"
 Phase 2 run: MT_SSID=... MT_PSK=... python3 test/mt_regression.py \
-    --port /dev/ttyACM0 --phase 2
+    --port "$P" --phase 2
 Phase 3 run (host-only segment plus the full controller matrix, including
 the RVC + Microwave batch's slots 12-13, the composed appliance
 round's slots 14-20, energy round A's slots 21-22, energy round B's
-slots 23-24 and energy round C1's slots 25-27):
+slots 23-24, energy round C1's slots 25-27 and energy round C2's slot 28):
 python3 test/mt_regression.py \
-    --port /dev/ttyACM0 --phase 3
+    --port "$P" --phase 3
 (-k "3." scopes to Phase 3's own steps, since -k matches a literal
 substring, not a regex, and every step name starts with its own "3.N ")
 
@@ -34,6 +42,41 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+
+
+# The AT+MT commands whose RESPONSE lines do not carry the "+<name>:"
+# prefix a host would derive from the command name. ATLink._derive_expect()
+# consults this before falling back to the name rule; a response line the
+# expect prefix does not match is routed into the URC queue instead, so a
+# wrong prefix does not merely fail a check, it makes every "lines == []"
+# assertion on that command TRUE regardless of what the device answered.
+#
+# B267 (C2 WiFi bench, BLOCKING) was the second member of this family:
+# AT+MTROWGET answers "+MTROW:" lines (spec 3.28, emit_row_line() in
+# mt_at.c). Four Phase 3 checks failed on a correct device, and worse,
+# t_row_evse_meter_staged's two count-0 cases (one of them the "staged
+# rows must be abandoned, not committed" regression task 2's review
+# demanded) had been reporting PASS while measuring nothing.
+#
+# The first member was already known: AT+MTEVT? answers "+MTEVTMASK:"
+# (spec 3.11, deliberately, so a +MTEVT URC landing between a command and
+# its terminal response cannot be mistaken for the reply). That one was
+# handled at each call site instead, which is exactly what let the second
+# member ship: a call site is a place to forget. The table is the single
+# place both live now, and test_mt_regression.py's
+# TestResponsePrefixAudit checks it against an independently written
+# truth table covering every command in mt_at.c's dispatch table.
+#
+# One collision is inherent and is NOT fixable here: AT+MTATTR's read
+# response and the controller-driven +MTATTR URC are the same line shape,
+# so ATLink cannot tell them apart. That is the standing rule in this
+# file's module docstring (T1 design section 8, N23): never have an
+# AT+MTATTR command in flight while a +MTATTR URC is expected. Phase 2
+# and Phase 3 sequence around it by construction.
+RESPONSE_PREFIX_EXCEPTIONS = {
+    "MTEVT": "+MTEVTMASK:",
+    "MTROWGET": "+MTROW:",
+}
 
 
 class ATLink:
@@ -88,10 +131,16 @@ class ATLink:
 
     @staticmethod
     def _derive_expect(cmd):
+        """The prefix a command's own response lines carry. The name rule
+        ("AT+MTVER?" -> "+MTVER:") holds for all but the two commands in
+        RESPONSE_PREFIX_EXCEPTIONS; see that table for why the exception
+        lives here and not at the call sites."""
         if not cmd.upper().startswith("AT+"):
             return None
-        name = cmd[3:].split("=")[0].rstrip("?")
-        return "+" + name.upper() + ":" if name else None
+        name = cmd[3:].split("=")[0].rstrip("?").upper()
+        if not name:
+            return None
+        return RESPONSE_PREFIX_EXCEPTIONS.get(name, "+" + name + ":")
 
     def command(self, cmd, expect=None, timeout=None):
         if expect is None:
@@ -584,7 +633,13 @@ PHASE3_COMPOSITION = [
     # by Phase 1's staged scratch composition instead (t_row_evse_meter_
     # staged, t_row_meter_pool_exhaustion, register_phase1_t12_negative),
     # the t_meas_staged_wh_min / t_staged_variant1_energy_c1 division.
-    (28, "0x050C,0"),      # energy EVSE, variant 0 (SOC feature: every
+    # B266: written BARE, not "0x050C,0". This string is used twice, as
+    # the AT+MTEP= argument (where ",0" is legal) and as the expected
+    # AT+MTEP? readback line (where it is not: spec 3.9 renders <variant>
+    # only when nonzero). The redundant token cost the C2 WiFi bench the
+    # whole of Phase 3, 1 failed and 25 skipped. Enforced now by
+    # test_every_entry_is_written_the_way_the_device_renders_it.
+    (28, "0x050C"),        # energy EVSE, variant 0 (SOC feature: every
                             # charging target must carry targetSoC)
 ]
 
@@ -7070,19 +7125,23 @@ def t_row_evse_meter_staged(link):
     so staging it here rather than spending the one free composition slot
     on it costs nothing this round's own checks need.
 
-    The meter's five attributes no longer answering a bare ERROR (design
-    spec 6.1) is the direct, AT-only test of this round's dead-shell fix:
+    The meter's attributes no longer answering a bare ERROR (design spec
+    6.1) is the direct, AT-only test of this round's dead-shell fix:
     before it, MeterIdentification's Instance AttrAccess was declared but
     never registered, so esp_matter::attribute::get_val()'s call into the
-    real ReadAttribute() dispatch failed outright for every one of the
-    five, regardless of what AT+MTMETERID had pushed. AT+MTATTR's own
-    pipeline only converts integer-carrying types past that point, so
-    four of the five (three char_strings, one struct) answer +MTERR:5
-    once the Instance runs, not a value; only MeterType (an enum) can
-    prove the stronger "answers a value" claim at this layer. The full
-    five-attribute value proof is a controller-read bench item (this
-    report's bench procedure), the only path that can carry a string or
-    a struct back at all."""
+    real ReadAttribute() dispatch failed outright, regardless of what
+    AT+MTMETERID had pushed. AT+MTATTR's own pipeline only converts
+    integer-carrying types past that point, so the three char_strings
+    answer +MTERR:5 once the Instance runs, not a value; only MeterType
+    (an enum) can prove the stronger "answers a value" claim at this
+    layer. PowerThreshold, the struct, is NOT part of that proof: the SDK
+    registers it ARRAY-typed and get_val() refuses ARRAY before the read
+    dispatch, so it never reaches the Instance in either direction and
+    answers +MTERR:5 unconditionally (B265, firmware 0.12.0; before that
+    it answered a bare ERROR and the bench failed this row on a correct
+    device). The full five-attribute value proof is a controller-read
+    bench item, the only path that can carry a string or a struct back at
+    all."""
     def diag(msg):
         print("    (staged EVSE/meter c2: %s)" % msg)
 
@@ -7214,14 +7273,44 @@ def t_row_evse_meter_staged(link):
         # of any of those four still answers +MTERR:5 (MT_ATTR_ERR_TYPE),
         # not a value: that is a real, permanent limit of AT+MTATTR (the
         # project's own "AT+MTATTRX for opaque types is specified but
-        # unimplemented"), not evidence the fix regressed. The
-        # DISTINGUISHING signal available at this layer is therefore "not
-        # a bare ERROR" (Instance::Read() ran at all), not "answers OK":
-        # only MeterType (an enum, genuinely integer-carrying) can prove
-        # the stronger claim. The full "all five answer values" proof
-        # needs a real controller read of each attribute by name (the
-        # bench procedure), which is the only path that can carry a
-        # string or a struct back at all.
+        # unimplemented"), not evidence the fix regressed. Only MeterType
+        # (an enum, genuinely integer-carrying) can prove the stronger
+        # claim. The full "all five answer values" proof needs a real
+        # controller read of each attribute by name (the bench
+        # procedure), which is the only path that can carry a string or a
+        # struct back at all.
+        #
+        # B265, and why these four assert +MTERR:5 EXACTLY rather than
+        # "not a bare ERROR". The C2 WiFi bench found the loose form both
+        # too weak and, for attribute 4, entirely without discriminating
+        # power:
+        #   - Attributes 1-3 (the char_strings) reach Instance::Read(),
+        #     come back fine, and fail only in attr_val_to_i64(), so they
+        #     answer +MTERR:5. Before the dead-shell fix they answered a
+        #     bare ERROR. +MTERR:5 is therefore the exact post-fix
+        #     answer, and asserting it pins the fix harder than "not -1"
+        #     did: a future regression that made the read fail some OTHER
+        #     way would slip through "not a bare ERROR" and is caught
+        #     here.
+        #   - Attribute 4 (PowerThreshold, a struct) NEVER reaches the
+        #     Instance at all, before the fix or after it. esp-matter
+        #     registers it ESP_MATTER_VAL_TYPE_ARRAY (a struct has no
+        #     esp_matter_attr_val_t representation), and get_val()
+        #     refuses ARRAY BEFORE the ReadAttribute() dispatch
+        #     (esp_matter_data_model.cpp). The bench captured the C6
+        #     console during each read: attributes 0-3 each logged one
+        #     "Meter Indication read attr N" line, attribute 4 logged
+        #     nothing. So the old "not a bare ERROR" assertion could
+        #     never have told a reached Instance from an unreached one
+        #     for this attribute: its answer is unconditional. It was an
+        #     unsound inference, and it failed on a CORRECT device.
+        #     Firmware 0.12.0 maps that ARRAY refusal to +MTERR:5
+        #     (mt_matter_attr_read(), B265), which is what the code
+        #     means, so all four now answer the same code for two
+        #     different reasons and AT_MT_SPEC.md 3.9's claim is true as
+        #     written. This row pins the error contract; it does NOT pin
+        #     the dead-shell fix for attribute 4, and nothing at this
+        #     layer can.
         res, lines = link.command("AT+MTATTR=3,2822,0")
         if res != 0:
             diag("MeterType read answered %r, wanted a value" % res)
@@ -7230,25 +7319,21 @@ def t_row_evse_meter_staged(link):
             diag("MeterType read: %r, wanted MeterType=1 (Private)"
                  % lines)
             ok = False
-        res, _ = link.command("AT+MTATTR=3,2822,1")
-        if res == -1:
-            diag("PointOfDelivery read answered a bare ERROR: the "
-                 "Instance was never reached, the dead-shell bug")
-            ok = False
-        res, _ = link.command("AT+MTATTR=3,2822,2")
-        if res == -1:
-            diag("MeterSerialNumber read answered a bare ERROR: the "
-                 "Instance was never reached, the dead-shell bug")
-            ok = False
-        res, _ = link.command("AT+MTATTR=3,2822,3")
-        if res == -1:
-            diag("ProtocolVersion read answered a bare ERROR: the "
-                 "Instance was never reached, the dead-shell bug")
-            ok = False
+        for attr, name in ((1, "PointOfDelivery"), (2, "MeterSerialNumber"),
+                           (3, "ProtocolVersion")):
+            res, _ = link.command("AT+MTATTR=3,2822,%d" % attr)
+            if res != 5:
+                diag("%s read answered %r, wanted +MTERR:5 (a bare ERROR "
+                     "means the Instance was never reached, the "
+                     "dead-shell bug; anything else is a new failure)"
+                     % (name, res))
+                ok = False
         res, _ = link.command("AT+MTATTR=3,2822,4")
-        if res == -1:
-            diag("PowerThreshold read answered a bare ERROR: the "
-                 "Instance was never reached, the dead-shell bug")
+        if res != 5:
+            diag("PowerThreshold read answered %r, wanted +MTERR:5 "
+                 "(get_val()'s ARRAY refusal mapped to MT_ATTR_ERR_TYPE, "
+                 "B265); this row does not test the dead-shell fix, "
+                 "which cannot be reached for a struct attribute" % res)
             ok = False
     finally:
         restored = (stage_composition(link, ["0x0100"]) and apply_and_wait())
@@ -7743,7 +7828,14 @@ def exit_code(suite, truncated):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--port", default=os.environ.get("MT_PORT", "/dev/ttyACM0"))
+    # The default is a HAZARD on the current bench, kept only for backward
+    # compatibility: /dev/ttyACM0 there is the ZBT-2 Thread RCP, not the
+    # Challenger, and an AT write into its Spinel link kills otbr-agent.
+    # Always pass --port or MT_PORT as a /dev/serial/by-id path (module
+    # docstring, docs/TESTING.md section 2).
+    ap.add_argument("--port", default=os.environ.get("MT_PORT", "/dev/ttyACM0"),
+                    help="AT link; use a /dev/serial/by-id path, never "
+                         "/dev/ttyACM<n> (see the module docstring)")
     ap.add_argument("--phase", type=int, choices=[0, 1, 2, 3], default=None,
                     help="run only this phase (0 runs just the preflight "
                          "gate; 2 and 3 are stateful and never run by "
