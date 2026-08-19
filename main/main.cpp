@@ -1199,7 +1199,56 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
     }
 
     esp_matter_attr_val_t val;
-    if (esp_matter::attribute::get_val(a, &val) != ESP_OK) {
+    esp_err_t gerr = esp_matter::attribute::get_val(a, &val);
+    /* B265: an attribute the SDK registered as ESP_MATTER_VAL_TYPE_ARRAY is
+     * refused by get_val() BEFORE the read dispatch, so no AttributeAccess-
+     * Interface behind it is ever consulted and the failure is unconditional.
+     * That is exactly what +MTERR:5 means ("not an integer-valued
+     * attribute"), so map it rather than let it collapse into the bare ERROR
+     * MT_ATTR_ERR_FAILED renders. Found on the C2 bench reading
+     * MeterIdentification PowerThreshold (a struct, which esp-matter has no
+     * esp_matter_attr_val_t representation for and registers as ARRAY):
+     * AT+MTATTR answered a bare ERROR while AT_MT_SPEC 3.9 claimed +MTERR:5,
+     * and a bare ERROR could not be told apart from a genuinely broken read.
+     *
+     * ESP_ERR_NOT_SUPPORTED sources reachable on THIS leg, enumerated the way
+     * the write leg's DE270 comment below enumerates its own (esp-matter
+     * release/v1.5.1, this checkout's pin). mt_matter_attr_read() calls the
+     * attribute-handle overload get_val(attribute_t*, val)
+     * (esp_matter_data_model.cpp:986), which does exactly two things:
+     *   - get_path_from_attribute_handle() (:970), whose only failure comes
+     *     from find_cluster_and_endpoint_id_for_internally_managed_attribute()
+     *     and is ESP_ERR_INVALID_ARG / ESP_ERR_INVALID_STATE /
+     *     ESP_ERR_NOT_FOUND. Never ESP_ERR_NOT_SUPPORTED.
+     *   - the (endpoint, cluster, attribute) overload (:927), whose ONLY
+     *     textual ESP_ERR_NOT_SUPPORTED is the ARRAY guard at :931. Its other
+     *     failure arms are ESP_ERR_INVALID_ARG (null val, unknown attribute),
+     *     ESP_ERR_NO_MEM (scoped buffer) and ESP_FAIL (a failing
+     *     provider::ReadAttribute(), and every get_val_from_tlv_data()
+     *     failure). None of them is ESP_ERR_NOT_SUPPORTED.
+     * get_val_internal() (:1001) also returns ESP_ERR_NOT_SUPPORTED, for a
+     * managed-internally attribute, but nothing on this path calls it: it is
+     * a separate entry point this bridge never uses. So the ARRAY guard is
+     * the single reachable source and the mapping collapses no two meanings
+     * into one code.
+     *
+     * This cannot alter +MTERR:11. That code is produced only by the write
+     * leg's set_val() mapping below, for an attribute that is MANAGED_
+     * INTERNALLY without WRITABLE; such an attribute reads through
+     * ReadAttribute() perfectly well and is never ARRAY-typed, so no
+     * attribute changes which of the two codes it answers. */
+    if (gerr == ESP_ERR_NOT_SUPPORTED) {
+        /* Keep the is_unsigned invariant below true for this arm too: the
+         * caller (cmd_mtattr) lets MT_ATTR_ERR_TYPE fall through to a write
+         * and parses <val> using this flag. An ARRAY attribute has no
+         * signedness at all; false selects the signed parse, and the write
+         * then fails on its own get_val() for the same reason. */
+        if (is_unsigned != NULL) {
+            *is_unsigned = false;
+        }
+        return MT_ATTR_ERR_TYPE;
+    }
+    if (gerr != ESP_OK) {
         return MT_ATTR_ERR_FAILED;
     }
     /* Set before the conversion, so the flag is valid even on
@@ -1270,7 +1319,23 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
     /* Read the current value to learn the attribute's type, then set the new
      * integer into the matching union field and push it. */
     esp_matter_attr_val_t val;
-    if (esp_matter::attribute::get_val(a, &val) != ESP_OK) {
+    esp_err_t gerr = esp_matter::attribute::get_val(a, &val);
+    /* B265, the write leg's half. Same single reachable ESP_ERR_NOT_SUPPORTED
+     * source as the read leg (get_val()'s ARRAY guard, enumerated in
+     * mt_matter_attr_read() above): this is the SAME call, so the same
+     * enumeration holds. Mapped for the same reason and so that AT_MT_SPEC
+     * 3.8's "String/array/float attributes are not supported over this
+     * command (+MTERR:5)" is true in BOTH directions: without this, reading
+     * an ARRAY attribute answered +MTERR:5 while writing the identical
+     * attribute answered a bare ERROR, and a host had no way to see that the
+     * two failures have one cause. Distinct from the set_val() mapping at the
+     * bottom of this function (+MTERR:11): that one fires for an attribute
+     * that IS integer-carrying and simply not ours to write, and it is
+     * unreachable for an ARRAY attribute, which never gets past this line. */
+    if (gerr == ESP_ERR_NOT_SUPPORTED) {
+        return MT_ATTR_ERR_TYPE;
+    }
+    if (gerr != ESP_OK) {
         return MT_ATTR_ERR_FAILED;
     }
     if (!i64_to_attr_val(&val, in)) {
