@@ -1607,7 +1607,15 @@ def step_3_2_grammar(ctx):
     MTALARM's SmokeState-Warning row is followed by an unscored clear so
     ep5 hands step_3_3 a clean ExpressedState, the same
     each-step-establishes-the-next-step's-preconditions discipline Phase
-    2 follows."""
+    2 follows.
+
+    The AT+MTROW family's three round-trip rows used to live here and are
+    now step_3_2b_row_round_trip, because they are the ONLY rows in this
+    step that need endpoint 28. Keeping them here declared max_ep 28 for
+    the whole step, so any capped run (the combined image, whose measured
+    WiFi-active cap is 20) lost all 44 checks to reach 3 of them. The
+    split costs no bench time and leaves this step's highest endpoint at
+    11, the TemperatureNumber-variant slot."""
     link, s = ctx.link, ctx.suite
 
     def c(name, fn):
@@ -1731,18 +1739,34 @@ def step_3_2_grammar(ctx):
     c("MTTEMPLEVELS comma inside a label -> OK",
       ok('AT+MTTEMPLEVELS=10,"Wine, red","Wine, white"'))
 
-    # AT+MTROW / AT+MTROWAPPLY / AT+MTROWGET (energy round C2, task 13):
-    # ep 28 is the EVSE, variant 0 (SOC feature). Every lookup-error and
-    # value-boundary row for this family lives in Phase 1
-    # (register_phase1_t12_negative), using ep 1/ep 99 as the "any
-    # endpoint"/"unknown endpoint" stand-ins, since AT+MTROW's own
-    # staging never checks ep against the composition (mt_rows.c's file
-    # comment: it is pure RAM). This is the one round trip Phase 1
-    # cannot stage: a real commit reaching a real EnergyEvse store, and a
-    # real readback of it. The full-schedule, merge-by-day and
-    # SOC-variant-rule proofs on this same endpoint are step_3_27_evse's
-    # job; the unscored clear below leaves the schedule EMPTY again
-    # before handing off, the MTALARM precedent above.
+
+def step_3_2b_row_round_trip(ctx):
+    """AT+MTROW / AT+MTROWAPPLY / AT+MTROWGET (energy round C2, task 13):
+    ep 28 is the EVSE, variant 0 (SOC feature). Every lookup-error and
+    value-boundary row for this family lives in Phase 1
+    (register_phase1_t12_negative), using ep 1/ep 99 as the "any
+    endpoint"/"unknown endpoint" stand-ins, since AT+MTROW's own staging
+    never checks ep against the composition (mt_rows.c's file comment: it
+    is pure RAM). This is the one round trip Phase 1 cannot stage: a real
+    commit reaching a real EnergyEvse store, and a real readback of it.
+    The full-schedule, merge-by-day and SOC-variant-rule proofs on this
+    same endpoint are step_3_27_evse's job; the unscored clear below
+    leaves the schedule EMPTY again before handing off, the MTALARM
+    precedent in step_3_2_grammar.
+
+    Split out of step_3_2_grammar for the 1.0.0 release gate: these three
+    rows are the only ones in that step that address endpoint 28, and
+    carrying them there forced max_ep 28 on all 44 of its checks, so a
+    capped run lost 41 checks that its own composition can serve. This
+    step is the part that genuinely cannot run below 28 endpoints."""
+    link, s = ctx.link, ctx.suite
+
+    def c(name, fn):
+        s.check("3.2b %s" % name, fn(link), tag="P3")
+
+    def ok(cmd, **kw):
+        return expect_ok(cmd, **kw)
+
     c("MTROW=28,1,0,2,480,80,25000000 -> OK (staging a real target; SOC "
       "feature present on variant 0, so SoC is supplied)",
       ok("AT+MTROW=28,1,0,2,480,80,25000000"))
@@ -4747,7 +4771,7 @@ def step_3_27_evse(ctx):
     Requires "3.5 commission" purely for the identity reads below
     (a real controller must exist to ask); every row after that is
     AT-only and would work identically on an uncommissioned device.
-    Deliberately NOT requiring anything from step_3_2_grammar's own
+    Deliberately NOT requiring anything from step_3_2b_row_round_trip's
     AT+MTROW round trip beyond it having left the schedule EMPTY (its
     own unscored clear, matching the MTALARM precedent), since this
     step's own first action is a fresh apply-count-0 in any case."""
@@ -5107,8 +5131,11 @@ def run_phase3(ctx):
 PHASE3_STEPS[:] = [
     {"name": "3.1 compose + boot-rebuild pin", "max_ep": 0,
      "fn": step_3_1_compose},
-    {"name": "3.2 endpoint-dependent grammar", "max_ep": 28,
+    {"name": "3.2 endpoint-dependent grammar", "max_ep": 11,
      "fn": step_3_2_grammar,
+     "requires": ["3.1 compose + boot-rebuild pin"]},
+    {"name": "3.2b AT+MTROW round trip", "max_ep": 28,
+     "fn": step_3_2b_row_round_trip,
      "requires": ["3.1 compose + boot-rebuild pin"]},
     {"name": "3.3 self-test wedge reproduction", "max_ep": 5,
      "fn": step_3_3_selftest_wedge,

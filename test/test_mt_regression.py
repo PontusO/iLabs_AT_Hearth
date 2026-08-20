@@ -4012,7 +4012,8 @@ class TestParseEnergyValues(unittest.TestCase):
 from mt_regression import (
     PHASE3_COMPOSITION, Phase3Context, stage_composition,
     restore_standard_state, step_3_1_compose, step_3_2_grammar,
-    step_3_3_selftest_wedge, step_3_4_stores, run_phase3, PHASE3_STEPS,
+    step_3_2b_row_round_trip, step_3_3_selftest_wedge, step_3_4_stores,
+    run_phase3, PHASE3_STEPS,
     step_3_5_commission, step_3_6_valve, step_3_7_modes, step_3_8_chime,
     step_3_9_opstate, step_3_10_smoke, step_3_11_power,
     step_3_12_lock_switch_levels, step_3_13_restore,
@@ -4465,6 +4466,14 @@ def phase3_grammar_commands():
         'AT+MTTEMPLEVELS=11,"Low"': (4, []),
         'AT+MTTEMPLEVELS=10,"Low","Medium","High"': (0, []),
         'AT+MTTEMPLEVELS=10,"Wine, red","Wine, white"': (0, []),
+    }
+
+
+def phase3_row_round_trip_commands():
+    """Every AT command step_3_2b_row_round_trip sends. Split out of
+    phase3_grammar_commands with the step itself: these four are the only
+    ones in the pair that address endpoint 28."""
+    return {
         "AT+MTROW=28,1,0,2,480,80,25000000": (0, []),
         "AT+MTROWAPPLY=28,1,1": (0, []),
         "AT+MTROWGET=28,1": (0, ["+MTROW:0,1,2,480,80,25000000"]),
@@ -4475,18 +4484,35 @@ def phase3_grammar_commands():
 class TestStep32Grammar(unittest.TestCase):
     """T5 task 4: 40 of Task 1's 41 deferred rows (the 41st needs a real
     forward, Task 5's job), plus the composed appliance round's
-    =<alarm ep>,0,0 migration row, plus energy round C2 (task 13)'s three
-    AT+MTROW-family round-trip rows against the real EVSE endpoint
-    (slot 28); see the step's own docstring."""
+    =<alarm ep>,0,0 migration row; see the step's own docstring. Energy
+    round C2's three AT+MTROW round-trip rows moved to step 3.2b at the
+    1.0.0 release gate, so this step no longer addresses endpoint 28 and
+    a capped run can serve all 41 of these."""
 
-    def test_forty_four_rows_all_pass(self):
+    def test_forty_one_rows_all_pass(self):
         link = FakeLink(phase3_grammar_commands())
         ctx = fresh_phase3_ctx(link)
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_2_grammar(ctx)
         self.assertEqual(ctx.suite.failed, 0,
                          msg=[n for n, ok, _ in ctx.suite.results if not ok])
-        self.assertEqual(len(ctx.suite.results), 44)
+        self.assertEqual(len(ctx.suite.results), 41)
+
+    def test_no_row_addresses_an_endpoint_above_eleven(self):
+        """The whole point of the split: this step's declared max_ep is
+        11, so a row reaching higher would make a capped run fail for a
+        reason unrelated to what it tests. Derived from the commands the
+        step actually sends, not from its source."""
+        link = FakeLink(phase3_grammar_commands())
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_2_grammar(ctx)
+        eps = {int(m.group(1))
+               for c in link.sent
+               for m in [re.search(r"^AT\+MT[A-Z]+=(\d+)", c)] if m}
+        real = {e for e in eps if e <= len(PHASE3_COMPOSITION)}
+        self.assertTrue(real)
+        self.assertLessEqual(max(real), 11, sorted(real))
 
     def test_a_wrong_code_fails_only_that_row(self):
         cmds = phase3_grammar_commands()
@@ -4495,6 +4521,40 @@ class TestStep32Grammar(unittest.TestCase):
         ctx = fresh_phase3_ctx(link)
         with contextlib.redirect_stdout(io.StringIO()):
             step_3_2_grammar(ctx)
+        self.assertEqual(ctx.suite.failed, 1)
+
+
+class TestStep32bRowRoundTrip(unittest.TestCase):
+    """Energy round C2 (task 13)'s three AT+MTROW-family round-trip rows
+    against the real EVSE endpoint (slot 28), split out of step 3.2 at
+    the 1.0.0 release gate so a capped run loses three checks instead of
+    forty-four."""
+
+    def test_three_rows_all_pass(self):
+        link = FakeLink(phase3_row_round_trip_commands())
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_2b_row_round_trip(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertEqual(len(ctx.suite.results), 3)
+        self.assertTrue(all(n.startswith("3.2b ")
+                            for n, _, _ in ctx.suite.results))
+
+    def test_the_schedule_is_cleared_before_3_27(self):
+        link = FakeLink(phase3_row_round_trip_commands())
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_2b_row_round_trip(ctx)
+        self.assertEqual(link.sent[-1], "AT+MTROWAPPLY=28,1,0")
+
+    def test_a_wrong_readback_fails_that_row(self):
+        cmds = phase3_row_round_trip_commands()
+        cmds["AT+MTROWGET=28,1"] = (0, ["+MTROW:0,1,2,480,80,9999"])
+        link = FakeLink(cmds)
+        ctx = fresh_phase3_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_2b_row_round_trip(ctx)
         self.assertEqual(ctx.suite.failed, 1)
 
 
@@ -4670,6 +4730,7 @@ class TestRunPhase3(unittest.TestCase):
         self.assertEqual(names, [
             "3.1 compose + boot-rebuild pin",
             "3.2 endpoint-dependent grammar",
+            "3.2b AT+MTROW round trip",
             "3.3 self-test wedge reproduction",
             "3.4 store grammar edges",
             "3.5 commission",
