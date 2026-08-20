@@ -8275,6 +8275,12 @@ class TestPhase3EndpointCap(unittest.TestCase):
         r'node[0-9a-z_]*,\s*"(\d+)"',
         r'\+MTEP:\d+,(\d+),',
         r'endpoint=(\d+)',
+        # Fix round 1, finding F5: step_3_27_evse binds `ep = 28` once and
+        # then formats it into every command with %d, so it matched none
+        # of the four patterns above and the "no endpoints found" escape
+        # swallowed it in silence. The step at the TOP of the table was
+        # the one the derivation could not see.
+        r'\bep\s*=\s*(\d+)',
     )
 
     def test_every_phase3_step_declares_max_ep(self):
@@ -8308,7 +8314,20 @@ class TestPhase3EndpointCap(unittest.TestCase):
                     ep = int(m.group(1))
                     if 0 < ep <= limit:
                         found.add(ep)
+            # Never `continue` silently: a step declaring a real
+            # endpoint whose source yields no evidence means the
+            # derivation cannot see that step, so the guarantee this
+            # test advertises does not hold for it (F5's actual defect
+            # class, not just its instance). Steps genuinely tied to no
+            # endpoint declare max_ep 0 and are the only legal empties.
             if not found:
+                self.assertEqual(
+                    step["max_ep"], 0,
+                    "%s declares max_ep %d but this test can find no "
+                    "endpoint in its source: the derivation is vacuous "
+                    "for it, so add a pattern rather than trusting the "
+                    "declared number"
+                    % (step["name"], step["max_ep"]))
                 continue
             self.assertGreaterEqual(
                 step["max_ep"], max(found),
@@ -8390,6 +8409,43 @@ class TestPhase3EndpointCap(unittest.TestCase):
             rc = main(["--port", "/dev/definitely-not-a-real-port-xyz",
                       "--phase", "3", "--max-endpoints", "20"])
         self.assertEqual(rc, 2)  # reaches the port-open failure
+
+    def _refuses(self, argv):
+        """argparse's error() raises SystemExit(2) before the port is
+        opened, the same way the --baseline/--phase 2 gate above it
+        does."""
+        with contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit):
+                main(argv)
+        return err.getvalue()
+
+    def test_out_of_range_caps_are_refused(self):
+        """Fix round 1, finding F4: 0, negatives and anything above the
+        table's length were all accepted and all exited 0, so a typo
+        measured something other than what it claimed. A negative is the
+        nastiest of the three, because Python slicing turns
+        PHASE3_COMPOSITION[:-1] into a 27-endpoint run that looks
+        deliberate."""
+        for bad in ("0", "-1", "29", "100"):
+            msg = self._refuses(["--port", "/dev/nope", "--phase", "3",
+                                 "--max-endpoints", bad])
+            self.assertIn("--max-endpoints must be between 1 and %d"
+                          % len(PHASE3_COMPOSITION), msg)
+
+    def test_the_whole_table_is_still_in_range(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--port", "/dev/definitely-not-a-real-port-xyz",
+                      "--phase", "3",
+                      "--max-endpoints", str(len(PHASE3_COMPOSITION))])
+        self.assertEqual(rc, 2)  # reaches the port-open failure
+
+    def test_max_endpoints_outside_phase_three_is_refused(self):
+        """Silently ignoring it on --phase 1 would be the same class of
+        trap: the operator believes a cap applied and it did not."""
+        msg = self._refuses(["--port", "/dev/nope", "--phase", "1",
+                             "--max-endpoints", "20"])
+        self.assertIn("--phase 3 only", msg)
 
 
 if __name__ == "__main__":

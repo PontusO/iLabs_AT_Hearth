@@ -8074,6 +8074,21 @@ def main(argv=None):
         ap.error("--baseline with --phase 2 requires --include-slow and "
                  "--include-manual: a committed baseline must not contain "
                  "gated-out entries")
+    # Same shape as the gate above, and for the same reason: a request that
+    # cannot mean anything must be refused at the door rather than exiting
+    # 0 having measured something else. --max-endpoints 0 would declare an
+    # empty composition, a negative would silently truncate from the far
+    # end (Python slicing), and anything above the table's length would
+    # claim a cap the run never applied.
+    if args.max_endpoints is not None:
+        if args.phase != 3:
+            ap.error("--max-endpoints applies to --phase 3 only: it "
+                     "truncates PHASE3_COMPOSITION, and no other phase "
+                     "declares one")
+        if not 1 <= args.max_endpoints <= len(PHASE3_COMPOSITION):
+            ap.error("--max-endpoints must be between 1 and %d (the length "
+                     "of PHASE3_COMPOSITION); got %d"
+                     % (len(PHASE3_COMPOSITION), args.max_endpoints))
     # After the baseline gate on purpose: the self-test for that gate calls
     # main() without a port, and it must keep exiting for its own reason.
     if not args.port:
