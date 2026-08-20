@@ -173,6 +173,64 @@ provider has no call site anywhere upstream, so the firmware calls it
 manually. See `AT_MT_SPEC.md` sections 3.19-3.24 and `ARCHITECTURE.md`
 section 8.6 for the full detail.
 
+## Endpoint capacity
+
+`MT_COMP_MAX_ENDPOINTS` is 28, and the WiFi-only and Thread-only images
+serve all 28: measured free heap at startup on the harness's 28-endpoint
+Phase 3 composition is 47,052 bytes on `build_wifi` and 117,040 on
+`build_thread`, against 87,908 and 157,628 on a single light (firmware
+0.12.0).
+
+**The combined image is the constrained one, and only when WiFi is the
+active transport.** It links both stacks, and the dormant one is a fixed
+tax of about 32 KB, so it starts about 39.5 KB below `build_wifi`. Measured
+on hardware 2026-08-20 with `test/mt_endpoint_cap.py`, WiFi-active:
+
+| endpoints | free heap at startup | verdict |
+|---|---|---|
+| 1 | 48,360 | pass, full Phase 2 twice |
+| 14 | 31,240 | pass |
+| **20** | **24,204** | **pass, three full Phase 3 runs** |
+| 21 | 23,076 | pass |
+| 23 | 19,228 | pass |
+| 24 | 17,392 | pass twice |
+| 25 | 15,564 | **fail once, pass once, identical boot heap** |
+| 28 | 7,608 | fail twice |
+
+Thread-active, the same image serves the full 28 with 40,052 bytes free and
+passes the whole operational criterion, so headroom is flat to within 160
+bytes across a 27-endpoint span. **The cap is a WiFi-active property, not a
+property of the image**, and stating it without that qualifier costs a
+Thread user eight endpoints they actually have.
+
+Composition acceptance is not the criterion: an over-large composition is
+accepted, `AT+MTEPAPPLY` answers `OK`, the device often commissions, and it
+then dies under controller traffic with lwIP `ERR_MEM` (CHIP error
+`0x3000001`) on `SendMessage`, retransmission exhaustion and a CASE
+timeout. Only real operational traffic sees it, which is what
+`test/mt_endpoint_cap.py` drives.
+
+The normative rule, because 25 failed and passed at the same boot heap and
+because endpoints are not interchangeable:
+
+1. **Keep `free heap at startup` at or above 24,000 bytes.** The firmware
+   logs it on the console every boot (`mt_main: free heap at startup: N
+   (BLE resident)`), so it is checkable on any composition without a bench.
+2. Per-endpoint cost, derived from the table: about **1,166 bytes** for a
+   simple type and about **2,210** for an energy type (electrical sensor
+   and meter, water heater, heat pump, solar, battery, DEM, EVSE).
+3. As a proxy at typical mixes, WiFi-active on the combined image: about
+   **20** endpoints, or about **12** if the composition is energy-heavy.
+   One light plus nineteen energy endpoints predicts 6,370 bytes free,
+   below the 7,608 that failed twice, so a bare endpoint count is not a
+   safe contract on its own.
+
+Heap moves with the SDK, with cluster gates and with any
+`sdkconfig.defaults*` edit, so re-measure with the rig rather than
+re-deriving. The user-facing version of this, aimed at somebody choosing a
+variant rather than changing the firmware, is in the `iLabs_Hearth` Arduino
+library's `fw/README.md`.
+
 ## Documentation
 
 The specifications, architecture decision record, testing plan and design

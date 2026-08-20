@@ -13,8 +13,11 @@ operational traffic sees this, which is why the criterion below is not
 "did AT+MTEPAPPLY answer OK".
 
 The cap that came out of this on 2026-08-20 (firmware 0.12.0, WiFi-active)
-is in `.superpowers/sdd/2026-08-19-hearth-1-0-0/task-5-report.md`, and the
-committed evidence of it is `test/baselines/combined-devicetypes.json`,
+is in this repository's `README.md`, under "Endpoint capacity": the whole
+measured curve, the heap floor that is the real rule, and the per-type
+costs. Its user-facing half lives in the `iLabs_Hearth` Arduino library's
+`fw/README.md`. The committed evidence is
+`test/baselines/combined-devicetypes.json`,
 whose header carries the `max_endpoints` the Phase 3 baseline was recorded
 at. Re-run this after an SDK bump, a cluster-gate change or a
 `sdkconfig.defaults*` edit: all three move heap, and the cap is a heap
