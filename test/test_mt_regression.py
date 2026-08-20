@@ -3237,6 +3237,186 @@ class TestStep213ThreadRebootReattach(unittest.TestCase):
                         names.index("2.12 rig restore"))
 
 
+from mt_regression import step_2_14_transport_switch
+
+
+class TestStep214TransportSwitch(unittest.TestCase):
+    """Task 4 (Hearth 1.0.0): AT+MTTRANSPORT exists only on build_combined
+    and had never run in any harness pass, since neither single-transport
+    image can answer it. This row exercises decision P2 (AT_MT_SPEC.md
+    3.12.1) without a reflash: stage a switch, apply it with a non-factory
+    reboot, and confirm the mismatch is reported rather than the device
+    silently claiming to be fine.
+
+    The task-4 report's key finding: AT+MTRESET is the wrong reboot here,
+    for the identical reason review finding F1 already ruled it out for
+    step 2.13 (TestStep213's own docstring) -- it factory-resets and
+    erases the fabric the mismatch condition needs. This class pins that
+    with the same style TestStep213's test_fabric_did_not_survive_fails
+    uses: a fabric that did not survive the reboot must abort the row
+    loudly, not let it silently degrade into a bring-up test."""
+
+    def _commands(self, mismatch="1", after_restore_mismatch="0",
+                 fabrics="+MTFABRICS:1"):
+        return {
+            "AT+MTTRANSPORT?": [
+                (0, ["+MTTRANSPORT:WIFI,WIFI"]),    # precondition read
+                (0, ["+MTTRANSPORT:WIFI,THREAD"]),  # stored-changed read
+                (0, ["+MTTRANSPORT:THREAD,THREAD"]),  # post-switch read
+            ],
+            "AT+MTTRANSPORT=THREAD": (0, []),
+            "AT+MTTRANSPORT=WIFI": (0, []),
+            "AT+MTFABRICS?": (0, [fabrics]),
+            "AT+MTNET?": [
+                (0, ["+MTNET:THREAD,1,0,%s" % mismatch]),
+                (0, ["+MTNET:WIFI,1,1,%s" % after_restore_mismatch]),
+            ],
+        }
+
+    def _ctx(self, link, swd_ok=True, urcs_per_call=None):
+        """A Phase2Context whose ctx.relink runs the real swd_reset()
+        against a fake process runner (TestStep213's own pattern), and
+        releases a scripted URC batch per call: [switch-forward,
+        restore] by default, +MTEVT:27 only on the first."""
+        ctx = fresh_ctx(link)
+        ctx.transport = "WIFI"
+        ctx.image = "combined"
+        calls = []
+        urcs_per_call = (urcs_per_call if urcs_per_call is not None
+                        else [["+MTREADY", "+MTEVT:27"], ["+MTREADY"]])
+
+        def relink(action):
+            ok, detail = action()
+            calls.append((ok, detail))
+            if ok and len(calls) <= len(urcs_per_call):
+                link.push_urcs(urcs_per_call[len(calls) - 1])
+            return ok, detail
+
+        ctx.relink = relink
+        ctx.swd_runner = lambda argv, **kw: types.SimpleNamespace(
+            returncode=0 if swd_ok else 1, stdout="", stderr="bad")
+        return ctx, calls
+
+    def test_single_transport_image_reports_not_applicable(self):
+        link = FakeLink(self._commands())
+        ctx = fresh_ctx(link)
+        ctx.image = "wifi"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_14_transport_switch(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual(ctx.suite.results, [])
+        self.assertEqual(ctx.suite.skipped, [])
+        self.assertTrue(any(n.startswith("2.14") for n, _ in ctx.suite.na))
+        # A not-applicable report must not touch the wire at all.
+        self.assertEqual(link.sent, [])
+
+    def test_happy_path_switches_observes_and_restores(self):
+        link = FakeLink(self._commands())
+        ctx, calls = self._ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_14_transport_switch(ctx)
+        self.assertEqual(ctx.suite.failed, 0,
+                         msg=[n for n, ok, _ in ctx.suite.results if not ok])
+        self.assertEqual(len(calls), 2, "one relink to switch, one to "
+                         "restore")
+        self.assertTrue(calls[0][0] and calls[1][0])
+        self.assertIn("AT+MTTRANSPORT=THREAD", link.sent)
+        self.assertIn("AT+MTTRANSPORT=WIFI", link.sent)
+        # F1's headline guard, restated for this row: the reboot must
+        # never be AT+MTRESET, which would erase the fabric the mismatch
+        # condition needs.
+        self.assertNotIn("AT+MTRESET", link.sent)
+
+    def test_reboot_mechanism_is_never_mtreset(self):
+        link = FakeLink(self._commands())
+        ctx, _ = self._ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_14_transport_switch(ctx)
+        self.assertNotIn("AT+MTRESET", link.sent)
+
+    def test_fabric_did_not_survive_switch_aborts(self):
+        # If the reboot mechanism were ever swapped back to something
+        # that factory-resets (AT+MTRESET among them), AT+MTFABRICS?
+        # reading 0 must fail this row loudly, the same guard TestStep213
+        # pins for 2.13.
+        link = FakeLink(self._commands(fabrics="+MTFABRICS:0"))
+        ctx, _ = self._ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_14_transport_switch(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn(
+            "2.14 fabric survived the switch (self-validating guard, F1)",
+            failed)
+
+    def test_missing_mismatch_event_fails(self):
+        link = FakeLink(self._commands())
+        ctx, _ = self._ctx(link, urcs_per_call=[["+MTREADY"], ["+MTREADY"]])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_14_transport_switch(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.14 +MTEVT:27 raised on the mismatched boot",
+                      failed)
+
+    def test_mismatch_flag_not_reported_fails(self):
+        link = FakeLink(self._commands(mismatch="0"))
+        ctx, _ = self._ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_14_transport_switch(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.14 AT+MTNET? reports the mismatch", failed)
+
+    def test_mismatch_not_cleared_after_restore_fails(self):
+        link = FakeLink(self._commands(after_restore_mismatch="1"))
+        ctx, _ = self._ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_14_transport_switch(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertIn("2.14 restore: mismatch cleared", failed)
+
+    def test_swd_reset_failure_aborts(self):
+        link = FakeLink(self._commands())
+        ctx, calls = self._ctx(link, swd_ok=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_14_transport_switch(ctx)
+        failed = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertEqual(failed, ["2.14 SWD reset, port back"])
+        self.assertFalse(calls[0][0])
+
+    def test_precondition_mismatch_aborts(self):
+        # active != stored, or either != ctx.transport: the row must not
+        # proceed from a device that is not in the expected pre-switch
+        # state.
+        link = FakeLink(self._commands())
+        link.commands["AT+MTTRANSPORT?"] = [(0, ["+MTTRANSPORT:THREAD,WIFI"])]
+        ctx, _ = self._ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_2_14_transport_switch(ctx)
+
+    def test_row_between_thread_reattach_and_two_resets(self):
+        # Placement is load-bearing (task-4 report): the row needs a live
+        # commissioned fabric to mismatch, so it must run before 2.11
+        # strips the fabric to zero, and it restores the active
+        # transport before returning so 2.11's re-commissioning
+        # (pairing_argv keys off ctx.transport) still targets the
+        # transport the bench is wired for.
+        names = [step["name"] for step in PHASE2_STEPS]
+        self.assertIn("2.14 transport switch", names)
+        self.assertLess(
+            names.index("2.13 Thread reattach survives a non-factory "
+                        "reboot"),
+            names.index("2.14 transport switch"))
+        self.assertLess(names.index("2.14 transport switch"),
+                        names.index("2.11 two resets"))
+
+    def test_requires_commissioning(self):
+        step = next(s for s in PHASE2_STEPS
+                   if s["name"] == "2.14 transport switch")
+        self.assertIn("2.3 commission ble-wifi", step.get("requires", ()))
+
+
 from mt_regression import step_2_6_root_urc_sweep
 
 
@@ -7970,6 +8150,82 @@ class TestMtThreadQueryShape(unittest.TestCase):
                             for n in phase1))
         self.assertTrue(any(n.startswith("MTTHREAD? shape by image")
                             for n in phase1))
+
+
+from mt_regression import t_mttransport
+
+
+class TestMtTransport(unittest.TestCase):
+    """Task 4 (Hearth 1.0.0): t_mttransport, the Phase 1 row for
+    AT+MTTRANSPORT (AT_MT_SPEC.md 3.12.2), which no harness run had ever
+    reached because it exists only on build_combined. Mirrors
+    TestMtThreadQueryShape's shape: a combined-image happy path, a
+    single-transport happy path proving EVERY form is absent (not just
+    the query, per 3.12.2's "no combined-image-only stub" text), and
+    enough failure shapes to prove the row checks the actual response.
+
+    The task-4 report's own finding, pinned here as
+    test_empty_value_wrong_code_fails: the empty-value form answers
+    +MTERR:1, not a bare ERROR, matching AT+MTEVT= and AT+MTSWITCH=
+    (register_phase1_negative) rather than the plan's paraphrase of the
+    spec, which had this one wrong."""
+
+    def test_combined_happy_path(self):
+        link = FakeLink({
+            "AT+MTTRANSPORT?": (0, ["+MTTRANSPORT:WIFI,WIFI"]),
+            "AT+MTTRANSPORT=BLUETOOTH": (1, []),
+            "AT+MTTRANSPORT=": (1, []),
+        })
+        self.assertTrue(t_mttransport(link))
+
+    def test_single_transport_happy_path(self):
+        link = FakeLink({
+            "AT+MTTRANSPORT?": (8, []),
+            "AT+MTTRANSPORT=WIFI": (8, []),
+            "AT+MTTRANSPORT=": (8, []),
+        })
+        self.assertTrue(t_mttransport(link))
+
+    def test_single_transport_set_form_leak_fails(self):
+        # AT_MT_SPEC.md 3.12.2: "there is no combined-image-only stub
+        # that always reports one fixed transport". A set form that
+        # answers anything but +MTERR:8 on a single-transport image is
+        # exactly that stub, and must fail this row even though the
+        # query alone still looks correct.
+        link = FakeLink({
+            "AT+MTTRANSPORT?": (8, []),
+            "AT+MTTRANSPORT=WIFI": (0, []),
+            "AT+MTTRANSPORT=": (8, []),
+        })
+        self.assertFalse(t_mttransport(link))
+
+    def test_query_wrong_code_fails(self):
+        link = FakeLink({"AT+MTTRANSPORT?": (-1, [])})
+        self.assertFalse(t_mttransport(link))
+
+    def test_query_malformed_line_fails(self):
+        link = FakeLink({"AT+MTTRANSPORT?":
+                         (0, ["+MTTRANSPORT:BLUETOOTH,WIFI"])})
+        self.assertFalse(t_mttransport(link))
+
+    def test_bad_value_wrongly_accepted_fails(self):
+        link = FakeLink({
+            "AT+MTTRANSPORT?": (0, ["+MTTRANSPORT:WIFI,WIFI"]),
+            "AT+MTTRANSPORT=BLUETOOTH": (0, []),  # wrongly accepted
+        })
+        self.assertFalse(t_mttransport(link))
+
+    def test_empty_value_wrong_code_fails(self):
+        link = FakeLink({
+            "AT+MTTRANSPORT?": (0, ["+MTTRANSPORT:WIFI,WIFI"]),
+            "AT+MTTRANSPORT=BLUETOOTH": (1, []),
+            "AT+MTTRANSPORT=": (-1, []),  # the plan's paraphrase, wrong
+        })
+        self.assertFalse(t_mttransport(link))
+
+    def test_row_registered(self):
+        phase1 = [n for p, n, _, _, _ in TESTS if p == 1]
+        self.assertTrue(any(n.startswith("MTTRANSPORT") for n in phase1))
 
 
 class TestMainPhase3Wiring(unittest.TestCase):

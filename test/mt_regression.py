@@ -463,6 +463,10 @@ class Phase2Context:
         self.power_cycler = None  # test seam for operator_power_cycle
         self.composition = None   # +MTEP: lines captured by run_phase2
         self.transport = "WIFI"   # set from phase2_gate's detection
+        self.image = None         # "combined"/"wifi"/"thread"; set by
+                                   # main() from AT+MTTRANSPORT? itself,
+                                   # since a device that answers it IS the
+                                   # combined image (task 4 report)
         self.dataset = None       # Thread active dataset hex, if any
         self.sleeper = None       # test seam; None means time.sleep. Only
                                    # 2.7's window settle uses it, so the
@@ -1335,6 +1339,121 @@ def step_2_13_thread_reboot_reattach(ctx):
         time.sleep(1.0)
     s.check("2.13 AT+MTTHREAD? reports an attached role after reattach",
             attached_ok, tag="P2")
+
+
+def step_2_14_transport_switch(ctx):
+    """P2 (AT_MT_SPEC.md 3.12.1, 3.12.2), task 4: the combined image can
+    reach the reflash-induced mismatch state 3.12.1 verified against a
+    real reflash between the WiFi and Thread images, without a reflash
+    at all. AT+MTTRANSPORT= followed by a reboot changes the active
+    stack exactly as a reflash would, and the mismatch detection,
+    +MTEVT:27 and AT+MTNET?'s <mismatch> flag behave the same either
+    way: both routes end at the identical condition, a fabric CHIP has
+    not provisioned on the transport that is now active.
+
+    The reboot that applies the switch is deliberately NOT AT+MTRESET,
+    the same review finding F1 already settled for step 2.13, and for
+    the identical reason: AT+MTRESET calls esp_matter::factory_reset(),
+    which erases the fabric as part of the command itself, before the
+    device even reboots (step 2.11's own "fabrics 0 after MTRESET"
+    check, made straight after +MTREADY, is the proof this happens
+    synchronously). Erasing the fabric here would erase the one thing
+    the mismatch condition needs (fabric_count > 0 && the active
+    transport unprovisioned), so +MTEVT:27 would never fire and this
+    row would test nothing while still reporting PASS on every other
+    line -- the exact "check whose input can never arrive" shape B267
+    already cost this harness once. The reboot instead uses
+    ctx.relink(lambda: swd_reset(ctx.swd_runner)), the identical
+    non-factory mechanism steps 2.8 and 2.13 use.
+
+    Placement: runs before 2.11, not after, for the same reason 2.13
+    does (its own docstring, and TESTING.md's "Runs before 2.11, not
+    after"): 2.11 factory-resets the device by its end (fabrics -> 0),
+    and this row needs a live commissioned fabric to mismatch in the
+    first place. It also restores the active transport back to
+    ctx.transport before returning: pairing_argv() and every controller
+    call after this point key off ctx.transport, which is fixed for the
+    whole run and is the transport the bench (WiFi AP or Thread border
+    router) is actually wired for, so leaving the switch applied would
+    strand 2.11's re-commissioning, not just this row.
+
+    Combined image only: build_wifi and build_thread never register
+    AT+MTTRANSPORT (spec 3.12.2), so this reports itself not_applicable
+    rather than skip (the same three-bucket rule step 2.13 follows), or
+    a clean single-transport Phase 2 run would exit nonzero with zero
+    failures."""
+    link, s = ctx.link, ctx.suite
+    name = "2.14 transport switch"
+    if ctx.image != "combined":
+        s.not_applicable(name, "single-transport image: AT+MTTRANSPORT "
+                         "does not exist")
+        return
+
+    res, lines = cmd_retry(link, "AT+MTTRANSPORT?")
+    if not s.check("2.14 precondition: AT+MTTRANSPORT? answers OK",
+                   res == 0 and bool(lines), tag="P2"):
+        raise StepAbort("AT+MTTRANSPORT? failed on the combined image")
+    active, stored = lines[0].split(":", 1)[1].split(",")
+    if not s.check("2.14 precondition: active and stored agree with "
+                   "ctx.transport", active == stored == ctx.transport,
+                   tag="P2"):
+        raise StepAbort("device not in the expected pre-switch state")
+    other = "THREAD" if active == "WIFI" else "WIFI"
+
+    s.check("2.14 AT+MTTRANSPORT=%s -> OK" % other,
+            link.command("AT+MTTRANSPORT=%s" % other)[0] == 0, tag="P2")
+    res, lines = link.command("AT+MTTRANSPORT?")
+    s.check("2.14 stored transport changed to %s" % other,
+            res == 0 and lines
+            and lines[0].split(":", 1)[1].split(",")[1] == other, tag="P2")
+    link.drain(0.3)
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    if not s.check("2.14 SWD reset, port back", ok, tag="P2"):
+        raise StepAbort("bridge did not come back after the switch: %s"
+                        % detail)
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    if not s.check("2.14 +MTREADY on the mismatched boot",
+                   ready is not None, tag="P2"):
+        raise StepAbort("device did not come back after the switch")
+
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    if not s.check("2.14 fabric survived the switch (self-validating "
+                   "guard, F1)", res == 0 and lines == ["+MTFABRICS:1"],
+                   tag="P2"):
+        raise StepAbort("no fabric to mismatch: the reboot erased it")
+    res, lines = cmd_retry(link, "AT+MTTRANSPORT?")
+    s.check("2.14 active transport is now %s" % other,
+            res == 0 and lines
+            and lines[0].split(":", 1)[1].split(",")[0] == other, tag="P2")
+    s.check("2.14 +MTEVT:27 raised on the mismatched boot",
+            link.await_urc(r"\+MTEVT:27$", timeout=20.0) is not None,
+            tag="P2")
+    res, lines = cmd_retry(link, "AT+MTNET?")
+    s.check("2.14 AT+MTNET? reports the mismatch",
+            res == 0 and lines and lines[0].split(",")[-1] == "1",
+            tag="P2")
+
+    # Restore before returning: 2.11's re-commissioning (pairing_argv
+    # keys off ctx.transport) and every step after this one need the
+    # device back on the transport the bench is actually wired for.
+    s.check("2.14 restore: AT+MTTRANSPORT=%s -> OK" % ctx.transport,
+            link.command("AT+MTTRANSPORT=%s" % ctx.transport)[0] == 0,
+            tag="P2")
+    link.drain(0.3)
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    if not s.check("2.14 restore: SWD reset, port back", ok, tag="P2"):
+        raise StepAbort("bridge did not come back after the restore: %s"
+                        % detail)
+    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+    if not s.check("2.14 restore: +MTREADY", ready is not None, tag="P2"):
+        raise StepAbort("device did not come back after the restore")
+    res, lines = cmd_retry(link, "AT+MTFABRICS?")
+    s.check("2.14 restore: fabric still present",
+            res == 0 and lines == ["+MTFABRICS:1"], tag="P2")
+    res, lines = cmd_retry(link, "AT+MTNET?")
+    s.check("2.14 restore: mismatch cleared",
+            res == 0 and lines and lines[0].split(",")[-1] == "0",
+            tag="P2")
 
 
 def step_2_6_root_urc_sweep(ctx):
@@ -5741,6 +5860,47 @@ def t_evt_mask_set_read_restore(link):
     return ok and res == 0 and lines == ["+MTEVTMASK:0x0800003F"]
 
 
+def t_mttransport(link):
+    """AT+MTTRANSPORT (AT_MT_SPEC.md 3.12.2) exists only on the combined
+    image (build_combined): build_wifi and build_thread never register
+    it, so every form of the command, query or set, well-formed or not,
+    reaches the ordinary unknown-command path and answers +MTERR:8, the
+    same code register_phase1_negative's MTBOGUS row gets. The spec is
+    explicit that there is no combined-image-only stub that reports one
+    fixed transport, so absence is checked for the set forms too, not
+    just the query.
+
+    Same design decision t_mtthread_query_shape carries (task-3 report,
+    round 0.11.0, this file further down): Phase 1 has one TESTS list
+    for every image, add_test's contract is fn(link) with no context
+    object, so a row whose correct answer differs by image detects its
+    own image from the command itself. Querying AT+MTTRANSPORT? to find
+    out whether AT+MTTRANSPORT exists at all is well-defined, not
+    circular: the single-transport answer, +MTERR:8, is what "it does
+    not exist" IS.
+
+    The two set-form negatives expect +MTERR:1 for an out-of-range or an
+    empty value, never a bare ERROR: AT+MTEVT= and AT+MTSWITCH= (both
+    plain scalar setters, register_phase1_negative below) are already
+    pinned to +MTERR:1 on an empty argument, and 3.12.2 reads "validates
+    the argument (+MTERR:1 for anything else)" with no carve-out for an
+    empty one."""
+    res, lines = link.command("AT+MTTRANSPORT?")
+    if res == 8:
+        # Single-transport image: the command does not exist in any
+        # form, not just the query.
+        return (link.command("AT+MTTRANSPORT=WIFI")[0] == 8
+                and link.command("AT+MTTRANSPORT=")[0] == 8)
+    if res != 0 or not lines:
+        return False
+    if not re.fullmatch(r"\+MTTRANSPORT:(WIFI|THREAD),(WIFI|THREAD)",
+                        lines[0]):
+        return False
+    if link.command("AT+MTTRANSPORT=BLUETOOTH")[0] != 1:
+        return False
+    return link.command("AT+MTTRANSPORT=")[0] == 1
+
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -6081,6 +6241,8 @@ def register_phase1_positive():
     p("MTEVT mask set/readback/restore", t_evt_mask_set_read_restore)
     p("MTNET? format", expect_ok(
         "AT+MTNET?", line_re=r"\+MTNET:(WIFI|THREAD),[01],[01],[01]"))
+    p("MTTRANSPORT: query and set, combined image only (3.12.2)",
+      t_mttransport)
     p("MTBAUD? -> 115200", expect_ok("AT+MTBAUD?",
                                      line_re=r"\+MTBAUD:115200"))
     p("MTFLOW? -> 0", expect_ok("AT+MTFLOW?", line_re=r"\+MTFLOW:0"))
@@ -7802,6 +7964,8 @@ PHASE2_STEPS[:] = [
     {"name": "2.13 Thread reattach survives a non-factory reboot",
      "fn": step_2_13_thread_reboot_reattach,
      "requires": ["2.3 commission ble-wifi"]},
+    {"name": "2.14 transport switch", "fn": step_2_14_transport_switch,
+     "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.11 two resets", "fn": step_2_11_two_resets,
      "requires": ["2.3 commission ble-wifi"]},
     {"name": "2.12 rig restore", "fn": step_2_12_rig_restore,
@@ -7923,6 +8087,12 @@ def main(argv=None):
             chip.wipe_storage()
             ctx = Phase2Context(link, chip, suite, args)
             ctx.transport = transport
+            # A device that answers AT+MTTRANSPORT? at all IS the combined
+            # image (spec 3.12.2: build_wifi/build_thread never register
+            # it, so it reaches the unknown-command path and answers
+            # +MTERR:8 there, never OK).
+            res, _ = link.command("AT+MTTRANSPORT?")
+            ctx.image = "combined" if res == 0 else transport.lower()
             ctx.dataset = dataset
             ctx.relink = make_relink(link, args.port)
             ctx.chip2 = ChipTool(args.chip_tool, args.storage + "-f2")
