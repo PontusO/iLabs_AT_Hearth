@@ -1,15 +1,15 @@
 {
   "header": {
     "at_core_repo_head": "11c9935ea392b62c0a9c84c5197483aa1fee41ef",
-    "cgmr": "0.12.0",
-    "fw_repo_head": "27cfab73243fcf306deb79eb31fe4dec87a10e49",
+    "cgmr": "1.0.0",
+    "fw_repo_head": "df9d16815b9c9f610b805e68ad772e83fe59484c",
     "manual_code": "34970112332",
     "net": "+MTNET:THREAD,1,0,0",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-08-19T13:08:55+00:00",
+    "timestamp": "2026-08-20T15:39:27+00:00",
     "transport": "THREAD"
   },
   "results": {
@@ -43,6 +43,7 @@
     "2.13 AT+MTTHREAD? reports an attached role after reattach": "PASS",
     "2.13 SWD reset, port back": "PASS",
     "2.13 fabric survived the reboot (self-validating guard, F1)": "PASS",
+    "2.14 transport switch": "N/A",
     "2.2 codes unchanged by reset": "PASS",
     "2.3 +MTEVT:1 session started": "PASS",
     "2.3 +MTEVT:3 commissioning complete": "PASS",
