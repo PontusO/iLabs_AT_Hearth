@@ -12,20 +12,35 @@ for why).
 
 ## Status
 
-**Working, hardware-verified, not yet certified or released.** The Matter stack
-runs, the device commissions and is controllable from a Matter controller, and
-the host drives the whole lifecycle over `AT+MT`: commissioning, fabric
-accounting, attribute read/write in both directions, a host-declared endpoint
-composition persisted across power cuts, and a subscribable platform event
-stream.
+**Released at 1.0.0, feature complete, hardware-verified, not certified.** The
+Matter stack runs, the device commissions and is controllable from a Matter
+controller, and the host drives the whole lifecycle over `AT+MT`:
+commissioning, fabric accounting, attribute read/write in both directions, a
+host-declared endpoint composition persisted across power cuts, and a
+subscribable platform event stream.
 
-Phases A and B are complete. Phase C, the protocol work needed to support an
-arduino-esp32-parity host library, has landed an unmodified upstream
-`MatterOnOffLight` sketch commissioned end to end (task C4) and is now
-through the seven-type device batch (tasks C1-C6) that brings the firmware's
-device-type table to 38 rows. See `CLAUDE.md` for current state and open
-questions, and `hearth-integration-plan.md` in the docs repository for the
-original roadmap.
+What 1.0.0 does **not** mean, stated here as plainly as in the tag message:
+it is not a stability contract (the `AT+MT` wire surface is not frozen, and a
+host may not infer that a breaking change requires a 2.0), it is not a
+product claim (the firmware is uncertified and uses development credentials,
+VID `0xFFF1`, so consumer hubs are expected to refuse it), and it is not a
+field-update story (the host-driven serial update stays a draft).
+
+Phases A and B are complete. Phase C, the protocol work behind the
+arduino-esp32-parity host library, landed an unmodified upstream
+`MatterOnOffLight` sketch commissioned end to end at task C4 and has since
+gone well past parity: the device-type table is at **52 rows**, including the
+composed appliances (refrigerator, oven, cooktop) and the whole Tier 3 energy
+surface (electrical sensor and meter, water heater, heat pump, solar, battery,
+device energy management, EVSE, electrical utility meter). 1.0.0 also ships
+three images rather than one: WiFi only, Thread only, and a combined image
+that picks its stack at runtime with `AT+MTTRANSPORT`.
+
+The Arduino host library that drives all of this is
+[`iLabs_Hearth`](https://github.com/PontusO/iLabs_Hearth), which bundles the
+three prebuilt images and their flasher. The decision record and the design
+history are in the docs repository (see [Documentation](#documentation)
+below), which is tagged with the same version as this firmware.
 
 ## Architecture
 
@@ -85,9 +100,44 @@ source ~/esp/esp-idf-v5.4.1/export.sh
 source ~/esp/esp-matter/export.sh
 idf.py -B build_wifi build
 
-python3 fw/flash.py --build-dir build_wifi    # board in BOOTSEL
+python3 fw/flash.py --build-dir build_wifi    # no BOOTSEL press needed
 make -C test/host run                       # host unit tests, no hardware
 ```
+
+### The other two images
+
+Thread-only and the combined image are build-time variants of the same
+source, selected by an extra `sdkconfig.defaults` overlay. **`SDKCONFIG`
+must be redirected into the build directory**: left at its default, the
+variant's configuration is written to `./sdkconfig` and silently takes over
+the WiFi build too.
+
+```sh
+idf.py -B build_thread -D SDKCONFIG=build_thread/sdkconfig \
+  -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.thread" \
+  build
+```
+
+The combined image additionally needs the SDK patchset, because runtime
+transport selection is not something esp-matter or CHIP offer. Two patches,
+pinned to the SDK commits this firmware builds against (`21aa3d1` for
+esp-matter, `b87051a9` for the nested connectedhomeip checkout), live in
+`sdk-patches/` and are applied by a script that refuses outright if either
+checkout has moved off its pin, so an SDK bump forces a deliberate
+re-evaluation rather than a silent re-apply:
+
+```sh
+scripts/apply-sdk-patches.sh          # --check to inspect, --revert to undo
+idf.py -B build_combined -D SDKCONFIG=build_combined/sdkconfig \
+  -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.combined" \
+  build
+```
+
+The patches are inert in the other two builds: each preprocesses the guard
+away, since only one network stack's Kconfig symbol is set in either. The
+combined image chooses its stack at runtime with `AT+MTTRANSPORT`, stores
+the choice, and reboots into it. Its endpoint capacity is lower when WiFi is
+the active transport: see [Endpoint capacity](#endpoint-capacity) below.
 
 ## AT interface
 
@@ -103,35 +153,52 @@ reference. In brief: identity (`AT+CGMI/CGMM/CGMR`, `AT+MTVER?`), lifecycle
 resets (`AT+MTRESET` keeps the endpoint composition, `AT+MTFRESET` erases it),
 the data model (`AT+MTATTR` read/write with publish modes), the host-declared
 endpoint composition (`AT+MTEP` / `AT+MTEPCLEAR` / `AT+MTEPAPPLY`), event
-subscription (`AT+MTEVT`), and the transport query (`AT+MTNET?`).
+subscription (`AT+MTEVT`), the transport query (`AT+MTNET?`), and, on the
+combined image only, the runtime stack selection (`AT+MTTRANSPORT`).
 
 ## Supported device types
 
-`AT+MTEP=<id>` accepts these 38 device type IDs (firmware 0.5.0); anything
-else answers `+MTERR:6`. The table is `main/mt_devtypes.cpp`'s and grows by
-rows; IDs are read from esp-matter, never transcribed.
+`AT+MTEP=<id>` accepts these 52 device type IDs (firmware 1.0.0); anything
+else answers `+MTERR:6`. The table is `main/mt_devtypes.cpp`'s, rendered here
+in its own order, and it grows by rows; IDs are read from esp-matter, never
+transcribed. `AT_MT_SPEC.md` section 3.9 in the docs repository is the
+authoritative copy.
 
 | ID | Device type | | ID | Device type |
 |---|---|---|---|---|
-| 0x0100 | On/Off Light | | 0x0044 | Rain Sensor |
-| 0x0101 | Dimmable Light | | 0x0041 | Water Freeze Detector |
-| 0x010C | Color Temperature Light | | 0x0043 | Water Leak Detector |
-| 0x010D | Extended Color Light | | 0x0302 | Temperature Sensor |
-| 0x010A | On/Off Plug-in Unit | | 0x0307 | Humidity Sensor |
-| 0x010B | Dimmable Plug-in Unit | | 0x0305 | Pressure Sensor |
-| 0x002B | Fan | | 0x0107 | Occupancy Sensor |
-| 0x0202 | Window Covering | | 0x0015 | Contact Sensor |
-| 0x0301 | Thermostat | | 0x000F | Generic Switch |
-| 0x0071 | Temperature Controlled Cabinet | | 0x000A | Door Lock |
-| 0x0106 | Light Sensor | | 0x002D | Air Purifier |
-| 0x0306 | Flow Sensor | | 0x007A | Extractor Hood |
-| 0x002C | Air Quality Sensor | | 0x0072 | Room Air Conditioner |
-| 0x010F | Mounted On/Off Control | | 0x0078 | Cooktop |
-| 0x0110 | Mounted Dimmable Load Control | | 0x0303 | Pump |
-| 0x0042 | Water Valve | | 0x0027 | Mode Select |
-| 0x0073 | Laundry Washer | | 0x0075 | Dishwasher |
-| 0x007C | Laundry Dryer | | 0x0076 | Smoke/CO Alarm |
-| 0x0011 | Power Source | | 0x0146 | Chime |
+| 0x0100 | On/Off Light | | 0x007A | Extractor Hood |
+| 0x0101 | Dimmable Light | | 0x0072 | Room Air Conditioner |
+| 0x010C | Color Temperature Light | | 0x0078 | Cooktop |
+| 0x0302 | Temperature Sensor | | 0x0303 | Pump |
+| 0x010A | On/Off Plug-in Unit | | 0x0042 | Water Valve |
+| 0x010B | Dimmable Plug-in Unit | | 0x0027 | Mode Select |
+| 0x0015 | Contact Sensor | | 0x0073 | Laundry Washer |
+| 0x0107 | Occupancy Sensor | | 0x0075 | Dishwasher |
+| 0x0307 | Humidity Sensor | | 0x007C | Laundry Dryer |
+| 0x0305 | Pressure Sensor | | 0x0076 | Smoke/CO Alarm |
+| 0x0044 | Rain Sensor | | 0x0011 | Power Source |
+| 0x0041 | Water Freeze Detector | | 0x0146 | Chime |
+| 0x0043 | Water Leak Detector | | 0x0074 | Robotic Vacuum Cleaner |
+| 0x002B | Fan | | 0x0079 | Microwave Oven |
+| 0x0202 | Window Covering | | 0x0070 | Refrigerator |
+| 0x0301 | Thermostat | | 0x007B | Oven |
+| 0x010D | Extended Color Light | | 0x0077 | Cook Surface |
+| 0x000F | Generic Switch | | 0x0510 | Electrical Sensor |
+| 0x0071 | Temperature Controlled Cabinet | | 0x0514 | Electrical Meter |
+| 0x000A | Door Lock | | 0x050F | Water Heater |
+| 0x0106 | Light Sensor | | 0x0309 | Heat Pump |
+| 0x0306 | Flow Sensor | | 0x0017 | Solar Power |
+| 0x002C | Air Quality Sensor | | 0x0018 | Battery Storage |
+| 0x010F | Mounted On/Off Control | | 0x050D | Device Energy Management |
+| 0x0110 | Mounted Dimmable Load Control | | 0x050C | Energy EVSE |
+| 0x002D | Air Purifier | | 0x0511 | Electrical Utility Meter |
+
+The last fourteen rows, `0x0074` Robotic Vacuum Cleaner onwards, are the
+beyond-parity work of the rounds after 0.5.0: the RVC and microwave batch,
+the composed appliances (a refrigerator's cabinets, an oven's cavities and a
+cooktop's surfaces are child endpoints declared with `AT+MTEP`'s parent
+index), and the three Tier 3 energy rounds. Nine device types define an
+`AT+MTEP` `<variant>`; the rest accept variant 0 only.
 
 The extended color light carries a hue/saturation addition beyond stock
 esp-matter, so hosts see `CurrentHue`/`CurrentSaturation` alongside XY and
@@ -147,8 +214,7 @@ with the dedicated `AT+MTTEMPLEVELS` command rather than `AT+MTATTR`, since it
 is a string list served by a CHIP delegate, not an ordinary attribute.
 Deliberately absent, with reasons recorded in the design specs: Color Light
 (no distinct device type ID exists; the host library's `MatterColorLight`
-rides the `0x010D` row). See `AT_MT_SPEC.md` section 3.9 for the
-authoritative table.
+rides the `0x010D` row).
 
 The Door Lock (`0x000A`) is the first device type beyond arduino-esp32
 parity, and the first whose commands the firmware cannot answer on its own:
