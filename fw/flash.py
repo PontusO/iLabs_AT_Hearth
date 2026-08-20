@@ -688,8 +688,9 @@ def check_plan_is_this_project(images, build_dir):
     """Refuse a build directory that is not this firmware, current layout.
 
     The default build dir is <repo>/build, which on a developer machine is
-    typically a stale leftover: this project has used build_b4 as the live one
-    since B2, and `build` may still hold an image from before the rename to
+    typically a stale leftover: this project has used build_wifi (named build_b4
+    before the 1.0.0 build-directory rename) as the live one since B2, and
+    `build` may still hold an image from before the rename to
     Hearth AND from before the single-app partition switch. Flashing that would
     put the app at 0x10000, which is now `nvs`, writing the application over
     the Matter fabric and the endpoint composition.
@@ -703,7 +704,7 @@ def check_plan_is_this_project(images, build_dir):
         names = ", ".join(sorted({os.path.basename(p) for _, p in images})) or "nothing"
         die(f"{build_dir} does not look like a build of this firmware: expected "
             f"{APP_BIN}, found {names}.\n"
-            f"  The live build directory is usually build_b4; pass --build-dir.")
+            f"  The live build directory is usually build_wifi; pass --build-dir.")
     addr = app[0][0]
     if addr != APP_OFFSET:
         die(f"{build_dir} was built for a different partition layout: the app "

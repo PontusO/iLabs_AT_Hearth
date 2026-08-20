@@ -83,9 +83,9 @@ fw/flash.py                 two-stage flasher (RP2350 bridge, then the C6)
 ```sh
 source ~/esp/esp-idf-v5.4.1/export.sh
 source ~/esp/esp-matter/export.sh
-idf.py -B build_b4 build
+idf.py -B build_wifi build
 
-python3 fw/flash.py --build-dir build_b4    # board in BOOTSEL
+python3 fw/flash.py --build-dir build_wifi    # board in BOOTSEL
 make -C test/host run                       # host unit tests, no hardware
 ```
 

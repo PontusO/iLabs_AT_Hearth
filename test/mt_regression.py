@@ -5989,7 +5989,7 @@ def phase0(link, header):
     if "ESP-NOW" in model:
         return ("wrong personality: this board runs the ESP-NOW firmware; "
                 "reflash Hearth with python3 fw/flash.py --build-dir "
-                "build_b4 --port <port> --bridge espnow")
+                "build_wifi --port <port> --bridge espnow")
     if model != "ESP32-C6 Hearth":
         return "unexpected model: %r" % model
     res, lines = link.command("AT+CGMR")
