@@ -225,6 +225,15 @@ because endpoints are not interchangeable:
    below the 7,608 that failed twice, so a bare endpoint count is not a
    safe contract on its own.
 
+**Re-checked on the 1.0.0 images**, same bench, two spot readings against
+the curve above: 48,620 bytes free at one endpoint (table row: 48,360) and
+24,272 at twenty (24,204). Both are within 260 bytes of the recorded
+figures and the 20-endpoint reading is still above the 24,000 floor, so the
+curve holds at 1.0.0. The table itself is left as the rig measured it
+rather than being nudged by two spot readings, since a boot-to-boot spread
+of a hundred-odd bytes on this bench is normal and the rows record what one
+run produced.
+
 Heap moves with the SDK, with cluster gates and with any
 `sdkconfig.defaults*` edit, so re-measure with the rig rather than
 re-deriving. The user-facing version of this, aimed at somebody choosing a
