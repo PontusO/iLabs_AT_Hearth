@@ -8247,5 +8247,150 @@ class TestMainPhase3Wiring(unittest.TestCase):
                 main(["--phase", "4"])
 
 
+class TestPhase3EndpointCap(unittest.TestCase):
+    """Task 5 (Hearth 1.0.0): the combined WiFi+Thread image links both
+    stacks and starts about 39.5 KB of heap below build_wifi, so the
+    28-endpoint PHASE3_COMPOSITION does not fit: measured on hardware,
+    25 endpoints is already flaky (it failed once and passed once at an
+    identical 15,564-byte boot heap) and 28 fails outright with lwIP
+    ERR_MEM under CASE traffic. --max-endpoints declares a PREFIX of the
+    table instead, and every step whose targets sit above the cap is
+    architecturally unreachable rather than broken, so it lands in
+    not_applicable() (step_2_13's bucket on a WiFi image), never in
+    skipped(), which would tip the exit code and make a clean capped run
+    read as a truncated one.
+
+    The load-bearing part is max_ep, and it is a REQUIRED key: a step
+    that silently defaulted to 0 would run against endpoints that do not
+    exist and fail for a reason that has nothing to do with what it
+    tests. test_max_ep_covers_every_endpoint_the_step_touches derives the
+    numbers back out of each step's own source, so the table cannot drift
+    away from the code the way a hand-maintained mapping normally
+    does."""
+
+    ENDPOINT_PATTERNS = (
+        r'AT\+MT(?:ATTR|VALVE|MODES|OPSTATE|ALARM|CHIME|CHIMESOUNDS|MEAS'
+        r'|DEMCAP|ROW|ROWCLEAR|ROWAPPLY|ROWGET|METERID|TEMPLEVELS'
+        r'|SWITCH)=(\d+)',
+        r'node[0-9a-z_]*,\s*"(\d+)"',
+        r'\+MTEP:\d+,(\d+),',
+        r'endpoint=(\d+)',
+    )
+
+    def test_every_phase3_step_declares_max_ep(self):
+        for step in PHASE3_STEPS:
+            self.assertIn("max_ep", step, step["name"])
+            self.assertIsInstance(step["max_ep"], int, step["name"])
+            self.assertGreaterEqual(step["max_ep"], 0, step["name"])
+            self.assertLessEqual(step["max_ep"], len(PHASE3_COMPOSITION),
+                                 step["name"])
+
+    def test_max_ep_covers_every_endpoint_the_step_touches(self):
+        """Read each step's source and confirm its declared max_ep is at
+        least the highest endpoint it addresses. Numbers above the
+        table's length are sentinels, not endpoints (99 is the
+        deliberately absent endpoint several steps assert +MTERR:2 on),
+        so they are excluded; anything at or below it is real."""
+        import ast as _ast
+        import inspect as _inspect
+        import mt_regression as _M
+        src = _inspect.getsource(_M).splitlines()
+        tree = _ast.parse(_inspect.getsource(_M))
+        bodies = {n.name: "\n".join(src[n.lineno - 1:n.end_lineno])
+                  for n in tree.body
+                  if isinstance(n, _ast.FunctionDef)}
+        limit = len(PHASE3_COMPOSITION)
+        for step in PHASE3_STEPS:
+            body = bodies[step["fn"].__name__]
+            found = set()
+            for pat in self.ENDPOINT_PATTERNS:
+                for m in re.finditer(pat, body):
+                    ep = int(m.group(1))
+                    if 0 < ep <= limit:
+                        found.add(ep)
+            if not found:
+                continue
+            self.assertGreaterEqual(
+                step["max_ep"], max(found),
+                "%s addresses endpoint %d but declares max_ep %d"
+                % (step["name"], max(found), step["max_ep"]))
+
+    def _capped_run(self, cap, steps):
+        link = FakeLink({
+            "AT+MTFRESET": (0, []), "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []), "AT+MTEPAPPLY": (0, []),
+            "AT+MTEP?": (0, ["+MTEP:0,1,0x0100"]),
+            "AT+MTFABRICS?": (0, ["+MTFABRICS:0"]),
+        }, urcs_on_command={"AT+MTFRESET": ["+MTREADY"],
+                            "AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase3_ctx(link)
+        ctx.max_endpoints = cap
+        saved = list(PHASE3_STEPS)
+        PHASE3_STEPS[:] = steps
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase3(ctx)
+        finally:
+            PHASE3_STEPS[:] = saved
+        return ctx
+
+    def test_step_above_the_cap_is_not_applicable_and_never_runs(self):
+        ran = []
+        steps = [
+            {"name": "low", "max_ep": 20,
+             "fn": lambda ctx: ran.append("low")},
+            {"name": "high", "max_ep": 21,
+             "fn": lambda ctx: ran.append("high")},
+        ]
+        ctx = self._capped_run(20, steps)
+        self.assertEqual(ran, ["low"])
+        self.assertEqual([n for n, _ in ctx.suite.na], ["high"])
+        self.assertEqual(ctx.suite.skipped, [])
+
+    def test_capped_run_still_exits_zero(self):
+        """An n/a step must not read as a truncated run: bench defect C's
+        ruling, applied to the cap."""
+        steps = [{"name": "high", "max_ep": 28, "fn": lambda ctx: None}]
+        ctx = self._capped_run(20, steps)
+        self.assertEqual(exit_code(ctx.suite, truncated=False), 0)
+
+    def test_uncapped_run_ignores_max_ep(self):
+        ran = []
+        steps = [{"name": "high", "max_ep": 28,
+                  "fn": lambda ctx: ran.append("high")}]
+        ctx = self._capped_run(None, steps)
+        self.assertEqual(ran, ["high"])
+        self.assertEqual(ctx.suite.na, [])
+
+    def test_compose_stages_the_capped_prefix_not_the_whole_table(self):
+        """step_3_1_compose used to read PHASE3_COMPOSITION directly; it
+        must read ctx.composition, or a capped run would declare 28
+        endpoints and then read back 20."""
+        prefix = list(PHASE3_COMPOSITION[:3])
+        cmds = {"AT+MTFRESET": (0, []), "AT+MTEPCLEAR": (0, []),
+                "AT+MTEPAPPLY": (0, []), "AT+MTRESET": (0, []),
+                "AT+MTEP?": (0, ["+MTEP:%d,%d,%s" % (i, slot, dt)
+                                 for i, (slot, dt) in enumerate(prefix)])}
+        for _slot, dt in prefix:
+            cmds["AT+MTEP=%s" % dt] = (0, [])
+        link = FakeLink(cmds, urcs_on_command={
+            "AT+MTFRESET": ["+MTREADY"], "AT+MTEPAPPLY": ["+MTREADY"],
+            "AT+MTRESET": ["+MTREADY"]})
+        ctx = fresh_phase3_ctx(link)
+        ctx.composition = prefix
+        ctx.max_endpoints = len(prefix)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_3_1_compose(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        staged = [c for c in link.sent if c.startswith("AT+MTEP=")]
+        self.assertEqual(len(staged), len(prefix))
+
+    def test_max_endpoints_is_a_valid_cli_flag(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--port", "/dev/definitely-not-a-real-port-xyz",
+                      "--phase", "3", "--max-endpoints", "20"])
+        self.assertEqual(rc, 2)  # reaches the port-open failure
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

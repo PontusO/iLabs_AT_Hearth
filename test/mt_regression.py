@@ -666,6 +666,11 @@ class Phase3Context:
                                     # recover_after_abort tolerates None
         self.node_id = getattr(opts, "node_id", 0x4845)
         self.composition = list(PHASE3_COMPOSITION)
+        self.max_endpoints = None  # None means the whole table; an int
+                                    # truncates .composition to that many
+                                    # entries and makes run_phase3 report
+                                    # every step targeting a higher
+                                    # endpoint as not-applicable
         self.subscriber_factory = None  # test seam; None means real
                                         # Subscriber (step_3_21's
                                         # ActivePower subscription)
@@ -1558,7 +1563,7 @@ def step_3_1_compose(ctx):
     if not s.check("3.1 +MTREADY after MTFRESET", ready is not None,
                    tag="P3"):
         raise StepAbort("device did not come back from AT+MTFRESET")
-    devtypes = [dt for _slot, dt in PHASE3_COMPOSITION]
+    devtypes = [dt for _slot, dt in ctx.composition]
     staged = stage_composition(link, devtypes)
     if not s.check("3.1 composition staged", staged, tag="P3"):
         raise StepAbort("staging the Phase 3 composition failed")
@@ -1580,7 +1585,7 @@ def step_3_1_compose(ctx):
                         "AT+MTRESET")
     res, lines = cmd_retry(link, "AT+MTEP?")
     expected = ["+MTEP:%d,%d,%s" % (i, slot, dt)
-               for i, (slot, dt) in enumerate(PHASE3_COMPOSITION)]
+               for i, (slot, dt) in enumerate(ctx.composition)]
     if not s.check("3.1 composition readback exact",
                    res == 0 and lines == expected, tag="P3"):
         raise StepAbort("Phase 3 composition did not read back as declared")
@@ -5067,6 +5072,22 @@ def run_phase3(ctx):
             if kw and kw not in name:
                 ctx.suite.gate_skip(name, "k=%s" % kw)
                 continue
+            # A capped run declares a PHASE3_COMPOSITION PREFIX, so every
+            # step whose targets sit above the cap addresses endpoints
+            # that do not exist. That is not a broken precondition and
+            # not a failure: it is the same "architecturally does not
+            # apply to this run" shape step_2_13 has on a WiFi image, so
+            # it lands in not_applicable() and does not tip the exit
+            # code. max_ep is a required key on every entry
+            # (test_every_phase3_step_declares_max_ep), because a step
+            # that silently defaulted to 0 would RUN against missing
+            # endpoints and fail for the wrong reason.
+            cap = getattr(ctx, "max_endpoints", None)
+            if cap is not None and step["max_ep"] > cap:
+                ctx.suite.not_applicable(
+                    name, "composition capped at %d endpoints: this step "
+                          "targets endpoint %d" % (cap, step["max_ep"]))
+                continue
             missing = [r for r in step.get("requires", ()) if r not in ran]
             if missing:
                 ctx.suite.skip(name, "requires step that did not run: %s"
@@ -5084,57 +5105,65 @@ def run_phase3(ctx):
 
 
 PHASE3_STEPS[:] = [
-    {"name": "3.1 compose + boot-rebuild pin", "fn": step_3_1_compose},
-    {"name": "3.2 endpoint-dependent grammar", "fn": step_3_2_grammar,
+    {"name": "3.1 compose + boot-rebuild pin", "max_ep": 0,
+     "fn": step_3_1_compose},
+    {"name": "3.2 endpoint-dependent grammar", "max_ep": 28,
+     "fn": step_3_2_grammar,
      "requires": ["3.1 compose + boot-rebuild pin"]},
-    {"name": "3.3 self-test wedge reproduction",
+    {"name": "3.3 self-test wedge reproduction", "max_ep": 5,
      "fn": step_3_3_selftest_wedge,
      "requires": ["3.1 compose + boot-rebuild pin"]},
-    {"name": "3.4 store grammar edges", "fn": step_3_4_stores,
+    {"name": "3.4 store grammar edges", "max_ep": 4, "fn": step_3_4_stores,
      "requires": ["3.1 compose + boot-rebuild pin"]},
-    {"name": "3.5 commission", "fn": step_3_5_commission,
+    {"name": "3.5 commission", "max_ep": 0, "fn": step_3_5_commission,
      "requires": ["3.4 store grammar edges"]},
-    {"name": "3.6 valve", "fn": step_3_6_valve,
+    {"name": "3.6 valve", "max_ep": 2, "fn": step_3_6_valve,
      "requires": ["3.5 commission"]},
-    {"name": "3.7 mode select", "fn": step_3_7_modes,
+    {"name": "3.7 mode select", "max_ep": 3, "fn": step_3_7_modes,
      "requires": ["3.5 commission"]},
-    {"name": "3.8 chime", "fn": step_3_8_chime,
+    {"name": "3.8 chime", "max_ep": 4, "fn": step_3_8_chime,
      "requires": ["3.5 commission"]},
-    {"name": "3.9 operational state", "fn": step_3_9_opstate,
+    {"name": "3.9 operational state", "max_ep": 7, "fn": step_3_9_opstate,
      "requires": ["3.5 commission"]},
-    {"name": "3.10 smoke/CO alarm", "fn": step_3_10_smoke,
+    {"name": "3.10 smoke/CO alarm", "max_ep": 5, "fn": step_3_10_smoke,
      "requires": ["3.5 commission"]},
-    {"name": "3.11 power source", "fn": step_3_11_power,
+    {"name": "3.11 power source", "max_ep": 6, "fn": step_3_11_power,
      "requires": ["3.5 commission"]},
-    {"name": "3.12 lock, switch, temp levels",
+    {"name": "3.12 lock, switch, temp levels", "max_ep": 10,
      "fn": step_3_12_lock_switch_levels, "requires": ["3.5 commission"]},
-    {"name": "3.15 robotic vacuum cleaner", "fn": step_3_15_rvc,
+    {"name": "3.15 robotic vacuum cleaner", "max_ep": 12, "fn": step_3_15_rvc,
      "requires": ["3.5 commission"]},
-    {"name": "3.16 microwave oven", "fn": step_3_16_microwave,
+    {"name": "3.16 microwave oven", "max_ep": 13, "fn": step_3_16_microwave,
      "requires": ["3.5 commission"]},
-    {"name": "3.17 composed refrigerator", "fn": step_3_17_composed_fridge,
+    {"name": "3.17 composed refrigerator", "max_ep": 16,
+     "fn": step_3_17_composed_fridge,
      "requires": ["3.5 commission"]},
-    {"name": "3.18 oven cavity", "fn": step_3_18_oven_cavity,
+    {"name": "3.18 oven cavity", "max_ep": 18, "fn": step_3_18_oven_cavity,
      "requires": ["3.5 commission"]},
-    {"name": "3.19 cook surface", "fn": step_3_19_cook_surface,
+    {"name": "3.19 cook surface", "max_ep": 20, "fn": step_3_19_cook_surface,
      "requires": ["3.5 commission"]},
-    {"name": "3.20 electrical sensor", "fn": step_3_20_electrical_sensor,
+    {"name": "3.20 electrical sensor", "max_ep": 21,
+     "fn": step_3_20_electrical_sensor,
      "requires": ["3.5 commission"]},
-    {"name": "3.21 electrical meter", "fn": step_3_21_electrical_meter,
+    {"name": "3.21 electrical meter", "max_ep": 22,
+     "fn": step_3_21_electrical_meter,
      "requires": ["3.5 commission"]},
-    {"name": "3.22 water heater", "fn": step_3_22_water_heater,
+    {"name": "3.22 water heater", "max_ep": 23, "fn": step_3_22_water_heater,
      "requires": ["3.5 commission"]},
-    {"name": "3.23 heat pump", "fn": step_3_23_heat_pump,
+    {"name": "3.23 heat pump", "max_ep": 24, "fn": step_3_23_heat_pump,
      "requires": ["3.5 commission"]},
-    {"name": "3.24 solar power", "fn": step_3_24_solar_power,
+    {"name": "3.24 solar power", "max_ep": 25, "fn": step_3_24_solar_power,
      "requires": ["3.5 commission"]},
-    {"name": "3.25 battery storage", "fn": step_3_25_battery_storage,
+    {"name": "3.25 battery storage", "max_ep": 26,
+     "fn": step_3_25_battery_storage,
      "requires": ["3.5 commission"]},
-    {"name": "3.26 device energy management", "fn": step_3_26_dem,
+    {"name": "3.26 device energy management", "max_ep": 27,
+     "fn": step_3_26_dem,
      "requires": ["3.5 commission"]},
-    {"name": "3.27 energy evse", "fn": step_3_27_evse,
+    {"name": "3.27 energy evse", "max_ep": 28, "fn": step_3_27_evse,
      "requires": ["3.5 commission"]},
-    {"name": "3.14 root-endpoint URC sweep", "fn": step_3_14_root_urc_sweep},
+    {"name": "3.14 root-endpoint URC sweep", "max_ep": 0,
+     "fn": step_3_14_root_urc_sweep},
 ]
 
 
@@ -8032,6 +8061,13 @@ def main(argv=None):
     ap.add_argument("--psk", default=os.environ.get("MT_PSK"))
     ap.add_argument("--node-id", type=lambda x: int(x, 0), default=0x4845,
                     help="node id chip-tool assigns at pairing")
+    ap.add_argument("--max-endpoints", type=int, default=None,
+                    help="Phase 3 only: declare the first N entries of "
+                         "PHASE3_COMPOSITION instead of all of them, and "
+                         "report every step that targets an endpoint above "
+                         "N as not-applicable. Exists for the combined "
+                         "WiFi+Thread image, whose measured endpoint cap is "
+                         "below the full table (task-5-report.md)")
     args = ap.parse_args(argv)
     if args.baseline and args.phase == 2 and not (
             args.include_slow and args.include_manual):
@@ -8109,6 +8145,11 @@ def main(argv=None):
             ctx = Phase3Context(link, chip, suite, args)
             ctx.transport = transport
             ctx.dataset = dataset
+            if args.max_endpoints is not None:
+                ctx.max_endpoints = args.max_endpoints
+                ctx.composition = list(
+                    PHASE3_COMPOSITION[:args.max_endpoints])
+                header["max_endpoints"] = args.max_endpoints
             run_phase3(ctx)
             capture_header(link, header)
         elif args.phase != 0:
