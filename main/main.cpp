@@ -1048,7 +1048,7 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
  * ahead of ember's attribute store. Once an Instance is registered for an
  * endpoint, ITS mFeature bitmask is what a controller reads back for
  * FeatureMap, not the ember global attribute mk_air_quality_sensor()'s
- * cluster::air_quality::feature::*::add() calls set up (81451a7). Both are
+ * cluster::air_quality::feature::*::add() calls set up (5888ae1). Both are
  * kept: the ember adds still gate which AirQualityEnum values esp-matter's
  * own data model believes are legal (used nowhere at runtime once the
  * Instance exists, but harmless to leave), and the Instance below is

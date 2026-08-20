@@ -88,7 +88,7 @@
  * ---- NO ATTACH-ORDER TRAP HERE (checked, not assumed) ----
  *
  * This round already recorded one false ordering claim (the EVSE delegate
- * attach comment, corrected in f5a3ad9), and this task's brief says
+ * attach comment, corrected in f19a99e), and this task's brief says
  * explicitly: verify any ordering requirement against the SDK source before
  * writing it down. There is genuinely none between
  * mk_electrical_utility_meter()'s feature::power_threshold::add() call

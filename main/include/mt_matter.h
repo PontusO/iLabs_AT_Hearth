@@ -1283,7 +1283,7 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
  * a snapshot of the other's output. See mt_meter.cpp's file comment for the
  * full citation trail, including why this needed checking at all (an
  * earlier task in this round recorded a false ordering claim of exactly
- * this shape for the EVSE delegate, corrected in f5a3ad9).
+ * this shape for the EVSE delegate, corrected in f19a99e).
  */
 uint32_t mt_meter_feature_mask(void);
 

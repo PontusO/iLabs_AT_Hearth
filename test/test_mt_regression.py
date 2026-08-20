@@ -2650,7 +2650,7 @@ class TestStep28(unittest.TestCase):
         return {
             "AT+MTATTR=1,6,0,1": (0, []),
             # Pre-reboot read echoes the write; the post-reboot read
-            # is 1 again: OnOff survives since the B63 fix (4410498),
+            # is 1 again: OnOff survives since the B63 fix (1dd02a2),
             # and this step is its warm-reboot regression guard.
             "AT+MTATTR=1,6,0": [(0, ["+MTATTR:1,6,0,1"]),
                                 (0, ["+MTATTR:1,6,0,1"])],
