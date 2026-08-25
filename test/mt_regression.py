@@ -5961,9 +5961,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def repo_head(path):
-    """HEAD of a git repo, or None when unresolvable. Both this repo and
-    the at_core repo go into the baseline header: at_core is compiled in
-    cross-repo, so bisecting a regression needs both hashes."""
+    """HEAD of a git repo, or None when unresolvable. Goes into the
+    baseline header as fw_repo_head, so a regression can be bisected to
+    the exact commit that produced it."""
     try:
         out = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
                              capture_output=True, text=True, timeout=5)
@@ -8139,8 +8139,6 @@ def main(argv=None):
         "port": args.port,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "fw_repo_head": repo_head(REPO_ROOT),
-        "at_core_repo_head": repo_head(
-            os.path.join(os.path.dirname(REPO_ROOT), "iLabs_AT_ESP-now")),
         # Always null, never args.ssid: baseline files are committed to a
         # public repo, and the project constraint is that neither PSK nor
         # SSID may appear in a committed file. The SSID identifies the
