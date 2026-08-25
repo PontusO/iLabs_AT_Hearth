@@ -5,8 +5,10 @@ An AT command stack for the ESP32-C6 coprocessor.
 `iLabs_AT_Hearth` turns an ESP32-C6 into a **Matter co-processor** that a host
 MCU drives over a simple UART AT interface (`AT+MT...`), the same way
 [`iLabs_AT_ESP-now`](https://github.com/PontusO/iLabs_AT_ESP-now) exposes ESP-NOW
-over `AT+EN...`. The two firmwares are **single-purpose images that share one
-engine**: the host reflashes the C6 over UART to switch personality. There is no
+over `AT+EN...`. The two firmwares are **single-purpose images**, started from
+one shared AT engine and now running diverged copies of it (converging again
+once ESP-NOW folds into this stack): the host reflashes the C6 over UART to
+switch personality. There is no
 combined ESP-NOW + Matter binary (see `ARCHITECTURE.md` in the docs repository
 for why).
 
