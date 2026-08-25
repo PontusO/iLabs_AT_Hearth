@@ -24,10 +24,12 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 include(${ESP_MATTER_PATH}/examples/common/cmake_common/components_include.cmake)
 include($ENV{ESP_MATTER_DEVICE_PATH}/esp_matter_device.cmake)
 
-# The shared at_core lives in the sibling ESP-NOW repo (used from B4 onward when
-# the AT+MT interface is wired in); the rest are esp-matter's component dirs.
+# hearth_core wraps the SDK-neutral core/ tree; port is the platform's own
+# UART transport, its own component so hearth_core and main can both depend
+# on it without a link cycle; the rest are esp-matter's component dirs.
 set(EXTRA_COMPONENT_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}/../../../iLabs_AT_ESP-now/components"
+    "${CMAKE_CURRENT_LIST_DIR}/hearth_core"
+    "${CMAKE_CURRENT_LIST_DIR}/port"
     "${ESP_MATTER_PATH}/examples/common"
     "${MATTER_SDK_PATH}/config/esp32/components"
     "${ESP_MATTER_PATH}/components"

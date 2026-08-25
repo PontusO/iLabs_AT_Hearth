@@ -1,24 +1,19 @@
-# B4: Matter (main.cpp, C++) + the AT+MT interface (mt_at.c, C) on the shared
-# at_core engine. mt_at.c pulls in at_core; main.cpp only touches mt_at.h,
-# which is C++-safe.
+# B4: Matter (main.cpp, C++) + the AT+MT interface on the SDK-neutral
+# hearth_core component. main.cpp only touches mt_at.h, which is C++-safe.
 idf_component_register(
     SRCS
         "main.cpp"
-        "mt_at.c"
-        "mt_cmdbox.c"
-        "mt_composition.c"
-        "mt_comp_store.c"
         "mt_devtypes.cpp"
         "mt_evse.cpp"
         "mt_meter.cpp"
-        "mt_rows.c"
-        "mt_transport.c"
     INCLUDE_DIRS
         "include"
     PRIV_REQUIRES
         esp_matter
         nvs_flash
-        at_core
+        driver
+        hearth_core
+        port
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE "-DCHIP_HAVE_CONFIG_H")
