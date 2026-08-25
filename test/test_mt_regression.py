@@ -277,7 +277,7 @@ class TestResponsePrefixAudit(unittest.TestCase):
         # checked against the source. Derived from mt_at.c, so a new
         # command that lands without a row here fails this test.
         src = os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "main", "mt_at.c")
+            os.path.abspath(__file__))), "core", "mt", "mt_at.c")
         with open(src) as fh:
             body = fh.read()
         table = body.split("static const at_command_t s_cmds[] = {", 1)[1]
