@@ -45,31 +45,29 @@ below), which is tagged with the same version as this firmware.
 ## Architecture
 
 ```
-                 components/at_core           (lives in iLabs_AT_ESP-now)
-                  ╱                ╲            engine + at_uart + link_mgr
-   iLabs_AT_ESP-now/main         iLabs_AT_Hearth/main
-   AT+EN...  (ESP-NOW)           AT+MT...  (Matter, C6-only)
+core/                        portable C, no SDK header compiles here, ever
+  at/                        the AT engine: parsing, dispatch, OK/ERROR/+xxERR
+  mt/                        AT+MT semantics: composition, cmdbox, rows, transport
+platform/esp32c6/             the ESP-IDF project: esp_matter runtime, port/
+                             (the UART link, KV store and OS glue on IDF)
+platform/nrf54l15/             NCS/Zephyr skeleton for the Ophelia-IV module
 ```
 
-Both firmwares register their own command table with the same subsystem-agnostic
-parser engine (`at_register_commands()`), speak the same AT conventions, and
-bring the radio up through the same `link_mgr`. `at_core` is **not vendored
-here**: it is pulled straight from the sibling ESP-NOW repo so there is a single
-source of truth, and a future single-binary merge stays mechanical.
+`core/` carries the whole `AT+MT` grammar and semantics; a platform directory
+is a self-contained implementation of two port interfaces against its own
+SDK, `hearth_port.h` downward (OS primitives, the UART link, a KV store,
+logging) and `mt_matter.h` upward (the Matter runtime), and nothing else.
+`core/at/` was imported from `iLabs_AT_ESP-now`'s `at_core` (provenance in
+the import commit) and now diverges: it is this repository's own copy, not a
+cross-repo reference, and the ESP UART transport that backs `hearth_port.h`'s
+link side lives in `platform/esp32c6/port/`. Nothing in this repository's
+build reaches into the sibling ESP-NOW repo any more.
 
 ## Requirements
 
 - **ESP-IDF v5.4.1**, the version esp-matter `release/v1.5` validates against.
   Not v5.5.4, which the ESP-NOW firmware uses: esp-matter fails to build on it
   at `chip_gn`.
-- **[`iLabs_AT_ESP-now`](https://github.com/PontusO/iLabs_AT_ESP-now) checked out
-  as a sibling directory** - it provides `components/at_core`, referenced via
-  `EXTRA_COMPONENT_DIRS` in the top-level `CMakeLists.txt`:
-  ```
-  src/git/
-    iLabs_AT_ESP-now/     <- provides components/at_core
-    iLabs_AT_Hearth/      <- this repo
-  ```
 - **esp-matter** `release/v1.5`. Source both `export.sh` scripts before
   building, IDF first.
 - **Target: ESP32-C6 only.** The build fails fast on any other target.
@@ -77,31 +75,42 @@ source of truth, and a future single-binary merge stays mechanical.
 ## Repository layout
 
 ```
-CMakeLists.txt              EXTRA_COMPONENT_DIRS -> ../iLabs_AT_ESP-now/components
-sdkconfig.defaults          shared build defaults
-sdkconfig.defaults.esp32c6  C6 overrides (console TX moved off the AT UART pins)
-main/
-  main.cpp                  C++: esp_matter runtime, callbacks, app_main,
-                            and the mt_matter_* C-linkage bridge
-  mt_at.c                   C: AT+MT handlers, event mask, "+MTERR" code space
-  mt_composition.c          C: composition codec (pure, host-testable)
-  mt_comp_store.c           C: NVS persistence for the composition
-  mt_devtypes.cpp           C++: device type ID -> esp_matter create thunks
-  include/                  mt_at.h, mt_matter.h, mt_at_config.h,
-                            mt_composition.h, mt_comp_store.h, mt_devtypes.h
-test/host/                  gcc unit tests for the pure-C parts
-fw/flash.py                 two-stage flasher (RP2350 bridge, then the C6)
+core/
+  at/                        at_parser.c/.h: line assembly, dispatch,
+                             OK/ERROR/+xxERR mapping
+  mt/                        mt_at.c, mt_cmdbox.c, mt_composition.c,
+                             mt_rows.c, mt_comp_store.c, mt_transport.c:
+                             the AT+MT semantics
+  include/                   mt_*.h, at_parser.h, and the two port contracts:
+                             hearth_port.h (downward), mt_matter.h (upward)
+platform/esp32c6/
+  CMakeLists.txt              EXTRA_COMPONENT_DIRS -> hearth_core, port
+                             (both local; no cross-repo reference)
+  sdkconfig.defaults          shared build defaults
+  sdkconfig.defaults.esp32c6  C6 overrides (console TX moved off the AT UART pins)
+  hearth_core/                IDF component wrapping core/ verbatim
+  port/                       hearth_port.h implementation on ESP-IDF: the
+                             UART link (at_uart.c), KV store, OS glue, log
+  main/
+    main.cpp                  C++: esp_matter runtime, callbacks, app_main,
+                              and the mt_matter_* C-linkage bridge
+    mt_devtypes.cpp           C++: device type ID -> esp_matter create thunks
+    mt_evse.cpp, mt_meter.cpp C++: the EVSE and meter esp_matter thunks
+  fw/flash.py                 two-stage flasher (RP2350 bridge, then the C6)
+platform/nrf54l15/            NCS/Zephyr skeleton for the Ophelia-IV module
+test/host/                    gcc unit tests for core/, the pure-C parts
 ```
 
 ## Build
 
 ```sh
+cd platform/esp32c6
 source ~/esp/esp-idf-v5.4.1/export.sh
 source ~/esp/esp-matter/export.sh
 idf.py -B build_wifi build
 
 python3 fw/flash.py --build-dir build_wifi    # no BOOTSEL press needed
-make -C test/host run                       # host unit tests, no hardware
+make -C ../../test/host run                 # host unit tests, no hardware
 ```
 
 ### The other two images
@@ -159,7 +168,7 @@ combined image only, the runtime stack selection (`AT+MTTRANSPORT`).
 ## Supported device types
 
 `AT+MTEP=<id>` accepts these 52 device type IDs (firmware 1.0.0); anything
-else answers `+MTERR:6`. The table is `main/mt_devtypes.cpp`'s, rendered here
+else answers `+MTERR:6`. The table is `platform/esp32c6/main/mt_devtypes.cpp`'s, rendered here
 in its own order, and it grows by rows; IDs are read from esp-matter, never
 transcribed. `AT_MT_SPEC.md` section 3.9 in the docs repository is the
 authoritative copy.
@@ -321,8 +330,8 @@ the documents matching a given firmware are a checkout rather than a guess.
 
 MIT - see [LICENSE](LICENSE). Copyright (c) 2026 Pontus Oldberg.
 
-One exception: `fw/flash.py` is **LGPL-2.1-or-later**, because it imports
-esptool's Python API in-process. See the SBOM below.
+One exception: `platform/esp32c6/fw/flash.py` is **LGPL-2.1-or-later**,
+because it imports esptool's Python API in-process. See the SBOM below.
 
 ## Software Bill of Materials
 
@@ -334,10 +343,10 @@ what is **host tooling** that never reaches the device.
 
 | Component | Where | Licence |
 |---|---|---|
-| Hearth application (`main/`) | this repo | MIT |
-| `at_core` AT engine | `iLabs_AT_ESP-now/components/at_core`, pulled cross-repo via `EXTRA_COMPONENT_DIRS` | MIT |
-| `fw/flash.py` two-stage flasher | this repo | **LGPL-2.1-or-later** |
-| `fw/RP2350USB2Serial.ino.uf2` | this repo, prebuilt | MIT |
+| Hearth application (`platform/esp32c6/main/`) | this repo | MIT |
+| `core/at/` AT engine | this repo (imported from `iLabs_AT_ESP-now`'s `at_core`, then diverging) | MIT |
+| `platform/esp32c6/fw/flash.py` two-stage flasher | this repo | **LGPL-2.1-or-later** |
+| `platform/esp32c6/fw/RP2350USB2Serial.ino.uf2` | this repo, prebuilt | MIT |
 
 ### 2. Linked into the firmware image
 
@@ -382,7 +391,7 @@ are present in the final image:
 
 | Component | Licence | Note |
 |---|---|---|
-| esptool (iLabs fork, adds `RP2040Reset`) | **GPL-2.0-or-later** | Imported in-process by `fw/flash.py`. Redistributing the fork carries GPL source obligations. |
+| esptool (iLabs fork, adds `RP2040Reset`) | **GPL-2.0-or-later** | Imported in-process by `platform/esp32c6/fw/flash.py`. Redistributing the fork carries GPL source obligations. |
 | pyserial | BSD-3-Clause | |
 | rich (optional) | MIT | |
 | `chip-tool` | Apache-2.0 | Test controller only |
@@ -393,7 +402,7 @@ are present in the final image:
   files you modified, and reproduce any upstream `NOTICE` contents. In practice
   one third-party notices file accompanying the binary.
 - **MIT:** retain the copyright and permission notice.
-- **`fw/flash.py`:** LGPL-2.1-or-later on its own; a combination distributed
+- **`platform/esp32c6/fw/flash.py`:** LGPL-2.1-or-later on its own; a combination distributed
   with esptool is GPL-2.0-or-later. If you would rather ship the flasher under
   MIT, invoke esptool as a subprocess instead of importing it, which makes the
   two mere aggregation.
