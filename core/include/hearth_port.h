@@ -39,7 +39,13 @@ void hearth_link_init(void);
 void hearth_link_write(const void *data, size_t len);
 void hearth_link_write_line(const char *fmt, ...)
     __attribute__((format(printf, 1, 2)));
-/* Returns bytes read, 0 on timeout. */
+/*
+ * Returns bytes read, 0 on timeout. The AT parser idles in reads of up to
+ * 3,600,000 ms (one hour) while the link is silent; implementations must
+ * accept and correctly wait out a timeout_ms at least that large, with no
+ * overflow in whatever internal unit the wait is converted to and no
+ * busy-waiting (a real blocking wait, not a short-timeout poll loop).
+ */
 int hearth_link_read(uint8_t *buf, size_t len, uint32_t timeout_ms);
 int hearth_link_get_baud(void);
 int hearth_link_set_baud(int baud);
