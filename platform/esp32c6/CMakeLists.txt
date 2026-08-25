@@ -27,7 +27,7 @@ include($ENV{ESP_MATTER_DEVICE_PATH}/esp_matter_device.cmake)
 # The shared at_core lives in the sibling ESP-NOW repo (used from B4 onward when
 # the AT+MT interface is wired in); the rest are esp-matter's component dirs.
 set(EXTRA_COMPONENT_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}/../iLabs_AT_ESP-now/components"
+    "${CMAKE_CURRENT_LIST_DIR}/../../../iLabs_AT_ESP-now/components"
     "${ESP_MATTER_PATH}/examples/common"
     "${MATTER_SDK_PATH}/config/esp32/components"
     "${ESP_MATTER_PATH}/components"
