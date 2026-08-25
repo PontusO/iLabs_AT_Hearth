@@ -3,9 +3,11 @@
         /* The AT link. On the DK this is the second VCOM (uart20 is the
          * console/shell UART, wired to zephyr,console in the board's own
          * dts); the Ophelia-IV board definition will point it at the
-         * module's host UART. uart21 does not exist on this board: its
-         * only two UARTE instances are uart20 and uart30, so uart30
-         * stands in for the brief's uart21 placeholder. */
+         * module's host UART. uart21 IS a real SoC node (uart@c7000,
+         * disabled by default, same as uart30), but the DK board's own
+         * pinctrl file routes pins only for uart20 and uart30; uart21 has
+         * no board-level pin routing to bring up, so uart30 stands in for
+         * the brief's uart21 placeholder. */
         hearth,at-uart = &uart30;
     };
 };

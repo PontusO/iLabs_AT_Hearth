@@ -30,12 +30,23 @@ int hearth_os_task_spawn(const char *name, void (*fn)(void *), void *arg,
                          uint32_t stack_bytes, unsigned prio)
 {
     k_thread_stack_t *stack = k_thread_stack_alloc(stack_bytes, 0);
-    static struct k_thread thread;
     if (stack == NULL) return -1;
-    k_tid_t tid = k_thread_create(&thread, stack, stack_bytes,
+    /* One TCB per call, not a shared static: a second spawn while an
+     * earlier thread is still live must not reinitialize its TCB out
+     * from under it. */
+    struct k_thread *thread = k_malloc(sizeof(*thread));
+    if (thread == NULL) {
+        k_thread_stack_free(stack);
+        return -1;
+    }
+    k_tid_t tid = k_thread_create(thread, stack, stack_bytes,
                                   (k_thread_entry_t)fn, arg, NULL, NULL,
                                   K_PRIO_PREEMPT(10), 0, K_NO_WAIT);
-    if (tid == NULL) return -1;
+    if (tid == NULL) {
+        k_free(thread);
+        k_thread_stack_free(stack);
+        return -1;
+    }
     k_thread_name_set(tid, name);
     return 0;
 }
