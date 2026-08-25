@@ -1,0 +1,16 @@
+/ {
+    chosen {
+        /* The AT link. On the DK this is the second VCOM (uart20 is the
+         * console/shell UART, wired to zephyr,console in the board's own
+         * dts); the Ophelia-IV board definition will point it at the
+         * module's host UART. uart21 does not exist on this board: its
+         * only two UARTE instances are uart20 and uart30, so uart30
+         * stands in for the brief's uart21 placeholder. */
+        hearth,at-uart = &uart30;
+    };
+};
+
+&uart30 {
+    status = "okay";
+    current-speed = <115200>;
+};
