@@ -1,25 +1,30 @@
-# Host unit tests for the pure-C parts of the AT+MT firmware. No IDF, no
-# framework: plain gcc. Run with `make -C test/host run`.
+# Host unit tests for the portable core. No SDK: plain gcc against the
+# stub port. Run with `make -C test/host run`.
 
-CFLAGS = -std=c11 -Wall -Wextra -Werror -g -I../../main/include -DMT_HOST_TEST
+CORE   = ../../core
+CFLAGS = -std=c11 -Wall -Wextra -Werror -g -I$(CORE)/include -DMT_HOST_TEST -DMT_COMBINED_IMAGE=0
 
 TESTS = test_mt_composition test_mt_transport test_mt_cmdbox test_mt_rows
 
 all: $(TESTS)
 
-test_mt_composition: test_mt_composition.c ../../main/mt_composition.c
+test_mt_composition: test_mt_composition.c $(CORE)/mt/mt_composition.c port_stub.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test_mt_transport: test_mt_transport.c ../../main/mt_transport.c
+test_mt_transport: test_mt_transport.c $(CORE)/mt/mt_transport.c port_stub.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test_mt_cmdbox: test_mt_cmdbox.c ../../main/mt_cmdbox.c
+test_mt_cmdbox: test_mt_cmdbox.c $(CORE)/mt/mt_cmdbox.c port_stub.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test_mt_rows: test_mt_rows.c ../../main/mt_rows.c
+test_mt_rows: test_mt_rows.c $(CORE)/mt/mt_rows.c port_stub.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-run: all
+boundary:
+	@! /usr/bin/grep -rnE '#include .*(freertos|esp_|nvs|sdkconfig|driver/|zephyr)' $(CORE) \
+	  || (echo "SDK header inside core/" && exit 1)
+
+run: all boundary
 	./test_mt_composition
 	./test_mt_transport
 	./test_mt_cmdbox
@@ -28,4 +33,4 @@ run: all
 clean:
 	rm -f $(TESTS)
 
-.PHONY: all run clean
+.PHONY: all run clean boundary
