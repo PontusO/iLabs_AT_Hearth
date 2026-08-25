@@ -69,7 +69,7 @@ typedef struct {
 void at_register_commands(const at_command_t *table, size_t count);
 
 /*
- * Spawn the parser task. Call after at_uart_init(), after any platform
+ * Spawn the parser task. Call after hearth_link_init(), after any platform
  * bring-up, and after all at_register_commands() calls.
  */
 void at_parser_start(const at_engine_cfg_t *cfg);

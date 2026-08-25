@@ -7,11 +7,12 @@
  * Line assembly and dispatch. Terminal responses are "OK" or "ERROR";
  * specific faults additionally emit "<err_prefix>:<code>" on the line
  * before "ERROR". URCs may be interleaved at any time by other tasks
- * (at_uart serializes lines). The command tables and the error-code
- * space come from the subsystem via at_register_commands() and the
- * at_engine_cfg_t passed to at_parser_start().
+ * (the link port serializes lines). The command tables and the
+ * error-code space come from the subsystem via at_register_commands()
+ * and the at_engine_cfg_t passed to at_parser_start().
  */
 
+#include <assert.h>
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -20,14 +21,22 @@
 #include <string.h>
 #include <strings.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
+#include "hearth_log.h"
+#include "hearth_port.h"
 
-#include "at_uart.h"
 #include "at_parser.h"
 
 static const char *TAG = "at_parser";
+
+/* hearth_link_read() takes a millisecond timeout with no "wait forever"
+ * sentinel; the ESP port converts it with pdMS_TO_TICKS(), whose ms*HZ
+ * multiply overflows a uint32_t past about 42,949,672 ms (~11.93 h at the
+ * project's 100 Hz tick rate). The line-assembly loop below re-issues this
+ * read unconditionally whenever it returns 0 bytes, so a long wait safely
+ * under that ceiling is operationally identical to blocking forever: on a
+ * fully idle link the task just wakes up once an hour to nothing, instead
+ * of never waking at all. */
+#define AT_PARSER_IDLE_WAIT_MS (60UL * 60UL * 1000UL)
 
 /* Engine configuration and mutable echo state, set at at_parser_start(). */
 static at_engine_cfg_t s_cfg;
@@ -43,17 +52,17 @@ static size_t              s_ntables;
 
 void at_resp_ok(void)
 {
-    at_uart_write_line("OK");
+    hearth_link_write_line("OK");
 }
 
 void at_resp_error(void)
 {
-    at_uart_write_line("ERROR");
+    hearth_link_write_line("ERROR");
 }
 
 static void resp_err_code(int code)
 {
-    at_uart_write_line("%s:%d", s_cfg.err_prefix, code);
+    hearth_link_write_line("%s:%d", s_cfg.err_prefix, code);
     at_resp_error();
 }
 
@@ -130,7 +139,7 @@ void at_mac_str(const uint8_t mac[6], char out[13])
 
 void at_register_commands(const at_command_t *table, size_t count)
 {
-    configASSERT(s_ntables < AT_MAX_TABLES);
+    assert(s_ntables < AT_MAX_TABLES);
     s_tables[s_ntables]       = table;
     s_table_counts[s_ntables] = count;
     s_ntables++;
@@ -213,7 +222,7 @@ static void parser_task(void *arg)
     (void)arg;
 
     char *line = malloc(s_cfg.line_max);
-    configASSERT(line);
+    assert(line);
     size_t pos = 0;
     bool overflow = false;
 
@@ -221,17 +230,17 @@ static void parser_task(void *arg)
 
     for (;;) {
         /* Block for the first byte, then drain whatever else is already
-         * buffered (uart_read_bytes waits for the FULL length otherwise). */
-        int n = at_uart_read(chunk, 1, portMAX_DELAY);
+         * buffered (the link read waits for the FULL length otherwise). */
+        int n = hearth_link_read(chunk, 1, AT_PARSER_IDLE_WAIT_MS);
         if (n == 1) {
-            n += at_uart_read(chunk + 1, sizeof(chunk) - 1, 0);
+            n += hearth_link_read(chunk + 1, sizeof(chunk) - 1, 0);
         }
         for (int i = 0; i < n; i++) {
             char c = (char)chunk[i];
 
             if (c == '\r' || c == '\n') {
                 if (s_echo) {
-                    at_uart_write("\r\n", 2);
+                    hearth_link_write("\r\n", 2);
                 }
                 if (overflow) {
                     at_resp_error();
@@ -249,7 +258,7 @@ static void parser_task(void *arg)
                 if (pos > 0) {
                     pos--;
                     if (s_echo) {
-                        at_uart_write("\b \b", 3);
+                        hearth_link_write("\b \b", 3);
                     }
                 }
                 continue;
@@ -258,7 +267,7 @@ static void parser_task(void *arg)
             if (pos < s_cfg.line_max - 1) {
                 line[pos++] = c;
                 if (s_echo) {
-                    at_uart_write(&c, 1);
+                    hearth_link_write(&c, 1);
                 }
             } else {
                 overflow = true;
@@ -269,13 +278,12 @@ static void parser_task(void *arg)
 
 void at_parser_start(const at_engine_cfg_t *cfg)
 {
-    configASSERT(cfg && cfg->err_prefix && cfg->line_max > 1);
+    assert(cfg && cfg->err_prefix && cfg->line_max > 1);
     s_cfg  = *cfg;
     s_echo = cfg->echo_default;
 
-    BaseType_t ok = xTaskCreate(parser_task, "at_parser",
-                                cfg->task_stack, NULL,
-                                cfg->task_prio, NULL);
-    configASSERT(ok == pdPASS);
-    ESP_LOGI(TAG, "parser started");
+    int ok = hearth_os_task_spawn("at_parser", parser_task, NULL,
+                                  cfg->task_stack, cfg->task_prio);
+    assert(ok == 0);
+    HEARTH_LOGI(TAG, "parser started");
 }

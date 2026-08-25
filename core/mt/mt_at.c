@@ -21,13 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
+#include "hearth_log.h"
+#include "hearth_port.h"
 
-#include "esp_system.h"
-
-#include "at_uart.h"
 #include "at_parser.h"
 #include "mt_at_config.h"
 #include "mt_at.h"
@@ -115,7 +111,7 @@ static int cmd_cgmi(at_type_t type, char *args)
     if (type != AT_EXEC) {
         return MT_R_ERROR;
     }
-    at_uart_write_line("%s", MT_MANUFACTURER);
+    hearth_link_write_line("%s", MT_MANUFACTURER);
     return AT_R_OK;
 }
 
@@ -125,7 +121,7 @@ static int cmd_cgmm(at_type_t type, char *args)
     if (type != AT_EXEC) {
         return MT_R_ERROR;
     }
-    at_uart_write_line("%s", MT_MODEL);
+    hearth_link_write_line("%s", MT_MODEL);
     return AT_R_OK;
 }
 
@@ -135,7 +131,7 @@ static int cmd_cgmr(at_type_t type, char *args)
     if (type != AT_EXEC) {
         return MT_R_ERROR;
     }
-    at_uart_write_line("%s", MT_FW_VERSION);
+    hearth_link_write_line("%s", MT_FW_VERSION);
     return AT_R_OK;
 }
 
@@ -147,7 +143,7 @@ static int cmd_ver(at_type_t type, char *args)
     if (type != AT_QUERY) {
         return MT_R_ERROR;
     }
-    at_uart_write_line("+MTVER:%s", MT_FW_VERSION);
+    hearth_link_write_line("+MTVER:%s", MT_FW_VERSION);
     return AT_R_OK;
 }
 
@@ -161,7 +157,7 @@ static int cmd_mtstate(at_type_t type, char *args)
     if (type != AT_QUERY) {
         return MT_R_ERROR;
     }
-    at_uart_write_line("+MTSTATE:%d,%d", mt_matter_state(), mt_matter_fabric_count());
+    hearth_link_write_line("+MTSTATE:%d,%d", mt_matter_state(), mt_matter_fabric_count());
     return AT_R_OK;
 }
 
@@ -172,7 +168,7 @@ static int cmd_mtfabrics(at_type_t type, char *args)
     if (type != AT_QUERY) {
         return MT_R_ERROR;
     }
-    at_uart_write_line("+MTFABRICS:%d", mt_matter_fabric_count());
+    hearth_link_write_line("+MTFABRICS:%d", mt_matter_fabric_count());
     return AT_R_OK;
 }
 
@@ -214,7 +210,7 @@ static int cmd_mtcodes(at_type_t type, char *args)
     if (mt_matter_onboarding_codes(qr, sizeof(qr), manual, sizeof(manual)) != 0) {
         return MT_R_ERROR;
     }
-    at_uart_write_line("+MTCODES:%s,%s", qr, manual);
+    hearth_link_write_line("+MTCODES:%s,%s", qr, manual);
     return AT_R_OK;
 }
 
@@ -233,8 +229,8 @@ static int cmd_mtreset(at_type_t type, char *args)
     }
     /* Acknowledge, drain the UART, then reset - the device reboots and the host
      * resynchronizes on the next "+MTREADY". */
-    at_uart_write_line("OK");
-    vTaskDelay(pdMS_TO_TICKS(100));
+    hearth_link_write_line("OK");
+    hearth_os_sleep_ms(100);
     mt_matter_factory_reset();
     return AT_R_DONE;
 }
@@ -266,8 +262,8 @@ static int cmd_mtfreset(at_type_t type, char *args)
     if (mt_matter_evse_targets_erase_all() != 0) {
         return MT_ERR_PERSIST;
     }
-    at_uart_write_line("OK");
-    vTaskDelay(pdMS_TO_TICKS(100));
+    hearth_link_write_line("OK");
+    hearth_os_sleep_ms(100);
     mt_matter_factory_reset();
     return AT_R_DONE;
 }
@@ -472,10 +468,10 @@ static int cmd_mtattr(at_type_t type, char *args)
             return attr_err_to_mterr(r);
         }
         if (is_unsigned) {
-            at_uart_write_line("+MTATTR:%lu,%lu,%lu,%llu", ep, cluster, attr,
+            hearth_link_write_line("+MTATTR:%lu,%lu,%lu,%llu", ep, cluster, attr,
                                (unsigned long long)(uint64_t)v);
         } else {
-            at_uart_write_line("+MTATTR:%lu,%lu,%lu,%lld", ep, cluster, attr,
+            hearth_link_write_line("+MTATTR:%lu,%lu,%lu,%lld", ep, cluster, attr,
                                (long long)v);
         }
         return AT_R_OK;
@@ -1606,7 +1602,7 @@ static uint32_t s_evt_mask = MT_EVT_MASK_DEFAULT;
 static int cmd_mtevt(at_type_t type, char *args)
 {
     if (type == AT_QUERY) {
-        at_uart_write_line("+MTEVTMASK:0x%08lX", (unsigned long)s_evt_mask);
+        hearth_link_write_line("+MTEVTMASK:0x%08lX", (unsigned long)s_evt_mask);
         return AT_R_OK;
     }
     if (type != AT_SET) {
@@ -1633,7 +1629,7 @@ bool mt_at_event(int bit, const char *detail)
     /*
      * Formatted, then handed to mt_at_urc() rather than written here.
      *
-     * This used to call at_uart_write_line() directly, which made it a second
+     * This used to call hearth_link_write_line() directly, which made it a second
      * URC path with no s_at_up gate, and it panicked the device:
      *
      *   assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))
@@ -1676,7 +1672,7 @@ static int cmd_mtnet(at_type_t type, char *args)
      * and disappears is harder to parse than one that is always there, and a
      * host cannot tell "no mismatch" from "old firmware" if it is omitted.
      */
-    at_uart_write_line("+MTNET:%s,%d,%d,%d",
+    hearth_link_write_line("+MTNET:%s,%d,%d,%d",
                        transport == MT_NET_THREAD ? "THREAD" : "WIFI",
                        enabled, connected, mt_matter_transport_mismatch());
     return AT_R_OK;
@@ -1768,7 +1764,7 @@ static int cmd_mtthread(at_type_t type, char *args)
     }
     name_esc[o] = '\0';
 
-    at_uart_write_line("+MTTHREAD:%s,%d,%s,%s,%s,%s,\"%s\"",
+    hearth_link_write_line("+MTTHREAD:%s,%d,%s,%s,%s,%s,\"%s\"",
                        role, info.attached ? 1 : 0,
                        channel_f, panid_f, extpanid_f, partid_f, name_esc);
     return AT_R_OK;
@@ -1842,14 +1838,14 @@ static int cmd_mtep(at_type_t type, char *args)
             uint8_t  parent_idx;
             if (mt_matter_endpoint_info(i, &devtype, &ep_id, &variant, &parent_idx) == 0) {
                 if (parent_idx != MT_COMP_NO_PARENT) {
-                    at_uart_write_line("+MTEP:%u,%u,0x%04lX,%u,%u", i, ep_id,
+                    hearth_link_write_line("+MTEP:%u,%u,0x%04lX,%u,%u", i, ep_id,
                                        (unsigned long)devtype, (unsigned)variant,
                                        (unsigned)parent_idx);
                 } else if (variant != 0) {
-                    at_uart_write_line("+MTEP:%u,%u,0x%04lX,%u", i, ep_id,
+                    hearth_link_write_line("+MTEP:%u,%u,0x%04lX,%u", i, ep_id,
                                        (unsigned long)devtype, (unsigned)variant);
                 } else {
-                    at_uart_write_line("+MTEP:%u,%u,0x%04lX", i, ep_id, (unsigned long)devtype);
+                    hearth_link_write_line("+MTEP:%u,%u,0x%04lX", i, ep_id, (unsigned long)devtype);
                 }
             }
         }
@@ -1933,9 +1929,9 @@ static int cmd_mtepapply(at_type_t type, char *args)
 
     /* Acknowledge, drain the UART, then reboot. The host resynchronizes on
      * the next "+MTREADY", exactly as it does after AT+MTRESET. */
-    at_uart_write_line("OK");
-    vTaskDelay(pdMS_TO_TICKS(100));
-    esp_restart();
+    hearth_link_write_line("OK");
+    hearth_os_sleep_ms(100);
+    hearth_os_restart();
     return AT_R_DONE;
 }
 
@@ -1960,7 +1956,7 @@ static const int s_baud_rates[] = {
 static int cmd_mtbaud(at_type_t type, char *args)
 {
     if (type == AT_QUERY) {
-        at_uart_write_line("+MTBAUD:%d", at_uart_get_baud());
+        hearth_link_write_line("+MTBAUD:%d", hearth_link_get_baud());
         return AT_R_OK;
     }
     if (type != AT_SET) {
@@ -1982,13 +1978,13 @@ static int cmd_mtbaud(at_type_t type, char *args)
         return MT_ERR_BAD_PARAM;
     }
 
-    /* Acknowledge at the current rate first: at_uart_set_baud() drains TX
+    /* Acknowledge at the current rate first: hearth_link_set_baud() drains TX
      * before it switches, so this OK still leaves at the rate the host is
      * still listening at. The host reconfigures its own side after seeing
      * it. Any URC raised in the gap goes out at the old rate too, for the
      * same reason. */
     at_resp_ok();
-    at_uart_set_baud((int)baud);
+    hearth_link_set_baud((int)baud);
     return AT_R_DONE;
 }
 
@@ -2006,7 +2002,7 @@ static int cmd_mtbaud(at_type_t type, char *args)
 static int cmd_mtflow(at_type_t type, char *args)
 {
     if (type == AT_QUERY) {
-        at_uart_write_line("+MTFLOW:%d", at_uart_get_flowctrl());
+        hearth_link_write_line("+MTFLOW:%d", hearth_link_get_flowctrl());
         return AT_R_OK;
     }
     if (type != AT_SET) {
@@ -2024,11 +2020,11 @@ static int cmd_mtflow(at_type_t type, char *args)
 #endif
 
     /* Same ordering reason as the baud switch: acknowledge at the current
-     * flow-control state, then change it, because at_uart_set_flowctrl()
+     * flow-control state, then change it, because hearth_link_set_flowctrl()
      * drains TX first and enabling CTS would otherwise be able to gate this
      * very response. */
     at_resp_ok();
-    at_uart_set_flowctrl((int)mode);
+    hearth_link_set_flowctrl((int)mode);
     return AT_R_DONE;
 }
 
@@ -2053,7 +2049,7 @@ static int cmd_mtflow(at_type_t type, char *args)
 static int cmd_mttransport(at_type_t type, char *args)
 {
     if (type == AT_QUERY) {
-        at_uart_write_line("+MTTRANSPORT:%s,%s",
+        hearth_link_write_line("+MTTRANSPORT:%s,%s",
                            mt_transport_name(mt_transport_active()),
                            mt_transport_name(mt_transport_stored()));
         return AT_R_OK;
@@ -2082,20 +2078,22 @@ static int cmd_mttransport(at_type_t type, char *args)
  * answers it.                                                              */
 
 /*
- * Guards every call into mt_cmdbox.c. mt_cmd_forward() runs on the CHIP
- * event loop task (called from an ember cluster callback); cmd_mtcmdresp()
- * below runs on the AT parser task. mt_cmdbox.c has no locking of its own,
- * by design (it stays host-testable with no FreeRTOS headers), so the
- * mailbox's single slot needs a critical section here around each
- * individual open/answer/take/expire call.
+ * HEARTH_CRIT_CMDBOX guards every call into mt_cmdbox.c. mt_cmd_forward()
+ * runs on the CHIP event loop task (called from an ember cluster callback);
+ * cmd_mtcmdresp() below runs on the AT parser task. mt_cmdbox.c has no
+ * locking of its own, by design (it stays host-testable with no SDK
+ * headers), so the mailbox's single slot needs a critical section here
+ * around each individual open/answer/take/expire call. The storage backing
+ * this section lives in the port (hearth_crit_enter()/hearth_crit_exit()),
+ * statically initialized so it is safe from the first instruction, before
+ * any init has run.
  */
-static portMUX_TYPE s_cmdbox_mux = portMUX_INITIALIZER_UNLOCKED;
 
 /* Given by cmd_mtcmdresp() on a successful verdict, waited on by
  * mt_cmd_forward(). Created in mt_at_start() alongside the rest of the AT
  * link bring-up, before s_at_up is set, so it exists by the time a forward
  * could possibly be called. */
-static SemaphoreHandle_t s_cmd_sem = NULL;
+static hearth_sem_t s_cmd_sem = NULL;
 
 /*
  * Shared body of mt_cmd_forward(), mt_cmd_forward_payload(),
@@ -2139,16 +2137,16 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
     if (!s_at_up) {
         return false;
     }
-    /* Fail closed if the semaphore never came up (xSemaphoreCreateBinary()
-     * returned NULL, e.g. heap exhaustion). Without this, xSemaphoreTake()
+    /* Fail closed if the semaphore never came up (hearth_sem_create_binary()
+     * returned NULL, e.g. heap exhaustion). Without this, hearth_sem_take()
      * below on a NULL handle is undefined behaviour, not a clean deny. */
     if (!s_cmd_sem) {
         return false;
     }
 
-    taskENTER_CRITICAL(&s_cmdbox_mux);
+    hearth_crit_enter(HEARTH_CRIT_CMDBOX);
     uint32_t seq = mt_cmdbox_open(ep, cluster, command);
-    taskEXIT_CRITICAL(&s_cmdbox_mux);
+    hearth_crit_exit(HEARTH_CRIT_CMDBOX);
 
     /* Publish the seq before the URC, never after: see the header comment. */
     if (seq_out != NULL) {
@@ -2166,7 +2164,7 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
      * yet), accepts the verdict, and gives the semaphore - but the
      * forward() call that give belongs to has already committed to
      * returning false and will never consume it. Left there, THIS call's
-     * xSemaphoreTake() would take that stale give immediately and deny in
+     * hearth_sem_take() would take that stale give immediately and deny in
      * microseconds without ever waiting for the host; the same trap would
      * then repeat for every call after this one, forever, since a stale
      * give is left behind every time an answer wins that race. One narrow
@@ -2176,7 +2174,7 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
      * mailbox self-healing: every forward() starts from a guaranteed-empty
      * semaphore, so a stale give can survive at most until the next call.
      */
-    xSemaphoreTake(s_cmd_sem, 0);
+    hearth_sem_take(s_cmd_sem, 0);
 
     char line[MT_CMD_LINE_MAX];
     if (fields != NULL && fields[0] != '\0') {
@@ -2190,28 +2188,28 @@ static bool mt_cmd_forward_common(uint16_t ep, uint32_t cluster, uint32_t comman
     }
     mt_at_urc(line);
 
-    if (xSemaphoreTake(s_cmd_sem, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
-        taskENTER_CRITICAL(&s_cmdbox_mux);
+    if (hearth_sem_take(s_cmd_sem, wait_ms)) {
+        hearth_crit_enter(HEARTH_CRIT_CMDBOX);
         int verdict = mt_cmdbox_take(seq);
-        taskEXIT_CRITICAL(&s_cmdbox_mux);
+        hearth_crit_exit(HEARTH_CRIT_CMDBOX);
         return verdict == 1;
     }
 
     /* Timed out: drop the slot so a late answer for this seq is rejected,
      * tell the host it missed the window, and deny. */
-    taskENTER_CRITICAL(&s_cmdbox_mux);
+    hearth_crit_enter(HEARTH_CRIT_CMDBOX);
     mt_cmdbox_expire(seq);
-    taskEXIT_CRITICAL(&s_cmdbox_mux);
+    hearth_crit_exit(HEARTH_CRIT_CMDBOX);
 
     /*
      * Drain again, non-blocking: this is the other half of the cascade fix
      * described above. A give can slip in between the failed
-     * xSemaphoreTake() a few lines up and mt_cmdbox_expire() taking the
+     * hearth_sem_take() a few lines up and mt_cmdbox_expire() taking the
      * mux, on THIS call's own seq. Without this drain, that give would sit
      * on the semaphore and be taken by the NEXT forward() instead of this
      * one, denying it instantly and starting the same cascade.
      */
-    xSemaphoreTake(s_cmd_sem, 0);
+    hearth_sem_take(s_cmd_sem, 0);
 
     char to_line[MT_CMD_LINE_MAX];
     snprintf(to_line, sizeof(to_line), "+MTCMDTO:%lu", (unsigned long)seq);
@@ -2288,7 +2286,7 @@ void mt_cmd_notify(uint16_t ep, uint32_t cluster, uint32_t command)
  * file, and this is deliberate rather than an oversight. mt_cmd_forward()
  * is called from an ember cluster callback running ON the CHIP event loop
  * task, which at that moment effectively holds the CHIP stack lock; it is
- * blocked inside xSemaphoreTake(), waiting for this handler. If this
+ * blocked inside hearth_sem_take(), waiting for this handler. If this
  * handler (running on the AT parser task) tried to take ChipStackLock too,
  * it would block on that very same CHIP task and wait out the full 1000 ms
  * deadline on every single command: a guaranteed deadlock until
@@ -2316,15 +2314,15 @@ static int cmd_mtcmdresp(at_type_t type, char *args)
         return MT_ERR_BAD_PARAM;
     }
 
-    taskENTER_CRITICAL(&s_cmdbox_mux);
+    hearth_crit_enter(HEARTH_CRIT_CMDBOX);
     int r = mt_cmdbox_answer((uint32_t)seq, (int)verdict);
-    taskEXIT_CRITICAL(&s_cmdbox_mux);
+    hearth_crit_exit(HEARTH_CRIT_CMDBOX);
 
     if (r != 0) {
         return MT_ERR_BAD_PARAM;
     }
 
-    xSemaphoreGive(s_cmd_sem);
+    hearth_sem_give(s_cmd_sem);
     return AT_R_OK;
 }
 
@@ -2355,23 +2353,24 @@ static int cmd_mtcmdresp(at_type_t type, char *args)
 static mt_row_stage_t s_row_stage;
 
 /*
- * Guards every call into mt_rows.c's mutators (mt_rows_stage(),
- * mt_rows_clear(), mt_rows_validate()) against s_row_stage, and every
- * access to the inbound stage's ownership state below: same reason and the
- * same pattern as s_cmdbox_mux above. mt_rows.c has no locking of its own,
- * by design (it stays host-testable with no FreeRTOS headers, see
- * mt_rows.h's file comment), so the critical section lives here, never in
- * mt_rows.c.
+ * HEARTH_CRIT_ROWS guards every call into mt_rows.c's mutators
+ * (mt_rows_stage(), mt_rows_clear(), mt_rows_validate()) against
+ * s_row_stage, and every access to the inbound stage's ownership state
+ * below: same reason and the same pattern as HEARTH_CRIT_CMDBOX above.
+ * mt_rows.c has no locking of its own, by design (it stays host-testable
+ * with no SDK headers, see mt_rows.h's file comment), so the critical
+ * section lives here, never in mt_rows.c.
  *
- * The mux is deliberately NOT held across mt_matter_rows_apply(): that call
- * may block (it takes ChipStackLock, the standing mt_matter_* bridge
- * convention) and a portMUX_TYPE is a spinlock, which must never wrap a
- * call that can block or take another lock. cmd_mtrowapply() below reads
- * s_row_stage under the mux only long enough to validate and decide
- * whether to proceed, then passes the struct to the bridge by pointer,
- * unguarded: a full copy does not fit the AT parser task's 6144-byte
- * stack (mt_row_stage_t holds MT_ROW_MAX_ROWS rows and runs to several KB,
- * see mt_rows.h).
+ * The section is deliberately NOT held across mt_matter_rows_apply(): that
+ * call may block (it takes ChipStackLock, the standing mt_matter_* bridge
+ * convention), and hearth_crit_enter()/hearth_crit_exit() wrap a spinlock
+ * on every platform that implements them (ISR-safe, interrupt-disabling),
+ * which must never wrap a call that can block or take another lock.
+ * cmd_mtrowapply() below reads s_row_stage under the section only long
+ * enough to validate and decide whether to proceed, then passes the struct
+ * to the bridge by pointer, unguarded: a full copy does not fit the AT
+ * parser task's 6144-byte stack (mt_row_stage_t holds MT_ROW_MAX_ROWS rows
+ * and runs to several KB, see mt_rows.h).
  *
  * That unguarded pointer pass was flagged when it shipped (task 2) as
  * something the inbound SetTargets path would have to close, because it is
@@ -2381,7 +2380,6 @@ static mt_row_stage_t s_row_stage;
  * re-opens the window, and the failure mode is a host's AT+MTROWAPPLY
  * committing rows it never staged.
  */
-static portMUX_TYPE s_row_mux = portMUX_INITIALIZER_UNLOCKED;
 
 /* ---- the inbound row stage (energy round C2, task 6) ------------------- *
  *
@@ -2397,7 +2395,7 @@ static portMUX_TYPE s_row_mux = portMUX_INITIALIZER_UNLOCKED;
  *                  cmd_mtrowclear, cmd_mtrowapply).
  * s_row_inbound    written only by the CHIP event loop task, and only
  *                  while it owns the claim.
- * the state below  written by both, always inside s_row_mux.
+ * the state below  written by both, always inside HEARTH_CRIT_ROWS.
  *
  * There is no buffer either task can write while the other reads. That is
  * the whole design, and it is why the ~5.6 KB of a second mt_row_stage_t is
@@ -2414,7 +2412,7 @@ static portMUX_TYPE s_row_mux = portMUX_INITIALIZER_UNLOCKED;
  * STAGING  the CHIP task is filling it. NOT readable: a reader would see a
  *          half-built set.
  * PENDING  fully staged, the +MTCMD is on the wire, the CHIP task is
- *          BLOCKED in xSemaphoreTake and touches nothing. This is the only
+ *          BLOCKED in hearth_sem_take() and touches nothing. This is the only
  *          state cmd_mtrowget() serves from, and the CHIP task's quiescence
  *          for the whole of it is what makes that read safe with no lock
  *          around the row data itself.
@@ -2466,21 +2464,22 @@ static uint32_t           s_inbound_seq     = 0;
 
 mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
 {
-    taskENTER_CRITICAL(&s_row_mux);
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
     bool got = (s_inbound_state == MT_INBOUND_IDLE && !s_inbound_reading);
     if (got) {
         s_inbound_state = MT_INBOUND_STAGING;
     }
-    taskEXIT_CRITICAL(&s_row_mux);
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
 
     if (!got) {
         return NULL;
     }
 
     /* Outside the critical section on purpose: this memsets several KB, and
-     * a portMUX_TYPE critical section disables interrupts. The STAGING
-     * state is what keeps everyone else out meanwhile, which is exactly
-     * what a state machine buys over holding a lock. */
+     * hearth_crit_enter()/hearth_crit_exit() disable interrupts on every
+     * platform that implements them as a spinlock. The STAGING state is
+     * what keeps everyone else out meanwhile, which is exactly what a
+     * state machine buys over holding a lock. */
     mt_rows_init(&s_row_inbound);
 
     /*
@@ -2504,12 +2503,12 @@ bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, ui
     /* The count comes off the stage, never from the caller: the number on
      * the wire and the number of rows AT+MTROWGET will hand back are then
      * the same fact read once, not two values to keep in step. */
-    taskENTER_CRITICAL(&s_row_mux);
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
     uint16_t count = s_row_inbound.count;
     if (s_inbound_state == MT_INBOUND_STAGING) {
         s_inbound_state = MT_INBOUND_PENDING;
     }
-    taskEXIT_CRITICAL(&s_row_mux);
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
 
     /*
      * "<rowcount>,<aux>". Worst case, with every head at its maximum:
@@ -2529,18 +2528,18 @@ bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, ui
     /* Verdict in (or timed out): stop admitting new readers before the
      * caller starts merging. A reader already streaming is unaffected, see
      * the state comment above. */
-    taskENTER_CRITICAL(&s_row_mux);
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
     if (s_inbound_state == MT_INBOUND_PENDING) {
         s_inbound_state = MT_INBOUND_CLOSED;
     }
-    taskEXIT_CRITICAL(&s_row_mux);
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
 
     return allow;
 }
 
 void mt_rows_inbound_release(void)
 {
-    taskENTER_CRITICAL(&s_row_mux);
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
     /* active/count only. row[] is deliberately left alone: a reader that
      * snapshotted the count under this same mux is still walking it, and
      * the next claim's mt_rows_init() is the thing that actually clears the
@@ -2549,7 +2548,7 @@ void mt_rows_inbound_release(void)
     s_row_inbound.count  = 0;
     s_inbound_state      = MT_INBOUND_IDLE;
     s_inbound_seq        = 0;
-    taskEXIT_CRITICAL(&s_row_mux);
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
 }
 
 /*
@@ -2673,9 +2672,9 @@ static int cmd_mtrow(at_type_t type, char *args)
         row.value[i] = v;
     }
 
-    taskENTER_CRITICAL(&s_row_mux);
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
     int r = mt_rows_stage(&s_row_stage, (uint16_t)ep, (uint8_t)kind, (uint16_t)idx, &row);
-    taskEXIT_CRITICAL(&s_row_mux);
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
 
     return row_err_to_mterr(r);
 }
@@ -2721,9 +2720,9 @@ static int cmd_mtrowclear(at_type_t type, char *args)
         return MT_ERR_NO_CLUSTER;
     }
 
-    taskENTER_CRITICAL(&s_row_mux);
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
     int r = mt_rows_clear(&s_row_stage, (uint16_t)ep, (uint8_t)kind);
-    taskEXIT_CRITICAL(&s_row_mux);
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
 
     return row_err_to_mterr(r);
 }
@@ -2789,7 +2788,7 @@ static int cmd_mtrowapply(at_type_t type, char *args)
         return MT_ERR_BAD_PARAM;
     }
 
-    taskENTER_CRITICAL(&s_row_mux);
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
     bool matches = s_row_stage.active && s_row_stage.ep == (uint16_t)ep &&
                    s_row_stage.kind == (uint8_t)kind;
     int vr;
@@ -2837,28 +2836,29 @@ static int cmd_mtrowapply(at_type_t type, char *args)
     } else {
         vr = mt_rows_validate(&s_row_stage, (uint16_t)count);
     }
-    taskEXIT_CRITICAL(&s_row_mux);
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
 
     if (vr != MT_ROW_OK) {
         return row_err_to_mterr(vr);
     }
 
     /* Outside the critical section: mt_matter_rows_apply() may block (it
-     * takes ChipStackLock), which a portMUX_TYPE spinlock must never wrap.
-     * It is passed the file-static stage directly (see s_row_mux's comment
-     * above for why this is not a full copy) and is responsible for
-     * treating a stage that does not currently match (ep, kind) as an
-     * empty set, exactly the convention just used above. */
+     * takes ChipStackLock), which hearth_crit_enter()/hearth_crit_exit()
+     * must never wrap. It is passed the file-static stage directly (see
+     * HEARTH_CRIT_ROWS's comment above for why this is not a full copy)
+     * and is responsible for treating a stage that does not currently
+     * match (ep, kind) as an empty set, exactly the convention just used
+     * above. */
     int r = mt_matter_rows_apply((uint16_t)ep, (uint8_t)kind, &s_row_stage);
     if (r != MT_ROW_OK) {
         return row_err_to_mterr(r);
     }
 
-    taskENTER_CRITICAL(&s_row_mux);
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
     if (s_row_stage.active && s_row_stage.ep == (uint16_t)ep && s_row_stage.kind == (uint8_t)kind) {
         mt_rows_init(&s_row_stage);
     }
-    taskEXIT_CRITICAL(&s_row_mux);
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
 
     return AT_R_OK;
 }
@@ -2894,7 +2894,7 @@ static void emit_row_line(uint16_t idx, uint16_t total, const mt_row_t *row, int
             off += snprintf(line + off, sizeof(line) - (size_t)off, ",");
         }
     }
-    at_uart_write_line("%s", line);
+    hearth_link_write_line("%s", line);
 }
 
 /*
@@ -3038,7 +3038,7 @@ static int cmd_mtrowget(at_type_t type, char *args)
     bool     inbound = false;
     uint16_t itotal  = 0;
     if (qualified) {
-        taskENTER_CRITICAL(&s_row_mux);
+        hearth_crit_enter(HEARTH_CRIT_ROWS);
         inbound = (s_inbound_state == MT_INBOUND_PENDING && s_inbound_seq == (uint32_t)seq &&
                    s_row_inbound.active && s_row_inbound.ep == (uint16_t)ep &&
                    s_row_inbound.kind == (uint8_t)kind);
@@ -3046,7 +3046,7 @@ static int cmd_mtrowget(at_type_t type, char *args)
             itotal            = s_row_inbound.count;
             s_inbound_reading = true;
         }
-        taskEXIT_CRITICAL(&s_row_mux);
+        hearth_crit_exit(HEARTH_CRIT_ROWS);
 
         if (!inbound) {
             /* Named a seq that is not the outstanding one, or named one when
@@ -3070,9 +3070,9 @@ static int cmd_mtrowget(at_type_t type, char *args)
                 emit_row_line(i, itotal, &s_row_inbound.row[i], nfields);
             }
         }
-        taskENTER_CRITICAL(&s_row_mux);
+        hearth_crit_enter(HEARTH_CRIT_ROWS);
         s_inbound_reading = false;
-        taskEXIT_CRITICAL(&s_row_mux);
+        hearth_crit_exit(HEARTH_CRIT_ROWS);
         return AT_R_OK;
     }
 
@@ -3426,7 +3426,7 @@ static const at_engine_cfg_t s_engine_cfg = {
  */
 void mt_at_start(void)
 {
-    at_uart_init();
+    hearth_link_init();
 
     /*
      * Verdict mailbox bring-up: the slot state machine and the semaphore
@@ -3440,7 +3440,7 @@ void mt_at_start(void)
      * before the semaphore exists.
      */
     mt_cmdbox_init();
-    s_cmd_sem = xSemaphoreCreateBinary();
+    s_cmd_sem = hearth_sem_create_binary();
 
     at_register_commands(s_cmds, sizeof(s_cmds) / sizeof(s_cmds[0]));
     at_parser_start(&s_engine_cfg);
@@ -3462,10 +3462,10 @@ void mt_at_start(void)
      * first line of a new session, which is the whole contract of a boot
      * marker.
      *
-     * at_uart_init() above has already created the TX mutex, so writing here
+     * hearth_link_init() above has already created the TX mutex, so writing here
      * is safe; it is only mt_at_urc() that must wait for the gate.
      */
-    at_uart_write_line("+MTREADY");
+    hearth_link_write_line("+MTREADY");
     s_at_up = true;
 }
 
@@ -3473,8 +3473,8 @@ bool mt_at_urc(const char *line)
 {
     /*
      * URCs can fire from esp_matter callbacks during esp_matter::start(),
-     * which app_main runs BEFORE mt_at_start(). At that point at_uart_init()
-     * has not created the TX mutex, and at_uart_write_line() would take a NULL
+     * which app_main runs BEFORE mt_at_start(). At that point hearth_link_init()
+     * has not created the TX mutex, and hearth_link_write_line() would take a NULL
      * semaphore: "assert failed: xQueueSemaphoreTake queue.c:1709 ((pxQueue))",
      * then panic and reboot, forever. A commissioned device restoring its
      * OnOff state at boot hits this on every boot.
@@ -3485,6 +3485,6 @@ bool mt_at_urc(const char *line)
     if (!s_at_up) {
         return false;
     }
-    at_uart_write_line("%s", line);
+    hearth_link_write_line("%s", line);
     return true;
 }

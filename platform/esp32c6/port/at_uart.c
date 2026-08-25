@@ -16,7 +16,7 @@
 #include "esp_log.h"
 
 #include "at_core_config.h"
-#include "at_uart.h"
+#include "hearth_port.h"
 
 static const char *TAG = "at_uart";
 
@@ -34,7 +34,7 @@ static uart_hw_flowcontrol_t hw_flowctrl_for(int mode)
     }
 }
 
-void at_uart_init(void)
+void hearth_link_init(void)
 {
 #if AT_TARGET_ESP8266
     /* ESP8266_RTOS_SDK: pins are fixed by the IO mux and configured by
@@ -96,7 +96,7 @@ void at_uart_init(void)
              AT_UART_FLOWCTRL);
 }
 
-void at_uart_write(const void *data, size_t len)
+void hearth_link_write(const void *data, size_t len)
 {
     if (len == 0) {
         return;
@@ -106,7 +106,7 @@ void at_uart_write(const void *data, size_t len)
     xSemaphoreGive(s_tx_mutex);
 }
 
-void at_uart_write_line(const char *fmt, ...)
+void hearth_link_write_line(const char *fmt, ...)
 {
     va_list ap;
 
@@ -129,22 +129,22 @@ void at_uart_write_line(const char *fmt, ...)
     buf[need]     = '\r';
     buf[need + 1] = '\n';
 
-    at_uart_write(buf, (size_t)need + 2);
+    hearth_link_write(buf, (size_t)need + 2);
     free(buf);
 }
 
-int at_uart_read(uint8_t *buf, size_t len, TickType_t ticks_to_wait)
+int hearth_link_read(uint8_t *buf, size_t len, uint32_t timeout_ms)
 {
-    int n = uart_read_bytes(AT_UART_PORT, buf, len, ticks_to_wait);
+    int n = uart_read_bytes(AT_UART_PORT, buf, len, pdMS_TO_TICKS(timeout_ms));
     return (n < 0) ? 0 : n;
 }
 
-int at_uart_get_baud(void)
+int hearth_link_get_baud(void)
 {
     return s_baud;
 }
 
-int at_uart_set_baud(int baud)
+int hearth_link_set_baud(int baud)
 {
     /* Hold the TX mutex so no writer can queue more output between the
      * drain and the rate switch. */
@@ -165,12 +165,12 @@ int at_uart_set_baud(int baud)
     return 0;
 }
 
-int at_uart_get_flowctrl(void)
+int hearth_link_get_flowctrl(void)
 {
     return s_flowctrl;
 }
 
-int at_uart_set_flowctrl(int mode)
+int hearth_link_set_flowctrl(int mode)
 {
     if (mode < AT_UART_FLOWCTRL_NONE || mode > AT_UART_FLOWCTRL_CTS_RTS) {
         return -1;
