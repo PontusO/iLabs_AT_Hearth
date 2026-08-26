@@ -20,7 +20,7 @@
 #define PIN_NRESET    2   /* CPico GP2  -> module nRESET pad          */
 #define PIN_STRAP     3   /* CPico GP3  -> module P2.03               */
 
-volatile uint32_t pending_baud = 0;   /* set by CDC callback, applied in loop() */
+static volatile uint32_t pending_baud = 0;   /* set by CDC callback, applied in loop() */
 
 void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)
 {
@@ -54,14 +54,15 @@ void loop()
 
     /* Apply baud change from CDC line-coding callback, out here where UART
        teardown and rebuild cannot deadlock the USB stack. */
-    uint32_t new_baud = pending_baud;
-    if (new_baud) {
-        pending_baud = 0;
-        if (new_baud != last_baud) {
-            Serial1.end();
-            Serial1.begin(new_baud);
-            last_baud = new_baud;
-        }
+    uint32_t new_baud;
+    noInterrupts();
+    new_baud = pending_baud;
+    pending_baud = 0;
+    interrupts();
+    if (new_baud && new_baud != last_baud) {
+        Serial1.end();
+        Serial1.begin(new_baud);
+        last_baud = new_baud;
     }
 
     /* Control lines follow CDC line state every pass. */
