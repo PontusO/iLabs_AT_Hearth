@@ -328,6 +328,26 @@ def test_decode_frames_multiple_concatenated():
     check("decode_frames: second payload", parsed[1][1] == {"off": 0})
 
 
+def test_decode_frames_truncated_cbor_raises_value_error():
+    # A header claiming a 1-byte payload that is itself a truncated CBOR
+    # item: 0xA1 is "map, 1 pair" with no key/value bytes following it.
+    # _decode_item must report this as a clean ValueError (truncated
+    # input), not let a bare buf[pos] past the end of the buffer surface
+    # as an IndexError to the caller. This pins the exact repro that
+    # escaped the malformed-CBOR guard in flash.py's read_response before
+    # smp.py's decoder grew explicit bounds checks (_read_bytes).
+    payload = bytes((0xA1,))
+    header = struct.pack(">BBHHBB", 2, 0, len(payload), 0, 1, 0)
+    raised = None
+    try:
+        smp.decode_frames(header + payload)
+    except ValueError as e:
+        raised = e
+    except IndexError:
+        raised = None  # explicitly not this: fall through to the check below
+    check("truncated CBOR raises ValueError, not IndexError", raised is not None)
+
+
 # ------------------------------------------------------------------ #
 # flash.py: argument parsing and image-hash printing against a temp
 # file. No serial-port access (global constraint for this task); the

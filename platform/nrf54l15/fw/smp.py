@@ -316,8 +316,34 @@ def cbor_encode(obj):
 _BREAK = object()  # sentinel: saw a 0xFF break byte while scanning an item
 
 
+def _read_bytes(buf, pos, n):
+    """Bounds-checked slice: n bytes at pos, or a clean ValueError.
+
+    Every place _decode_item reads past the head byte (length-prefix
+    bytes, bstr/tstr payload bytes) goes through this, so a truncated
+    CBOR value (a header claiming more bytes than the buffer actually
+    holds, e.g. a bare 0xA1 map-of-1 with no key/value following) raises
+    ValueError here instead of letting a bare index/slice past the end
+    of buf surface as an IndexError to the caller. Plain slicing (buf[a:b])
+    does NOT raise on a short slice, it just returns fewer bytes silently,
+    which is its own trap: checking the bound explicitly is what makes
+    truncation an error at all instead of quietly wrong data (or an
+    IndexError two calls later, once _decode_item recurses back in with a
+    pos that has walked past len(buf)).
+    """
+    if pos + n > len(buf):
+        raise ValueError(
+            "cbor_decode: truncated input (need %d bytes at offset %d, "
+            "only %d available)" % (n, pos, len(buf) - pos))
+    return bytes(buf[pos:pos + n])
+
+
+def _read_uint(buf, pos, n):
+    return int.from_bytes(_read_bytes(buf, pos, n), "big")
+
+
 def _decode_item(buf, pos):
-    head = buf[pos]
+    head = _read_bytes(buf, pos, 1)[0]
     major = head >> 5
     info = head & 0x1F
     pos += 1
@@ -336,16 +362,16 @@ def _decode_item(buf, pos):
     if info < 24:
         value = info
     elif info == 24:
-        value = buf[pos]
+        value = _read_uint(buf, pos, 1)
         pos += 1
     elif info == 25:
-        value = int.from_bytes(buf[pos:pos + 2], "big")
+        value = _read_uint(buf, pos, 2)
         pos += 2
     elif info == 26:
-        value = int.from_bytes(buf[pos:pos + 4], "big")
+        value = _read_uint(buf, pos, 4)
         pos += 4
     elif info == 27:
-        value = int.from_bytes(buf[pos:pos + 8], "big")
+        value = _read_uint(buf, pos, 8)
         pos += 8
     elif info == 31:
         value = None  # indefinite length marker
@@ -365,7 +391,7 @@ def _decode_item(buf, pos):
                     break
                 data += item
             return data, pos
-        data = bytes(buf[pos:pos + value])
+        data = _read_bytes(buf, pos, value)
         return data, pos + value
     if major == 3:  # tstr
         if info == 31:
@@ -376,7 +402,8 @@ def _decode_item(buf, pos):
                     break
                 text += item
             return text, pos
-        text = bytes(buf[pos:pos + value]).decode("utf-8")
+        data = _read_bytes(buf, pos, value)
+        text = data.decode("utf-8")
         return text, pos + value
     if major == 4:  # list
         result = []
