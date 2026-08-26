@@ -13,10 +13,20 @@
  * module's second UART, watched via the Debug Probe.
  */
 
+#include "tusb.h"
+
 #define PIN_UART_TX   0   /* CPico GP0  -> module P1.15 (UARTE20 RX) */
 #define PIN_UART_RX   1   /* CPico GP1  <- module P1.04 (UARTE20 TX) */
 #define PIN_NRESET    2   /* CPico GP2  -> module nRESET pad          */
 #define PIN_STRAP     3   /* CPico GP3  -> module P2.03               */
+
+volatile uint32_t pending_baud = 0;   /* set by CDC callback, applied in loop() */
+
+void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)
+{
+    (void)itf;
+    pending_baud = coding->bit_rate;
+}
 
 static void drive_low_or_release(int pin, bool asserted)
 {
@@ -42,12 +52,16 @@ void loop()
 {
     static uint32_t last_baud = 115200;
 
-    /* Follow the host's baud selection. */
-    uint32_t baud = Serial.baud();
-    if (baud != last_baud && baud != 0) {
-        Serial1.end();
-        Serial1.begin(baud);
-        last_baud = baud;
+    /* Apply baud change from CDC line-coding callback, out here where UART
+       teardown and rebuild cannot deadlock the USB stack. */
+    uint32_t new_baud = pending_baud;
+    if (new_baud) {
+        pending_baud = 0;
+        if (new_baud != last_baud) {
+            Serial1.end();
+            Serial1.begin(new_baud);
+            last_baud = new_baud;
+        }
     }
 
     /* Control lines follow CDC line state every pass. */
