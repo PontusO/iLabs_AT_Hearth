@@ -10,8 +10,8 @@ The CPico RP2350 dev board carries the module and hosts the bridging firmware. T
 
 | Line | From (CPico) | To (Ophelia-IV module) | Signal |
 |---|---|---|---|
-| Serial TX | GP1 | P1.04 (UARTE20 RX) | AT UART transmit |
-| Serial RX | GP0 | P1.15 (UARTE20 TX) | AT UART receive |
+| Serial TX | GP0 | P1.15 (UARTE20 RX) | CPico transmit line |
+| Serial RX | GP1 | P1.04 (UARTE20 TX) | CPico receive line |
 | Reset | GP2 | nRESET pad | Active-low reset (asserted by host) |
 | Recovery strap | GP3 | P2.03 (GPIO, pull-up) | Active-low strap sampled at boot |
 | Console TX | P0.00 (console TX) | Debug Probe UART RX | Module console output |
@@ -53,6 +53,16 @@ This produces two artifacts under `build/`:
 - `mcuboot/zephyr/zephyr.hex`: the locked bootloader (installed once via SWD)
 - `nrf54l15/zephyr/zephyr.signed.bin`: the signed application image
 
+**Partition layout** (1428 KB flash_primary, carved by NCS Partition Manager):
+
+| Partition | Size | Purpose |
+|---|---|---|
+| `mcuboot` | 48 KB | Locked bootloader |
+| `mcuboot_pad` | 2 KB | Padding to align app slot |
+| `app` | 1342 KB | Primary slot: signed application image |
+| `settings_storage` | 32 KB | ZMS: heartbeat KV store and Matter persistence |
+| `factory_data` | 4 KB | Reserved for production factory data |
+
 **Install via SWD** (pyocd 0.44.1, requires the Debug Probe soldered to the module):
 
 ```bash
@@ -60,7 +70,7 @@ pyocd flash -t nrf54l build/mcuboot/zephyr/zephyr.hex
 pyocd flash -t nrf54l build/nrf54l15/zephyr/zephyr.signed.bin
 ```
 
-The pyocd tool is the SWD path for this platform. If the module is ever locked out (though the bootloader's lock is deliberate and can be verified working), erase and reflash the bootloader with `pyocd erase -t nrf54l --chip` followed by the flash commands above.
+The pyocd tool is the SWD path for this platform. Recovery from any state (locked or corrupted) uses `pyocd erase -t nrf54l --chip` followed by the flash commands above: no serial port can reach a module with an invalid bootloader.
 
 ## Everyday flashing
 
