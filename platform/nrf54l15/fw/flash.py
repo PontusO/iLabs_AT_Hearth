@@ -7,7 +7,7 @@ Usage:
 
 No default port, deliberately (bench rule: a run that guesses is worse
 than a run that refuses). Always pass a /dev/serial/by-id/... path, never
-/dev/ttyACM<n> -- the number moves across re-enumeration, and on the bench
+/dev/ttyACM<n>: the number moves across re-enumeration, and on the bench
 rig a stray write to the wrong ttyACM can hit the Thread RCP and kill
 otbr-agent.
 
@@ -20,12 +20,12 @@ strap low, both released = module runs, the bridge follows host baud):
      MCUboot's IMAGE_MAGIC
   2. open the port at 115200 (MCUboot's serial-recovery baud; the
      CPico bridge follows whatever baud the host opens at)
-  3. enter recovery: RTS True, DTR True, 50 ms, DTR False, 250 ms --
-     holds the recovery strap through the reset pulse and for longer
-     than CONFIG_BOOT_SERIAL_DETECT_DELAY=50 ms
-     (build/mcuboot/zephyr/.config:81)
+  3. enter recovery: RTS True, DTR True, 50 ms, DTR False, 250 ms
+     (holds the recovery strap through the reset pulse and for longer
+     than CONFIG_BOOT_SERIAL_DETECT_DELAY=50 ms,
+     build/mcuboot/zephyr/.config:81)
   4. SMP echo handshake, 3 attempts (see smp.py's header comment for why
-     this build's echo replies ENOTSUP rather than echoing -- any
+     this build's echo replies ENOTSUP rather than echoing: any
      well-formed reply still proves the link works)
   5. upload loop: <=512-byte payload chunks, resend on timeout from the
      last acked offset, progress line like the C6 flasher
@@ -65,6 +65,7 @@ ECHO_ATTEMPTS = 3
 ECHO_TIMEOUT_S = 2.0
 UPLOAD_FRAME_TIMEOUT_S = 5.0
 UPLOAD_MAX_CONSECUTIVE_TIMEOUTS = 5
+UPLOAD_MAX_NO_PROGRESS = 5  # consecutive non-advancing replies before giving up
 READY_TIMEOUT_S = 20.0
 READY_MARKER = "+MTREADY"
 
@@ -79,7 +80,7 @@ def die(msg):
 
 # ------------------------------------------------------------------ #
 # Image inspection: sha256 + the signed image's own MCUboot header.
-# No serial access here -- exercised by test_smp.py against a temp file.
+# No serial access here; exercised by test_smp.py against a temp file.
 # ------------------------------------------------------------------ #
 def sha256_of(path):
     h = hashlib.sha256()
@@ -95,7 +96,7 @@ def parse_image_header(data):
     All fields little-endian:
       ih_magic(4) ih_load_addr(4) ih_hdr_size(2) ih_protect_tlv_size(2)
       ih_img_size(4) ih_flags(4) ih_ver{major(1) minor(1) rev(2) build(4)}
-      _pad1(4)   -- total 32 bytes (IMAGE_HEADER_SIZE, image.h:57)
+      _pad1(4)   (total 32 bytes, IMAGE_HEADER_SIZE, image.h:57)
 
     Returns a dict; magic_ok False means "refuse to flash this" (mirrors
     the C6 flasher's check_plan_is_this_project refusal-on-mismatch).
@@ -141,17 +142,36 @@ def send_frame(ser, op, group, cmd_id, payload, seq):
     ser.write(smp.serial_encode(frame))
 
 
-def read_response(ser, decoder, timeout):
-    """Read from ser until one decoded SMP frame arrives or timeout."""
+def read_response(ser, decoder, timeout, expected_seq=None):
+    """Read from ser until a decoded SMP frame arrives, or timeout.
+
+    If expected_seq is given, frames whose header.seq does not match it
+    are dropped and reading continues until the deadline: a late reply to
+    an earlier, already-abandoned request must not be mistaken for the
+    answer to the current one, or every later exchange would be paired
+    with the wrong response (the review's "sticky desync" finding).
+
+    A CRC-valid packet whose payload is not valid CBOR is a protocol
+    error, not a Python exception to propagate: it dies cleanly here with
+    a clear message instead of an uncaught traceback.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         waiting = getattr(ser, "in_waiting", 0) or 1
         chunk = ser.read(waiting)
         if chunk:
             for raw in decoder.feed(chunk):
-                parsed = smp.decode_frames(raw)
-                if parsed:
-                    return parsed[0]
+                try:
+                    parsed = smp.decode_frames(raw)
+                except (ValueError, UnicodeDecodeError) as e:
+                    die(f"malformed SMP response (CRC was valid, CBOR "
+                        f"decode failed): {e}")
+                if not parsed:
+                    continue
+                header, payload = parsed[0]
+                if expected_seq is not None and header.seq != expected_seq:
+                    continue  # stale reply to an earlier request; keep waiting
+                return header, payload
         else:
             time.sleep(0.02)
     return None
@@ -159,9 +179,10 @@ def read_response(ser, decoder, timeout):
 
 def handshake(ser, decoder):
     for attempt in range(1, ECHO_ATTEMPTS + 1):
+        seq = attempt & 0xFF
         send_frame(ser, smp.NMGR_OP_WRITE, smp.MGMT_GROUP_ID_DEFAULT,
-                   smp.NMGR_ID_ECHO, {"d": "hearth"}, attempt & 0xFF)
-        resp = read_response(ser, decoder, ECHO_TIMEOUT_S)
+                   smp.NMGR_ID_ECHO, {"d": "hearth"}, seq)
+        resp = read_response(ser, decoder, ECHO_TIMEOUT_S, expected_seq=seq)
         if resp is not None:
             _, payload = resp
             # CONFIG_BOOT_MGMT_ECHO is not set in this build (see smp.py's
@@ -180,15 +201,18 @@ def upload(ser, decoder, data, digest):
     off = 0
     seq = 0
     consecutive_timeouts = 0
+    consecutive_no_progress = 0
     while off < total:
         chunk = data[off:off + CHUNK]
         payload = {"image": 0, "data": chunk, "off": off}
         if off == 0:
             payload["len"] = total
             payload["sha"] = digest
+        frame_seq = seq & 0xFF
         send_frame(ser, smp.NMGR_OP_WRITE, smp.MGMT_GROUP_ID_IMAGE,
-                   smp.IMGMGR_NMGR_ID_UPLOAD, payload, seq & 0xFF)
-        resp = read_response(ser, decoder, UPLOAD_FRAME_TIMEOUT_S)
+                   smp.IMGMGR_NMGR_ID_UPLOAD, payload, frame_seq)
+        resp = read_response(ser, decoder, UPLOAD_FRAME_TIMEOUT_S,
+                              expected_seq=frame_seq)
         if resp is None:
             consecutive_timeouts += 1
             if consecutive_timeouts > UPLOAD_MAX_CONSECUTIVE_TIMEOUTS:
@@ -204,6 +228,23 @@ def upload(ser, decoder, data, digest):
         new_off = rpayload.get("off")
         if new_off is None:
             die(f"upload response missing 'off' at off={off}")
+
+        # A healthy exchange always reports an offset past the one this
+        # frame was sent from. A device parked at a fixed curr_off (the
+        # offset-mismatch resync path, boot_serial.c:1041-1047) answers
+        # rc=0 immediately every time without ever advancing, which the
+        # timeout counter above never sees since nothing times out. Bound
+        # that separately, or the loop spins forever.
+        if new_off <= off:
+            consecutive_no_progress += 1
+            if consecutive_no_progress > UPLOAD_MAX_NO_PROGRESS:
+                die(f"upload stalled: {consecutive_no_progress} consecutive "
+                    f"replies did not advance past off={off}/{total}; the "
+                    f"bootloader may be parked expecting a different "
+                    f"offset than the one being sent")
+        else:
+            consecutive_no_progress = 0
+
         off = new_off  # bootloader's own idea of the next offset: this is
                         # what makes a resend-on-timeout safe (it always
                         # tells us where it actually got to, including
@@ -227,7 +268,7 @@ def build_arg_parser():
     ap.add_argument("--port",
                      help="serial port of the CPico bridge, by-id "
                           "(e.g. /dev/serial/by-id/usb-...); never "
-                          "/dev/ttyACM<n> -- the id moves across "
+                          "/dev/ttyACM<n>: the id moves across "
                           "re-enumeration. No default: a guessed port is "
                           "worse than a refusal.")
     ap.add_argument("--baud", type=int, default=DEFAULT_BAUD,
@@ -250,7 +291,7 @@ def main(argv=None):
     args = build_arg_parser().parse_args(argv)
 
     if not args.port:
-        die("--port is required (no default port -- pass "
+        die("--port is required (no default port; pass "
             "/dev/serial/by-id/..., never /dev/ttyACM<n>)")
 
     data = None

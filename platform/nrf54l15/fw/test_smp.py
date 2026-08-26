@@ -3,7 +3,7 @@
 
 Plain asserts, no framework, matching the repo's host-test style
 (test/host in this repo, run with `make -C test/host run`). Run with
-plain python3 from a normal shell (never the NCS environment -- its
+plain python3 from a normal shell (never the NCS environment, its
 PYTHONHOME breaks system python):
 
     python3 test_smp.py
@@ -11,8 +11,8 @@ PYTHONHOME breaks system python):
 Golden byte vectors are derived BY HAND from the constants smp.py's
 header comment cites against the MCUboot source, with a comment showing
 the derivation next to each one. Where a test only checks a round-trip
-property (encode then decode gives the original back) that is noted too
--- it is weaker than a byte-for-byte golden vector but still exercises
+property (encode then decode gives the original back) that is noted too:
+it is weaker than a byte-for-byte golden vector but still exercises
 real wire-format code, and is used where hand-deriving the full byte
 string would be unwieldy (the multi-line continuation case).
 """
@@ -69,6 +69,105 @@ def test_serial_roundtrip():
 
 
 # ------------------------------------------------------------------ #
+# A full, hand-derived wire byte string, independent of serial_encode's
+# own logic (the round-trip tests above only prove self-consistency:
+# encode then decode gives back what was encoded, even if both sides
+# share the same bug). This one is checked against a literal byte
+# string worked out by hand from the citations in smp.py's header
+# comment, sections 1-2.
+# ------------------------------------------------------------------ #
+def test_serial_encode_hand_derived_wire_vector():
+    # Frame: op=NMGR_OP_WRITE(2), flags=0, group=MGMT_GROUP_ID_DEFAULT(0),
+    # seq=1, id=NMGR_ID_ECHO(0), payload={"d": "hi"}.
+    #
+    # payload (CBOR, standard RFC 8949, see smp.py section 4):
+    #   map(1)            -> 0xA1
+    #   key "d" (tstr,1)   -> 0x61 0x64
+    #   val "hi" (tstr,2)  -> 0x62 0x68 0x69
+    #   = A1 61 64 62 68 69                               (6 bytes)
+    #
+    # header (boot_serial_priv.h:62-77, see smp.py section 1):
+    #   op(1)=02 flags(1)=00 len(2,BE)=00 06 group(2,BE)=00 00
+    #   seq(1)=01 id(1)=00
+    #   = 02 00 00 06 00 00 01 00                          (8 bytes)
+    #
+    # frame = header ++ payload: this is what the CRC covers
+    # (boot_serial.c:1382-1383); totlen below is NOT covered by it.
+    #   = 02 00 00 06 00 00 01 00 A1 61 64 62 68 69         (14 bytes)
+    #
+    # crc = crc16_xmodem(frame) = 0x4EC4 (the algorithm itself is pinned
+    # independently by test_crc16_known_vector's catalog check value)
+    #
+    # totlen = len(frame) + sizeof(crc) = 14 + 2 = 16 = 0x0010, big-
+    # endian, spanning header+payload+crc but excluding itself
+    # (boot_serial.c:1394, "totlen = len + sizeof(*bs_hdr) + sizeof(crc)")
+    #
+    # raw = totlen(2,BE) ++ frame(14) ++ crc(2,BE), 18 bytes total:
+    #   00 10  02 00 00 06 00 00 01 00 A1 61 64 62 68 69  4E C4
+    # The WHOLE raw buffer is base64'd in one call (boot_serial.c:1405-
+    # 1414) before being split into lines: the split is over the base64
+    # text, not over the raw bytes.
+    #
+    # base64(raw) = "ABACAAAGAAABAKFhZGJoaU7E" (24 base64 characters; 18
+    # is a multiple of 3, so there is no '=' padding).
+    #
+    # 24 <= FRAME_MTU(124), so this fits on a single line:
+    #   wire = 0x06 0x09 ++ base64(raw) ++ '\n'
+    frame = smp.encode_frame(op=2, group=0, cmd_id=0, payload_map={"d": "hi"}, seq=1)
+    expect = bytes((0x06, 0x09)) + b"ABACAAAGAAABAKFhZGJoaU7E" + b"\n"
+    check("serial_encode matches the hand-derived wire vector",
+          smp.serial_encode(frame) == expect)
+
+
+_B64_ALPHABET = ("ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                  "abcdefghijklmnopqrstuvwxyz0123456789+/")
+
+
+def test_serial_decoder_rejects_crc_corruption():
+    # Reuses the exact frame from test_serial_encode_hand_derived_wire_
+    # vector: its 18-byte raw buffer base64's to exactly 24 characters
+    # with no '=' padding, so the base64 quartet right before the
+    # trailing newline is a full, real data quartet. That quartet's
+    # last character carries only the bottom 6 bits of the raw buffer's
+    # final byte, the low byte of the trailing crc16 (see the derivation
+    # above: raw ends ...4E C4). Swapping that one character for a
+    # different valid base64 character therefore corrupts only the crc
+    # trailer, leaving header/payload/totlen untouched, and the decoder's
+    # residue check (crc16_xmodem(body) == 0, mirroring
+    # boot_serial.c:1479-1489) must reject the packet rather than return
+    # a silently-corrupted frame.
+    frame = smp.encode_frame(op=2, group=0, cmd_id=0, payload_map={"d": "hi"}, seq=1)
+    wire = bytearray(smp.serial_encode(frame))
+    idx = len(wire) - 2  # last base64 char, immediately before '\n'
+    current = chr(wire[idx])
+    replacement = next(c for c in _B64_ALPHABET if c != current)
+    wire[idx] = ord(replacement)
+
+    dec = smp.SerialDecoder()
+    out = dec.feed(bytes(wire))
+    check("CRC-corrupted packet is dropped, not returned", out == [])
+
+
+def test_serial_decoder_drops_orphan_continuation_line():
+    # A 0x04 0x14 continuation line with no preceding 0x06 0x09 start
+    # line has nothing to continue. boot_serial.c's own dispatch
+    # (boot_serial.c:1550-1557) only ever calls into the decoder for a
+    # line matching one marker or the other; there is no third "orphan
+    # continuation" case in the C source, so dropping it here (rather
+    # than crashing, or worse, decoding it as if it were a start line)
+    # is the only sane behaviour, and it must not leave the decoder in a
+    # stuck state.
+    dec = smp.SerialDecoder()
+    out = dec.feed(smp.PKT_CONT + b"AAAA\n")
+    check("orphan continuation line dropped, no crash", out == [])
+
+    frame = smp.encode_frame(2, 0, 0, {"d": "x"}, 9)
+    out2 = dec.feed(smp.serial_encode(frame))
+    check("decoder recovers after dropping an orphan continuation line",
+          out2 == [frame])
+
+
+# ------------------------------------------------------------------ #
 # CBOR encoder: one hand-derived byte vector per type the flasher emits.
 # All are standard RFC 8949 CBOR (zcbor's major types match, see smp.py's
 # header comment section 4): major<<5 | additional-info header byte.
@@ -119,7 +218,7 @@ def test_cbor_negative_int():
 # ------------------------------------------------------------------ #
 # CRC16: known catalog vector for CRC-16/XMODEM (poly 0x1021, init
 # 0x0000), which is what boot_serial.c actually computes when seeded
-# with CRC16_INITIAL_CRC=0 (boot_serial.c:135) -- see smp.py's header
+# with CRC16_INITIAL_CRC=0 (boot_serial.c:135); see smp.py's header
 # comment section 3 for the full derivation chain.
 # ------------------------------------------------------------------ #
 def test_crc16_known_vector():
@@ -128,7 +227,7 @@ def test_crc16_known_vector():
 
 def test_crc16_residue_property():
     # Appending the big-endian CRC of a message to that message and
-    # recomputing the CRC over the whole thing must give residue 0 --
+    # recomputing the CRC over the whole thing must give residue 0:
     # this is exactly what boot_serial.c:1479-1489 checks on decode.
     msg = b"hello mcuboot"
     crc = smp.crc16_xmodem(msg)
@@ -190,7 +289,7 @@ def test_serial_multiline_roundtrip():
 
 def test_serial_decoder_fed_byte_at_a_time():
     # Streaming property: feeding one byte at a time must give the same
-    # result as feeding it all at once -- exercises the partial-line
+    # result as feeding it all at once; exercises the partial-line
     # buffering path.
     payload = {"data": bytes(range(200)), "off": 0}
     frame = smp.encode_frame(2, 1, 1, payload, 3)
@@ -231,7 +330,7 @@ def test_decode_frames_multiple_concatenated():
 
 # ------------------------------------------------------------------ #
 # flash.py: argument parsing and image-hash printing against a temp
-# file. No serial-port access (global constraint for this task) -- the
+# file. No serial-port access (global constraint for this task); the
 # port-touching paths are exercised on hardware in Task 7.
 # ------------------------------------------------------------------ #
 def test_flash_argparse_no_default_port_value():
