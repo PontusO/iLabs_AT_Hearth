@@ -1,0 +1,6 @@
+board:
+  name: ophelia_cpico
+  full_name: iLabs CPico with Wurth Ophelia-IV
+  vendor: ilabs
+  socs:
+    - name: nrf54l15
