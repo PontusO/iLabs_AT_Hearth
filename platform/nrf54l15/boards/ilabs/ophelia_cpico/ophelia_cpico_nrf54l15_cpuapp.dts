@@ -11,6 +11,7 @@
         zephyr,shell-uart = &uart30;
         zephyr,sram = &cpuapp_sram;
         zephyr,flash = &cpuapp_rram;
+        zephyr,flash-controller = &rram_controller;
         zephyr,code-partition = &slot0_partition;
         hearth,at-uart = &uart20;
     };
