@@ -85,6 +85,11 @@ The `--port` flag **must use `/dev/serial/by-id`**, never `/dev/ttyACM<n>`. The 
 
 When the flash succeeds, the application starts and prints `+MTREADY` on the same UART within a few seconds; its presence is the flasher's success criterion.
 
+Watching the console: open the Debug Probe's CDC with DTR asserted.
+Like the bridge's own USB stack, the probe's CDC discards output while
+the host holds DTR low, so a reader that clears DTR sees permanent
+silence from a perfectly healthy console (half a bench day, once).
+
 ## Recovery semantics
 
 `CONFIG_BOOT_SERIAL_NO_APPLICATION` means the recovery strap is not the only way into serial recovery. A unit whose slot-0 image fails signature validation drops into serial recovery on its own at boot, with no strap required. Physical access to a unit in that state, plus a corrupted image, is therefore enough to reach an unauthenticated SMP flash-write port: no strap, no credentials, wire access alone. Signed-boot still refuses to run unsigned code, so a write does not equal a compromise of the running application; this is a deliberate availability-over-lockdown choice, appropriate for a module whose SWD pads are also exposed on test points (SWD access alone already grants at least as much).
