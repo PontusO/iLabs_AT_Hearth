@@ -1,10 +1,12 @@
 /*
  * hearth_port_zephyr.c - hearth_port.h and hearth_log.h on Zephyr.
- * Skeleton quality: the KV store is RAM-backed (the real port moves to
- * ZMS/settings in the Nordic round), flow control reports none.
+ * The KV store persists through the settings subsystem on the ZMS
+ * backend (settings_storage partition, pm_static.yml); flow control
+ * still reports none.
  */
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,6 +14,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/reboot.h>
 
 #include "hearth_log.h"
@@ -139,70 +142,125 @@ int hearth_link_set_baud(int baud)
 int hearth_link_get_flowctrl(void) { return 0; }
 int hearth_link_set_flowctrl(int mode) { return mode == 0 ? 0 : -1; }
 
-/* ---- RAM KV (skeleton; ZMS in the Nordic round) ------------------ */
+/* ---- persistent KV (Zephyr settings over ZMS) --------------------- *
+ * The settings_storage partition is mapped by pm_static.yml; the ZMS
+ * backend binds to it via the "storage_partition" devicetree nodelabel
+ * (boards/ilabs/ophelia_cpico/ophelia_cpico_nrf54l15_cpuapp.dts),
+ * matched by subsys/settings/src/settings_zms.c's
+ * FIXED_PARTITION_ID(storage_partition) fallback when no
+ * "zephyr,settings-partition" chosen node is present.
+ */
 
-#define KV_MAX 8
+#define KV_PATH_MAX 48
 
-static struct {
-    char    ns[16], key[16];
-    uint8_t blob[512];
-    size_t  len;
-    int     used;
-} s_kv[KV_MAX];
+/* settings_subsys_init() is called once, lazily, on the first hearth_kv_*
+ * call (no dedicated boot hook). A failed init does not latch, so a later
+ * call retries instead of being wedged for the life of the process. */
+static bool s_kv_ready;
 
-static int kv_find(const char *ns, const char *key)
+static int kv_ensure_init(void)
 {
-    for (int i = 0; i < KV_MAX; i++)
-        if (s_kv[i].used && !strcmp(s_kv[i].ns, ns) && !strcmp(s_kv[i].key, key))
-            return i;
-    return -1;
+    if (s_kv_ready) return 0;
+    if (settings_subsys_init() != 0) return -1;
+    s_kv_ready = true;
+    return 0;
+}
+
+/* ns and key are short, well-known strings ("mt_ep"/"comp",
+ * "mt_cfg"/"transport"); refuse rather than silently truncate. */
+static int kv_path(char *out, size_t out_len, const char *ns, const char *key)
+{
+    int n = snprintf(out, out_len, "hearth/%s/%s", ns, key);
+    if (n < 0 || (size_t)n >= out_len) return -1;
+    return 0;
+}
+
+struct kv_read_ctx {
+    void   *buf;     /* NULL for an existence-only probe (hearth_kv_delete) */
+    size_t  cap;
+    size_t  len;
+    bool    found;
+    bool    too_big;
+};
+
+/*
+ * settings_load_subtree_direct() invokes this with the matched key
+ * RELATIVE to the subtree argument we pass (the full "hearth/ns/key"
+ * path). Verified against ~/ncs/v3.0.2/zephyr/subsys/settings/src/
+ * settings.c: settings_call_set_handler() computes the relative key with
+ * settings_name_steq(name, subtree, &name_key); that function only
+ * assigns *next (our relative key) when a '/' separator follows the
+ * matched prefix, and leaves it at its initialized NULL when name equals
+ * subtree exactly (subsys/settings/src/settings.c:74-110). So for our
+ * exact-path subtree the one leaf we asked for calls back with key ==
+ * NULL; any deeper node (there are none here, but the check is cheap and
+ * correct if the tree ever grows) calls back with a non-empty key. The
+ * same NULL-or-empty check is how NCS's own settings-backed persistent
+ * storage does it (nrf/samples/matter/common/src/persistent_storage/
+ * backends/persistent_storage_settings.cpp, LoadEntryCallback).
+ */
+static int kv_read_cb(const char *key, size_t len, settings_read_cb read_cb,
+                      void *cb_arg, void *param)
+{
+    struct kv_read_ctx *ctx = param;
+
+    if (key != NULL && key[0] != '\0') return 0;
+
+    ctx->found = true;
+    ctx->len = len;
+    if (ctx->buf == NULL) return 1; /* existence probe, no read needed */
+    if (len > ctx->cap) { ctx->too_big = true; return 1; }
+    ssize_t n = read_cb(cb_arg, ctx->buf, len);
+    if (n < 0) { ctx->found = false; return 1; }
+    ctx->len = (size_t)n;
+    return 1; /* exact-path subtree: one leaf at most, stop here */
 }
 
 int hearth_kv_get_blob(const char *ns, const char *key,
                        void *buf, size_t *inout_len)
 {
-    int i = kv_find(ns, key);
-    if (i < 0) return 1;
-    if (*inout_len < s_kv[i].len) return -1;
-    memcpy(buf, s_kv[i].blob, s_kv[i].len);
-    *inout_len = s_kv[i].len;
+    char path[KV_PATH_MAX];
+    if (kv_ensure_init() != 0) return -1;
+    if (kv_path(path, sizeof(path), ns, key) != 0) return -1;
+
+    struct kv_read_ctx ctx = { .buf = buf, .cap = *inout_len };
+    settings_load_subtree_direct(path, kv_read_cb, &ctx);
+    if (!ctx.found) return 1;
+    if (ctx.too_big) return -1;
+    *inout_len = ctx.len;
     return 0;
 }
 
 int hearth_kv_set_blob(const char *ns, const char *key,
                        const void *buf, size_t len)
 {
-    if (len > sizeof(s_kv[0].blob)) return -1;
-    int i = kv_find(ns, key);
-    if (i < 0)
-        for (int j = 0; j < KV_MAX; j++)
-            if (!s_kv[j].used) { i = j; break; }
-    if (i < 0) return -1;
-    snprintf(s_kv[i].ns, sizeof(s_kv[i].ns), "%s", ns);
-    snprintf(s_kv[i].key, sizeof(s_kv[i].key), "%s", key);
-    memcpy(s_kv[i].blob, buf, len);
-    s_kv[i].len = len;
-    s_kv[i].used = 1;
-    return 0;
+    char path[KV_PATH_MAX];
+    if (kv_ensure_init() != 0) return -1;
+    if (kv_path(path, sizeof(path), ns, key) != 0) return -1;
+    return settings_save_one(path, buf, len) == 0 ? 0 : -1;
 }
 
 int hearth_kv_get_u8(const char *ns, const char *key, uint8_t *out)
 {
-    size_t len = 1;
+    size_t len = sizeof(*out);
     return hearth_kv_get_blob(ns, key, out, &len);
 }
 
 int hearth_kv_set_u8(const char *ns, const char *key, uint8_t val)
 {
-    return hearth_kv_set_blob(ns, key, &val, 1);
+    return hearth_kv_set_blob(ns, key, &val, sizeof(val));
 }
 
 int hearth_kv_delete(const char *ns, const char *key)
 {
-    int i = kv_find(ns, key);
-    if (i < 0) return 1;
-    s_kv[i].used = 0;
-    return 0;
+    char path[KV_PATH_MAX];
+    if (kv_ensure_init() != 0) return -1;
+    if (kv_path(path, sizeof(path), ns, key) != 0) return -1;
+
+    struct kv_read_ctx ctx = { .buf = NULL };
+    settings_load_subtree_direct(path, kv_read_cb, &ctx);
+    if (!ctx.found) return 1;
+    return settings_delete(path) == 0 ? 0 : -1;
 }
 
 void hearth_log_write(hearth_log_level_t level, const char *tag,
