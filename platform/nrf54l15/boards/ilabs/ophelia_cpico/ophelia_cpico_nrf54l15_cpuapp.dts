@@ -60,6 +60,9 @@
         compatible = "fixed-partitions";
         #address-cells = <1>;
         #size-cells = <1>;
+        /* This fixed-partitions node is inert under sysbuild's Partition
+         * Manager: pm_static.yml is the byte truth (48 KB mcuboot, 1342 KB
+         * app). Kept only so bare non-sysbuild builds still link. */
         boot_partition: partition@0 {
             label = "mcuboot";
             reg = <0x0 DT_SIZE_K(64)>;

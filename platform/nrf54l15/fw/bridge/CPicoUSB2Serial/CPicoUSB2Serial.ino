@@ -31,9 +31,13 @@ void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)
     /* Overriding this weak callback starves the core's own
      * checkSerialReset() (SerialUSB.cpp: bps == 1200 and DTR low), which
      * is what normally provides the 1200 baud touch into BOOTSEL, so the
-     * touch is re-implemented here. Cost of missing this: the bridge can
-     * only be reflashed with a finger on the BOOTSEL button (paid for on
-     * the bench). Reboot from loop(), not from USB interrupt context. */
+     * touch is re-implemented here. This trigger is deliberately wider than
+     * the stock core's: 1200 baud alone, without the stock's additional
+     * DTR-low term. 1200 baud never carries legitimate traffic on this link,
+     * and the wider trigger cannot miss a touch the stock logic would catch.
+     * Cost of missing this: the bridge can only be reflashed with a finger
+     * on the BOOTSEL button (paid for on the bench). Reboot from loop(),
+     * not from USB interrupt context. */
     if (coding->bit_rate == 1200) {
         reboot_req = true;
     }

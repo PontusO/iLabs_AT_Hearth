@@ -85,6 +85,8 @@ The `--port` flag **must use `/dev/serial/by-id`**, never `/dev/ttyACM<n>`. The 
 
 When the flash succeeds, the application starts and prints `+MTREADY` on the same UART within a few seconds; its presence is the flasher's success criterion.
 
+The bridge exposes nRESET and the recovery strap via CDC control signals: CDC DTR asserted holds the module in reset, and RTS asserted drives the recovery strap (released lines let it run). Stock terminal programs (picocom, minicom) assert DTR and often RTS on open, so a terminal opened with defaults silently holds the module in reset or drops it into recovery; open with DTR and RTS cleared to talk to the running application.
+
 Watching the console: open the Debug Probe's CDC with DTR asserted.
 Like the bridge's own USB stack, the probe's CDC discards output while
 the host holds DTR low, so a reader that clears DTR sees permanent
