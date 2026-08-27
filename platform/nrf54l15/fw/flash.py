@@ -54,8 +54,9 @@ DEFAULT_BAUD = 115200  # MCUboot serial-recovery baud (CONFIG_BOOT_SERIAL_UART)
 # bridge follows DTR=reset, RTS=strap (Task 4 report). Detect window is
 # CONFIG_BOOT_SERIAL_DETECT_DELAY=50ms (build/mcuboot/zephyr/.config:81);
 # the hold below is comfortably longer.
-ENTER_STRAP_S = 0.050
-ENTER_HOLD_S = 0.250
+ENTER_STRAP_SETTLE_S = 0.100
+ENTER_RESET_PULSE_S = 0.100
+ENTER_HOLD_S = 0.400
 EXIT_HOLD_S = 0.050
 
 CHUNK = 512  # payload bytes/frame; well under
@@ -120,9 +121,15 @@ def parse_image_header(data):
 # Recovery strap sequence (Task 4 bridge contract: DTR=reset, RTS=strap).
 # ------------------------------------------------------------------ #
 def enter_recovery(ser):
+    """Assert the strap well before the reset releases: each line change
+    is a separate USB control transfer applied by the bridge on its own
+    loop pass, so the strap gets a settle window rather than assuming
+    ordering. Found on the bench: back-to-back events made recovery
+    entry intermittent (roughly one success in three)."""
     ser.rts = True
+    time.sleep(ENTER_STRAP_SETTLE_S)
     ser.dtr = True
-    time.sleep(ENTER_STRAP_S)
+    time.sleep(ENTER_RESET_PULSE_S)
     ser.dtr = False
     time.sleep(ENTER_HOLD_S)
 
@@ -331,10 +338,17 @@ def main(argv=None):
 
         decoder = smp.SerialDecoder()
         print("SMP handshake...")
-        if not handshake(ser, decoder):
-            die(f"no response from the bootloader after {ECHO_ATTEMPTS} "
-                f"attempts; check the port and that the strap held "
-                f"through CONFIG_BOOT_SERIAL_DETECT_DELAY")
+        entered = handshake(ser, decoder)
+        for retry in range(2):
+            if entered:
+                break
+            print(f"re-entering recovery (attempt {retry + 2}/3)...")
+            enter_recovery(ser)
+            entered = handshake(ser, decoder)
+        if not entered:
+            die(f"no response from the bootloader after 3 entry attempts; "
+                f"check the port and that the strap held through "
+                f"CONFIG_BOOT_SERIAL_DETECT_DELAY")
 
         print("uploading...")
         upload(ser, decoder, data, digest)

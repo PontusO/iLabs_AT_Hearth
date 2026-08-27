@@ -28,6 +28,19 @@ void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)
     pending_baud = coding->bit_rate;
 }
 
+static volatile bool line_dtr = false;
+static volatile bool line_rts = false;
+static volatile bool line_evt = false;
+
+/* TinyUSB weak-callback override: cache CDC line state for the loop. */
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
+{
+    (void)itf;
+    line_dtr = dtr;
+    line_rts = rts;
+    line_evt = true;
+}
+
 static void drive_low_or_release(int pin, bool asserted)
 {
     if (asserted) {
@@ -65,9 +78,22 @@ void loop()
         last_baud = new_baud;
     }
 
-    /* Control lines follow CDC line state every pass. */
-    drive_low_or_release(PIN_NRESET, Serial.dtr());
-    drive_low_or_release(PIN_STRAP, Serial.rts());
+    /* Control lines are applied on line-state EVENTS only (the C6
+     * bridge pattern): re-sampling Serial.dtr()/rts() every pass and
+     * re-driving pinMode produced microsecond release glitches on the
+     * strap whenever a read flickered, which broke MCUboot's 100 ms
+     * continuous strap debounce roughly two times in three on the
+     * bench. The callback below caches the state; this block applies
+     * it once per change. */
+    if (line_evt) {
+        noInterrupts();
+        bool dtr = line_dtr;
+        bool rts = line_rts;
+        line_evt = false;
+        interrupts();
+        drive_low_or_release(PIN_NRESET, dtr);
+        drive_low_or_release(PIN_STRAP, rts);
+    }
 
     while (Serial.available())  Serial1.write(Serial.read());
 
