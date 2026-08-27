@@ -16,6 +16,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/sys/ring_buffer.h>
 
 #include "hearth_log.h"
 #include "hearth_port.h"
@@ -81,9 +82,47 @@ static k_spinlock_key_t s_crit_key[HEARTH_CRIT_COUNT];
 void hearth_crit_enter(int id) { s_crit_key[id] = k_spin_lock(&s_crit[id]); }
 void hearth_crit_exit(int id)  { k_spin_unlock(&s_crit[id], s_crit_key[id]); }
 
+/* ---- link RX (interrupt-driven) -----------------------------------
+ * TX stays uart_poll_out: the UARTE TX FIFO is drained by hearth code
+ * one byte at a time and nothing is lost sitting in it. RX is the other
+ * direction: at 115200 baud the UARTE RX FIFO holds only ~4 bytes, and
+ * the old uart_poll_in + k_msleep(1) loop dropped bytes that arrived
+ * during the sleep window (a bench-proven defect: "AT+MTEP=256" lost
+ * its '=' and was answered as an unknown command). The ISR below drains
+ * the FIFO into a ring buffer as fast as bytes arrive; hearth_link_read
+ * only ever touches the ring, never the FIFO directly. */
+
+RING_BUF_DECLARE(s_rx_ring, 1024); /* MT_AT_LINE_MAX is 512; headroom is cheap */
+static struct k_sem s_rx_sem;
+static uint32_t s_rx_overflow_count;
+static bool s_rx_overflow_logged;
+
+static void hearth_link_isr(const struct device *dev, void *user_data)
+{
+    ARG_UNUSED(user_data);
+    while (uart_irq_update(dev) && uart_irq_rx_ready(dev)) {
+        uint8_t byte;
+        while (uart_fifo_read(dev, &byte, 1) == 1) {
+            if (ring_buf_put(&s_rx_ring, &byte, 1) == 0) {
+                /* Ring full: drop the incoming byte, count it, and warn
+                 * once (not per byte, an overrun can be a fast burst). */
+                s_rx_overflow_count++;
+                if (!s_rx_overflow_logged) {
+                    s_rx_overflow_logged = true;
+                    HEARTH_LOGW("link", "rx ring overflow, dropping bytes");
+                }
+            }
+        }
+    }
+    k_sem_give(&s_rx_sem);
+}
+
 void hearth_link_init(void)
 {
     k_mutex_init(&s_tx_lock);
+    k_sem_init(&s_rx_sem, 0, 1);
+    uart_irq_callback_user_data_set(s_uart, hearth_link_isr, NULL);
+    uart_irq_rx_enable(s_uart);
 }
 
 void hearth_link_write(const void *data, size_t len)
@@ -110,17 +149,20 @@ void hearth_link_write_line(const char *fmt, ...)
 
 int hearth_link_read(uint8_t *buf, size_t len, uint32_t timeout_ms)
 {
-    size_t got = 0;
-    int64_t end = k_uptime_get() + timeout_ms;
-    while (got < len) {
-        unsigned char c;
-        if (uart_poll_in(s_uart, &c) == 0) {
-            buf[got++] = c;
-            continue;
-        }
-        if (k_uptime_get() >= end) break;
-        k_msleep(1);
-    }
+    /* K_MSEC(uint32_t) is a real blocking wait, not a poll: k_sem_take
+     * parks this thread on the semaphore and the kernel wakes it either
+     * when the ISR gives it or when the timeout elapses, no busy-waiting.
+     * K_MSEC takes the full ms value up to UINT32_MAX (~49.7 days) without
+     * overflow, well past the header's 3,600,000 ms (one hour) floor. */
+    if (k_sem_take(&s_rx_sem, K_MSEC(timeout_ms)) != 0) return 0;
+
+    uint32_t got = ring_buf_get(&s_rx_ring, buf, len);
+
+    /* len may be smaller than what is queued (a header field read, say);
+     * if bytes remain, re-give so the next call does not block spuriously
+     * waiting for the ISR to give again. */
+    if (!ring_buf_is_empty(&s_rx_ring)) k_sem_give(&s_rx_sem);
+
     return (int)got;
 }
 
@@ -136,7 +178,15 @@ int hearth_link_set_baud(int baud)
     struct uart_config cfg;
     if (uart_config_get(s_uart, &cfg) != 0) return -1;
     cfg.baudrate = (uint32_t)baud;
-    return uart_configure(s_uart, &cfg) == 0 ? 0 : -1;
+
+    /* The RX irq must be quiet while the UARTE is reconfigured. */
+    uart_irq_rx_disable(s_uart);
+    if (uart_configure(s_uart, &cfg) != 0) {
+        uart_irq_rx_enable(s_uart);
+        return -1;
+    }
+    uart_irq_rx_enable(s_uart);
+    return 0;
 }
 
 int hearth_link_get_flowctrl(void) { return 0; }
