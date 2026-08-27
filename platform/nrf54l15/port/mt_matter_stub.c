@@ -386,17 +386,23 @@ int mt_matter_evse_targets_erase_all(void) { return -1; }
  * on this path but stubbed for header completeness, 0-on-success -> -1.
  */
 
+/* The three devtype checks ACCEPT everything, deliberately: with the
+ * real bridge absent, rejecting all staging would leave the whole
+ * composition pipeline (AT+MTEP, AT+MTEPAPPLY, and the persistence
+ * behind it) dead on this platform. Accepting lets the pipeline and the
+ * KV store be exercised over the AT link during bring-up; the real
+ * mt_devtypes implementation replaces these in the Matter round. */
 bool mt_devtype_is_known(uint32_t devtype_id)
 {
     (void)devtype_id;
-    return false;
+    return true;
 }
 
 bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant)
 {
     (void)devtype_id;
     (void)variant;
-    return false;
+    return true;
 }
 
 bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
@@ -404,7 +410,7 @@ bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_
     (void)devtype_id;
     (void)variant;
     (void)parent_devtype;
-    return false;
+    return true;
 }
 
 int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype,
