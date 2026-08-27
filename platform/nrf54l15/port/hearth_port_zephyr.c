@@ -1,10 +1,12 @@
 /*
  * hearth_port_zephyr.c - hearth_port.h and hearth_log.h on Zephyr.
- * Skeleton quality: the KV store is RAM-backed (the real port moves to
- * ZMS/settings in the Nordic round), flow control reports none.
+ * The KV store persists through the settings subsystem on the ZMS
+ * backend (settings_storage partition, pm_static.yml); flow control
+ * still reports none.
  */
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,7 +14,9 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/sys/ring_buffer.h>
 
 #include "hearth_log.h"
 #include "hearth_port.h"
@@ -78,9 +82,52 @@ static k_spinlock_key_t s_crit_key[HEARTH_CRIT_COUNT];
 void hearth_crit_enter(int id) { s_crit_key[id] = k_spin_lock(&s_crit[id]); }
 void hearth_crit_exit(int id)  { k_spin_unlock(&s_crit[id], s_crit_key[id]); }
 
+/* ---- link RX (interrupt-driven) -----------------------------------
+ * TX stays uart_poll_out: the UARTE TX FIFO is drained by hearth code
+ * one byte at a time and nothing is lost sitting in it. RX is the other
+ * direction: this driver (UART_NRFX_UARTE_LEGACY_SHIM) does not FIFO
+ * more than a single staging byte at 115200 (poll_in_byte, ENDRX taken
+ * per byte, STARTRX re-armed inside uart_fifo_read), and the old
+ * uart_poll_in + k_msleep(1) loop dropped bytes that arrived during the
+ * sleep window (a bench-proven defect: "AT+MTEP=256" lost its '=' and
+ * was answered as an unknown command). The ISR below drains that single
+ * byte into a ring buffer as fast as it lands; hearth_link_read only
+ * ever touches the ring, never the FIFO directly. Per-byte re-arm has
+ * no headroom above 115200 without moving to the async API; tracked as
+ * a graph node, not addressed here. */
+
+static uint8_t s_rx_buf[1024]; /* MT_AT_LINE_MAX is 512; headroom is cheap */
+static struct ring_buf s_rx_ring;
+static struct k_sem s_rx_sem;
+/* ISR-increment-only; hearth_link_read (thread context) compares this
+ * against s_rx_overflow_seen and logs the delta. No logging from ISR
+ * context. */
+static uint32_t s_rx_overflow_count;
+static uint32_t s_rx_overflow_seen;
+
+static void hearth_link_isr(const struct device *dev, void *user_data)
+{
+    ARG_UNUSED(user_data);
+    while (uart_irq_update(dev) && uart_irq_rx_ready(dev)) {
+        uint8_t byte;
+        while (uart_fifo_read(dev, &byte, 1) == 1) {
+            if (ring_buf_put(&s_rx_ring, &byte, 1) == 0) {
+                /* Ring full: drop the incoming byte, count it. The
+                 * count is drained and logged from thread context. */
+                s_rx_overflow_count++;
+            }
+        }
+    }
+    k_sem_give(&s_rx_sem);
+}
+
 void hearth_link_init(void)
 {
     k_mutex_init(&s_tx_lock);
+    ring_buf_init(&s_rx_ring, sizeof(s_rx_buf), s_rx_buf);
+    k_sem_init(&s_rx_sem, 0, 1);
+    uart_irq_callback_user_data_set(s_uart, hearth_link_isr, NULL);
+    uart_irq_rx_enable(s_uart);
 }
 
 void hearth_link_write(const void *data, size_t len)
@@ -107,16 +154,54 @@ void hearth_link_write_line(const char *fmt, ...)
 
 int hearth_link_read(uint8_t *buf, size_t len, uint32_t timeout_ms)
 {
+    /*
+     * A deadline loop, not a single sem_take: the ISR gives the
+     * semaphore once per interrupt entry, including entries where the
+     * drain leaves the ring empty (already-consumed data, a TX-side
+     * interrupt on the same callback), so one successful take does not
+     * guarantee bytes. Loop until len bytes are accumulated or the
+     * deadline passes, matching the ESP port (uart_read_bytes) and the
+     * parser's contract (at_parser.c parser_task: "the link read waits
+     * for the FULL length"). timeout_ms 0 keeps poll semantics: a
+     * single non-blocking attempt, no deadline loop.
+     *
+     * K_MSEC(uint32_t) is a real blocking wait, not a poll: k_sem_take
+     * parks this thread and the kernel wakes it on either a give or the
+     * timeout, no busy-waiting. The remaining-time computation below
+     * stays within uint32_t range (clamped), so K_MSEC never overflows,
+     * even for the header's 3,600,000 ms (one hour) floor.
+     */
+    int64_t deadline = k_uptime_get() + (int64_t)timeout_ms;
     size_t got = 0;
-    int64_t end = k_uptime_get() + timeout_ms;
+
     while (got < len) {
-        unsigned char c;
-        if (uart_poll_in(s_uart, &c) == 0) {
-            buf[got++] = c;
-            continue;
+        k_timeout_t wait;
+
+        if (timeout_ms == 0) {
+            wait = K_NO_WAIT;
+        } else {
+            int64_t left = deadline - k_uptime_get();
+            if (left <= 0) break;
+            wait = K_MSEC((uint32_t)(left > UINT32_MAX ? UINT32_MAX : left));
         }
-        if (k_uptime_get() >= end) break;
-        k_msleep(1);
+
+        if (k_sem_take(&s_rx_sem, wait) != 0) {
+            if (timeout_ms == 0) break;
+            continue; /* deadline re-checked at the top of the loop */
+        }
+
+        got += ring_buf_get(&s_rx_ring, buf + got, len - got);
+
+        /* More queued than we took (len was smaller); re-give so the
+         * next lap, or the next call, does not block spuriously. */
+        if (!ring_buf_is_empty(&s_rx_ring)) k_sem_give(&s_rx_sem);
+
+        uint32_t overflow = s_rx_overflow_count;
+        if (overflow != s_rx_overflow_seen) {
+            HEARTH_LOGW("link", "rx ring overflow, dropped %u byte(s)",
+                       (unsigned)(overflow - s_rx_overflow_seen));
+            s_rx_overflow_seen = overflow;
+        }
     }
     return (int)got;
 }
@@ -132,77 +217,189 @@ int hearth_link_set_baud(int baud)
 {
     struct uart_config cfg;
     if (uart_config_get(s_uart, &cfg) != 0) return -1;
+    uint32_t old_baud = cfg.baudrate;
     cfg.baudrate = (uint32_t)baud;
-    return uart_configure(s_uart, &cfg) == 0 ? 0 : -1;
+
+    /*
+     * cmd_mtbaud (mt_at.c) documents the contract this must honor: the
+     * AT+MTBAUD OK is written at the OLD rate and hearth_link_set_baud()
+     * drains TX before switching, so the host (still listening at the
+     * old rate) sees a clean OK, not tail bytes at the new rate. Hold
+     * the tx lock across drain-and-switch so no later write queues into
+     * the gap, and busy-wait two character times (10 bits/char: start +
+     * 8 data + stop) at the OLD baud so the OK is actually off the wire,
+     * not just handed to the UARTE, before the rate changes under it.
+     */
+    k_mutex_lock(&s_tx_lock, K_FOREVER);
+
+    uint32_t drain_us = (old_baud != 0)
+        ? (uint32_t)(2ULL * 10 * 1000000 / old_baud) + 100
+        : 100;
+    k_busy_wait(drain_us);
+
+    uart_irq_rx_disable(s_uart);
+    if (uart_configure(s_uart, &cfg) != 0) {
+        uart_irq_rx_enable(s_uart);
+        k_mutex_unlock(&s_tx_lock);
+        return -1;
+    }
+
+    /* A byte that arrived mid-reconfigure was sampled at the wrong rate
+     * and is garbage; the sem count carried over from before the switch
+     * is stale for the same reason. Flush both while the rx irq is
+     * still off, so this cannot race the ISR. */
+    ring_buf_reset(&s_rx_ring);
+    k_sem_reset(&s_rx_sem);
+
+    uart_irq_rx_enable(s_uart);
+    k_mutex_unlock(&s_tx_lock);
+    return 0;
 }
 
 int hearth_link_get_flowctrl(void) { return 0; }
 int hearth_link_set_flowctrl(int mode) { return mode == 0 ? 0 : -1; }
 
-/* ---- RAM KV (skeleton; ZMS in the Nordic round) ------------------ */
+/* ---- persistent KV (Zephyr settings over ZMS) --------------------- *
+ * The settings_storage partition is mapped by pm_static.yml. This build
+ * has CONFIG_PARTITION_MANAGER_ENABLED=y, so zephyr/include/zephyr/
+ * storage/flash_map.h takes its USE_PARTITION_MANAGER branch and pulls
+ * in nrf/include/flash_map_pm.h instead of the plain devicetree-based
+ * FIXED_PARTITION_ID. Because CONFIG_SETTINGS_ZMS is set, flash_map_pm.h
+ * preprocessor-aliases the bare token storage_partition to
+ * settings_storage (`#define storage_partition settings_storage`), and
+ * redefines FIXED_PARTITION_ID(label) as PM_ID(label), i.e.
+ * PM_##label##_ID. So subsys/settings/src/settings_zms.c's fallback
+ * FIXED_PARTITION_ID(storage_partition) expands, via that token alias,
+ * to PM_settings_storage_ID, i.e. PM_SETTINGS_STORAGE_ID straight out of
+ * the generated pm_config.h (0x15C000, size 0x8000). Devicetree is never
+ * consulted on this path; the "storage_partition" nodelabel that also
+ * happens to live in boards/ilabs/ophelia_cpico/
+ * ophelia_cpico_nrf54l15_cpuapp.dts (address 0x15c000, but a stale,
+ * PM-ignored 0x9000 size) is not what resolves this and its own
+ * DT-derived partition ID matching PM's is coincidence, not the
+ * mechanism. Do NOT "fix" this by adding a zephyr,settings-partition
+ * chosen node: that only flips settings_zms.c onto its other branch
+ * (DT_FIXED_PARTITION_ID via DT_CHOSEN, the raw devicetree-ordinal path,
+ * bypassing flash_map_pm.h's alias entirely), which is unnecessary
+ * because the PM alias above already binds correctly, and swaps a
+ * working, PM-address-accurate path for one keyed off devicetree
+ * ordinals that are not guaranteed to track pm_static.yml.
+ */
 
-#define KV_MAX 8
+#define KV_PATH_MAX 48
 
-static struct {
-    char    ns[16], key[16];
-    uint8_t blob[512];
-    size_t  len;
-    int     used;
-} s_kv[KV_MAX];
+/* settings_subsys_init() is called once, lazily, on the first hearth_kv_*
+ * call (no dedicated boot hook). A failed init does not latch, so a later
+ * call retries instead of being wedged for the life of the process.
+ * hearth_kv_* is only ever called from one thread today; if that ever
+ * changes, this still holds, because settings_subsys_init() takes the
+ * settings subsystem's own internal mutex and is idempotent to call more
+ * than once (subsys/settings/src/settings_init.c). */
+static bool s_kv_ready;
 
-static int kv_find(const char *ns, const char *key)
+static int kv_ensure_init(void)
 {
-    for (int i = 0; i < KV_MAX; i++)
-        if (s_kv[i].used && !strcmp(s_kv[i].ns, ns) && !strcmp(s_kv[i].key, key))
-            return i;
-    return -1;
+    if (s_kv_ready) return 0;
+    if (settings_subsys_init() != 0) return -1;
+    s_kv_ready = true;
+    return 0;
+}
+
+/* ns and key are short, well-known strings ("mt_ep"/"comp",
+ * "mt_cfg"/"transport"); refuse rather than silently truncate. */
+static int kv_path(char *out, size_t out_len, const char *ns, const char *key)
+{
+    int n = snprintf(out, out_len, "hearth/%s/%s", ns, key);
+    if (n < 0 || (size_t)n >= out_len) return -1;
+    return 0;
+}
+
+struct kv_read_ctx {
+    void   *buf;     /* NULL for an existence-only probe (hearth_kv_delete) */
+    size_t  cap;
+    size_t  len;
+    bool    found;
+    bool    too_big;
+};
+
+/*
+ * settings_load_subtree_direct() invokes this with the matched key
+ * RELATIVE to the subtree argument we pass (the full "hearth/ns/key"
+ * path). Verified against ~/ncs/v3.0.2/zephyr/subsys/settings/src/
+ * settings.c: settings_call_set_handler() computes the relative key with
+ * settings_name_steq(name, subtree, &name_key); that function only
+ * assigns *next (our relative key) when a '/' separator follows the
+ * matched prefix, and leaves it at its initialized NULL when name equals
+ * subtree exactly (subsys/settings/src/settings.c:74-110). So for our
+ * exact-path subtree the one leaf we asked for calls back with key ==
+ * NULL; any deeper node (there are none here, but the check is cheap and
+ * correct if the tree ever grows) calls back with a non-empty key. The
+ * same NULL-or-empty check is how NCS's own settings-backed persistent
+ * storage does it (nrf/samples/matter/common/src/persistent_storage/
+ * backends/persistent_storage_settings.cpp, LoadEntryCallback).
+ */
+static int kv_read_cb(const char *key, size_t len, settings_read_cb read_cb,
+                      void *cb_arg, void *param)
+{
+    struct kv_read_ctx *ctx = param;
+
+    if (key != NULL && key[0] != '\0') return 0;
+
+    ctx->found = true;
+    ctx->len = len;
+    if (ctx->buf == NULL) return 1; /* existence probe, no read needed */
+    if (len > ctx->cap) { ctx->too_big = true; return 1; }
+    ssize_t n = read_cb(cb_arg, ctx->buf, len);
+    if (n < 0) { ctx->found = false; return 1; }
+    ctx->len = (size_t)n;
+    return 1; /* exact-path subtree: one leaf at most, stop here */
 }
 
 int hearth_kv_get_blob(const char *ns, const char *key,
                        void *buf, size_t *inout_len)
 {
-    int i = kv_find(ns, key);
-    if (i < 0) return 1;
-    if (*inout_len < s_kv[i].len) return -1;
-    memcpy(buf, s_kv[i].blob, s_kv[i].len);
-    *inout_len = s_kv[i].len;
+    char path[KV_PATH_MAX];
+    if (kv_ensure_init() != 0) return -1;
+    if (kv_path(path, sizeof(path), ns, key) != 0) return -1;
+
+    struct kv_read_ctx ctx = { .buf = buf, .cap = *inout_len };
+    settings_load_subtree_direct(path, kv_read_cb, &ctx);
+    if (!ctx.found) return 1;
+    if (ctx.too_big) return -1;
+    *inout_len = ctx.len;
     return 0;
 }
 
 int hearth_kv_set_blob(const char *ns, const char *key,
                        const void *buf, size_t len)
 {
-    if (len > sizeof(s_kv[0].blob)) return -1;
-    int i = kv_find(ns, key);
-    if (i < 0)
-        for (int j = 0; j < KV_MAX; j++)
-            if (!s_kv[j].used) { i = j; break; }
-    if (i < 0) return -1;
-    snprintf(s_kv[i].ns, sizeof(s_kv[i].ns), "%s", ns);
-    snprintf(s_kv[i].key, sizeof(s_kv[i].key), "%s", key);
-    memcpy(s_kv[i].blob, buf, len);
-    s_kv[i].len = len;
-    s_kv[i].used = 1;
-    return 0;
+    char path[KV_PATH_MAX];
+    if (kv_ensure_init() != 0) return -1;
+    if (kv_path(path, sizeof(path), ns, key) != 0) return -1;
+    return settings_save_one(path, buf, len) == 0 ? 0 : -1;
 }
 
 int hearth_kv_get_u8(const char *ns, const char *key, uint8_t *out)
 {
-    size_t len = 1;
+    size_t len = sizeof(*out);
     return hearth_kv_get_blob(ns, key, out, &len);
 }
 
 int hearth_kv_set_u8(const char *ns, const char *key, uint8_t val)
 {
-    return hearth_kv_set_blob(ns, key, &val, 1);
+    return hearth_kv_set_blob(ns, key, &val, sizeof(val));
 }
 
 int hearth_kv_delete(const char *ns, const char *key)
 {
-    int i = kv_find(ns, key);
-    if (i < 0) return 1;
-    s_kv[i].used = 0;
-    return 0;
+    char path[KV_PATH_MAX];
+    if (kv_ensure_init() != 0) return -1;
+    if (kv_path(path, sizeof(path), ns, key) != 0) return -1;
+
+    struct kv_read_ctx ctx = { .buf = NULL };
+    settings_load_subtree_direct(path, kv_read_cb, &ctx);
+    if (!ctx.found) return 1;
+    return settings_delete(path) == 0 ? 0 : -1;
 }
 
 void hearth_log_write(hearth_log_level_t level, const char *tag,
