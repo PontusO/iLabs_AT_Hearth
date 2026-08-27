@@ -19,14 +19,24 @@ strap low, both released = module runs, the bridge follows host baud):
      (magic + version), refuse to continue if the magic doesn't match
      MCUboot's IMAGE_MAGIC
   2. open the port at 115200 (MCUboot's serial-recovery baud; the
-     CPico bridge follows whatever baud the host opens at)
-  3. enter recovery: RTS True, DTR True, 50 ms, DTR False, 250 ms
-     (holds the recovery strap through the reset pulse and for longer
-     than CONFIG_BOOT_SERIAL_DETECT_DELAY=50 ms,
-     build/mcuboot/zephyr/.config:81)
-  4. SMP echo handshake, 3 attempts (see smp.py's header comment for why
-     this build's echo replies ENOTSUP rather than echoing: any
-     well-formed reply still proves the link works)
+     CPico bridge follows whatever baud the host opens at). DTR and RTS
+     are cleared to False on the Serial object BEFORE open(): pyserial
+     applies them at open time, so the module sees a known released
+     line state instead of whatever it happened to power up with.
+  3. enter recovery, starting from that known released state: RTS True
+     (strap asserted), settle 100 ms, DTR True (reset pulse), 100 ms,
+     DTR False (reset released, strap still held), hold 400 ms. Up to
+     ENTRY_ATTEMPTS=3 entry attempts; each one clears the input buffer
+     and starts a fresh SMP decoder so a stale reply left over from an
+     earlier, abandoned attempt cannot be mistaken for this attempt's
+     answer.
+  4. SMP echo handshake, 3 attempts per entry (see smp.py's header
+     comment for why this build's echo replies ENOTSUP rather than
+     echoing: any well-formed reply still proves the link works). The
+     seq field is drawn from one session-wide monotonic counter shared
+     with the upload loop, so no two frames sent in a run, across
+     entries or between handshake and upload, ever reuse a seq value
+     while still in flight.
   5. upload loop: <=512-byte payload chunks, resend on timeout from the
      last acked offset, progress line like the C6 flasher
      (platform/esp32c6/fw/flash.py)
@@ -34,9 +44,11 @@ strap low, both released = module runs, the bridge follows host baud):
   7. wait up to 20 s for a line containing +MTREADY; print it and exit 0,
      or exit 1 with the tail of what was read
 
---enter-only and --no-wait are for Task 7's demo 2 and for debugging: the
-former drives the strap sequence and stops before touching SMP at all,
-the latter skips the post-flash +MTREADY wait.
+--enter-only and --no-wait are for Task 7's demo 2 and for debugging:
+the former drives the strap sequence and then runs the SMP handshake to
+verify recovery was actually entered (exiting non-zero if the
+bootloader never answers), the latter skips the post-flash +MTREADY
+wait.
 """
 
 import argparse
@@ -51,13 +63,32 @@ import smp
 DEFAULT_BAUD = 115200  # MCUboot serial-recovery baud (CONFIG_BOOT_SERIAL_UART)
 
 # Recovery strap sequence timing (spec section 4 / task context): the
-# bridge follows DTR=reset, RTS=strap (Task 4 report). Detect window is
-# CONFIG_BOOT_SERIAL_DETECT_DELAY=50ms (build/mcuboot/zephyr/.config:81);
-# the hold below is comfortably longer.
-ENTER_STRAP_SETTLE_S = 0.100
-ENTER_RESET_PULSE_S = 0.100
-ENTER_HOLD_S = 0.400
+# bridge follows DTR=reset, RTS=strap (Task 4 report). DTR/RTS are
+# cleared before the port opens (see main()), so every transition below
+# is a genuine edge, not a guess about the module's power-on line state.
+ENTER_STRAP_SETTLE_S = 0.100  # gap between asserting RTS (strap low) and
+                               # asserting DTR (reset pulse start). The
+                               # bridge applies one line-state event per
+                               # loop pass, so this settle window lets it
+                               # apply the strap event before the reset
+                               # event arrives, rather than racing the
+                               # two down the same USB control transfer.
+ENTER_RESET_PULSE_S = 0.100   # width of the reset pulse (DTR held
+                               # asserted): long enough for the module's
+                               # reset controller to register a clean
+                               # reset before it is released.
+ENTER_HOLD_S = 0.400          # time DTR stays released, strap still
+                               # held, before this entry attempt is
+                               # considered complete: covers MCUboot's
+                               # boot path up to where it samples the
+                               # strap, plus its continuous-strap detect
+                               # window, CONFIG_BOOT_SERIAL_DETECT_DELAY=
+                               # 50 ms (build/mcuboot/zephyr/.config:81),
+                               # with margin for boot time ahead of it.
 EXIT_HOLD_S = 0.050
+
+ENTRY_ATTEMPTS = 3  # recovery entries to try before giving up (each one
+                     # runs its own full ECHO_ATTEMPTS handshake)
 
 CHUNK = 512  # payload bytes/frame; well under
              # CONFIG_BOOT_SERIAL_MAX_RECEIVE_SIZE=1024
@@ -121,11 +152,26 @@ def parse_image_header(data):
 # Recovery strap sequence (Task 4 bridge contract: DTR=reset, RTS=strap).
 # ------------------------------------------------------------------ #
 def enter_recovery(ser):
-    """Assert the strap well before the reset releases: each line change
-    is a separate USB control transfer applied by the bridge on its own
-    loop pass, so the strap gets a settle window rather than assuming
-    ordering. Found on the bench: back-to-back events made recovery
-    entry intermittent (roughly one success in three)."""
+    """Assert the strap well before the reset releases.
+
+    Setting ser.rts or ser.dtr issues one USB CDC SET_CONTROL_LINE_STATE
+    control transfer carrying BOTH bits' current state, not a
+    per-line transfer; each pyserial assignment below is what turns
+    into one such transfer, applied by the bridge on its own loop pass
+    as a single line-state event. The settle window between asserting
+    RTS and asserting DTR exists so the bridge applies the strap event
+    before the reset event arrives, rather than the two racing down
+    back-to-back transfers.
+
+    That settle window only means something because main() clears both
+    lines (ser.dtr = False; ser.rts = False) before ser.open(): pyserial
+    applies pre-open line state at open time, so the module starts from
+    a known released state and ser.rts = True below is a genuine
+    transition, not an assertion of a bit that might already have been
+    set by whatever the line happened to power up as. That pre-open
+    clearing is what makes this whole sequence deterministic. Found on
+    the bench: without it, recovery entry was intermittent (roughly one
+    success in three)."""
     ser.rts = True
     time.sleep(ENTER_STRAP_SETTLE_S)
     ser.dtr = True
@@ -184,9 +230,28 @@ def read_response(ser, decoder, timeout, expected_seq=None):
     return None
 
 
-def handshake(ser, decoder):
+class SeqCounter:
+    """Session-wide monotonic SMP seq allocator, wrapping mod 256 (seq is
+    a single byte on the wire, so a wrap after 256 allocations is the
+    best any counter can do). Shared between handshake() and upload()
+    on purpose: a late reply to an abandoned handshake attempt from a
+    prior recovery entry could otherwise land with the same seq as a
+    fresh handshake or upload frame and be mistaken for its answer.
+    Handshake and upload frames also carry different group/command ids,
+    which alone would make such a collision harmless, but sharing one
+    counter removes the ambiguity outright instead of relying on that."""
+
+    def __init__(self):
+        self._n = 0
+
+    def next(self):
+        self._n = (self._n + 1) & 0xFF
+        return self._n
+
+
+def handshake(ser, decoder, seqc):
     for attempt in range(1, ECHO_ATTEMPTS + 1):
-        seq = attempt & 0xFF
+        seq = seqc.next()
         send_frame(ser, smp.NMGR_OP_WRITE, smp.MGMT_GROUP_ID_DEFAULT,
                    smp.NMGR_ID_ECHO, {"d": "hearth"}, seq)
         resp = read_response(ser, decoder, ECHO_TIMEOUT_S, expected_seq=seq)
@@ -203,19 +268,20 @@ def handshake(ser, decoder):
     return False
 
 
-def upload(ser, decoder, data, digest):
+def upload(ser, decoder, data, digest, seqc):
     total = len(data)
     off = 0
-    seq = 0
     consecutive_timeouts = 0
     consecutive_no_progress = 0
+    frame_seq = seqc.next()  # one seq per offset; a resend of the same
+                              # offset reuses it, since read_response()
+                              # matches replies against this same value
     while off < total:
         chunk = data[off:off + CHUNK]
         payload = {"image": 0, "data": chunk, "off": off}
         if off == 0:
             payload["len"] = total
             payload["sha"] = digest
-        frame_seq = seq & 0xFF
         send_frame(ser, smp.NMGR_OP_WRITE, smp.MGMT_GROUP_ID_IMAGE,
                    smp.IMGMGR_NMGR_ID_UPLOAD, payload, frame_seq)
         resp = read_response(ser, decoder, UPLOAD_FRAME_TIMEOUT_S,
@@ -256,7 +322,7 @@ def upload(ser, decoder, data, digest):
                         # what makes a resend-on-timeout safe (it always
                         # tells us where it actually got to, including
                         # alignment padding and offset mismatches)
-        seq += 1
+        frame_seq = seqc.next()
         pct = 100 * off // total if total else 100
         print(f"  {off}/{total} bytes ({pct}%)")
 
@@ -281,9 +347,11 @@ def build_arg_parser():
     ap.add_argument("--baud", type=int, default=DEFAULT_BAUD,
                      help=f"serial baud (default {DEFAULT_BAUD})")
     ap.add_argument("--enter-only", action="store_true",
-                     help="drive the recovery strap sequence and exit; "
-                          "no SMP handshake, no upload (Task 7 demo 2 / "
-                          "debugging)")
+                     help="drive the recovery strap sequence, then run "
+                          "the SMP handshake to verify recovery was "
+                          "actually entered (exit non-zero if the "
+                          "bootloader does not answer); no upload "
+                          "(Task 7 demo 2 / debugging)")
     ap.add_argument("--no-wait", action="store_true",
                      help="skip waiting for +MTREADY after exiting "
                           "recovery; exit 0 once the reset sequence is "
@@ -325,33 +393,65 @@ def main(argv=None):
     ser.port = args.port
     ser.baudrate = args.baud
     ser.timeout = 0
+    # Cleared before open(): pyserial applies pre-open dtr/rts at open
+    # time, so the module starts from a known released line state and
+    # enter_recovery()'s ser.rts = True is a genuine transition, not an
+    # assertion of a bit that might already have been set by whatever
+    # the line happened to power up as. See enter_recovery()'s docstring.
+    ser.dtr = False
+    ser.rts = False
     ser.open()
 
     try:
-        print("entering recovery (RTS strap + DTR reset pulse)...")
-        enter_recovery(ser)
+        seqc = SeqCounter()
 
         if args.enter_only:
-            print("--enter-only: recovery strap driven; not touching the "
-                  "port further.")
+            print("entering recovery (RTS strap + DTR reset pulse)...")
+            enter_recovery(ser)
+            print("--enter-only: recovery strap driven; probing the "
+                  "bootloader with an SMP handshake to verify recovery "
+                  "was actually entered. Closing this port on exit "
+                  "drops DTR/RTS, but that does not undo recovery: "
+                  "MCUboot latched the strap decision at boot, so the "
+                  "module stays in recovery until the next reset.")
+            ser.reset_input_buffer()
+            decoder = smp.SerialDecoder()
+            if not handshake(ser, decoder, seqc):
+                die("no response from the bootloader; recovery entry "
+                    "could not be verified")
+            print("bootloader responded: recovery entry verified.")
             return 0
 
-        decoder = smp.SerialDecoder()
-        print("SMP handshake...")
-        entered = handshake(ser, decoder)
-        for retry in range(2):
+        decoder = None
+        entered = False
+        for attempt in range(1, ENTRY_ATTEMPTS + 1):
+            if attempt == 1:
+                print("entering recovery (RTS strap + DTR reset pulse)...")
+            else:
+                print(f"re-entering recovery (attempt {attempt}/"
+                      f"{ENTRY_ATTEMPTS})...")
+            enter_recovery(ser)
+            # Stale-reply hardening: a reply left over from a previous,
+            # abandoned entry attempt must never be mistaken for this
+            # attempt's answer. Every entry gets a clean input buffer and
+            # a fresh decoder (its partial-line state must not straddle
+            # a reset), on top of the seq counter being session-wide and
+            # monotonic so a late reply cannot even coincidentally carry
+            # a seq this attempt reuses.
+            ser.reset_input_buffer()
+            decoder = smp.SerialDecoder()
+            if attempt == 1:
+                print("SMP handshake...")
+            entered = handshake(ser, decoder, seqc)
             if entered:
                 break
-            print(f"re-entering recovery (attempt {retry + 2}/3)...")
-            enter_recovery(ser)
-            entered = handshake(ser, decoder)
         if not entered:
-            die(f"no response from the bootloader after 3 entry attempts; "
-                f"check the port and that the strap held through "
-                f"CONFIG_BOOT_SERIAL_DETECT_DELAY")
+            die(f"no response from the bootloader after {ENTRY_ATTEMPTS} "
+                f"entry attempts; check the port and that the strap held "
+                f"through CONFIG_BOOT_SERIAL_DETECT_DELAY")
 
         print("uploading...")
-        upload(ser, decoder, data, digest)
+        upload(ser, decoder, data, digest, seqc)
         print("upload complete.")
 
         print("exiting recovery (release strap, reset pulse)...")

@@ -41,14 +41,37 @@ void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
     line_evt = true;
 }
 
-static void drive_low_or_release(int pin, bool asserted)
+/* Per-pin cache of the last state actually applied. pinMode() in
+ * arduino-pico calls gpio_init(), which momentarily releases the pad
+ * before reconfiguring it; calling drive_low_or_release() again with
+ * the state it is already in would glitch an already-driven pin.
+ * Caching lets the function return early when nothing changed. */
+struct pin_cache {
+    bool applied;
+    bool valid;
+};
+
+static struct pin_cache nreset_cache = { false, false };
+static struct pin_cache strap_cache  = { false, false };
+
+/* struct pin_cache (elaborated, not the typedef) in the signature below
+ * is deliberate: arduino-cli's auto-generated prototype for this
+ * function is inserted above every other declaration in the sketch,
+ * before a typedef here would be visible, and "struct pin_cache" alone
+ * needs no prior typedef to parse. */
+static void drive_low_or_release(int pin, bool asserted, struct pin_cache *cache)
 {
+    if (cache->valid && cache->applied == asserted) {
+        return;   /* already in this state: do not re-touch the pad */
+    }
     if (asserted) {
         pinMode(pin, OUTPUT);
         digitalWrite(pin, LOW);
     } else {
         pinMode(pin, INPUT);   /* released: module pull-up wins */
     }
+    cache->applied = asserted;
+    cache->valid = true;
 }
 
 void setup()
@@ -78,21 +101,41 @@ void loop()
         last_baud = new_baud;
     }
 
+    /* A USB unplug while DTR/RTS are asserted must not leave the module
+     * held in reset forever: TinyUSB fires no line-state callback on a
+     * disconnect or unmount, so line_dtr/line_rts stay latched at
+     * whatever they were the instant the cable dropped. Detect the
+     * unmount here and synthesize the release ourselves. This is the
+     * fix for the "unplug the bridge mid-session and the module never
+     * comes back without a manual power cycle" regression. */
+    if (!tud_mounted() && (line_dtr || line_rts)) {
+        line_dtr = false;
+        line_rts = false;
+        line_evt = true;
+    }
+
     /* Control lines are applied on line-state EVENTS only (the C6
-     * bridge pattern): re-sampling Serial.dtr()/rts() every pass and
-     * re-driving pinMode produced microsecond release glitches on the
-     * strap whenever a read flickered, which broke MCUboot's 100 ms
-     * continuous strap debounce roughly two times in three on the
-     * bench. The callback below caches the state; this block applies
-     * it once per change. */
+     * bridge pattern). The real defect this avoids: pinMode() in
+     * arduino-pico calls gpio_init(), which momentarily releases the
+     * pad before reconfiguring it, so re-sampling Serial.dtr()/rts()
+     * and re-driving pinMode every loop pass glitched the strap on
+     * EVERY pass, unconditionally, not just when a read happened to
+     * flicker. MCUboot's continuous-strap debounce window is
+     * CONFIG_BOOT_SERIAL_DETECT_DELAY=50 ms, and that per-pass glitch
+     * broke it roughly two times in three on the bench. The callback
+     * above caches the state; this block applies it once per change,
+     * and drive_low_or_release() is itself idempotent now, so even a
+     * repeated identical event cannot re-glitch the pad. STRAP is
+     * applied before nRESET so the strap is already settled before the
+     * reset line moves, in either direction. */
     if (line_evt) {
         noInterrupts();
         bool dtr = line_dtr;
         bool rts = line_rts;
         line_evt = false;
         interrupts();
-        drive_low_or_release(PIN_NRESET, dtr);
-        drive_low_or_release(PIN_STRAP, rts);
+        drive_low_or_release(PIN_STRAP, rts, &strap_cache);
+        drive_low_or_release(PIN_NRESET, dtr, &nreset_cache);
     }
 
     while (Serial.available())  Serial1.write(Serial.read());
@@ -103,17 +146,12 @@ void loop()
      * low in normal operation (DTR asserted holds the module in
      * reset). Found on the bench: with Serial.write() the module's
      * +MTREADY never reached the host. */
-    bool flushed = false;
     while (Serial1.available()) {
         uint8_t b = (uint8_t)Serial1.read();
         tud_cdc_write(&b, 1);
-        flushed = false;
-        if (tud_cdc_write_available() == 0) {
-            tud_cdc_write_flush();
-            flushed = true;
-        }
     }
-    if (!flushed) {
-        tud_cdc_write_flush();
-    }
+    /* tud_cdc_write() auto-flushes on its own once it fills a full USB
+     * packet; this call is only the tail flush for whatever is left in
+     * the FIFO below a full packet. */
+    tud_cdc_write_flush();
 }
