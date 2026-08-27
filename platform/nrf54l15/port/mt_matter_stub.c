@@ -374,7 +374,9 @@ int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total)
     return MT_ROW_ERR_ENDPOINT;
 }
 
-int mt_matter_evse_targets_erase_all(void) { return -1; }
+int mt_matter_evse_targets_erase_all(void) { /* Erasing schedules that cannot exist succeeds vacuously; a -1 here
+     * blocked AT+MTFRESET's completion during bring-up (bench-found). */
+    return 0; }
 
 /*
  * ---- mt_devtypes.h ---------------------------------------------------
