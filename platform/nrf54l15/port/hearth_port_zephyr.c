@@ -143,19 +143,41 @@ int hearth_link_get_flowctrl(void) { return 0; }
 int hearth_link_set_flowctrl(int mode) { return mode == 0 ? 0 : -1; }
 
 /* ---- persistent KV (Zephyr settings over ZMS) --------------------- *
- * The settings_storage partition is mapped by pm_static.yml; the ZMS
- * backend binds to it via the "storage_partition" devicetree nodelabel
- * (boards/ilabs/ophelia_cpico/ophelia_cpico_nrf54l15_cpuapp.dts),
- * matched by subsys/settings/src/settings_zms.c's
- * FIXED_PARTITION_ID(storage_partition) fallback when no
- * "zephyr,settings-partition" chosen node is present.
+ * The settings_storage partition is mapped by pm_static.yml. This build
+ * has CONFIG_PARTITION_MANAGER_ENABLED=y, so zephyr/include/zephyr/
+ * storage/flash_map.h takes its USE_PARTITION_MANAGER branch and pulls
+ * in nrf/include/flash_map_pm.h instead of the plain devicetree-based
+ * FIXED_PARTITION_ID. Because CONFIG_SETTINGS_ZMS is set, flash_map_pm.h
+ * preprocessor-aliases the bare token storage_partition to
+ * settings_storage (`#define storage_partition settings_storage`), and
+ * redefines FIXED_PARTITION_ID(label) as PM_ID(label), i.e.
+ * PM_##label##_ID. So subsys/settings/src/settings_zms.c's fallback
+ * FIXED_PARTITION_ID(storage_partition) expands, via that token alias,
+ * to PM_settings_storage_ID, i.e. PM_SETTINGS_STORAGE_ID straight out of
+ * the generated pm_config.h (0x15C000, size 0x8000). Devicetree is never
+ * consulted on this path; the "storage_partition" nodelabel that also
+ * happens to live in boards/ilabs/ophelia_cpico/
+ * ophelia_cpico_nrf54l15_cpuapp.dts (address 0x15c000, but a stale,
+ * PM-ignored 0x9000 size) is not what resolves this and its own
+ * DT-derived partition ID matching PM's is coincidence, not the
+ * mechanism. Do NOT "fix" this by adding a zephyr,settings-partition
+ * chosen node: that only flips settings_zms.c onto its other branch
+ * (DT_FIXED_PARTITION_ID via DT_CHOSEN, the raw devicetree-ordinal path,
+ * bypassing flash_map_pm.h's alias entirely), which is unnecessary
+ * because the PM alias above already binds correctly, and swaps a
+ * working, PM-address-accurate path for one keyed off devicetree
+ * ordinals that are not guaranteed to track pm_static.yml.
  */
 
 #define KV_PATH_MAX 48
 
 /* settings_subsys_init() is called once, lazily, on the first hearth_kv_*
  * call (no dedicated boot hook). A failed init does not latch, so a later
- * call retries instead of being wedged for the life of the process. */
+ * call retries instead of being wedged for the life of the process.
+ * hearth_kv_* is only ever called from one thread today; if that ever
+ * changes, this still holds, because settings_subsys_init() takes the
+ * settings subsystem's own internal mutex and is idempotent to call more
+ * than once (subsys/settings/src/settings_init.c). */
 static bool s_kv_ready;
 
 static int kv_ensure_init(void)
