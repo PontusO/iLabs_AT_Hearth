@@ -22,10 +22,21 @@
 
 static volatile uint32_t pending_baud = 0;   /* set by CDC callback, applied in loop() */
 
+static volatile bool reboot_req = false;
+
 void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)
 {
     (void)itf;
     pending_baud = coding->bit_rate;
+    /* Overriding this weak callback starves the core's own
+     * checkSerialReset() (SerialUSB.cpp: bps == 1200 and DTR low), which
+     * is what normally provides the 1200 baud touch into BOOTSEL, so the
+     * touch is re-implemented here. Cost of missing this: the bridge can
+     * only be reflashed with a finger on the BOOTSEL button (paid for on
+     * the bench). Reboot from loop(), not from USB interrupt context. */
+    if (coding->bit_rate == 1200) {
+        reboot_req = true;
+    }
 }
 
 static volatile bool line_dtr = false;
@@ -128,6 +139,10 @@ void loop()
      * repeated identical event cannot re-glitch the pad. STRAP is
      * applied before nRESET so the strap is already settled before the
      * reset line moves, in either direction. */
+    if (reboot_req) {
+        rp2040.rebootToBootloader();
+    }
+
     if (line_evt) {
         noInterrupts();
         bool dtr = line_dtr;
