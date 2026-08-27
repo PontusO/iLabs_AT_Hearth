@@ -87,3 +87,13 @@
         };
     };
 };
+
+/* The kernel timer. Without this the build silently falls back to a
+ * SysTick configuration whose ISR never reaches the vector table, and
+ * the first tick is a fatal spurious exception (found the hard way on
+ * first boot). Channel split copied from the nrf54l15dk. */
+&grtc {
+    owned-channels = <0 1 2 3 4 5 6 7 8 9 10 11>;
+    child-owned-channels = <3 4 7 8 9 10 11>;
+    status = "okay";
+};

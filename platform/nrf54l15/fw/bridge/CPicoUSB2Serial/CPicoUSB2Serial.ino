@@ -70,5 +70,24 @@ void loop()
     drive_low_or_release(PIN_STRAP, Serial.rts());
 
     while (Serial.available())  Serial1.write(Serial.read());
-    while (Serial1.available()) Serial.write(Serial1.read());
+
+    /* Module-to-host bytes go through TinyUSB directly, NOT through
+     * Serial.write(): the arduino-pico CDC discards TX while DTR is
+     * low, and this bridge's contract REQUIRES the host to keep DTR
+     * low in normal operation (DTR asserted holds the module in
+     * reset). Found on the bench: with Serial.write() the module's
+     * +MTREADY never reached the host. */
+    bool flushed = false;
+    while (Serial1.available()) {
+        uint8_t b = (uint8_t)Serial1.read();
+        tud_cdc_write(&b, 1);
+        flushed = false;
+        if (tud_cdc_write_available() == 0) {
+            tud_cdc_write_flush();
+            flushed = true;
+        }
+    }
+    if (!flushed) {
+        tud_cdc_write_flush();
+    }
 }
