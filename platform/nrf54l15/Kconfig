@@ -11,8 +11,18 @@
 # the PSA-backed crypto path (CHIPCryptoPALPSA.cpp) the one actually
 # built.
 #
+# The common/src/Kconfig fragment below is sourced for the same reason:
+# matter_init.cpp (platform/nrf54l15/CMakeLists.txt, ${MATTER_COMMON})
+# is built straight out of the NCS Matter common sample sources and
+# reads its own NCS_SAMPLE_MATTER_* symbols (task queue sizing, the
+# settings shell, test event triggers, and so on) that only exist once
+# this fragment is sourced. Mirrors how
+# ~/ncs/v3.3.4/nrf/samples/matter/template/Kconfig reaches the same
+# file via ${ZEPHYR_NRF_MODULE_DIR}.
+#
 mainmenu "Hearth nRF54L15 Matter Platform"
 
 source "$(ZEPHYR_CONNECTEDHOMEIP_MODULE_DIR)/config/nrfconnect/chip-module/Kconfig.features"
 source "$(ZEPHYR_CONNECTEDHOMEIP_MODULE_DIR)/config/nrfconnect/chip-module/Kconfig.defaults"
+source "$(ZEPHYR_NRF_MODULE_DIR)/samples/matter/common/src/Kconfig"
 source "Kconfig.zephyr"
