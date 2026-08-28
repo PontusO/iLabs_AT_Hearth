@@ -6,6 +6,7 @@
  */
 
 #include <app/ConcreteAttributePath.h>
+#include <app/clusters/boolean-state-server/CodegenIntegration.h>
 #include <app/server/Server.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/util/attribute-storage.h>
@@ -621,6 +622,45 @@ void MatterPostAttributeChangeCallback(const chip::app::ConcreteAttributePath &p
         emberAfLocateAttributeMetadata(path.mEndpointId, path.mClusterId, path.mAttributeId);
     if (md != nullptr && md->IsNullable() && raw == attr_null_sentinel(is_unsigned, bytes)) {
         return;
+    }
+
+    /*
+     * Fix round 2, C1: the BooleanState bridge (Contact/Rain/Water Freeze/
+     * Water Leak). BooleanState is one of the clusters CHIP serves through
+     * the newer registered ServerClusterInterface path
+     * (src/app/clusters/boolean-state-server/): CodegenDataModelProvider_
+     * Read.cpp:116 checks that registry before ember's external-storage
+     * fallback is ever consulted, so a real controller's read of
+     * StateValue was answering from the registered BooleanStateCluster
+     * object's own mStateValue, not this bridge's arena - bench-confirmed
+     * (an AT write of StateValue=1 fired the URC below, but chip-tool
+     * still read FALSE) and mechanically confirmed against the tree cited
+     * above. This block bridges the two: BooleanState::
+     * FindClusterOnEndpoint() (CodegenIntegration.h) returns the very
+     * object emberAfSetDynamicEndpoint()'s init dispatch already
+     * constructed for this endpoint (see the comment on booleanStateAttrs
+     * in mt_devtypes_zephyr.cpp for why that construction happens at all),
+     * and SetStateValue() pushes this write into it AND emits the
+     * StateChange event (boolean-state-cluster.cpp:57-64) - strictly
+     * better than an ember-only fix, since a bare ember write never emits
+     * that event.
+     *
+     * No recursion risk. SetStateValue() only touches the object's own
+     * mStateValue plus the event/reporting path; it never calls back into
+     * emberAfWriteAttribute, so it cannot re-enter this callback. And a
+     * controller's own IM write to StateValue never reaches this function
+     * in the first place: StateValue is read-only in the Matter sense and
+     * BooleanStateCluster does not override WriteAttribute, so the
+     * registry rejects the write before ember's external-storage path
+     * (and this callback) is ever reached. The only writer that reaches
+     * here for this attribute is this bridge's own AT+MTATTR path.
+     */
+    if (path.mClusterId == chip::app::Clusters::BooleanState::Id &&
+        path.mAttributeId == chip::app::Clusters::BooleanState::Attributes::StateValue::Id) {
+        auto *booleanState = chip::app::Clusters::BooleanState::FindClusterOnEndpoint(path.mEndpointId);
+        if (booleanState != nullptr) {
+            booleanState->SetStateValue(raw != 0);
+        }
     }
 
     char line[64];

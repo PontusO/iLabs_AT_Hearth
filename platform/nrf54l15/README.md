@@ -6,10 +6,29 @@ This is the Nordic sibling of the ESP32-C6 Matter co-processor, running MCUboot 
 
 Matter-over-Thread with the commissioning core is bench-proven (design:
 `superpowers/specs/2026-08-28-nrf54l15-matter-core-design.md` in the same
-repository). The device-type catalogue currently serves the milestone slice
-of the shared table: `0x0100` On/Off Light, `0x0101` Dimmable Light,
-`0x0302` Temperature Sensor; anything else answers `+MTERR:6` until the
-catalogue grows toward C6 parity.
+repository). The device-type catalogue serves the milestone slice plus
+catalogue batch 1 (attribute-only): `0x0100` On/Off Light, `0x0101`
+Dimmable Light, `0x0302` Temperature Sensor, `0x0015` Contact Sensor,
+`0x0107` Occupancy Sensor, `0x0307` Humidity Sensor, `0x0305` Pressure
+Sensor, `0x0044` Rain Sensor, `0x0041` Water Freeze Detector, `0x0043`
+Water Leak Detector, `0x0106` Light Sensor, `0x0306` Flow Sensor, `0x010A`
+On/Off Plug-in Unit, `0x010B` Dimmable Plug-in Unit; anything else answers
+`+MTERR:6` until the catalogue grows toward C6 parity. The BooleanState
+cluster (Contact/Rain/Water Freeze/Water Leak) is served over real Matter
+reads by a CHIP-registered `BooleanStateCluster` object rather than this
+build's external-storage arena directly; `MatterPostAttributeChangeCallback`
+(`port/mt_matter_zephyr.cpp`) bridges the two, so an AT+MTATTR write of
+StateValue both answers a later AT+MTATTR read from this arena and reaches
+a real Matter controller's read, emitting the cluster's StateChange event
+in the process -- see the comment at that call site and on
+`booleanStateAttrs` (`port/mt_devtypes_zephyr.cpp`) for the mechanism.
+
+Known issue (graph bug B388): on the dimmable types (`0x0101`, `0x010B`),
+level commands (the MoveToLevel family) currently settle CurrentLevel on
+the wrong value on dynamic endpoints, a pre-existing CHIP defect this
+batch surfaced rather than caused. Direct AT+MTATTR writes to CurrentLevel
+and OnOff coupling both work correctly; store coherence (AT, controller,
+URCs) is otherwise fine. Tracked for a dedicated fix round.
 
 ## Dev board wiring
 

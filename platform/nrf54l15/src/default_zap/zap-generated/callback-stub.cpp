@@ -36,11 +36,17 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::BasicInformation::Id:
     emberAfBasicInformationClusterInitCallback(endpoint);
     break;
+  case app::Clusters::BooleanState::Id:
+    emberAfBooleanStateClusterInitCallback(endpoint);
+    break;
   case app::Clusters::Descriptor::Id:
     emberAfDescriptorClusterInitCallback(endpoint);
     break;
   case app::Clusters::DiagnosticLogs::Id:
     emberAfDiagnosticLogsClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::FlowMeasurement::Id:
+    emberAfFlowMeasurementClusterInitCallback(endpoint);
     break;
   case app::Clusters::GeneralCommissioning::Id:
     emberAfGeneralCommissioningClusterInitCallback(endpoint);
@@ -57,6 +63,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::Identify::Id:
     emberAfIdentifyClusterInitCallback(endpoint);
     break;
+  case app::Clusters::IlluminanceMeasurement::Id:
+    emberAfIlluminanceMeasurementClusterInitCallback(endpoint);
+    break;
   case app::Clusters::LevelControl::Id:
     emberAfLevelControlClusterInitCallback(endpoint);
     break;
@@ -69,11 +78,20 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::OtaSoftwareUpdateRequestor::Id:
     emberAfOtaSoftwareUpdateRequestorClusterInitCallback(endpoint);
     break;
+  case app::Clusters::OccupancySensing::Id:
+    emberAfOccupancySensingClusterInitCallback(endpoint);
+    break;
   case app::Clusters::OnOff::Id:
     emberAfOnOffClusterInitCallback(endpoint);
     break;
   case app::Clusters::OperationalCredentials::Id:
     emberAfOperationalCredentialsClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::PressureMeasurement::Id:
+    emberAfPressureMeasurementClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::RelativeHumidityMeasurement::Id:
+    emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
     break;
   case app::Clusters::SoftwareDiagnostics::Id:
     emberAfSoftwareDiagnosticsClusterInitCallback(endpoint);
@@ -109,12 +127,22 @@ emberAfBasicInformationClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfBooleanStateClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfDescriptorClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
 void __attribute__((weak))
 emberAfDiagnosticLogsClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfFlowMeasurementClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
@@ -144,6 +172,11 @@ emberAfIdentifyClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfIlluminanceMeasurementClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfLevelControlClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
@@ -164,12 +197,27 @@ emberAfOtaSoftwareUpdateRequestorClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfOccupancySensingClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfOnOffClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
 void __attribute__((weak))
 emberAfOperationalCredentialsClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfPressureMeasurementClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfRelativeHumidityMeasurementClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
