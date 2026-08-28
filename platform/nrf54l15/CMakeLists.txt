@@ -31,6 +31,7 @@ if(CONFIG_CHIP)
   target_include_directories(app PRIVATE src src/default_zap ${MATTER_COMMON})
   target_sources(app PRIVATE
     src/main.cpp
+    port/mt_matter_zephyr.cpp
     ${MATTER_COMMON}/app/matter_init.cpp
     ${MATTER_COMMON}/app/matter_event_handler.cpp
     ${MATTER_COMMON}/app/task_executor.cpp

@@ -20,6 +20,12 @@
  * Every out-parameter is defensively zeroed (after a NULL check) before the
  * failure return, so a core caller that trusts a 0-filled struct on error
  * never reads uninitialized memory.
+ *
+ * The commissioning/state/network slice (mt_matter_state,
+ * mt_matter_fabric_count, mt_matter_open_commissioning,
+ * mt_matter_onboarding_codes, mt_matter_factory_reset, mt_matter_net_info,
+ * mt_matter_transport_mismatch, mt_matter_thread_info, mt_thread_role_name)
+ * now lives in mt_matter_zephyr.cpp against the real CHIP stack.
  */
 
 #include <stddef.h>
@@ -27,46 +33,6 @@
 
 #include "mt_devtypes.h"
 #include "mt_matter.h"
-
-int mt_matter_state(void) { return MT_STATE_UNINIT; }
-int mt_matter_fabric_count(void) { return 0; }
-
-int mt_matter_open_commissioning(int timeout_s)
-{
-    (void)timeout_s;
-    return -1;
-}
-
-int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual, size_t manual_len)
-{
-    if (qr && qr_len) qr[0] = '\0';
-    if (manual && manual_len) manual[0] = '\0';
-    return -1;
-}
-
-void mt_matter_factory_reset(void) { }
-
-int mt_matter_net_info(int *transport, int *enabled, int *connected)
-{
-    if (transport) *transport = 0;
-    if (enabled) *enabled = 0;
-    if (connected) *connected = 0;
-    return -1;
-}
-
-int mt_matter_transport_mismatch(void) { return 0; }
-
-int mt_matter_thread_info(mt_thread_info_t *out)
-{
-    if (out) memset(out, 0, sizeof(*out));
-    return MT_ATTR_ERR_CLUSTER;
-}
-
-const char *mt_thread_role_name(uint8_t role)
-{
-    (void)role;
-    return NULL;
-}
 
 uint16_t mt_matter_endpoint_count(void) { return 0; }
 
