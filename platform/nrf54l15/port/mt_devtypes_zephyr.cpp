@@ -180,7 +180,11 @@ DECLARE_DYNAMIC_CLUSTER(TemperatureMeasurement::Id, tempAttrs, ZAP_CLUSTER_MASK(
 
 DECLARE_DYNAMIC_ENDPOINT(temperatureSensorEndpoint, temperatureSensorClusters);
 
-constexpr EmberAfDeviceType kTemperatureSensorTypes[] = { { 0x0302, 2 } };
+/* Fix round 2, M1: data_model/1.5/device_types/TemperatureSensor.xml
+ * revision is 3, not 2 -- a milestone-round mistake predating this batch,
+ * caught while verifying the eleven new device types against the same
+ * source. */
+constexpr EmberAfDeviceType kTemperatureSensorTypes[] = { { 0x0302, 3 } };
 
 /* ---- boolean-state sensors: contact (0x0015), rain (0x0044), water
  * freeze (0x0041), water leak (0x0043) --------------------------------- */
@@ -193,29 +197,43 @@ constexpr EmberAfDeviceType kTemperatureSensorTypes[] = { { 0x0302, 2 } };
  * the cluster, dynamic ones included (its instance pool is explicitly sized
  * kFixedClusterCount + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT), and
  * constructs a BooleanStateCluster object whose ReadAttribute() answers
- * StateValue from its own mStateValue member (init false), never consulting
- * this arena -- the Descriptor situation above, but for a value the host is
- * meant to update live rather than a static list.
+ * StateValue from its own mStateValue member, never consulting this arena
+ * -- the Descriptor situation above, but for a value the host is meant to
+ * update live rather than a static list. This was bench-confirmed (an
+ * AT+MTATTR write of StateValue=1 fired the URC below, but chip-tool still
+ * read FALSE) and mechanically confirmed (CodegenDataModelProvider_
+ * Read.cpp:116 checks that registry before ember's external-storage
+ * fallback is ever consulted).
  *
- * mt_matter_attr_read/write (mt_matter_zephyr.cpp) call the classic
- * emberAfReadAttribute/WriteAttribute path, which DOES reach this arena, so
- * AT+MTATTR against StateValue reads and writes correctly here. A real
- * Matter controller's read of the same attribute is served by the
- * registered BooleanStateCluster object instead, and will not see
- * AT+MTATTR writes until something bridges the two (candidate: a
- * MatterPostAttributeChangeCallback hook that calls
- * BooleanState::FindClusterOnEndpoint(ep)->SetStateValue() -- out of scope
- * for this attribute-only catalogue round; tracked as a follow-up).
- * Declared here regardless because the AT+MTATTR contract must still
- * resolve the attribute, and every other cluster in this file besides
- * Descriptor is a plain ember external-storage cluster with no such split.
+ * Fix round 2, C1: bridged, not left as a gap. mt_matter_attr_read/write
+ * (mt_matter_zephyr.cpp) call the classic emberAfReadAttribute/
+ * WriteAttribute path and always reach this arena, so AT+MTATTR against
+ * StateValue reads and writes correctly here; MatterPostAttributeChangeCallback
+ * additionally looks up the registered BooleanStateCluster object via
+ * BooleanState::FindClusterOnEndpoint() and calls SetStateValue() on it, so
+ * a host write now also reaches a real Matter controller's read AND emits
+ * the cluster's StateChange event -- see the comment at that call site for
+ * the full mechanism and why it cannot recurse. Declared here regardless,
+ * same as before the bridge: the AT+MTATTR contract must still resolve the
+ * attribute against this arena, and every other cluster in this file
+ * besides Descriptor is a plain ember external-storage cluster with no
+ * such split.
  */
 DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(booleanStateAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(BooleanState::Attributes::StateValue::Id, BOOLEAN, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(BooleanState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
     DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(contactSensorClusters)
+/* Fix round 2, M2: Contact/Rain/Water Freeze/Water Leak all compose to the
+ * exact same cluster set (BooleanState + Identify + Descriptor, mandatory
+ * clusters only), so one cluster list and one EmberAfEndpointType serve
+ * all four -- the same "one metadata array per cluster, shared by every
+ * endpoint type that carries that cluster" principle the top of this file
+ * states for onOffAttrs, extended here to the whole cluster list since the
+ * whole composition, not just one cluster, is identical across these four.
+ * Only the EmberAfDeviceType (id, revision) differs per device type, and
+ * that is what s_registry keys off. */
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(booleanStateSensorClusters)
 DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
@@ -224,47 +242,11 @@ DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SE
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(contactSensorEndpoint, contactSensorClusters);
+DECLARE_DYNAMIC_ENDPOINT(booleanStateSensorEndpoint, booleanStateSensorClusters);
 
 constexpr EmberAfDeviceType kContactSensorTypes[] = { { 0x0015, 2 } };
-
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(rainSensorClusters)
-DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
-                        nullptr),
-    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
-                            nullptr),
-    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
-                            nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
-
-DECLARE_DYNAMIC_ENDPOINT(rainSensorEndpoint, rainSensorClusters);
-
 constexpr EmberAfDeviceType kRainSensorTypes[] = { { 0x0044, 1 } };
-
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(waterFreezeDetectorClusters)
-DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
-                        nullptr),
-    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
-                            nullptr),
-    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
-                            nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
-
-DECLARE_DYNAMIC_ENDPOINT(waterFreezeDetectorEndpoint, waterFreezeDetectorClusters);
-
 constexpr EmberAfDeviceType kWaterFreezeDetectorTypes[] = { { 0x0041, 1 } };
-
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(waterLeakDetectorClusters)
-DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
-                        nullptr),
-    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
-                            nullptr),
-    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
-                            nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
-
-DECLARE_DYNAMIC_ENDPOINT(waterLeakDetectorEndpoint, waterLeakDetectorClusters);
-
 constexpr EmberAfDeviceType kWaterLeakDetectorTypes[] = { { 0x0043, 1 } };
 
 /* ---- occupancy sensor (0x0107) ---------------------------------------- */
@@ -272,18 +254,38 @@ constexpr EmberAfDeviceType kWaterLeakDetectorTypes[] = { { 0x0043, 1 } };
 /*
  * Occupancy, OccupancySensorType and OccupancySensorTypeBitmap are none of
  * them nullable (controller-clusters.matter: plain, non-nullable
- * attributes). emberAfOccupancySensingClusterServerInitCallback
- * (occupancy-sensor-server.cpp) DOES fire for this cluster on any endpoint,
- * dynamic included (cluster-callbacks.cpp dispatches it by cluster id
- * regardless of static/dynamic), but unlike BooleanState it is a plain
- * ember-classic function, not a registered ServerClusterInterface object:
- * it calls halOccupancyGetSensorType() (weak, defaults to
- * HAL_OCCUPANCY_SENSOR_TYPE_PIR) and writes OccupancySensorType/
- * OccupancySensorTypeBitmap through the classic emberAfWriteAttribute path,
- * i.e. through this same arena. Its PIR default reproduces exactly the
- * seed below, so the two cannot drift; no AttributeAccessInterface
- * Instance is constructed anywhere in this tree, so reads are otherwise
- * plain ember external storage like every other sensor in this file.
+ * attributes).
+ *
+ * Fix round 2, I1: the previous version of this comment claimed
+ * emberAfOccupancySensingClusterServerInitCallback fires for this cluster
+ * on any endpoint, dynamic included, "because cluster-callbacks.cpp
+ * dispatches it by cluster id regardless of static/dynamic" -- that
+ * reasoning does not hold up. There is no per-build cluster-callbacks.cpp
+ * in this checked-in tree; the file with that name lives only under a
+ * build directory's gen/matter-data-model-codegen path and dispatches a
+ * DIFFERENT, unrelated function (emberAfOccupancySensingClusterInitCallback, no
+ * "Server" in the name -- a weak no-op stub, unused). The actual function
+ * that fires here, emberAfOccupancySensingClusterServerInitCallback
+ * (occupancy-sensor-server.cpp), is reached only through the per-cluster
+ * "functions" array on EmberAfCluster (MATTER_CLUSTER_FLAG_INIT_FUNCTION,
+ * checked by emberAfFindClusterFunction() in attribute-storage.cpp's
+ * initializeEndpoint()). endpoint_config.h wires that array
+ * (chipFuncArrayOccupancySensingServer) for the STATIC, ZAP-declared
+ * cluster on endpoint 240 only; DECLARE_DYNAMIC_CLUSTER below hardcodes
+ * `.functions = NULL` for every dynamic cluster it builds, with no way to
+ * attach one. So on this endpoint -- a dynamically created one -- that
+ * init callback never runs at all, and the seed row below is the only
+ * writer of OccupancySensorType/OccupancySensorTypeBitmap.
+ *
+ * Fix round 2, I2: occupancy-sensor-server.cpp does define an
+ * AttributeAccessInterface Instance class, and its object file is linked
+ * into this build (occupancy-sensor-server.cpp.obj, confirmed in the DK
+ * build log) -- the earlier claim that no such Instance "is constructed
+ * anywhere in this tree" undersold that; the code is present and
+ * reachable, it is simply never instantiated by anything in this
+ * firmware. With no Instance registered, reads and writes for this
+ * cluster are plain ember external storage, exactly like every other
+ * sensor in this file.
  */
 DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(occupancyAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::Occupancy::Id, BITMAP8, 1, 0),
@@ -473,13 +475,15 @@ const hearth_devtype s_registry[] = {
     { 0x0100, 0, &onOffLightEndpoint, Span<const EmberAfDeviceType>(kOnOffLightTypes) },
     { 0x0101, 0, &dimmableLightEndpoint, Span<const EmberAfDeviceType>(kDimmableLightTypes) },
     { 0x0302, 0, &temperatureSensorEndpoint, Span<const EmberAfDeviceType>(kTemperatureSensorTypes) },
-    { 0x0015, 0, &contactSensorEndpoint, Span<const EmberAfDeviceType>(kContactSensorTypes) },
+    { 0x0015, 0, &booleanStateSensorEndpoint, Span<const EmberAfDeviceType>(kContactSensorTypes) },
     { 0x0107, 0, &occupancySensorEndpoint, Span<const EmberAfDeviceType>(kOccupancySensorTypes) },
     { 0x0307, 0, &humiditySensorEndpoint, Span<const EmberAfDeviceType>(kHumiditySensorTypes) },
     { 0x0305, 0, &pressureSensorEndpoint, Span<const EmberAfDeviceType>(kPressureSensorTypes) },
-    { 0x0044, 0, &rainSensorEndpoint, Span<const EmberAfDeviceType>(kRainSensorTypes) },
-    { 0x0041, 0, &waterFreezeDetectorEndpoint, Span<const EmberAfDeviceType>(kWaterFreezeDetectorTypes) },
-    { 0x0043, 0, &waterLeakDetectorEndpoint, Span<const EmberAfDeviceType>(kWaterLeakDetectorTypes) },
+    { 0x0044, 0, &booleanStateSensorEndpoint, Span<const EmberAfDeviceType>(kRainSensorTypes) },
+    { 0x0041, 0, &booleanStateSensorEndpoint,
+      Span<const EmberAfDeviceType>(kWaterFreezeDetectorTypes) },
+    { 0x0043, 0, &booleanStateSensorEndpoint,
+      Span<const EmberAfDeviceType>(kWaterLeakDetectorTypes) },
     { 0x0106, 0, &lightSensorEndpoint, Span<const EmberAfDeviceType>(kLightSensorTypes) },
     { 0x0306, 0, &flowSensorEndpoint, Span<const EmberAfDeviceType>(kFlowSensorTypes) },
     { 0x010A, 0, &onOffPlugInUnitEndpoint, Span<const EmberAfDeviceType>(kOnOffPlugInUnitTypes) },
@@ -605,15 +609,29 @@ const attr_seed s_seeds[] = {
     { BooleanState::Id, BooleanState::Attributes::StateValue::Id, 1, { 0x00 } },
     { BooleanState::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 
-    /* OccupancySensing: no features mandated by the device type, so
-     * FeatureMap stays 0 even though the sensor-type fields below claim
-     * PIR. Sensor-type fields seed a PIR default (type 0 = kPir,
-     * bitmap 0x01 = kPir): this is also exactly what
-     * emberAfOccupancySensingClusterServerInitCallback's weak
-     * halOccupancyGetSensorType() default produces, so the two write the
-     * same value to this arena and neither drifts from the other. */
+    /* OccupancySensing: fix round 2, C2. The device-type XML alone was the
+     * wrong source for FeatureMap: it names no <features> block, but the
+     * CLUSTER XML (data_model/1.5/clusters/OccupancySensing.xml) declares
+     * all eight Feature bits as `optionalConform choice="a" min="1"` --
+     * choice group "a" requires AT LEAST ONE of them set, so FeatureMap 0
+     * does not conform. Seeding a PIR sensor means Feature::
+     * kPassiveInfrared (0x2) must be set.
+     *
+     * Trap worth naming explicitly: kPassiveInfrared is BIT 1 or Feature
+     * (Enums.h:67-69, value 0x2), but OccupancySensorTypeBitmap::kPir is
+     * BIT 0 of a DIFFERENT bitmap (Enums.h:48-55 -> Bitmap for
+     * OccupancySensorTypeBitmap, value 0x1). The two "PIR" bits live in
+     * unrelated attributes at different bit positions by design -- do not
+     * copy one value into the other.
+     *
+     * Sensor-type fields seed a PIR default (type 0 = kPir, bitmap 0x01 =
+     * kPir); see the comment above occupancyAttrs for why the seed rows
+     * below are the only writer of these fields on this (dynamic)
+     * endpoint. */
     { OccupancySensing::Id, OccupancySensing::Attributes::OccupancySensorType::Id, 1, { 0x00 } },
     { OccupancySensing::Id, OccupancySensing::Attributes::OccupancySensorTypeBitmap::Id, 1, { 0x01 } },
+    { OccupancySensing::Id, OccupancySensing::Attributes::FeatureMap::Id, 4,
+      { 0x02, 0x00, 0x00, 0x00 } },
     { OccupancySensing::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x05, 0x00 } },
 
     /* RelativeHumidityMeasurement: no features, and no reading until the

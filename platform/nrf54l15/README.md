@@ -13,11 +13,15 @@ Dimmable Light, `0x0302` Temperature Sensor, `0x0015` Contact Sensor,
 Sensor, `0x0044` Rain Sensor, `0x0041` Water Freeze Detector, `0x0043`
 Water Leak Detector, `0x0106` Light Sensor, `0x0306` Flow Sensor, `0x010A`
 On/Off Plug-in Unit, `0x010B` Dimmable Plug-in Unit; anything else answers
-`+MTERR:6` until the catalogue grows toward C6 parity. Known gap: the
-BooleanState cluster (Contact/Rain/Water Freeze/Water Leak) is served over
-real Matter reads by a CHIP-registered `BooleanStateCluster` object, not by
-this build's external-storage arena -- see the comment on `booleanStateAttrs`
-in `port/mt_devtypes_zephyr.cpp`.
+`+MTERR:6` until the catalogue grows toward C6 parity. The BooleanState
+cluster (Contact/Rain/Water Freeze/Water Leak) is served over real Matter
+reads by a CHIP-registered `BooleanStateCluster` object rather than this
+build's external-storage arena directly; `MatterPostAttributeChangeCallback`
+(`port/mt_matter_zephyr.cpp`) bridges the two, so an AT+MTATTR write of
+StateValue both answers a later AT+MTATTR read from this arena and reaches
+a real Matter controller's read, emitting the cluster's StateChange event
+in the process -- see the comment at that call site and on
+`booleanStateAttrs` (`port/mt_devtypes_zephyr.cpp`) for the mechanism.
 
 ## Dev board wiring
 
