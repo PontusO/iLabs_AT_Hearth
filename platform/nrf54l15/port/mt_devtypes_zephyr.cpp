@@ -617,9 +617,9 @@ const attr_seed s_seeds[] = {
      * does not conform. Seeding a PIR sensor means Feature::
      * kPassiveInfrared (0x2) must be set.
      *
-     * Trap worth naming explicitly: kPassiveInfrared is BIT 1 or Feature
-     * (Enums.h:67-69, value 0x2), but OccupancySensorTypeBitmap::kPir is
-     * BIT 0 of a DIFFERENT bitmap (Enums.h:48-55 -> Bitmap for
+     * Trap worth naming explicitly: kPassiveInfrared is BIT 1 of Feature
+     * (Enums.h:46-56, value 0x2), but OccupancySensorTypeBitmap::kPir is
+     * BIT 0 of a DIFFERENT bitmap (Enums.h:64-70 -> Bitmap for
      * OccupancySensorTypeBitmap, value 0x1). The two "PIR" bits live in
      * unrelated attributes at different bit positions by design -- do not
      * copy one value into the other.
