@@ -80,3 +80,7 @@ void MatterGroupKeyManagementClusterInitCallback(chip::EndpointId endpointId);
 
 void MatterGroupKeyManagementClusterShutdownCallback(
     chip::EndpointId endpointId);
+
+void MatterBooleanStateClusterInitCallback(chip::EndpointId endpointId);
+
+void MatterBooleanStateClusterShutdownCallback(chip::EndpointId endpointId);

@@ -6,10 +6,18 @@ This is the Nordic sibling of the ESP32-C6 Matter co-processor, running MCUboot 
 
 Matter-over-Thread with the commissioning core is bench-proven (design:
 `superpowers/specs/2026-08-28-nrf54l15-matter-core-design.md` in the same
-repository). The device-type catalogue currently serves the milestone slice
-of the shared table: `0x0100` On/Off Light, `0x0101` Dimmable Light,
-`0x0302` Temperature Sensor; anything else answers `+MTERR:6` until the
-catalogue grows toward C6 parity.
+repository). The device-type catalogue serves the milestone slice plus
+catalogue batch 1 (attribute-only): `0x0100` On/Off Light, `0x0101`
+Dimmable Light, `0x0302` Temperature Sensor, `0x0015` Contact Sensor,
+`0x0107` Occupancy Sensor, `0x0307` Humidity Sensor, `0x0305` Pressure
+Sensor, `0x0044` Rain Sensor, `0x0041` Water Freeze Detector, `0x0043`
+Water Leak Detector, `0x0106` Light Sensor, `0x0306` Flow Sensor, `0x010A`
+On/Off Plug-in Unit, `0x010B` Dimmable Plug-in Unit; anything else answers
+`+MTERR:6` until the catalogue grows toward C6 parity. Known gap: the
+BooleanState cluster (Contact/Rain/Water Freeze/Water Leak) is served over
+real Matter reads by a CHIP-registered `BooleanStateCluster` object, not by
+this build's external-storage arena -- see the comment on `booleanStateAttrs`
+in `port/mt_devtypes_zephyr.cpp`.
 
 ## Dev board wiring
 

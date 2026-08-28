@@ -182,6 +182,284 @@ DECLARE_DYNAMIC_ENDPOINT(temperatureSensorEndpoint, temperatureSensorClusters);
 
 constexpr EmberAfDeviceType kTemperatureSensorTypes[] = { { 0x0302, 2 } };
 
+/* ---- boolean-state sensors: contact (0x0015), rain (0x0044), water
+ * freeze (0x0041), water leak (0x0043) --------------------------------- */
+
+/*
+ * BooleanState (0x0045) is one of the clusters CHIP has migrated to the
+ * newer code-driven ServerClusterInterface path
+ * (src/app/clusters/boolean-state-server/CodegenIntegration.cpp):
+ * MatterBooleanStateClusterInitCallback fires for every endpoint carrying
+ * the cluster, dynamic ones included (its instance pool is explicitly sized
+ * kFixedClusterCount + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT), and
+ * constructs a BooleanStateCluster object whose ReadAttribute() answers
+ * StateValue from its own mStateValue member (init false), never consulting
+ * this arena -- the Descriptor situation above, but for a value the host is
+ * meant to update live rather than a static list.
+ *
+ * mt_matter_attr_read/write (mt_matter_zephyr.cpp) call the classic
+ * emberAfReadAttribute/WriteAttribute path, which DOES reach this arena, so
+ * AT+MTATTR against StateValue reads and writes correctly here. A real
+ * Matter controller's read of the same attribute is served by the
+ * registered BooleanStateCluster object instead, and will not see
+ * AT+MTATTR writes until something bridges the two (candidate: a
+ * MatterPostAttributeChangeCallback hook that calls
+ * BooleanState::FindClusterOnEndpoint(ep)->SetStateValue() -- out of scope
+ * for this attribute-only catalogue round; tracked as a follow-up).
+ * Declared here regardless because the AT+MTATTR contract must still
+ * resolve the attribute, and every other cluster in this file besides
+ * Descriptor is a plain ember external-storage cluster with no such split.
+ */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(booleanStateAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(BooleanState::Attributes::StateValue::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(BooleanState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(contactSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(contactSensorEndpoint, contactSensorClusters);
+
+constexpr EmberAfDeviceType kContactSensorTypes[] = { { 0x0015, 2 } };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(rainSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(rainSensorEndpoint, rainSensorClusters);
+
+constexpr EmberAfDeviceType kRainSensorTypes[] = { { 0x0044, 1 } };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(waterFreezeDetectorClusters)
+DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(waterFreezeDetectorEndpoint, waterFreezeDetectorClusters);
+
+constexpr EmberAfDeviceType kWaterFreezeDetectorTypes[] = { { 0x0041, 1 } };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(waterLeakDetectorClusters)
+DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(waterLeakDetectorEndpoint, waterLeakDetectorClusters);
+
+constexpr EmberAfDeviceType kWaterLeakDetectorTypes[] = { { 0x0043, 1 } };
+
+/* ---- occupancy sensor (0x0107) ---------------------------------------- */
+
+/*
+ * Occupancy, OccupancySensorType and OccupancySensorTypeBitmap are none of
+ * them nullable (controller-clusters.matter: plain, non-nullable
+ * attributes). emberAfOccupancySensingClusterServerInitCallback
+ * (occupancy-sensor-server.cpp) DOES fire for this cluster on any endpoint,
+ * dynamic included (cluster-callbacks.cpp dispatches it by cluster id
+ * regardless of static/dynamic), but unlike BooleanState it is a plain
+ * ember-classic function, not a registered ServerClusterInterface object:
+ * it calls halOccupancyGetSensorType() (weak, defaults to
+ * HAL_OCCUPANCY_SENSOR_TYPE_PIR) and writes OccupancySensorType/
+ * OccupancySensorTypeBitmap through the classic emberAfWriteAttribute path,
+ * i.e. through this same arena. Its PIR default reproduces exactly the
+ * seed below, so the two cannot drift; no AttributeAccessInterface
+ * Instance is constructed anywhere in this tree, so reads are otherwise
+ * plain ember external storage like every other sensor in this file.
+ */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(occupancyAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::Occupancy::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::OccupancySensorType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::OccupancySensorTypeBitmap::Id, BITMAP8, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(occupancySensorClusters)
+DECLARE_DYNAMIC_CLUSTER(OccupancySensing::Id, occupancyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(occupancySensorEndpoint, occupancySensorClusters);
+
+constexpr EmberAfDeviceType kOccupancySensorTypes[] = { { 0x0107, 4 } };
+
+/* ---- humidity sensor (0x0307) ------------------------------------------ */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(humidityAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, INT16U, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MinMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MaxMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(humiditySensorClusters)
+DECLARE_DYNAMIC_CLUSTER(RelativeHumidityMeasurement::Id, humidityAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(humiditySensorEndpoint, humiditySensorClusters);
+
+constexpr EmberAfDeviceType kHumiditySensorTypes[] = { { 0x0307, 2 } };
+
+/* ---- pressure sensor (0x0305) ------------------------------------------ */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(pressureAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MeasuredValue::Id, INT16S, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MinMeasuredValue::Id, INT16S, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MaxMeasuredValue::Id, INT16S, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(pressureSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(PressureMeasurement::Id, pressureAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(pressureSensorEndpoint, pressureSensorClusters);
+
+constexpr EmberAfDeviceType kPressureSensorTypes[] = { { 0x0305, 2 } };
+
+/* ---- light (illuminance) sensor (0x0106) -------------------------------
+ *
+ * IlluminanceMeasurement's MeasuredValue is uint16 (INT16U), unlike
+ * TemperatureMeasurement/PressureMeasurement's signed int16s: the null
+ * sentinel is therefore the type MAXIMUM (0xFFFF, NumericAttributeTraits::
+ * GetNullValue() for an unsigned type), not the signed-type minimum 0x8000
+ * the temperature/pressure seeds use. Same attr_null_sentinel() convention
+ * (mt_matter_zephyr.cpp), different type -> different sentinel bytes. */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(illuminanceAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MeasuredValue::Id, INT16U, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MinMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MaxMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(lightSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(IlluminanceMeasurement::Id, illuminanceAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(lightSensorEndpoint, lightSensorClusters);
+
+constexpr EmberAfDeviceType kLightSensorTypes[] = { { 0x0106, 3 } };
+
+/* ---- flow sensor (0x0306) ----------------------------------------------- */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(flowAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MeasuredValue::Id, INT16U, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MinMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MaxMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(flowSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(FlowMeasurement::Id, flowAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(flowSensorEndpoint, flowSensorClusters);
+
+constexpr EmberAfDeviceType kFlowSensorTypes[] = { { 0x0306, 2 } };
+
+/* ---- on/off plug-in unit (0x010A) --------------------------------------
+ *
+ * Reuses onOffAttrs/kOnOffIncoming verbatim: OnOffPlug-inUnit.xml mandates
+ * the SAME OnOff feature (LT, "Lighting") as OnOffLight.xml -- surprising
+ * for a plug, but confirmed against both the device-type XML
+ * (mandatoryConform on feature LT for the On/Off cluster) and the C6's own
+ * esp_matter build (esp_matter_endpoint.cpp on_off_plug_in_unit::add()
+ * calls on_off::feature::lighting::add() for this same device type), so
+ * the plug's OnOff FeatureMap seed is 0x01, identical to the light's, not
+ * 0. Groups and Scenes Management are also mandatoryConform in the XML for
+ * this device type, matching OnOffLight.xml exactly, and are left out here
+ * for the same reason the milestone on/off light above leaves them out:
+ * this catalogue serves attribute-only clusters this build declares, and
+ * Groups/Scenes were never added for the lights either. */
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(onOffPlugInUnitClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(onOffPlugInUnitEndpoint, onOffPlugInUnitClusters);
+
+constexpr EmberAfDeviceType kOnOffPlugInUnitTypes[] = { { 0x010A, 4 } };
+
+/* ---- dimmable plug-in unit (0x010B) -------------------------------------
+ *
+ * Reuses onOffAttrs/levelAttrs/kOnOffIncoming/kLevelIncoming verbatim:
+ * DimmablePlug-InUnit.xml mandates OnOff feature LT and LevelControl
+ * features OO+LT, the identical set DimmableLight.xml mandates, so this
+ * cluster list and its seeds (FeatureMap 0x01 for OnOff, 0x03 for
+ * LevelControl) are the same as the dimmable light above; see that
+ * device type's seed rows in s_seeds, none of which are duplicated here. */
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(dimmablePlugInUnitClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(dimmablePlugInUnitEndpoint, dimmablePlugInUnitClusters);
+
+constexpr EmberAfDeviceType kDimmablePlugInUnitTypes[] = { { 0x010B, 5 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -195,6 +473,17 @@ const hearth_devtype s_registry[] = {
     { 0x0100, 0, &onOffLightEndpoint, Span<const EmberAfDeviceType>(kOnOffLightTypes) },
     { 0x0101, 0, &dimmableLightEndpoint, Span<const EmberAfDeviceType>(kDimmableLightTypes) },
     { 0x0302, 0, &temperatureSensorEndpoint, Span<const EmberAfDeviceType>(kTemperatureSensorTypes) },
+    { 0x0015, 0, &contactSensorEndpoint, Span<const EmberAfDeviceType>(kContactSensorTypes) },
+    { 0x0107, 0, &occupancySensorEndpoint, Span<const EmberAfDeviceType>(kOccupancySensorTypes) },
+    { 0x0307, 0, &humiditySensorEndpoint, Span<const EmberAfDeviceType>(kHumiditySensorTypes) },
+    { 0x0305, 0, &pressureSensorEndpoint, Span<const EmberAfDeviceType>(kPressureSensorTypes) },
+    { 0x0044, 0, &rainSensorEndpoint, Span<const EmberAfDeviceType>(kRainSensorTypes) },
+    { 0x0041, 0, &waterFreezeDetectorEndpoint, Span<const EmberAfDeviceType>(kWaterFreezeDetectorTypes) },
+    { 0x0043, 0, &waterLeakDetectorEndpoint, Span<const EmberAfDeviceType>(kWaterLeakDetectorTypes) },
+    { 0x0106, 0, &lightSensorEndpoint, Span<const EmberAfDeviceType>(kLightSensorTypes) },
+    { 0x0306, 0, &flowSensorEndpoint, Span<const EmberAfDeviceType>(kFlowSensorTypes) },
+    { 0x010A, 0, &onOffPlugInUnitEndpoint, Span<const EmberAfDeviceType>(kOnOffPlugInUnitTypes) },
+    { 0x010B, 0, &dimmablePlugInUnitEndpoint, Span<const EmberAfDeviceType>(kDimmablePlugInUnitTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -216,13 +505,23 @@ struct attr_slot {
  * 3 + 1, Descriptor skipped. Sizing this to exactly 20 would make the
  * overflow guard in seed_slots() the normal path the moment anyone adds an
  * attribute, and a skipped slot shows up only as a wrong value at runtime.
- * The guard stays a backstop; raise this number when 22 is reached. */
+ * The guard stays a backstop; raise this number when 22 is reached.
+ *
+ * Catalogue batch 1 (nRF): the dimmable plug-in unit (0x010B) ties the
+ * dimmable light at 20 slots (same OnOff + LevelControl + Identify set);
+ * every other new devtype is narrower (the widest sensor is occupancy
+ * sensing at 9). 22 still holds. */
 constexpr uint8_t kMaxSlots = 22;
 
 /* One data version per cluster; the widest endpoint type has exactly four.
  * emberAfSetDynamicEndpoint() returns CHIP_ERROR_NO_MEMORY outright if the
  * span is shorter than the server-cluster count
- * (attribute-storage.cpp:319-323), so a short array fails loudly. */
+ * (attribute-storage.cpp:319-323), so a short array fails loudly.
+ *
+ * Catalogue batch 1: every new devtype has at most three server clusters
+ * (measurement/boolean-state/occupancy + Identify + Descriptor, or OnOff +
+ * LevelControl + Identify + Descriptor for the dimmable plug), so 4 still
+ * holds. */
 constexpr uint8_t kMaxClusters = 4;
 
 struct dyn_endpoint {
@@ -300,6 +599,68 @@ const attr_seed s_seeds[] = {
 
     /* Identify: no features; IdentifyType 0 (None) is the zero-fill. */
     { Identify::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x06, 0x00 } },
+
+    /* BooleanState: no features; StateValue false is the zero-fill (spelled
+     * out anyway, since it is the attribute this cluster exists for). */
+    { BooleanState::Id, BooleanState::Attributes::StateValue::Id, 1, { 0x00 } },
+    { BooleanState::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* OccupancySensing: no features mandated by the device type, so
+     * FeatureMap stays 0 even though the sensor-type fields below claim
+     * PIR. Sensor-type fields seed a PIR default (type 0 = kPir,
+     * bitmap 0x01 = kPir): this is also exactly what
+     * emberAfOccupancySensingClusterServerInitCallback's weak
+     * halOccupancyGetSensorType() default produces, so the two write the
+     * same value to this arena and neither drifts from the other. */
+    { OccupancySensing::Id, OccupancySensing::Attributes::OccupancySensorType::Id, 1, { 0x00 } },
+    { OccupancySensing::Id, OccupancySensing::Attributes::OccupancySensorTypeBitmap::Id, 1, { 0x01 } },
+    { OccupancySensing::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x05, 0x00 } },
+
+    /* RelativeHumidityMeasurement: no features, and no reading until the
+     * host writes one, so all three values start null (uint16, sentinel is
+     * the type maximum 0xFFFF). */
+    { RelativeHumidityMeasurement::Id, RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, 2,
+      { 0xFF, 0xFF } },
+    { RelativeHumidityMeasurement::Id, RelativeHumidityMeasurement::Attributes::MinMeasuredValue::Id,
+      2, { 0xFF, 0xFF } },
+    { RelativeHumidityMeasurement::Id, RelativeHumidityMeasurement::Attributes::MaxMeasuredValue::Id,
+      2, { 0xFF, 0xFF } },
+    { RelativeHumidityMeasurement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x03, 0x00 } },
+
+    /* PressureMeasurement: no features mandated, and no reading until the
+     * host writes one, so all three values start null (int16s, sentinel is
+     * the type minimum 0x8000, same convention as TemperatureMeasurement
+     * above). */
+    { PressureMeasurement::Id, PressureMeasurement::Attributes::MeasuredValue::Id, 2,
+      { 0x00, 0x80 } },
+    { PressureMeasurement::Id, PressureMeasurement::Attributes::MinMeasuredValue::Id, 2,
+      { 0x00, 0x80 } },
+    { PressureMeasurement::Id, PressureMeasurement::Attributes::MaxMeasuredValue::Id, 2,
+      { 0x00, 0x80 } },
+    { PressureMeasurement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x03, 0x00 } },
+
+    /* IlluminanceMeasurement: no features, and no reading until the host
+     * writes one, so all three values start null. uint16, NOT int16s like
+     * temperature/pressure above: the sentinel is the type maximum 0xFFFF,
+     * not the type minimum -- see the comment on illuminanceAttrs. */
+    { IlluminanceMeasurement::Id, IlluminanceMeasurement::Attributes::MeasuredValue::Id, 2,
+      { 0xFF, 0xFF } },
+    { IlluminanceMeasurement::Id, IlluminanceMeasurement::Attributes::MinMeasuredValue::Id, 2,
+      { 0xFF, 0xFF } },
+    { IlluminanceMeasurement::Id, IlluminanceMeasurement::Attributes::MaxMeasuredValue::Id, 2,
+      { 0xFF, 0xFF } },
+    { IlluminanceMeasurement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x03, 0x00 } },
+
+    /* FlowMeasurement: no features, and no reading until the host writes
+     * one, so all three values start null (uint16, sentinel 0xFFFF). */
+    { FlowMeasurement::Id, FlowMeasurement::Attributes::MeasuredValue::Id, 2, { 0xFF, 0xFF } },
+    { FlowMeasurement::Id, FlowMeasurement::Attributes::MinMeasuredValue::Id, 2, { 0xFF, 0xFF } },
+    { FlowMeasurement::Id, FlowMeasurement::Attributes::MaxMeasuredValue::Id, 2, { 0xFF, 0xFF } },
+    { FlowMeasurement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x03, 0x00 } },
+
+    /* On/Off and dimmable plug-in units reuse OnOff/LevelControl/Identify
+     * verbatim (same FeatureMap and ClusterRevision seeds as the lights
+     * above), so they need no seed rows of their own. */
 };
 
 void seed_slots(dyn_endpoint *d)
@@ -391,10 +752,11 @@ extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint3
     (void)devtype_id;
     (void)variant;
     (void)parent_devtype;
-    /* None of the three milestone device types requires a parent or
+    /* None of the device types in s_registry requires a parent or
      * restricts which device type may parent it, so every combination is
      * legal, including the unparented case (parent_devtype 0). Same answer
-     * as the C6 table gives for these three. */
+     * as the C6 table gives for all of these (all max_variant 0, generic
+     * parenting). */
     return true;
 }
 
