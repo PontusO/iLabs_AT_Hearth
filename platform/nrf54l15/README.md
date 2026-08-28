@@ -23,6 +23,13 @@ a real Matter controller's read, emitting the cluster's StateChange event
 in the process -- see the comment at that call site and on
 `booleanStateAttrs` (`port/mt_devtypes_zephyr.cpp`) for the mechanism.
 
+Known issue (graph bug B388): on the dimmable types (`0x0101`, `0x010B`),
+level commands (the MoveToLevel family) currently settle CurrentLevel on
+the wrong value on dynamic endpoints, a pre-existing CHIP defect this
+batch surfaced rather than caused. Direct AT+MTATTR writes to CurrentLevel
+and OnOff coupling both work correctly; store coherence (AT, controller,
+URCs) is otherwise fine. Tracked for a dedicated fix round.
+
 ## Dev board wiring
 
 The CPico RP2350 dev board carries the module and hosts the bridging firmware. This table is the soldering contract: a deviation means editing both the board `pinctrl` file and the sketch defines together.
