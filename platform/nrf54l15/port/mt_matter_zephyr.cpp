@@ -288,10 +288,15 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * an unknown endpoint index is MT_ATTR_ERR_ENDPOINT (emberAfIndexFromEndpoint
  * against kEmberInvalidEndpointIndex, attribute-storage.h), an endpoint that
  * exists but does not carry the cluster is MT_ATTR_ERR_CLUSTER
- * (emberAfContainsServer - this tree declares no emberAfFindServerCluster,
- * a delta from the brief's sketch name, recorded in the task report), and a
- * present cluster with no such attribute is MT_ATTR_ERR_ATTRIBUTE
- * (emberAfLocateAttributeMetadata).
+ * (emberAfContainsServer, attribute-storage.h:98-104), and a present cluster
+ * with no such attribute is MT_ATTR_ERR_ATTRIBUTE (emberAfLocateAttributeMetadata).
+ *
+ * emberAfContainsServer(), not emberAfFindServerCluster(): the latter is not
+ * declared in attribute-storage.h (this file's only ember include), only in
+ * app/util/endpoint-config-api.h; emberAfContainsServer() is its exact
+ * wrapper (attribute-storage.cpp:828-830, `return
+ * emberAfFindServerCluster(endpoint, clusterId) != nullptr;`), so calling it
+ * is equivalent and needs no extra include.
  */
 static mt_attr_result_t attr_locate(uint16_t ep, uint32_t cluster, uint32_t attr,
                                     const EmberAfAttributeMetadata **out_md)
@@ -310,19 +315,30 @@ static mt_attr_result_t attr_locate(uint16_t ep, uint32_t cluster, uint32_t attr
     return MT_ATTR_OK;
 }
 
-/* Set around a notify=false host write (mt_matter_attr_write below) so the
- * POST_UPDATE callback it triggers does not echo a +MTATTR URC for a change
- * the host itself just reflected in. See MatterPostAttributeChangeCallback
- * further down. */
-static volatile bool s_suppress_attr_urc;
+/*
+ * NumericAttributeTraits::GetNullValue() (attribute-storage-null-handling.h):
+ * the type maximum for unsigned, the type minimum for signed - same
+ * sentinels mt_devtypes_zephyr.cpp's s_seeds table documents and uses.
+ * Shared by mt_matter_attr_read()'s null check and
+ * MatterPostAttributeChangeCallback()'s (fix round 1, C2) so the two cannot
+ * drift apart.
+ */
+static uint64_t attr_null_sentinel(bool is_unsigned, uint8_t bytes)
+{
+    return is_unsigned
+        ? (bytes >= 8 ? (uint64_t)-1 : ((1ULL << (8 * bytes)) - 1))
+        : (bytes >= 8 ? (1ULL << 63) : (1ULL << (8 * bytes - 1)));
+}
 
+/*
+ * out is a required, non-null out-parameter (unlike is_unsigned, which
+ * mt_matter.h documents as "may be NULL"): mt_at.c's cmd_mtattr always
+ * passes the address of a stack local, the same precondition the C6's
+ * mt_matter_attr_read() (main.cpp) relies on without a guard of its own.
+ */
 extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
                                    bool *is_unsigned)
 {
-    if (out) {
-        *out = 0;
-    }
-
     chip::DeviceLayer::StackLock lock;
 
     const EmberAfAttributeMetadata *md = nullptr;
@@ -368,20 +384,11 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         raw |= ((uint64_t)buf[i]) << (8 * i);
     }
 
-    if (md->IsNullable()) {
-        /* NumericAttributeTraits::GetNullValue() (attribute-storage-null-
-         * handling.h): the type maximum for unsigned, the type minimum for
-         * signed - same sentinels mt_devtypes_zephyr.cpp's s_seeds table
-         * documents and uses. */
-        uint64_t null_raw = unsigned_type
-            ? (bytes >= 8 ? (uint64_t)-1 : ((1ULL << (8 * bytes)) - 1))
-            : (bytes >= 8 ? (1ULL << 63) : (1ULL << (8 * bytes - 1)));
-        if (raw == null_raw) {
-            /* The AT grammar has no null literal: answer MT_ATTR_ERR_TYPE
-             * with is_unsigned already set above, so a caller about to
-             * WRITE can still fetch the signedness first. */
-            return MT_ATTR_ERR_TYPE;
-        }
+    if (md->IsNullable() && raw == attr_null_sentinel(unsigned_type, bytes)) {
+        /* The AT grammar has no null literal: answer MT_ATTR_ERR_TYPE
+         * with is_unsigned already set above, so a caller about to
+         * WRITE can still fetch the signedness first. */
+        return MT_ATTR_ERR_TYPE;
     }
 
     if (unsigned_type) {
@@ -486,19 +493,30 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
     input.SetMarkDirty(notify ? chip::app::MarkAttributeDirty::kIfChanged
                               : chip::app::MarkAttributeDirty::kNo);
 
-    /* notify=false reflects a controller-driven change back into local
-     * storage; suppress the +MTATTR echo for exactly this call so the host
-     * does not see its own reflection loop back to it (see
-     * MatterPostAttributeChangeCallback below, which fires regardless of
-     * MarkAttributeDirty - that flag only gates the reporting-engine
-     * listener, not the post-change callback, attribute-table.cpp:469-476). */
-    if (!notify) {
-        s_suppress_attr_urc = true;
-    }
+    /*
+     * notify selects ONLY MarkAttributeDirty - kIfChanged (notify=true) marks
+     * the change for the CHIP reporting engine, so subscribed/bound
+     * controllers see it; kNo (notify=false) changes local storage without
+     * that fabric-facing report. It does NOT gate the +MTATTR URC: fix round
+     * 1 (controller ruling, C1) overturned this file's original
+     * s_suppress_attr_urc design, which assumed notify=false host writes
+     * should echo silently. The wire spec says otherwise on both platforms:
+     * AT_MT_SPEC.md 3.8 states plainly, with no mode carve-out, "A write to
+     * an ember-managed attribute that actually changes its value echoes a
+     * +MTATTR URC ... then OK", and 3.25's AirQuality write is called out as
+     * the ONE exception that "never echoes the +MTATTR URC, in either mode"
+     * - an exception that only makes sense if the general rule already
+     * covers both modes. On the C6, esp-matter's set_val()
+     * (esp_matter_data_model.cpp:784-788) fires its POST_UPDATE callback
+     * unconditionally whenever call_callbacks defaults true, with no
+     * per-mode gate either; mt_matter_attr_write() there never suppresses
+     * app_attribute_update_cb(). So a notify=false reflection of a
+     * controller-driven change DOES echo back to the host as a +MTATTR URC
+     * on both platforms - the host is expected to see its own reflection
+     * confirmed, not silenced, and de-duplication (if ever needed) is a host
+     * concern, not this bridge's.
+     */
     Status st = emberAfWriteAttribute(path, input);
-    if (!notify) {
-        s_suppress_attr_urc = false;
-    }
 
     switch (st) {
     case Status::Success:
@@ -522,20 +540,42 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
 /*
  * Strong override of the weak default in NCS's generic-callback-stubs.cpp.
  * Every attribute write that actually changes a value passes through here,
- * whether it came from this bridge's notify=true path or from a
- * controller's own IM write - so a controller-driven change surfaces to the
- * host as a +MTATTR URC the same way the C6's app_attribute_update_cb()
- * does. Format is byte-identical to platform/esp32c6/main/main.cpp:838-842.
+ * whether it came from this bridge's write (either notify mode - see the
+ * comment in mt_matter_attr_write() above, fix round 1/C1) or from a
+ * controller's own IM write - so any change surfaces to the host as a
+ * +MTATTR URC the same way the C6's app_attribute_update_cb() does. Format
+ * is byte-identical to platform/esp32c6/main/main.cpp:838-842.
  */
 void MatterPostAttributeChangeCallback(const chip::app::ConcreteAttributePath &path, uint8_t type,
                                        uint16_t size, uint8_t *value)
 {
-    if (s_suppress_attr_urc) return;
     if (path.mEndpointId == 0 || path.mEndpointId == 240) return;
     bool is_unsigned; uint8_t bytes;
     if (!attr_type_info((EmberAfAttributeType)type, &is_unsigned, &bytes) || size < bytes) return;
     uint64_t raw = 0;
     for (uint8_t i = 0; i < bytes; i++) raw |= ((uint64_t)value[i]) << (8 * i);
+
+    /*
+     * Fix round 1, C2: a transition TO null must not echo the raw sentinel
+     * as if it were a real value (a host reading +MTATTR:...,255 has no way
+     * to tell that from a genuine 255, and a follow-up AT+MTATTR read
+     * answers +MTERR:5 for the same attribute, an inconsistency the C6 does
+     * not have - attr_val_to_i64()'s nullable arms there return false for a
+     * null value, so main.cpp's app_attribute_update_cb() never builds a URC
+     * line for one, see attr_val_to_i64() and its callers in main.cpp).
+     * emberAfLocateAttributeMetadata() is a plain table lookup (no I/O, no
+     * lock of its own), safe to call here under whatever lock the caller
+     * already holds (this bridge's own StackLock for a local write, or
+     * CHIP's own lock for a controller-driven one - the same lock
+     * discipline this whole file follows). Shares attr_null_sentinel() with
+     * mt_matter_attr_read() so the two null tests cannot drift apart.
+     */
+    const EmberAfAttributeMetadata *md =
+        emberAfLocateAttributeMetadata(path.mEndpointId, path.mClusterId, path.mAttributeId);
+    if (md != nullptr && md->IsNullable() && raw == attr_null_sentinel(is_unsigned, bytes)) {
+        return;
+    }
+
     char line[64];
     if (is_unsigned) {
         snprintf(line, sizeof(line), "+MTATTR:%u,%lu,%lu,%llu", path.mEndpointId,
