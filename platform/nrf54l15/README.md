@@ -4,6 +4,13 @@
 
 This is the Nordic sibling of the ESP32-C6 Matter co-processor, running MCUboot with UART serial recovery on a Wurth Ophelia-IV module (nRF54L15). The bootloader is software-installed via SWD, locked against modification, and can always be reached by holding the recovery strap. See `superpowers/specs/2026-08-26-nrf54l15-bootloader-design.md` in the iLabs_Hearth_docs repository for the full design rationale and specification.
 
+Matter-over-Thread with the commissioning core is bench-proven (design:
+`superpowers/specs/2026-08-28-nrf54l15-matter-core-design.md` in the same
+repository). The device-type catalogue currently serves the milestone slice
+of the shared table: `0x0100` On/Off Light, `0x0101` Dimmable Light,
+`0x0302` Temperature Sensor; anything else answers `+MTERR:6` until the
+catalogue grows toward C6 parity.
+
 ## Dev board wiring
 
 The CPico RP2350 dev board carries the module and hosts the bridging firmware. This table is the soldering contract: a deviation means editing both the board `pinctrl` file and the sketch defines together.
