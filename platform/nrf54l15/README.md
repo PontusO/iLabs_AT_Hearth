@@ -106,6 +106,27 @@ One consequence: a successful SMP handshake through `flash.py --enter-only` does
 
 Another consequence: a field unit that ends up with a bad slot-0 image and no operator present to reflash it sits in serial recovery indefinitely. There is no timeout back to any other state; recovery is where it stays until someone flashes it.
 
+## Data model regeneration
+
+The Matter data model (endpoint 0 root node, plus the disabled catalogue
+endpoint at id 240 carrying the union of milestone clusters) is
+`src/default_zap/hearth.zap`, edited by hand as JSON, with the generated
+`.matter` file and `zap-generated/` sources checked in next to it. To
+regenerate after editing the `.zap` file:
+
+```bash
+cd ~/ncs/v3.3.4   # west zap-generate is an NCS workspace extension
+west zap-generate -z $FW/platform/nrf54l15/src/default_zap/hearth.zap
+```
+
+`hearth.zap` stores its ZCL/template `package` paths as the ones the
+original sample (`light_bulb.zap`, the starting point for this file) had
+relative to its own location under `nrf/samples/matter/`; copied into this
+repository those relative paths resolve outside the NCS tree entirely. The
+`package` entries at the top of `hearth.zap` are pinned to absolute paths
+under `~/ncs/v3.3.4/modules/lib/matter/...` for that reason; keep them
+pinned there after any hand-edit or regeneration on this machine.
+
 ## Keys
 
 Signing keys live in `keys/`. The DEVELOPMENT key (`hearth_dev_p256.pem`) is committed to the repository and deliberately shared; it protects nothing and ensures every dev build exercises the signature verification path. The PRODUCTION key is generated offline, never committed, and swapped in at fixture time to sign release images. See `keys/README.md` for the production key swap procedure.

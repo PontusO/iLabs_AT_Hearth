@@ -61,6 +61,12 @@
 &gpiote20 { status = "okay"; };
 &gpiote30 { status = "okay"; };
 
+/* NRF_802154_SL (the 802.15.4 driver OpenThread/CHIP pull in) selects
+ * TEMP_NRF5_MPSL for radio temperature compensation, which needs this
+ * node enabled; disabled by default at the SoC dtsi level. Matches the
+ * nrf54l15dk reference board. */
+&temp { status = "okay"; };
+
 &cpuapp_rram {
     partitions {
         compatible = "fixed-partitions";
