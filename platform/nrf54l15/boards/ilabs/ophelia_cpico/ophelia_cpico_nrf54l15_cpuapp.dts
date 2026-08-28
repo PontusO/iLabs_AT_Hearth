@@ -68,6 +68,17 @@
  * module). */
 &clock { status = "okay"; };
 
+/* The module's 32 MHz radio crystal uses the SoC's internal load
+ * capacitors; without programming them the HFXO does not oscillate to
+ * spec and the radio (BLE and 802.15.4 alike) transmits nothing while
+ * every non-RF subsystem runs normally. Bench-found during the Matter
+ * round: "CHIPoBLE advertising started" with no advertisement on the
+ * air. Values from Zephyr's ophelia4ev board (same Ophelia-IV module). */
+&hfxo {
+    load-capacitors = "internal";
+    load-capacitance-femtofarad = <15000>;
+};
+
 &gpio1 { status = "okay"; };
 &gpio2 { status = "okay"; };
 &gpiote20 { status = "okay"; };

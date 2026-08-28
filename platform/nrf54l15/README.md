@@ -134,3 +134,32 @@ Signing keys live in `keys/`. The DEVELOPMENT key (`hearth_dev_p256.pem`) is com
 ## Toolchain note
 
 This platform does not use the nrfutil toolchain-manager tool that appears in Nordic's documentation. Instead, the NCS activation block above configures the exact toolchain directory on this machine. Use that activation block before any `west` command; use a clean shell for `pyocd` and host Python tests.
+
+## Matter commissioning on the bench
+
+The milestone acceptance (2026-08-28) commissions with the CLI chip-tool
+from the bench host over BLE into the live OTBR fabric:
+
+```bash
+# open the window over AT (AT+MTCOMMISSION), then, in a clean shell:
+./fw/srp-aaaa-shim.sh &     # see the header comment: OTBR mDNS workaround
+chip-tool pairing ble-thread <node-id> hex:<dataset> 20202021 3840
+```
+
+Dev credentials only (test VID 0xFFF1 / PID 0x8000, SPAKE2 passcode
+20202021, discriminator 3840): consumer hubs are expected to refuse
+them. The Thread dataset comes from the border router
+(`ot-ctl dataset active -x`) and is a credential: never commit or log
+it. The `srp-aaaa-shim.sh` workaround is required until the upstream
+ot-br-posix mDNS host-update defect it documents is fixed.
+
+Radio note: the module's 32 MHz HFXO needs the SoC-internal load
+capacitors programmed (board DTS `&hfxo`); without them the radio is
+silent while everything else runs. Bench scripts must wait for +MTREADY
+after opening the AT port (the bridge's DTR line pulses reset on open).
+
+Measured 2026-08-28 (build/, dev/nrf-matter-core at 5c19776 + hfxo fix):
+app image 753,691 B of the 1,374,208 B slot (54.9%); settings_storage
+raw occupancy 30,476 of 32,768 B non-erased after a day of commissioning
+churn (ZMS is log-structured, stale entries count until collection; the
+32 KB sizing watch item from the design spec stays open).
