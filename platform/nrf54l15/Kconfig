@@ -1,0 +1,37 @@
+#
+# Without this file, Zephyr auto-generates a trivial app Kconfig root
+# (mainmenu + source "Kconfig.zephyr") and nothing else. That default
+# never reaches the CHIP module's own Kconfig.features/Kconfig.defaults
+# fragments (they are not rsourced from chip-module/Kconfig itself, only
+# from each sample's own top-level Kconfig, mirrored here), so options
+# such as CHIP_CRYPTO_PSA's "default y" never apply and CHIP falls back
+# to the legacy mbedTLS crypto backend, which this nrf_security build
+# does not expose (mbedtls_ecp_muladd, mbedtls_pkcs5_pbkdf2_hmac: no
+# declaration, build fails). Sourcing these two fragments is what makes
+# the PSA-backed crypto path (CHIPCryptoPALPSA.cpp) the one actually
+# built.
+#
+# Sourcing alone is not the whole story: prj.conf sets
+# CONFIG_CHIP_CRYPTO_PSA=y explicitly rather than trusting the default
+# even with these fragments sourced, because chip-module/Kconfig.defaults
+# wraps that "default y" inside its own "if CHIP ... endif # CHIP" body,
+# and this build passed through a CONFIG_CHIP=n window (sysbuild forcing
+# the app image off) where that body, default included, was not reachable
+# at all. See prj.conf's comment next to CONFIG_CHIP_CRYPTO_PSA=y for the
+# full history.
+#
+# The common/src/Kconfig fragment below is sourced for the same reason:
+# matter_init.cpp (platform/nrf54l15/CMakeLists.txt, ${MATTER_COMMON})
+# is built straight out of the NCS Matter common sample sources and
+# reads its own NCS_SAMPLE_MATTER_* symbols (task queue sizing, the
+# settings shell, test event triggers, and so on) that only exist once
+# this fragment is sourced. Mirrors how
+# ~/ncs/v3.3.4/nrf/samples/matter/template/Kconfig reaches the same
+# file via ${ZEPHYR_NRF_MODULE_DIR}.
+#
+mainmenu "Hearth nRF54L15 Matter Platform"
+
+source "$(ZEPHYR_CONNECTEDHOMEIP_MODULE_DIR)/config/nrfconnect/chip-module/Kconfig.features"
+source "$(ZEPHYR_CONNECTEDHOMEIP_MODULE_DIR)/config/nrfconnect/chip-module/Kconfig.defaults"
+source "$(ZEPHYR_NRF_MODULE_DIR)/samples/matter/common/src/Kconfig"
+source "Kconfig.zephyr"

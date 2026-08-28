@@ -97,9 +97,14 @@ typedef struct {
  * an mt_attr_result_t: MT_ATTR_OK on success, MT_ATTR_ERR_CLUSTER when the
  * cluster is absent (a WiFi image never creates it), which cmd_mtthread
  * (mt_at.c) maps to +MTERR:8 rather than the generic +MTERR:3, since the
- * question here is "does this image speak Thread at all". Never calls into
- * OpenThread directly: every field comes from the same esp_matter provider
- * read path mt_matter_attr_read() uses for any other attribute.
+ * question here is "does this image speak Thread at all". The two
+ * platforms reach these fields differently: the C6 reads through the
+ * same esp_matter provider-read path mt_matter_attr_read() uses for any
+ * other attribute, never calling into OpenThread directly; the nRF port
+ * reads OpenThread directly, under the Thread stack lock, because CHIP
+ * on Zephyr has no equivalent provider layer to read through. Both
+ * derive the same spec-defined renderings (AT_MT_SPEC.md's AT+MTTHREAD?
+ * section is binding on the result, not on how a platform gets there).
  */
 int mt_matter_thread_info(mt_thread_info_t *out);
 

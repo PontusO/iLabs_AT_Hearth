@@ -4,6 +4,13 @@
 
 This is the Nordic sibling of the ESP32-C6 Matter co-processor, running MCUboot with UART serial recovery on a Wurth Ophelia-IV module (nRF54L15). The bootloader is software-installed via SWD, locked against modification, and can always be reached by holding the recovery strap. See `superpowers/specs/2026-08-26-nrf54l15-bootloader-design.md` in the iLabs_Hearth_docs repository for the full design rationale and specification.
 
+Matter-over-Thread with the commissioning core is bench-proven (design:
+`superpowers/specs/2026-08-28-nrf54l15-matter-core-design.md` in the same
+repository). The device-type catalogue currently serves the milestone slice
+of the shared table: `0x0100` On/Off Light, `0x0101` Dimmable Light,
+`0x0302` Temperature Sensor; anything else answers `+MTERR:6` until the
+catalogue grows toward C6 parity.
+
 ## Dev board wiring
 
 The CPico RP2350 dev board carries the module and hosts the bridging firmware. This table is the soldering contract: a deviation means editing both the board `pinctrl` file and the sketch defines together.
@@ -106,6 +113,27 @@ One consequence: a successful SMP handshake through `flash.py --enter-only` does
 
 Another consequence: a field unit that ends up with a bad slot-0 image and no operator present to reflash it sits in serial recovery indefinitely. There is no timeout back to any other state; recovery is where it stays until someone flashes it.
 
+## Data model regeneration
+
+The Matter data model (endpoint 0 root node, plus the disabled catalogue
+endpoint at id 240 carrying the union of milestone clusters) is
+`src/default_zap/hearth.zap`, edited by hand as JSON, with the generated
+`.matter` file and `zap-generated/` sources checked in next to it. To
+regenerate after editing the `.zap` file:
+
+```bash
+cd ~/ncs/v3.3.4   # west zap-generate is an NCS workspace extension
+west zap-generate -z $FW/platform/nrf54l15/src/default_zap/hearth.zap
+```
+
+`hearth.zap` stores its ZCL/template `package` paths as the ones the
+original sample (`light_bulb.zap`, the starting point for this file) had
+relative to its own location under `nrf/samples/matter/`; copied into this
+repository those relative paths resolve outside the NCS tree entirely. The
+`package` entries at the top of `hearth.zap` are pinned to absolute paths
+under `~/ncs/v3.3.4/modules/lib/matter/...` for that reason; keep them
+pinned there after any hand-edit or regeneration on this machine.
+
 ## Keys
 
 Signing keys live in `keys/`. The DEVELOPMENT key (`hearth_dev_p256.pem`) is committed to the repository and deliberately shared; it protects nothing and ensures every dev build exercises the signature verification path. The PRODUCTION key is generated offline, never committed, and swapped in at fixture time to sign release images. See `keys/README.md` for the production key swap procedure.
@@ -113,3 +141,32 @@ Signing keys live in `keys/`. The DEVELOPMENT key (`hearth_dev_p256.pem`) is com
 ## Toolchain note
 
 This platform does not use the nrfutil toolchain-manager tool that appears in Nordic's documentation. Instead, the NCS activation block above configures the exact toolchain directory on this machine. Use that activation block before any `west` command; use a clean shell for `pyocd` and host Python tests.
+
+## Matter commissioning on the bench
+
+The milestone acceptance (2026-08-28) commissions with the CLI chip-tool
+from the bench host over BLE into the live OTBR fabric:
+
+```bash
+# open the window over AT (AT+MTCOMMISSION), then, in a clean shell:
+./fw/srp-aaaa-shim.sh &     # see the header comment: OTBR mDNS workaround
+chip-tool pairing ble-thread <node-id> hex:<dataset> 20202021 3840
+```
+
+Dev credentials only (test VID 0xFFF1 / PID 0x8000, SPAKE2 passcode
+20202021, discriminator 3840): consumer hubs are expected to refuse
+them. The Thread dataset comes from the border router
+(`ot-ctl dataset active -x`) and is a credential: never commit or log
+it. The `srp-aaaa-shim.sh` workaround is required until the upstream
+ot-br-posix mDNS host-update defect it documents is fixed.
+
+Radio note: the module's 32 MHz HFXO needs the SoC-internal load
+capacitors programmed (board DTS `&hfxo`); without them the radio is
+silent while everything else runs. Bench scripts must wait for +MTREADY
+after opening the AT port (the bridge's DTR line pulses reset on open).
+
+Measured 2026-08-28 (build/, dev/nrf-matter-core at 5c19776 + hfxo fix):
+app image 753,691 B of the 1,374,208 B slot (54.9%); settings_storage
+raw occupancy 30,476 of 32,768 B non-erased after a day of commissioning
+churn (ZMS is log-structured, stale entries count until collection; the
+32 KB sizing watch item from the design spec stays open).

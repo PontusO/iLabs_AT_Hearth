@@ -30,7 +30,19 @@
     };
 };
 
+/* The SoC dtsi reserves 68 KB of the 256 KB physical SRAM for the
+ * cpuflpr (VPR) coprocessor (nordic/nrf54l15.dtsi: cpuapp_sram defaults
+ * to 188 KB). This board never runs anything on cpuflpr (no VPR
+ * firmware anywhere in this repo), so reclaim the full 256 KB for
+ * cpuapp; matches the pattern in every Nordic nrf54l15dk board overlay
+ * ("restore full RRAM and SRAM space"). Real CHIP server bring-up
+ * (Task 2, PrepareServer/StartServer with BT+OpenThread actually
+ * running) overflows the default 188 KB RAM region by ~15.3 KB; the
+ * Task 1 skeleton never hit this because it never started the stack.
+ */
 &cpuapp_sram {
+    reg = <0x20000000 DT_SIZE_K(256)>;
+    ranges = <0x0 0x20000000 DT_SIZE_K(256)>;
     status = "okay";
 };
 
@@ -56,10 +68,27 @@
  * module). */
 &clock { status = "okay"; };
 
+/* The module's 32 MHz radio crystal uses the SoC's internal load
+ * capacitors; without programming them the HFXO does not oscillate to
+ * spec and the radio (BLE and 802.15.4 alike) transmits nothing while
+ * every non-RF subsystem runs normally. Bench-found during the Matter
+ * round: "CHIPoBLE advertising started" with no advertisement on the
+ * air. Values from Zephyr's ophelia4ev board (same Ophelia-IV module). */
+&hfxo {
+    load-capacitors = "internal";
+    load-capacitance-femtofarad = <15000>;
+};
+
 &gpio1 { status = "okay"; };
 &gpio2 { status = "okay"; };
 &gpiote20 { status = "okay"; };
 &gpiote30 { status = "okay"; };
+
+/* NRF_802154_SL (the 802.15.4 driver OpenThread/CHIP pull in) selects
+ * TEMP_NRF5_MPSL for radio temperature compensation, which needs this
+ * node enabled; disabled by default at the SoC dtsi level. Matches the
+ * nrf54l15dk reference board. */
+&temp { status = "okay"; };
 
 &cpuapp_rram {
     partitions {

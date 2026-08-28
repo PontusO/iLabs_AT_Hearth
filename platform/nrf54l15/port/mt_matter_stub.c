@@ -20,95 +20,31 @@
  * Every out-parameter is defensively zeroed (after a NULL check) before the
  * failure return, so a core caller that trusts a 0-filled struct on error
  * never reads uninitialized memory.
+ *
+ * The commissioning/state/network slice (mt_matter_state,
+ * mt_matter_fabric_count, mt_matter_open_commissioning,
+ * mt_matter_onboarding_codes, mt_matter_factory_reset, mt_matter_net_info,
+ * mt_matter_transport_mismatch, mt_matter_thread_info, mt_thread_role_name)
+ * now lives in mt_matter_zephyr.cpp against the real CHIP stack, and so
+ * does the live endpoint table (mt_matter_endpoint_count,
+ * mt_matter_endpoint_info, mt_matter_record_endpoint).
+ *
+ * The mt_devtypes.h quartet used to sit at the end of this file with
+ * accept-all predicates, so the composition pipeline could be exercised
+ * before any device type existed. mt_devtypes_zephyr.cpp implements them
+ * for real now; AT+MTEP rejects an unknown device type again.
+ *
+ * mt_matter_attr_read/mt_matter_attr_write (Task 5) now live in
+ * mt_matter_zephyr.cpp too, against the ember external-attribute path
+ * (emberAfReadAttribute/emberAfWriteAttribute), alongside the strong
+ * MatterPostAttributeChangeCallback() override that turns a changed
+ * attribute into a +MTATTR URC.
  */
 
 #include <stddef.h>
 #include <string.h>
 
-#include "mt_devtypes.h"
 #include "mt_matter.h"
-
-int mt_matter_state(void) { return MT_STATE_UNINIT; }
-int mt_matter_fabric_count(void) { return 0; }
-
-int mt_matter_open_commissioning(int timeout_s)
-{
-    (void)timeout_s;
-    return -1;
-}
-
-int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual, size_t manual_len)
-{
-    if (qr && qr_len) qr[0] = '\0';
-    if (manual && manual_len) manual[0] = '\0';
-    return -1;
-}
-
-void mt_matter_factory_reset(void) { }
-
-int mt_matter_net_info(int *transport, int *enabled, int *connected)
-{
-    if (transport) *transport = 0;
-    if (enabled) *enabled = 0;
-    if (connected) *connected = 0;
-    return -1;
-}
-
-int mt_matter_transport_mismatch(void) { return 0; }
-
-int mt_matter_thread_info(mt_thread_info_t *out)
-{
-    if (out) memset(out, 0, sizeof(*out));
-    return MT_ATTR_ERR_CLUSTER;
-}
-
-const char *mt_thread_role_name(uint8_t role)
-{
-    (void)role;
-    return NULL;
-}
-
-uint16_t mt_matter_endpoint_count(void) { return 0; }
-
-int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id, uint8_t *variant,
-                            uint8_t *parent_idx)
-{
-    (void)index;
-    if (devtype) *devtype = 0;
-    if (ep_id) *ep_id = 0;
-    if (variant) *variant = 0;
-    if (parent_idx) *parent_idx = 0;
-    return -1;
-}
-
-void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant, uint8_t parent_idx)
-{
-    (void)devtype;
-    (void)ep_id;
-    (void)variant;
-    (void)parent_idx;
-}
-
-int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
-                        bool *is_unsigned)
-{
-    (void)ep;
-    (void)cluster;
-    (void)attr;
-    if (out) *out = 0;
-    if (is_unsigned) *is_unsigned = false;
-    return MT_ATTR_ERR_ENDPOINT;
-}
-
-int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t val, bool notify)
-{
-    (void)ep;
-    (void)cluster;
-    (void)attr;
-    (void)val;
-    (void)notify;
-    return MT_ATTR_ERR_ENDPOINT;
-}
 
 int mt_matter_switch_click(uint16_t ep)
 {
@@ -377,51 +313,3 @@ int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total)
 int mt_matter_evse_targets_erase_all(void) { /* Erasing schedules that cannot exist succeeds vacuously; a -1 here
      * blocked AT+MTFRESET's completion during bring-up (bench-found). */
     return 0; }
-
-/*
- * ---- mt_devtypes.h ---------------------------------------------------
- * mt_at.c's AT+MTEP handler (cmd_mtep) links against this header too, not
- * just mt_matter.h; the linker surfaced these as the remaining undefined
- * references, per this file's own "iterate until it links" contract. No
- * device type is known to a skeleton with no device type table at all, so
- * every predicate is false; mt_devtype_create() is unreferenced by mt_at.c
- * on this path but stubbed for header completeness, 0-on-success -> -1.
- */
-
-/* The three devtype checks ACCEPT everything, deliberately: with the
- * real bridge absent, rejecting all staging would leave the whole
- * composition pipeline (AT+MTEP, AT+MTEPAPPLY, and the persistence
- * behind it) dead on this platform. Accepting lets the pipeline and the
- * KV store be exercised over the AT link during bring-up; the real
- * mt_devtypes implementation replaces these in the Matter round. */
-bool mt_devtype_is_known(uint32_t devtype_id)
-{
-    (void)devtype_id;
-    return true;
-}
-
-bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant)
-{
-    (void)devtype_id;
-    (void)variant;
-    return true;
-}
-
-bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
-{
-    (void)devtype_id;
-    (void)variant;
-    (void)parent_devtype;
-    return true;
-}
-
-int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype,
-                       uint16_t parent_ep_id, uint16_t *out_ep_id)
-{
-    (void)devtype_id;
-    (void)variant;
-    (void)parent_devtype;
-    (void)parent_ep_id;
-    if (out_ep_id) *out_ep_id = 0;
-    return -1;
-}
