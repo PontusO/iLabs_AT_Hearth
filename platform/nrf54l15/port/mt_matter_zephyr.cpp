@@ -59,33 +59,24 @@ extern "C" int mt_matter_open_commissioning(int timeout_s)
 extern "C" int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual, size_t manual_len)
 {
     /*
-     * Fix round 1 (bench-found): this used to run lock-free, on the belief
-     * that formatting an already-resolved payload needed no CHIP stack
-     * access. That belief was wrong. GetQRCode()/GetManualPairingCode() both
-     * call GetPayloadContents(), which reads the passcode and discriminator
-     * through GetCommissionableDataProvider() (ConfigurationManagerImpl on
-     * this platform), which in turn reads them via
-     * GenericConfigurationManagerImpl::ReadConfigValue() ->
-     * ZephyrConfig::ReadConfigValueImpl() -> Zephyr's
-     * settings_load_subtree_direct(). That is live Device Layer state, not
-     * a static snapshot: the CHIP event-loop thread touches the same
-     * settings subsystem for its own background persistence (session and
-     * fabric table state, group data, fail-safe bookkeeping) for the whole
-     * time it is not blocked waiting on the next event, which per CHIP's
-     * own threading model (chip::DeviceLayer::StackLock's own doc comment,
-     * PlatformManager.h) is exactly the condition the CHIP big lock exists
-     * to serialize against. Calling into this path from the AT parser
-     * thread without that lock races the CHIP thread's own settings I/O;
-     * ZephyrConfig::ReadConfigValueImpl() reports a bare
-     * CHIP_ERROR_PERSISTED_STORAGE_FAILED on that race with no logging of
-     * its own (only the OnboardingCodesUtil.cpp wrappers above it log, and
-     * by the time execution reaches them the underlying cause is already a
-     * generic storage error), which is exactly the bench symptom: silent
-     * ERROR, no console output. The C6 already takes ChipStackLock for this
-     * same function (main.cpp); this platform's port dropped it. Taking
-     * the lock here blocks until the CHIP thread's event loop releases its
-     * own hold on it, giving this read the same exclusion the CHIP thread
-     * gives its own settings access.
+     * StackLock here is C6-parity discipline, not a bug fix for an observed
+     * race: fix round 1's bare-ERROR bench finding turned out to be a
+     * controller test-form error (AT+MTCODES, the EXEC form, sent instead
+     * of the AT+MTCODES? query form that cmd_mtcodes actually requires;
+     * core/mt/mt_at.c:202-215), caught and confirmed on this same build.
+     * No settings-I/O race was ever observed, and none should be claimed
+     * here. The original task review judged this call lock-free-safe, and
+     * that judgment stands; the lock is kept anyway because the C6 takes
+     * ChipStackLock for this exact function and uniform locking across
+     * every CHIP-touching function in this file is cheaper to reason about
+     * than a per-function safety argument for the one exception.
+     *
+     * The LOG_ERR calls below stay for a different, real reason: chasing
+     * fix round 1's bare ERROR back to its actual cause (a caller-side
+     * command-form mismatch, not this function) took longer than it should
+     * have precisely because this path logged nothing on failure. Keeping
+     * these means any future failure here, whatever its cause, is visible
+     * on the console instead of forcing that same trace again.
      */
     chip::DeviceLayer::StackLock lock;
 
