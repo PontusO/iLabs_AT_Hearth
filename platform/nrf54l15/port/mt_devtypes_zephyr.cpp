@@ -211,10 +211,13 @@ struct attr_slot {
     uint8_t data[4];
 };
 
-/* The widest endpoint type (dimmable light) uses exactly 20 slots: OnOff
- * 6 + auto ClusterRevision, LevelControl 8 + 1, Identify 3 + 1, Descriptor
- * skipped. Adding an attribute to any of those clusters must raise this. */
-constexpr uint8_t kMaxSlots = 20;
+/* Two slots of headroom over the widest endpoint type. The dimmable light
+ * uses 20: OnOff 6 + auto ClusterRevision, LevelControl 8 + 1, Identify
+ * 3 + 1, Descriptor skipped. Sizing this to exactly 20 would make the
+ * overflow guard in seed_slots() the normal path the moment anyone adds an
+ * attribute, and a skipped slot shows up only as a wrong value at runtime.
+ * The guard stays a backstop; raise this number when 22 is reached. */
+constexpr uint8_t kMaxSlots = 22;
 
 /* One data version per cluster; the widest endpoint type has exactly four.
  * emberAfSetDynamicEndpoint() returns CHIP_ERROR_NO_MEMORY outright if the
