@@ -24,11 +24,15 @@ The Recovery strap and nRESET lines are driven high-impedance (pulled up externa
 
 Before any UART flashing, the MCUboot bootloader is installed over SWD. Do this once per module.
 
-**NCS toolchain activation** (required for `west` commands on this machine):
+**NCS toolchain activation** (required for `west` commands on this machine).
+The platform builds against NCS v3.3.4 (Matter 1.5.0 in the bundled CHIP
+tree) since 2026-08-28; the module's installed bootloader was built with
+v3.0.2 and stays, since the MCUboot image format and SMP recovery protocol
+are stable across the bump:
 
 ```bash
-TC=$HOME/ncs/toolchains/7cbc0036f4
-export PATH="$TC/bin:$TC/usr/bin:$TC/usr/local/bin:$TC/opt/bin:$TC/opt/nanopb/generator-bin:$TC/opt/zephyr-sdk/arm-zephyr-eabi/bin:$TC/opt/zephyr-sdk/riscv64-zephyr-elf/bin:$PATH"
+TC=$HOME/ncs/toolchains/911f4c5c26
+export PATH="$TC/bin:$TC/usr/bin:$TC/usr/local/bin:$TC/opt/bin:$TC/opt/nanopb/generator-bin:$TC/nrfutil/bin:$TC/opt/zephyr-sdk/arm-zephyr-eabi/bin:$TC/opt/zephyr-sdk/riscv64-zephyr-elf/bin:$PATH"
 export LD_LIBRARY_PATH="$TC/lib:$TC/lib/x86_64-linux-gnu:$TC/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export GIT_EXEC_PATH="$TC/usr/local/libexec/git-core"
 export GIT_TEMPLATE_DIR="$TC/usr/local/share/git-core/templates"
@@ -36,7 +40,7 @@ export PYTHONHOME="$TC/usr/local"
 export PYTHONPATH="$TC/usr/local/lib/python3.12:$TC/usr/local/lib/python3.12/site-packages"
 export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
 export ZEPHYR_SDK_INSTALL_DIR="$TC/opt/zephyr-sdk"
-export ZEPHYR_BASE="$HOME/ncs/v3.0.2/zephyr"
+export ZEPHYR_BASE="$HOME/ncs/v3.3.4/zephyr"
 ```
 
 CAUTION: this PYTHONHOME/PYTHONPATH breaks ordinary system Python in the same shell. Use a dedicated shell or subshell for west builds.

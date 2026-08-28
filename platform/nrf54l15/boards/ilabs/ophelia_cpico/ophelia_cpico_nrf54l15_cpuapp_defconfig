@@ -24,3 +24,8 @@ CONFIG_EXTERNAL_CACHE=y
 
 # Start SYSCOUNTER on driver init
 CONFIG_NRF_GRTC_START_SYSCOUNTER=y
+
+# No 32 kHz crystal on the Ophelia-IV module: LFCLK from the internal
+# RC. The choice is visible via the board's &clock node; the board
+# CMakeLists fails the configure if this line stops resolving.
+CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y

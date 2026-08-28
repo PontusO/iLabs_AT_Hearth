@@ -50,6 +50,12 @@
     pinctrl-names = "default", "sleep";
 };
 
+/* The legacy nrf clock driver (CLOCK_CONTROL_NRF) needs this node; it
+ * is what makes the K32SRC Kconfig choice visible, and the board
+ * defconfig selects the internal RC there (no 32 kHz crystal on the
+ * module). */
+&clock { status = "okay"; };
+
 &gpio1 { status = "okay"; };
 &gpio2 { status = "okay"; };
 &gpiote20 { status = "okay"; };
