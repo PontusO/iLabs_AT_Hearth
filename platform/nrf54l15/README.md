@@ -23,12 +23,13 @@ a real Matter controller's read, emitting the cluster's StateChange event
 in the process -- see the comment at that call site and on
 `booleanStateAttrs` (`port/mt_devtypes_zephyr.cpp`) for the mechanism.
 
-Known issue (graph bug B388): on the dimmable types (`0x0101`, `0x010B`),
-level commands (the MoveToLevel family) currently settle CurrentLevel on
-the wrong value on dynamic endpoints, a pre-existing CHIP defect this
-batch surfaced rather than caused. Direct AT+MTATTR writes to CurrentLevel
-and OnOff coupling both work correctly; store coherence (AT, controller,
-URCs) is otherwise fine. Tracked for a dedicated fix round.
+Level commands (the MoveToLevel family) on the dimmable types (`0x0101`,
+`0x010B`) settle CurrentLevel correctly on dynamic endpoints (fixed:
+graph bug B388, which traced to dynamic endpoints never running the
+per-endpoint LevelControl server init that caches Min/MaxLevel; `port/
+mt_devtypes_zephyr.cpp` now invokes it by hand at endpoint create time).
+Direct AT+MTATTR writes to CurrentLevel and OnOff coupling both work
+correctly; store coherence (AT, controller, URCs) is fine throughout.
 
 ## Dev board wiring
 
