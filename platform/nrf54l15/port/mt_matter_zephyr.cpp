@@ -5,8 +5,11 @@
  * stack lock (the bridge_manager.cpp discipline).
  */
 
+#include <app/ConcreteAttributePath.h>
 #include <app/server/Server.h>
 #include <app/server/CommissioningWindowManager.h>
+#include <app/util/attribute-storage.h>
+#include <app/util/attribute-table.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/ConnectivityManager.h>
 #include <platform/ThreadStackManager.h>
@@ -15,11 +18,13 @@
 #include <openthread/link.h>
 #include <openthread/thread.h>
 
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/logging/log.h>
 
 extern "C" {
+#include "mt_at.h"
 #include "mt_composition.h"
 #include "mt_matter.h"
 }
@@ -30,6 +35,7 @@ using chip::DeviceLayer::ConnectivityMgr;
 using chip::DeviceLayer::PlatformMgr;
 using chip::DeviceLayer::ThreadStackMgr;
 using chip::DeviceLayer::ThreadStackMgrImpl;
+using chip::Protocols::InteractionModel::Status;
 
 extern "C" int mt_matter_state(void)
 {
@@ -247,4 +253,299 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
     s_live_variant[s_live_count] = variant;
     s_live_parent[s_live_count] = parent_idx;
     s_live_count++;
+}
+
+/* ---- attribute bridge (Task 5, AT+MTATTR) ------------------------------ */
+
+/*
+ * ZCL type to signedness and byte width; anything outside the AT+MTATTR
+ * integer family is MT_ATTR_ERR_TYPE.
+ */
+static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *bytes)
+{
+    switch (t) {
+    case ZAP_TYPE(BOOLEAN): case ZAP_TYPE(BITMAP8): case ZAP_TYPE(ENUM8): case ZAP_TYPE(INT8U):
+        *is_unsigned = true;  *bytes = 1; return true;
+    case ZAP_TYPE(BITMAP16): case ZAP_TYPE(ENUM16): case ZAP_TYPE(INT16U):
+        *is_unsigned = true;  *bytes = 2; return true;
+    case ZAP_TYPE(INT24U): *is_unsigned = true; *bytes = 3; return true;
+    case ZAP_TYPE(BITMAP32): case ZAP_TYPE(INT32U):
+        *is_unsigned = true;  *bytes = 4; return true;
+    case ZAP_TYPE(INT48U): *is_unsigned = true; *bytes = 6; return true;
+    case ZAP_TYPE(BITMAP64): case ZAP_TYPE(INT64U):
+        *is_unsigned = true;  *bytes = 8; return true;
+    case ZAP_TYPE(INT8S):  *is_unsigned = false; *bytes = 1; return true;
+    case ZAP_TYPE(INT16S): *is_unsigned = false; *bytes = 2; return true;
+    case ZAP_TYPE(INT32S): *is_unsigned = false; *bytes = 4; return true;
+    case ZAP_TYPE(INT64S): *is_unsigned = false; *bytes = 8; return true;
+    default: return false;
+    }
+}
+
+/*
+ * Locate an attribute's metadata, splitting endpoint/cluster/attribute
+ * absence the way mt_matter.h's mt_attr_result_t comments require it split:
+ * an unknown endpoint index is MT_ATTR_ERR_ENDPOINT (emberAfIndexFromEndpoint
+ * against kEmberInvalidEndpointIndex, attribute-storage.h), an endpoint that
+ * exists but does not carry the cluster is MT_ATTR_ERR_CLUSTER
+ * (emberAfContainsServer - this tree declares no emberAfFindServerCluster,
+ * a delta from the brief's sketch name, recorded in the task report), and a
+ * present cluster with no such attribute is MT_ATTR_ERR_ATTRIBUTE
+ * (emberAfLocateAttributeMetadata).
+ */
+static mt_attr_result_t attr_locate(uint16_t ep, uint32_t cluster, uint32_t attr,
+                                    const EmberAfAttributeMetadata **out_md)
+{
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, cluster)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    const EmberAfAttributeMetadata *md = emberAfLocateAttributeMetadata(ep, cluster, attr);
+    if (md == nullptr) {
+        return MT_ATTR_ERR_ATTRIBUTE;
+    }
+    *out_md = md;
+    return MT_ATTR_OK;
+}
+
+/* Set around a notify=false host write (mt_matter_attr_write below) so the
+ * POST_UPDATE callback it triggers does not echo a +MTATTR URC for a change
+ * the host itself just reflected in. See MatterPostAttributeChangeCallback
+ * further down. */
+static volatile bool s_suppress_attr_urc;
+
+extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
+                                   bool *is_unsigned)
+{
+    if (out) {
+        *out = 0;
+    }
+
+    chip::DeviceLayer::StackLock lock;
+
+    const EmberAfAttributeMetadata *md = nullptr;
+    mt_attr_result_t r = attr_locate(ep, cluster, attr, &md);
+    if (r != MT_ATTR_OK) {
+        return r;
+    }
+
+    bool unsigned_type;
+    uint8_t bytes;
+    if (!attr_type_info(md->attributeType, &unsigned_type, &bytes)) {
+        /* Genuinely not an AT+MTATTR type (string/array/struct/float): no
+         * definite signedness exists, but the header's "the flag is also
+         * valid when the result is MT_ATTR_ERR_TYPE" covers this arm too,
+         * and cmd_mtattr (mt_at.c) always lets MT_ATTR_ERR_TYPE fall through
+         * to a write that reads this flag before it re-derives the same
+         * failure. Same choice as the C6 (main.cpp's mt_matter_attr_read(),
+         * the ESP_ERR_NOT_SUPPORTED/ARRAY arm): false selects the signed
+         * parse, and the write fails on its own attr_type_info() check for
+         * the identical reason. */
+        if (is_unsigned) {
+            *is_unsigned = false;
+        }
+        return MT_ATTR_ERR_TYPE;
+    }
+    /* Set before the null check below, so the flag stays valid even when
+     * this read goes on to answer MT_ATTR_ERR_TYPE for a null nullable
+     * value (core/include/mt_matter.h:172-176, binding). */
+    if (is_unsigned) {
+        *is_unsigned = unsigned_type;
+    }
+
+    uint8_t buf[8] = { 0 };
+    Status st = emberAfReadAttribute(ep, cluster, attr, buf, sizeof(buf));
+    if (st != Status::Success) {
+        /* Cannot happen once attr_locate() has already proven the
+         * endpoint/cluster/attribute triple exists; defensive only. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    uint64_t raw = 0;
+    for (uint8_t i = 0; i < bytes; i++) {
+        raw |= ((uint64_t)buf[i]) << (8 * i);
+    }
+
+    if (md->IsNullable()) {
+        /* NumericAttributeTraits::GetNullValue() (attribute-storage-null-
+         * handling.h): the type maximum for unsigned, the type minimum for
+         * signed - same sentinels mt_devtypes_zephyr.cpp's s_seeds table
+         * documents and uses. */
+        uint64_t null_raw = unsigned_type
+            ? (bytes >= 8 ? (uint64_t)-1 : ((1ULL << (8 * bytes)) - 1))
+            : (bytes >= 8 ? (1ULL << 63) : (1ULL << (8 * bytes - 1)));
+        if (raw == null_raw) {
+            /* The AT grammar has no null literal: answer MT_ATTR_ERR_TYPE
+             * with is_unsigned already set above, so a caller about to
+             * WRITE can still fetch the signedness first. */
+            return MT_ATTR_ERR_TYPE;
+        }
+    }
+
+    if (unsigned_type) {
+        *out = (int64_t)raw;  /* reinterpret through uint64_t, per the header */
+    } else {
+        int shift = 64 - 8 * bytes;
+        *out = (int64_t)(raw << shift) >> shift;
+    }
+    return MT_ATTR_OK;
+}
+
+extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t val, bool notify)
+{
+    chip::DeviceLayer::StackLock lock;
+
+    const EmberAfAttributeMetadata *md = nullptr;
+    mt_attr_result_t r = attr_locate(ep, cluster, attr, &md);
+    if (r != MT_ATTR_OK) {
+        return r;
+    }
+
+    bool unsigned_type;
+    uint8_t bytes;
+    if (!attr_type_info(md->attributeType, &unsigned_type, &bytes)) {
+        return MT_ATTR_ERR_TYPE;
+    }
+
+    /* Width bounds check ahead of the write: a value outside the
+     * attribute's own width is MT_ATTR_ERR_VALUE, not a silent truncation
+     * (core/include/mt_matter.h:185-188, binding). */
+    if (bytes < 8) {
+        uint64_t u = (uint64_t)val;
+        if (unsigned_type) {
+            uint64_t max_u = (1ULL << (8 * bytes)) - 1;
+            if (u > max_u) {
+                return MT_ATTR_ERR_VALUE;
+            }
+        } else {
+            int64_t min_s = -(int64_t)(1ULL << (8 * bytes - 1));
+            int64_t max_s = (int64_t)((1ULL << (8 * bytes - 1)) - 1);
+            if (val < min_s || val > max_s) {
+                return MT_ATTR_ERR_VALUE;
+            }
+        }
+    }
+
+    /*
+     * No metadata->IsWritable() gate here - a deliberate delta from the
+     * brief's sketch, recorded in the task report with tree evidence on
+     * both platforms:
+     *
+     * emAfWriteAttribute()'s writable/data-type guard runs only when
+     * overrideReadOnlyAndDataType is false (NCS v3.3.4
+     * attribute-table.cpp:350-364), and BOTH public emberAfWriteAttribute()
+     * overloads pass true for it (attribute-table.cpp:189-199): "This
+     * function will not check to see if the attribute is writable since the
+     * read only/writable characteristic of an attribute only pertains to
+     * external devices writing over the air... it assumes the device knows
+     * what it is doing" (the function's own doc comment). A locally
+     * originated write is trusted the same way on the C6: esp-matter's
+     * set_val()/update() (esp_matter_data_model.cpp:1091) skip their
+     * ATTRIBUTE_FLAG_WRITABLE-less refusal entirely for a plain,
+     * not-managed-internally attribute, which is what TemperatureMeasurement
+     * MeasuredValue and Identify IdentifyType both are on the C6 too
+     * (esp_matter_attribute.cpp: create_measured_value() is
+     * ATTRIBUTE_FLAG_NULLABLE only, create_identify_type() is
+     * ATTRIBUTE_FLAG_NONE - neither carries WRITABLE or
+     * MANAGED_INTERNALLY). This bridge's write is that same "the caller is
+     * the local host, not a controller over the air" concession, which is
+     * exactly why the controller bench gate's own MeasuredValue write has to
+     * succeed even though ZAP declares it without WRITABLE
+     * (mt_devtypes_zephyr.cpp:163-164).
+     *
+     * mt_matter.h's MT_ATTR_ERR_READONLY comment is scoped narrower than "no
+     * WRITABLE flag": it names a specific mechanism, "served by a cluster
+     * Instance (ATTRIBUTE_FLAG_MANAGED_INTERNALLY without
+     * ATTRIBUTE_FLAG_WRITABLE)". This milestone's registry has no
+     * Instance-managed cluster at all (no delegate pool exists yet on this
+     * platform), so that condition cannot occur here - MT_ATTR_ERR_READONLY
+     * is unreachable from this bridge today, the same as it was on the C6
+     * before its first Instance-managed cluster shipped. A gate on
+     * IsWritable() alone would answer READONLY for MeasuredValue too, which
+     * the bench gate explicitly requires to succeed; it is not implemented
+     * here for that reason. Concretely: the brief's own bench gate line "a
+     * write to IdentifyType (read-only) answers the read-only error" will
+     * NOT reproduce with this bridge - IdentifyType is locally writable, at
+     * parity with the C6 at the same point in its history. Flagged for the
+     * controller in the task report; the fix, if this parity is not what is
+     * wanted here, is a future round's Instance-managed IdentifyCluster (or
+     * an explicit non-generic carve-out), not a blanket IsWritable() check
+     * that breaks MeasuredValue.
+     */
+
+    uint8_t buf[8] = { 0 };
+    uint64_t u = (uint64_t)val;
+    for (uint8_t i = 0; i < bytes; i++) {
+        buf[i] = (uint8_t)(u >> (8 * i));
+    }
+
+    chip::app::ConcreteAttributePath path(ep, cluster, attr);
+    EmberAfWriteDataInput input(buf, md->attributeType);
+    input.SetMarkDirty(notify ? chip::app::MarkAttributeDirty::kIfChanged
+                              : chip::app::MarkAttributeDirty::kNo);
+
+    /* notify=false reflects a controller-driven change back into local
+     * storage; suppress the +MTATTR echo for exactly this call so the host
+     * does not see its own reflection loop back to it (see
+     * MatterPostAttributeChangeCallback below, which fires regardless of
+     * MarkAttributeDirty - that flag only gates the reporting-engine
+     * listener, not the post-change callback, attribute-table.cpp:469-476). */
+    if (!notify) {
+        s_suppress_attr_urc = true;
+    }
+    Status st = emberAfWriteAttribute(path, input);
+    if (!notify) {
+        s_suppress_attr_urc = false;
+    }
+
+    switch (st) {
+    case Status::Success:
+        /* A same-value re-push also answers Success in both notify modes:
+         * emAfWriteAttribute()'s AttributeValueIsChanging() early-out
+         * (attribute-table.cpp:408-426) returns Success without touching
+         * MarkAttributeDirty's callback path at all. OK by construction; no
+         * special case needed here (binding per core/include/mt_matter.h's
+         * same-value comment). */
+        return MT_ATTR_OK;
+    case Status::ConstraintError:
+        /* ember's own MIN_MAX bounds check (attribute-table.cpp:366-406)
+         * runs unconditionally, independent of the override flag noted
+         * above. */
+        return MT_ATTR_ERR_VALUE;
+    default:
+        return MT_ATTR_ERR_FAILED;
+    }
+}
+
+/*
+ * Strong override of the weak default in NCS's generic-callback-stubs.cpp.
+ * Every attribute write that actually changes a value passes through here,
+ * whether it came from this bridge's notify=true path or from a
+ * controller's own IM write - so a controller-driven change surfaces to the
+ * host as a +MTATTR URC the same way the C6's app_attribute_update_cb()
+ * does. Format is byte-identical to platform/esp32c6/main/main.cpp:838-842.
+ */
+void MatterPostAttributeChangeCallback(const chip::app::ConcreteAttributePath &path, uint8_t type,
+                                       uint16_t size, uint8_t *value)
+{
+    if (s_suppress_attr_urc) return;
+    if (path.mEndpointId == 0 || path.mEndpointId == 240) return;
+    bool is_unsigned; uint8_t bytes;
+    if (!attr_type_info((EmberAfAttributeType)type, &is_unsigned, &bytes) || size < bytes) return;
+    uint64_t raw = 0;
+    for (uint8_t i = 0; i < bytes; i++) raw |= ((uint64_t)value[i]) << (8 * i);
+    char line[64];
+    if (is_unsigned) {
+        snprintf(line, sizeof(line), "+MTATTR:%u,%lu,%lu,%llu", path.mEndpointId,
+                 (unsigned long)path.mClusterId, (unsigned long)path.mAttributeId,
+                 (unsigned long long)raw);
+    } else {
+        int64_t sv = (int64_t)(raw << (64 - 8 * bytes)) >> (64 - 8 * bytes);
+        snprintf(line, sizeof(line), "+MTATTR:%u,%lu,%lu,%lld", path.mEndpointId,
+                 (unsigned long)path.mClusterId, (unsigned long)path.mAttributeId,
+                 (long long)sv);
+    }
+    mt_at_urc(line);
 }

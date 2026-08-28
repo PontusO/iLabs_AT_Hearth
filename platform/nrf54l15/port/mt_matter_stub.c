@@ -33,33 +33,18 @@
  * accept-all predicates, so the composition pipeline could be exercised
  * before any device type existed. mt_devtypes_zephyr.cpp implements them
  * for real now; AT+MTEP rejects an unknown device type again.
+ *
+ * mt_matter_attr_read/mt_matter_attr_write (Task 5) now live in
+ * mt_matter_zephyr.cpp too, against the ember external-attribute path
+ * (emberAfReadAttribute/emberAfWriteAttribute), alongside the strong
+ * MatterPostAttributeChangeCallback() override that turns a changed
+ * attribute into a +MTATTR URC.
  */
 
 #include <stddef.h>
 #include <string.h>
 
 #include "mt_matter.h"
-
-int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
-                        bool *is_unsigned)
-{
-    (void)ep;
-    (void)cluster;
-    (void)attr;
-    if (out) *out = 0;
-    if (is_unsigned) *is_unsigned = false;
-    return MT_ATTR_ERR_ENDPOINT;
-}
-
-int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t val, bool notify)
-{
-    (void)ep;
-    (void)cluster;
-    (void)attr;
-    (void)val;
-    (void)notify;
-    return MT_ATTR_ERR_ENDPOINT;
-}
 
 int mt_matter_switch_click(uint16_t ep)
 {
