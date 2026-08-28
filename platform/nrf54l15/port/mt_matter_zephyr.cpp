@@ -15,8 +15,10 @@
 #include <platform/ThreadStackManager.h>
 #include <setup_payload/OnboardingCodesUtil.h>
 
+#include <openthread/dataset.h>
 #include <openthread/link.h>
 #include <openthread/thread.h>
+#include <openthread/thread_ftd.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -28,11 +30,11 @@ extern "C" {
 #include "mt_composition.h"
 #include "mt_matter.h"
 }
+#include "mt_port_ids.h"
 
 LOG_MODULE_REGISTER(hearth_matter, LOG_LEVEL_INF);
 
 using chip::DeviceLayer::ConnectivityMgr;
-using chip::DeviceLayer::PlatformMgr;
 using chip::DeviceLayer::ThreadStackMgr;
 using chip::DeviceLayer::ThreadStackMgrImpl;
 using chip::Protocols::InteractionModel::Status;
@@ -85,6 +87,12 @@ extern "C" int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual,
      * these means any future failure here, whatever its cause, is visible
      * on the console instead of forcing that same trace again.
      */
+    if (qr_len == 0 || manual_len == 0) {
+        /* qr_len - 1 / manual_len - 1 below would underflow a size_t of 0
+         * into SIZE_MAX, handing MutableCharSpan a buffer size no caller
+         * ever meant. Refused before the lock is even taken. */
+        return -1;
+    }
     chip::DeviceLayer::StackLock lock;
 
     chip::RendezvousInformationFlags flags(chip::RendezvousInformationFlag::kBLE);
@@ -132,18 +140,30 @@ extern "C" int mt_matter_transport_mismatch(void)
     return 0;
 }
 
-/* OT role to Matter RoutingRoleEnum (ThreadNetworkDiagnostics). The
- * REED refinement (a child eligible for promotion) is not derived here;
- * a child reports END_DEVICE or SLEEPY_END_DEVICE by its link mode.
- * Recorded as a milestone simplification in the task report. */
+/*
+ * OT role to Matter RoutingRoleEnum (ThreadNetworkDiagnostics), matching
+ * CHIP's own derivation (thread-network-diagnostics-provider.cpp:112-118)
+ * and AT_MT_SPEC.md's `<role>` table (~2894-2907): DISABLED is
+ * kUnspecified (0), DETACHED is kUnassigned (1) - the two are NOT the
+ * same token, unlike a plain "no dataset" or "not attached" read. A CHILD
+ * with the radio off when idle is kSleepyEndDevice (2) regardless of
+ * router eligibility; a CHILD with the radio on is kReed (4) when
+ * router-eligible, kEndDevice (3) otherwise. Both build arms compile
+ * CONFIG_OPENTHREAD_FTD=y, so otThreadIsRouterEligible() is always
+ * reachable here and no #if guard is needed the way CHIP's own
+ * CHIP_DEVICE_CONFIG_THREAD_FTD one is.
+ */
 static uint8_t ot_role_to_matter(otInstance *ot)
 {
     switch (otThreadGetDeviceRole(ot)) {
-    case OT_DEVICE_ROLE_DISABLED:
+    case OT_DEVICE_ROLE_DISABLED: return 0;  /* kUnspecified */
     case OT_DEVICE_ROLE_DETACHED: return 1;  /* kUnassigned */
     case OT_DEVICE_ROLE_CHILD: {
         otLinkModeConfig mode = otThreadGetLinkMode(ot);
-        return mode.mRxOnWhenIdle ? 3 : 2;   /* kEndDevice : kSleepyEndDevice */
+        if (!mode.mRxOnWhenIdle) {
+            return 2;  /* kSleepyEndDevice */
+        }
+        return otThreadIsRouterEligible(ot) ? 4 /* kReed */ : 3 /* kEndDevice */;
     }
     case OT_DEVICE_ROLE_ROUTER: return 5;    /* kRouter */
     case OT_DEVICE_ROLE_LEADER: return 6;    /* kLeader */
@@ -160,12 +180,32 @@ extern "C" int mt_matter_thread_info(mt_thread_info_t *out)
 
     ThreadStackMgr().LockThreadStack();
     otInstance *ot = ThreadStackMgrImpl().OTInstance();
+    if (!ot) {
+        /* No OpenThread instance yet (should not happen once the Thread
+         * stack has started, but this read must never dereference a null
+         * otInstance). */
+        ThreadStackMgr().UnlockThreadStack();
+        return MT_ATTR_ERR_FAILED;
+    }
     out->role = ot_role_to_matter(ot);
     otDeviceRole role = otThreadGetDeviceRole(ot);
-    bool attached = (role == OT_DEVICE_ROLE_CHILD || role == OT_DEVICE_ROLE_ROUTER ||
+    out->attached = (role == OT_DEVICE_ROLE_CHILD || role == OT_DEVICE_ROLE_ROUTER ||
                      role == OT_DEVICE_ROLE_LEADER);
-    out->attached = attached;
-    if (attached) {
+
+    /*
+     * The four id fields (and the network name) are gated on "dataset
+     * installed" (otDatasetIsCommissioned()), NOT on the attached
+     * predicate above: AT_MT_SPEC.md's binding derivation (~2927-2949)
+     * is explicit that a device holding a dataset but still detached
+     * already reports its channel, PAN ID, extended PAN ID, partition id
+     * and network name, matching CHIP's own gate
+     * (thread-network-diagnostics-provider.cpp:68,
+     * `if (!otDatasetIsCommissioned(otInst))`). Using `attached` here
+     * would make every one of those fields read null for the entire
+     * window between dataset install and attachment, which is exactly
+     * the false negative the spec calls out.
+     */
+    if (otDatasetIsCommissioned(ot)) {
         out->has_channel = true;
         out->channel = otLinkGetChannel(ot);
         out->has_panid = true;
@@ -179,11 +219,18 @@ extern "C" int mt_matter_thread_info(mt_thread_info_t *out)
         out->extpanid = v;
         out->has_partitionid = true;
         out->partitionid = otThreadGetPartitionId(ot);
-    }
-    const char *name = otThreadGetNetworkName(ot);
-    if (name) {
-        strncpy(out->name, name, sizeof(out->name) - 1);
-        out->name[sizeof(out->name) - 1] = '\0';
+
+        /* Same gate as the four ids above: with no dataset installed,
+         * OpenThread's otThreadGetNetworkName() still answers its
+         * compiled-in default ("OpenThread"), which is not this
+         * device's network name and must not reach the wire. out->name
+         * is already zeroed (memset above), so leaving this block
+         * unentered is what makes the unconfigured case render "". */
+        const char *name = otThreadGetNetworkName(ot);
+        if (name) {
+            strncpy(out->name, name, sizeof(out->name) - 1);
+            out->name[sizeof(out->name) - 1] = '\0';
+        }
     }
     ThreadStackMgr().UnlockThreadStack();
     return MT_ATTR_OK;
@@ -549,7 +596,7 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
 void MatterPostAttributeChangeCallback(const chip::app::ConcreteAttributePath &path, uint8_t type,
                                        uint16_t size, uint8_t *value)
 {
-    if (path.mEndpointId == 0 || path.mEndpointId == 240) return;
+    if (path.mEndpointId == 0 || path.mEndpointId == kCatalogueEndpointId) return;
     bool is_unsigned; uint8_t bytes;
     if (!attr_type_info((EmberAfAttributeType)type, &is_unsigned, &bytes) || size < bytes) return;
     uint64_t raw = 0;

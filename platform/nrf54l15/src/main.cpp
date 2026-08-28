@@ -21,12 +21,9 @@ extern "C" {
 #include "mt_devtypes.h"
 #include "mt_matter.h"
 }
+#include "mt_port_ids.h"
 
 LOG_MODULE_REGISTER(hearth_main, LOG_LEVEL_INF);
-
-/* The catalogue endpoint exists only to compile cluster server code
- * into the image (spec section 3); it is never visible on the fabric. */
-static constexpr chip::EndpointId kCatalogueEndpointId = 240;
 
 /*
  * Rebuild the endpoint composition the host declared over AT+MTEP. The

@@ -274,6 +274,7 @@ struct attr_seed {
 
 const attr_seed s_seeds[] = {
     /* OnOff */
+    { OnOff::Id, OnOff::Attributes::GlobalSceneControl::Id, 1, { 0x01 } },     /* TRUE, cluster spec default */
     { OnOff::Id, OnOff::Attributes::StartUpOnOff::Id, 1, { 0xFF } },           /* null */
     { OnOff::Id, OnOff::Attributes::FeatureMap::Id, 4, { 0x01, 0x00, 0x00, 0x00 } },
     { OnOff::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x06, 0x00 } },
@@ -431,6 +432,18 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     if (variant > type->max_variant) {
         LOG_ERR("devtype 0x%04X variant %u not supported by this build", (unsigned)devtype_id,
                 (unsigned)variant);
+        return -1;
+    }
+
+    /* Checked before the dv span below is built: emberAfSetDynamicEndpoint()
+     * takes Span<DataVersion>(d.dv, type->ep_type->clusterCount), and d.dv
+     * is exactly kMaxClusters wide. A devtype with more clusters than that
+     * would hand the span a length past the end of d.dv, the same
+     * silent-overrun kMaxSlots guards against above. Raise kMaxClusters
+     * when a devtype needs more. */
+    if (type->ep_type->clusterCount > kMaxClusters) {
+        LOG_ERR("devtype 0x%04X has %u clusters, kMaxClusters is %u; raise it",
+                (unsigned)devtype_id, (unsigned)type->ep_type->clusterCount, (unsigned)kMaxClusters);
         return -1;
     }
 

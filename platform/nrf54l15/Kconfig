@@ -11,6 +11,15 @@
 # the PSA-backed crypto path (CHIPCryptoPALPSA.cpp) the one actually
 # built.
 #
+# Sourcing alone is not the whole story: prj.conf sets
+# CONFIG_CHIP_CRYPTO_PSA=y explicitly rather than trusting the default
+# even with these fragments sourced, because chip-module/Kconfig.defaults
+# wraps that "default y" inside its own "if CHIP ... endif # CHIP" body,
+# and this build passed through a CONFIG_CHIP=n window (sysbuild forcing
+# the app image off) where that body, default included, was not reachable
+# at all. See prj.conf's comment next to CONFIG_CHIP_CRYPTO_PSA=y for the
+# full history.
+#
 # The common/src/Kconfig fragment below is sourced for the same reason:
 # matter_init.cpp (platform/nrf54l15/CMakeLists.txt, ${MATTER_COMMON})
 # is built straight out of the NCS Matter common sample sources and

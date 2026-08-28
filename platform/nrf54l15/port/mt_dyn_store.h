@@ -8,6 +8,16 @@
  * mt_devtypes_zephyr.cpp's per-endpoint slot arena. This header is how the
  * rest of the port reaches that arena; it is C++ only and never leaves
  * platform/nrf54l15/port.
+ *
+ * No external consumer exists yet: Task 5's mt_matter_attr_read/_write
+ * bridge went through the ember path this header's own comment below
+ * prefers, exactly as intended, and nothing else in this port has needed
+ * mt_dyn_attr_slot() so far. That is not a reason to fold this header
+ * away. It stays as the deliberate contract for a future round that
+ * genuinely cannot go through emberAfReadAttribute()/emberAfWriteAttribute()
+ * (an SDK callback that already holds the ember lookup, say), so that
+ * round has a documented, lock-audited entry point instead of reaching
+ * into the slot arena ad hoc.
  */
 
 #pragma once

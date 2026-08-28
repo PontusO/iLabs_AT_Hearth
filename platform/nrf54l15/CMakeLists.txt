@@ -7,7 +7,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/../../core/sources.cmake)
 
 target_sources(app PRIVATE
     port/hearth_port_zephyr.c
-    port/mt_matter_stub.c
     ${HEARTH_CORE_SOURCES})
 target_include_directories(app PRIVATE ${HEARTH_CORE_INCLUDE_DIRS} port)
 target_compile_definitions(app PRIVATE MT_COMBINED_IMAGE=0)
@@ -31,6 +30,7 @@ if(CONFIG_CHIP)
   target_include_directories(app PRIVATE src src/default_zap ${MATTER_COMMON})
   target_sources(app PRIVATE
     src/main.cpp
+    port/mt_matter_stub.c
     port/mt_matter_zephyr.cpp
     port/mt_devtypes_zephyr.cpp
     ${MATTER_COMMON}/app/matter_init.cpp
