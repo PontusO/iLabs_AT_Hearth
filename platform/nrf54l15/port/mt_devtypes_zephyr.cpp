@@ -47,25 +47,43 @@ namespace {
 
 /* ---- shared cluster building blocks ---------------------------------- */
 
-/* Descriptor's four lists are ARRAY-typed. The declared size is the byte
- * budget CHIP checks against its attribute IO buffer, not storage we own:
- * the values come from CHIP's own DescriptorCluster server object. */
-constexpr uint16_t kDescriptorArraySize = 254;
-
+/*
+ * Descriptor carries no attribute metadata of its own beyond the
+ * ClusterRevision that DECLARE_DYNAMIC_ATTRIBUTE_LIST_END() appends.
+ *
+ * Its four lists (DeviceTypeList, ServerList, ClientList, PartsList) are
+ * served by CHIP's registered DescriptorCluster object, which wins before
+ * ember storage is ever consulted (CodegenDataModelProvider_Read.cpp:116
+ * checks the cluster registry ahead of the metadata path), so declaring
+ * them here bought nothing. It cost correctness: emberAfSetDynamicEndpoint
+ * validates every declared attribute size against the ember attribute IO
+ * buffer (attribute-storage.cpp:334-356), and that buffer is
+ * ATTRIBUTE_LARGEST from our generated endpoint_config.h:1160, which is 66.
+ * A 254-byte ARRAY declaration therefore failed the check and made every
+ * single endpoint creation return CHIP_ERROR_NO_MEMORY.
+ */
 DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(descriptorAttrs)
-DECLARE_DYNAMIC_ATTRIBUTE(Descriptor::Attributes::DeviceTypeList::Id, ARRAY, kDescriptorArraySize, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE(Descriptor::Attributes::ServerList::Id, ARRAY, kDescriptorArraySize, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE(Descriptor::Attributes::ClientList::Id, ARRAY, kDescriptorArraySize, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE(Descriptor::Attributes::PartsList::Id, ARRAY, kDescriptorArraySize, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
 
+/* Identify's attributes DO reach the external store below: unlike
+ * Descriptor, MatterIdentifyClusterInitCallback (identify-server/
+ * CodegenIntegration.cpp:174) only logs, and the IdentifyCluster object is
+ * built solely by constructing a legacy Identify instance (:147), which
+ * nothing does for a dynamic endpoint.
+ *
+ * The incoming command list is nullptr for the same reason: with no cluster
+ * object there is no handler, and this tree has no ember fallback for
+ * Identify either (our generated IMClusterCommandHandler.cpp dispatches
+ * only Groups, LevelControl, OtaSoftwareUpdateRequestor, OnOff and
+ * ThreadNetworkDiagnostics). Advertising Identify in AcceptedCommandList
+ * would be a lie. Per-endpoint IdentifyCluster instances are a later
+ * round's work. */
 DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(identifyAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(Identify::Attributes::IdentifyTime::Id, INT16U, 2,
                           ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(Identify::Attributes::IdentifyType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(Identify::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
     DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
-
-constexpr CommandId kIdentifyIncoming[] = { Identify::Commands::Identify::Id, kInvalidCommandId };
 
 /* One metadata array per cluster, shared by every endpoint type that
  * carries that cluster: EmberAfCluster holds a const pointer to it and
@@ -81,7 +99,7 @@ DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::OnOff::Id, BOOLEAN, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::OffWaitTime::Id, INT16U, 2,
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::StartUpOnOff::Id, ENUM8, 1,
-                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+                              ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
     DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
 
@@ -90,7 +108,7 @@ constexpr CommandId kOnOffIncoming[] = { OnOff::Commands::Off::Id, OnOff::Comman
 
 DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(onOffLightClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
-    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), kIdentifyIncoming,
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
@@ -103,16 +121,17 @@ constexpr EmberAfDeviceType kOnOffLightTypes[] = { { 0x0100, 3 } };
 /* ---- dimmable light (0x0101) ----------------------------------------- */
 
 DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(levelAttrs)
-DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::CurrentLevel::Id, INT8U, 1, 0),
+DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::CurrentLevel::Id, INT8U, 1,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::RemainingTime::Id, INT16U, 2, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::MinLevel::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::MaxLevel::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::Options::Id, BITMAP8, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::OnLevel::Id, INT8U, 1,
-                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+                              ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::StartUpCurrentLevel::Id, INT8U, 1,
-                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+                              ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
     DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
 
@@ -128,7 +147,7 @@ DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(dimmableLightClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), kIdentifyIncoming,
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
@@ -141,16 +160,19 @@ constexpr EmberAfDeviceType kDimmableLightTypes[] = { { 0x0101, 3 } };
 /* ---- temperature sensor (0x0302) ------------------------------------- */
 
 DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(tempAttrs)
-DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MeasuredValue::Id, INT16S, 2, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MinMeasuredValue::Id, INT16S, 2, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MaxMeasuredValue::Id, INT16S, 2, 0),
+DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MeasuredValue::Id, INT16S, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MinMeasuredValue::Id, INT16S, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MaxMeasuredValue::Id, INT16S, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
     DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
 
 DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(temperatureSensorClusters)
 DECLARE_DYNAMIC_CLUSTER(TemperatureMeasurement::Id, tempAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
-    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), kIdentifyIncoming,
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
@@ -178,20 +200,27 @@ const hearth_devtype s_registry[] = {
 /* ---- the external attribute store ------------------------------------ */
 
 /* One attribute-value arena per dynamic slot. Every dynamic attribute
- * declared above is 4 bytes or fewer, so 8-byte slots are generous and
- * uniform; the widest endpoint type (dimmable light) needs 19 slots. */
+ * declared above is 4 bytes or fewer (BITMAP32 is the widest), so 4-byte
+ * slots hold all of them; seed_slots() refuses anything larger rather than
+ * overrunning. 28 endpoints times this arena is the dominant RAM cost of
+ * the whole file, so the bounds are tight on purpose. */
 struct attr_slot {
     ClusterId cluster;
     AttributeId attr;
     uint8_t size;
-    uint8_t data[8];
+    uint8_t data[4];
 };
-constexpr uint8_t kMaxSlots = 24;
 
-/* Eight data versions is one per cluster, and no endpoint type above has
- * more than four clusters; emberAfSetDynamicEndpoint() refuses the call
- * outright if the span is short, so the headroom is cheap insurance. */
-constexpr uint8_t kMaxClusters = 8;
+/* The widest endpoint type (dimmable light) uses exactly 20 slots: OnOff
+ * 6 + auto ClusterRevision, LevelControl 8 + 1, Identify 3 + 1, Descriptor
+ * skipped. Adding an attribute to any of those clusters must raise this. */
+constexpr uint8_t kMaxSlots = 20;
+
+/* One data version per cluster; the widest endpoint type has exactly four.
+ * emberAfSetDynamicEndpoint() returns CHIP_ERROR_NO_MEMORY outright if the
+ * span is shorter than the server-cluster count
+ * (attribute-storage.cpp:319-323), so a short array fails loudly. */
+constexpr uint8_t kMaxClusters = 4;
 
 struct dyn_endpoint {
     bool used;
@@ -211,6 +240,64 @@ dyn_endpoint s_dyn[MT_COMP_MAX_ENDPOINTS];
  * before esp_matter::start(). */
 uint16_t s_next_ep_id = 1;
 
+/*
+ * Boot values for attributes where zero is the wrong answer, little-endian
+ * as the attribute store holds them. Two kinds of entry live here:
+ *
+ *   Functional. LevelControl reads MinLevel and MaxLevel out of the store
+ *   when the endpoint is enabled (level-control.cpp:1480-1481) and keeps
+ *   them as the movement bounds for the life of the endpoint. Left at zero,
+ *   a dimmable light clamps every MoveToLevel to 0 and never lights.
+ *
+ *   Conformance. FeatureMap and ClusterRevision must describe the cluster
+ *   the endpoint actually presents. Revisions are this tree's own
+ *   zzz_generated/app-common/clusters/<Cluster>/Metadata.h kRevision
+ *   (OnOff 6, LevelControl 6, TemperatureMeasurement 4, Identify 6);
+ *   feature bits are from the matching Enums.h (OnOff Feature::kLighting
+ *   0x1; LevelControl kOnOff 0x1 | kLighting 0x2 = 0x3).
+ *
+ * Nullable attributes whose correct boot value is null carry the type's
+ * null sentinel rather than a zero: NumericAttributeTraits::GetNullValue()
+ * (attribute-storage-null-handling.h:77-81) is the type maximum for
+ * unsigned and enum types (0xFF for a 1-byte one) and the type minimum for
+ * signed ones (0x8000 for INT16S, stored little-endian as 00 80).
+ */
+struct attr_seed {
+    ClusterId cluster;
+    AttributeId attr;
+    uint8_t size;
+    uint8_t bytes[4];
+};
+
+const attr_seed s_seeds[] = {
+    /* OnOff */
+    { OnOff::Id, OnOff::Attributes::StartUpOnOff::Id, 1, { 0xFF } },           /* null */
+    { OnOff::Id, OnOff::Attributes::FeatureMap::Id, 4, { 0x01, 0x00, 0x00, 0x00 } },
+    { OnOff::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x06, 0x00 } },
+
+    /* LevelControl */
+    { LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, 1, { 0xFE } },
+    { LevelControl::Id, LevelControl::Attributes::MinLevel::Id, 1, { 0x01 } },
+    { LevelControl::Id, LevelControl::Attributes::MaxLevel::Id, 1, { 0xFE } },
+    { LevelControl::Id, LevelControl::Attributes::OnLevel::Id, 1, { 0xFF } },  /* null */
+    { LevelControl::Id, LevelControl::Attributes::StartUpCurrentLevel::Id, 1, { 0xFF } }, /* null */
+    { LevelControl::Id, LevelControl::Attributes::FeatureMap::Id, 4, { 0x03, 0x00, 0x00, 0x00 } },
+    { LevelControl::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x06, 0x00 } },
+
+    /* TemperatureMeasurement: no features, and no reading until the host
+     * writes one, so all three values start null. */
+    { TemperatureMeasurement::Id, TemperatureMeasurement::Attributes::MeasuredValue::Id, 2,
+      { 0x00, 0x80 } },
+    { TemperatureMeasurement::Id, TemperatureMeasurement::Attributes::MinMeasuredValue::Id, 2,
+      { 0x00, 0x80 } },
+    { TemperatureMeasurement::Id, TemperatureMeasurement::Attributes::MaxMeasuredValue::Id, 2,
+      { 0x00, 0x80 } },
+    { TemperatureMeasurement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x04, 0x00 } },
+
+    /* Identify: no features; IdentifyType 0 (None) is the zero-fill. */
+    { Identify::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x06, 0x00 } },
+};
+
 void seed_slots(dyn_endpoint *d)
 {
     d->slot_count = 0;
@@ -228,6 +315,12 @@ void seed_slots(dyn_endpoint *d)
             if (md.attributeType == ZAP_TYPE(ARRAY)) {
                 continue;
             }
+            if (md.size > sizeof(d->slots[0].data)) {
+                LOG_ERR("attr 0x%08X on cluster 0x%08X is %u bytes, arena holds %u",
+                        (unsigned)md.attributeId, (unsigned)cl.clusterId, (unsigned)md.size,
+                        (unsigned)sizeof(d->slots[0].data));
+                continue;
+            }
             if (d->slot_count >= kMaxSlots) {
                 LOG_ERR("slot arena full for devtype 0x%04X", (unsigned)d->type->id);
                 return;
@@ -237,8 +330,11 @@ void seed_slots(dyn_endpoint *d)
             s.attr = md.attributeId;
             s.size = (uint8_t)md.size;
             memset(s.data, 0, sizeof(s.data));
-            if (md.attributeId == Globals::Attributes::ClusterRevision::Id) {
-                s.data[0] = 1;
+            for (auto &seed : s_seeds) {
+                if (seed.cluster == cl.clusterId && seed.attr == md.attributeId) {
+                    memcpy(s.data, seed.bytes, (seed.size < s.size) ? seed.size : s.size);
+                    break;
+                }
             }
         }
     }
@@ -301,22 +397,37 @@ extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint3
 extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype,
                                  uint16_t parent_ep_id, uint16_t *out_ep_id)
 {
-    /* No milestone device type has variants, so variant carries no
-     * construction difference yet; mt_devtype_variant_ok() has already
-     * rejected anything but 0 by the time the rebuild loop gets here. */
-    (void)variant;
-
     if (!out_ep_id) {
         return -1;
     }
+
+    /* The lock covers the whole function, so every s_dyn and s_next_ep_id
+     * mutation happens under it and the invariant is statable: the dynamic
+     * endpoint table and the slot arena are only ever touched with the CHIP
+     * stack lock held. emberAfSetDynamicEndpoint() below enables the
+     * endpoint synchronously and runs cluster init callbacks that read this
+     * arena back, so the two must not be lockable separately. */
+    chip::DeviceLayer::StackLock lock;
 
     const hearth_devtype *type = nullptr;
     for (auto &e : s_registry) {
         if (e.id == devtype_id) {
             type = &e;
+            break;
         }
     }
     if (!type) {
+        return -1;
+    }
+
+    /* Re-checked here, not just at AT+MTEP staging time: a composition blob
+     * persisted by a wider build can name a variant this build does not
+     * implement, and silently dropping it would hand a commissioned device
+     * an endpoint that is not what its stored composition says. Fail, and
+     * let the rebuild loop abort. */
+    if (variant > type->max_variant) {
+        LOG_ERR("devtype 0x%04X variant %u not supported by this build", (unsigned)devtype_id,
+                (unsigned)variant);
         return -1;
     }
 
@@ -339,7 +450,6 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * as unsupported and the cluster inits against garbage. */
     d.used = true;
 
-    chip::DeviceLayer::StackLock lock;
     CHIP_ERROR err = emberAfSetDynamicEndpoint(
         index, d.ep_id, type->ep_type, Span<DataVersion>(d.dv, type->ep_type->clusterCount),
         type->device_types, (parent_devtype != 0) ? parent_ep_id : kInvalidEndpointId);

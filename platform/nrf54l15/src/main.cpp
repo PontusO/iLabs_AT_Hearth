@@ -57,8 +57,17 @@ static void rebuild_composition(void)
         uint16_t eid = 0;
         uint8_t var = 0;
         uint8_t pidx = 0;
-        if (comp.parent[i] != MT_COMP_NO_PARENT &&
-            mt_matter_endpoint_info(comp.parent[i], &dt, &eid, &var, &pidx) == 0) {
+        if (comp.parent[i] != MT_COMP_NO_PARENT) {
+            if (mt_matter_endpoint_info(comp.parent[i], &dt, &eid, &var, &pidx) != 0) {
+                /* The composition says this endpoint has a parent and the
+                 * parent is not live. Creating it unparented would present
+                 * the fabric a different device than the stored composition
+                 * describes: the same silently-wrong data model the abort
+                 * below exists to prevent. */
+                LOG_ERR("endpoint %u parent index %u not live, aborting rebuild", i,
+                        (unsigned)comp.parent[i]);
+                break;
+            }
             parent_devtype = dt;
             parent_ep_id = eid;
         }
