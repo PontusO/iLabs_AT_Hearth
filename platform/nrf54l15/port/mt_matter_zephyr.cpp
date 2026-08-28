@@ -20,6 +20,7 @@
 #include <zephyr/logging/log.h>
 
 extern "C" {
+#include "mt_composition.h"
 #include "mt_matter.h"
 }
 
@@ -194,4 +195,56 @@ extern "C" const char *mt_thread_role_name(uint8_t role)
     case 6: return "LEADER";
     default: return nullptr;
     }
+}
+
+/* ---- the live endpoint table ----------------------------------------- */
+
+/*
+ * What the boot rebuild actually created, in creation order. The stored
+ * composition (mt_comp_store.h) is the intent; this is the outcome, and
+ * AT+MTEP? reports this one. Parallel arrays rather than a struct array,
+ * mirroring the C6's s_live_* tables so the two read alike.
+ *
+ * Written only from the boot path in main.cpp, before mt_at_start() lets
+ * any AT command run, so there is no concurrent access to guard.
+ */
+static uint32_t s_live_devtype[MT_COMP_MAX_ENDPOINTS];
+static uint16_t s_live_ep_id[MT_COMP_MAX_ENDPOINTS];
+static uint8_t s_live_variant[MT_COMP_MAX_ENDPOINTS];
+static uint8_t s_live_parent[MT_COMP_MAX_ENDPOINTS];
+static uint16_t s_live_count;
+
+extern "C" uint16_t mt_matter_endpoint_count(void)
+{
+    return s_live_count;
+}
+
+extern "C" int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id,
+                                       uint8_t *variant, uint8_t *parent_idx)
+{
+    if (index >= s_live_count) {
+        if (devtype) *devtype = 0;
+        if (ep_id) *ep_id = 0;
+        if (variant) *variant = 0;
+        if (parent_idx) *parent_idx = 0;
+        return -1;
+    }
+    if (devtype) *devtype = s_live_devtype[index];
+    if (ep_id) *ep_id = s_live_ep_id[index];
+    if (variant) *variant = s_live_variant[index];
+    if (parent_idx) *parent_idx = s_live_parent[index];
+    return 0;
+}
+
+extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant,
+                                          uint8_t parent_idx)
+{
+    if (s_live_count >= MT_COMP_MAX_ENDPOINTS) {
+        return;
+    }
+    s_live_devtype[s_live_count] = devtype;
+    s_live_ep_id[s_live_count] = ep_id;
+    s_live_variant[s_live_count] = variant;
+    s_live_parent[s_live_count] = parent_idx;
+    s_live_count++;
 }

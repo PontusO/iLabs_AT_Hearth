@@ -32,6 +32,7 @@ if(CONFIG_CHIP)
   target_sources(app PRIVATE
     src/main.cpp
     port/mt_matter_zephyr.cpp
+    port/mt_devtypes_zephyr.cpp
     ${MATTER_COMMON}/app/matter_init.cpp
     ${MATTER_COMMON}/app/matter_event_handler.cpp
     ${MATTER_COMMON}/app/task_executor.cpp

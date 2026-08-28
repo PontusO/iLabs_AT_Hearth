@@ -16,6 +16,10 @@
 
 extern "C" {
 #include "mt_at.h"
+#include "mt_comp_store.h"
+#include "mt_composition.h"
+#include "mt_devtypes.h"
+#include "mt_matter.h"
 }
 
 LOG_MODULE_REGISTER(hearth_main, LOG_LEVEL_INF);
@@ -24,11 +28,59 @@ LOG_MODULE_REGISTER(hearth_main, LOG_LEVEL_INF);
  * into the image (spec section 3); it is never visible on the fabric. */
 static constexpr chip::EndpointId kCatalogueEndpointId = 240;
 
-/* Filled in by the dynamic-endpoint task: reads the stored composition
- * and creates one dynamic endpoint per entry. Until then the device is
- * commissionable but bare. */
+/*
+ * Rebuild the endpoint composition the host declared over AT+MTEP. The
+ * device does this unaided so it rejoins its fabric after a power cut
+ * without waiting on the host (design spec section 5.3).
+ *
+ * Order is what makes the endpoint ids reproducible: mt_devtype_create()
+ * hands out 1..N in composition order from a counter reset at every boot,
+ * so replaying the same stored composition yields the same ids.
+ */
 static void rebuild_composition(void)
 {
+    mt_composition_t comp;
+    int rc = mt_comp_store_load(&comp);
+    if (rc < 0) {
+        LOG_ERR("composition load failed, starting unconfigured");
+        comp.count = 0;
+    } else if (rc == 1) {
+        LOG_INF("no stored composition, starting unconfigured");
+        comp.count = 0;
+    }
+
+    for (uint16_t i = 0; i < comp.count; i++) {
+        uint16_t ep_id = 0;
+        uint32_t parent_devtype = 0;
+        uint16_t parent_ep_id = 0;
+        uint32_t dt = 0;
+        uint16_t eid = 0;
+        uint8_t var = 0;
+        uint8_t pidx = 0;
+        if (comp.parent[i] != MT_COMP_NO_PARENT &&
+            mt_matter_endpoint_info(comp.parent[i], &dt, &eid, &var, &pidx) == 0) {
+            parent_devtype = dt;
+            parent_ep_id = eid;
+        }
+        if (mt_devtype_create(comp.devtype[i], comp.variant[i], parent_devtype, parent_ep_id,
+                              &ep_id) != 0) {
+            /*
+             * Abort the whole rebuild rather than skipping the failed
+             * entry. A failed create consumes no endpoint id, so every
+             * endpoint after it would shift down by one and a commissioned
+             * device would silently get the wrong data model. See design
+             * spec 12.1. The same abort covers a parenting failure
+             * (mt_devtype_create() returns -1 for that too): a live
+             * endpoint with the wrong parent is the identical kind of
+             * silently-wrong data model.
+             */
+            LOG_ERR("endpoint %u (0x%04X) failed, aborting rebuild", i, (unsigned)comp.devtype[i]);
+            break;
+        }
+        mt_matter_record_endpoint(comp.devtype[i], ep_id, comp.variant[i], comp.parent[i]);
+    }
+
+    LOG_INF("composition rebuilt: %u endpoint(s)", mt_matter_endpoint_count());
 }
 
 int main(void)
