@@ -5,8 +5,10 @@
  * Every attribute on a dynamic endpoint is declared EXTERNAL_STORAGE (the
  * DECLARE_DYNAMIC_ATTRIBUTE macro sets that flag unconditionally), so CHIP
  * keeps no value bytes of its own for them: the values live in
- * mt_devtypes_zephyr.cpp's per-endpoint slot arena. This header is how the
- * rest of the port reaches that arena; it is C++ only and never leaves
+ * mt_devtypes_zephyr.cpp's per-endpoint blocks, one heap allocation per
+ * created endpoint holding that endpoint's DataVersion array and its
+ * attribute slots, sized for its own device type. This header is how the
+ * rest of the port reaches those blocks; it is C++ only and never leaves
  * platform/nrf54l15/port.
  *
  * No external consumer exists yet: Task 5's mt_matter_attr_read/_write
@@ -16,8 +18,8 @@
  * away. It stays as the deliberate contract for a future round that
  * genuinely cannot go through emberAfReadAttribute()/emberAfWriteAttribute()
  * (an SDK callback that already holds the ember lookup, say), so that
- * round has a documented, lock-audited entry point instead of reaching
- * into the slot arena ad hoc.
+ * round has a documented, lock-audited entry point instead of walking the
+ * header table and following block pointers ad hoc.
  */
 
 #pragma once
@@ -51,8 +53,11 @@
  *
  * Look up one attribute's value bytes on a dynamic endpoint. On success
  * *data points at the live storage (writable, little-endian, exactly *size
- * bytes) and the function returns true. Returns false when the endpoint is
- * not a live dynamic endpoint, or when the attribute has no slot: that is
+ * bytes) and the function returns true. The pointer aliases into that
+ * endpoint's heap block, which is allocated once at boot and never freed,
+ * so it stays valid for the life of the boot subject to the locking rules
+ * above. Returns false when the endpoint is not a live dynamic endpoint, or
+ * when the attribute has no slot: that is
  * the case for every Descriptor attribute and for anything ARRAY-typed,
  * which CHIP serves from its own cluster objects rather than from here.
  */

@@ -80,10 +80,11 @@ C6's combined image only, runtime stack selection (`AT+MTTRANSPORT`).
 ## Supported device types
 
 `AT+MTEP=<id>` accepts these 52 device type IDs on the ESP32-C6 (firmware
-1.0.0); anything else answers `+MTERR:6`. The nRF54L15 currently serves 14
-of the same catalogue (the lights, the plugs, and the simple sensor rows;
-its README carries the exact list and known issues) and grows toward
-parity. `AT_MT_SPEC.md` section 3.9 in the docs repository
+1.0.0); anything else answers `+MTERR:6`. The nRF54L15 currently serves 20
+of the same catalogue (the lights including the two colour ones, the plugs,
+the simple sensor rows, and the thermostat, fan, window covering and air
+quality sensor; its README carries the exact list and known issues) and
+grows toward parity. `AT_MT_SPEC.md` section 3.9 in the docs repository
 is the authoritative copy.
 
 | ID | Device type | | ID | Device type |

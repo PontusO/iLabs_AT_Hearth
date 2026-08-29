@@ -40,6 +40,8 @@
     0x00000031, /* Cluster: Network Commissioning, Attribute: LastConnectErrorValue, Privilege: administer */ \
     0x0000003E, /* Cluster: Operational Credentials, Attribute: NOCs, Privilege: administer */ \
     /* Cluster: Group Key Management, Attribute: GroupKeyMap, Privilege: view */ \
+    /* Cluster: Window Covering, Attribute: Mode, Privilege: view */ \
+    /* Cluster: Color Control, Attribute: StartUpColorTemperatureMireds, Privilege: view */ \
 }
 
 // Parallel array data (cluster, *attribute*, privilege) for read attribute
@@ -55,6 +57,8 @@
     0x00000007, /* Cluster: Network Commissioning, Attribute: LastConnectErrorValue, Privilege: administer */ \
     0x00000000, /* Cluster: Operational Credentials, Attribute: NOCs, Privilege: administer */ \
     /* Cluster: Group Key Management, Attribute: GroupKeyMap, Privilege: view */ \
+    /* Cluster: Window Covering, Attribute: Mode, Privilege: view */ \
+    /* Cluster: Color Control, Attribute: StartUpColorTemperatureMireds, Privilege: view */ \
 }
 
 // Parallel array data (cluster, attribute, *privilege*) for read attribute
@@ -70,6 +74,8 @@
     chip::Access::Privilege::kAdminister, /* Cluster: Network Commissioning, Attribute: LastConnectErrorValue, Privilege: administer */ \
     chip::Access::Privilege::kAdminister, /* Cluster: Operational Credentials, Attribute: NOCs, Privilege: administer */ \
     /* Cluster: Group Key Management, Attribute: GroupKeyMap, Privilege: view */ \
+    /* Cluster: Window Covering, Attribute: Mode, Privilege: view */ \
+    /* Cluster: Color Control, Attribute: StartUpColorTemperatureMireds, Privilege: view */ \
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -86,6 +92,14 @@
     0x00000030, /* Cluster: General Commissioning, Attribute: Breadcrumb, Privilege: administer */ \
     0x00000031, /* Cluster: Network Commissioning, Attribute: InterfaceEnabled, Privilege: administer */ \
     0x0000003F, /* Cluster: Group Key Management, Attribute: GroupKeyMap, Privilege: manage */ \
+    0x00000102, /* Cluster: Window Covering, Attribute: Mode, Privilege: manage */ \
+    0x00000201, /* Cluster: Thermostat, Attribute: MinHeatSetpointLimit, Privilege: manage */ \
+    0x00000201, /* Cluster: Thermostat, Attribute: MaxHeatSetpointLimit, Privilege: manage */ \
+    0x00000201, /* Cluster: Thermostat, Attribute: MinCoolSetpointLimit, Privilege: manage */ \
+    0x00000201, /* Cluster: Thermostat, Attribute: MaxCoolSetpointLimit, Privilege: manage */ \
+    0x00000201, /* Cluster: Thermostat, Attribute: ControlSequenceOfOperation, Privilege: manage */ \
+    0x00000201, /* Cluster: Thermostat, Attribute: SystemMode, Privilege: manage */ \
+    0x00000300, /* Cluster: Color Control, Attribute: StartUpColorTemperatureMireds, Privilege: manage */ \
 }
 
 // Parallel array data (cluster, *attribute*, privilege) for write attribute
@@ -100,6 +114,14 @@
     0x00000000, /* Cluster: General Commissioning, Attribute: Breadcrumb, Privilege: administer */ \
     0x00000004, /* Cluster: Network Commissioning, Attribute: InterfaceEnabled, Privilege: administer */ \
     0x00000000, /* Cluster: Group Key Management, Attribute: GroupKeyMap, Privilege: manage */ \
+    0x00000017, /* Cluster: Window Covering, Attribute: Mode, Privilege: manage */ \
+    0x00000015, /* Cluster: Thermostat, Attribute: MinHeatSetpointLimit, Privilege: manage */ \
+    0x00000016, /* Cluster: Thermostat, Attribute: MaxHeatSetpointLimit, Privilege: manage */ \
+    0x00000017, /* Cluster: Thermostat, Attribute: MinCoolSetpointLimit, Privilege: manage */ \
+    0x00000018, /* Cluster: Thermostat, Attribute: MaxCoolSetpointLimit, Privilege: manage */ \
+    0x0000001B, /* Cluster: Thermostat, Attribute: ControlSequenceOfOperation, Privilege: manage */ \
+    0x0000001C, /* Cluster: Thermostat, Attribute: SystemMode, Privilege: manage */ \
+    0x00004010, /* Cluster: Color Control, Attribute: StartUpColorTemperatureMireds, Privilege: manage */ \
 }
 
 // Parallel array data (cluster, attribute, *privilege*) for write attribute
@@ -114,6 +136,14 @@
     chip::Access::Privilege::kAdminister, /* Cluster: General Commissioning, Attribute: Breadcrumb, Privilege: administer */ \
     chip::Access::Privilege::kAdminister, /* Cluster: Network Commissioning, Attribute: InterfaceEnabled, Privilege: administer */ \
     chip::Access::Privilege::kManage, /* Cluster: Group Key Management, Attribute: GroupKeyMap, Privilege: manage */ \
+    chip::Access::Privilege::kManage, /* Cluster: Window Covering, Attribute: Mode, Privilege: manage */ \
+    chip::Access::Privilege::kManage, /* Cluster: Thermostat, Attribute: MinHeatSetpointLimit, Privilege: manage */ \
+    chip::Access::Privilege::kManage, /* Cluster: Thermostat, Attribute: MaxHeatSetpointLimit, Privilege: manage */ \
+    chip::Access::Privilege::kManage, /* Cluster: Thermostat, Attribute: MinCoolSetpointLimit, Privilege: manage */ \
+    chip::Access::Privilege::kManage, /* Cluster: Thermostat, Attribute: MaxCoolSetpointLimit, Privilege: manage */ \
+    chip::Access::Privilege::kManage, /* Cluster: Thermostat, Attribute: ControlSequenceOfOperation, Privilege: manage */ \
+    chip::Access::Privilege::kManage, /* Cluster: Thermostat, Attribute: SystemMode, Privilege: manage */ \
+    chip::Access::Privilege::kManage, /* Cluster: Color Control, Attribute: StartUpColorTemperatureMireds, Privilege: manage */ \
 }
 
 ////////////////////////////////////////////////////////////////////////////////

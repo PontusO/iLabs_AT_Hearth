@@ -149,7 +149,9 @@ void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
     (void)ep;
 }
 
-uint32_t mt_air_quality_feature_mask(void) { return 0; }
+/* mt_air_quality_feature_mask() left this file in catalogue batch 2, when
+ * the air quality sensor (0x002C) entered the registry: it lives in
+ * mt_matter_zephyr.cpp now and returns the real bits. */
 
 int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
 {

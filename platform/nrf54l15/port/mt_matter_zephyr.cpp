@@ -8,9 +8,14 @@
 #include <app/ConcreteAttributePath.h>
 #include <app/clusters/boolean-state-server/CodegenIntegration.h>
 #include <app/server/Server.h>
+#include <clusters/AirQuality/Enums.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/util/attribute-storage.h>
 #include <app/util/attribute-table.h>
+/* AttributeBaseType(): the tree's own alias-to-base ZCL type mapping, read
+ * by attr_type_info() below so the AT+MTATTR integer family cannot drift
+ * from the SDK's definition of it. */
+#include <app/util/ember-io-storage.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/ConnectivityManager.h>
 #include <platform/ThreadStackManager.h>
@@ -261,11 +266,20 @@ extern "C" const char *mt_thread_role_name(uint8_t role)
  *
  * Written only from the boot path in main.cpp, before mt_at_start() lets
  * any AT command run, so there is no concurrent access to guard.
+ *
+ * Depth is kServiceableEndpoints (capacity), not MT_COMP_MAX_ENDPOINTS
+ * (acceptance): the only writer is mt_matter_record_endpoint(), which
+ * main.cpp calls once per endpoint that mt_devtype_create() actually stood
+ * up, so an entry here can only exist for an endpoint this build is
+ * serving. A composition may DECLARE 28, but the seventeenth never gets
+ * created and so is never recorded. Nothing indexes these by composition
+ * index either: mt_matter_endpoint_info() bounds its caller against
+ * s_live_count, which is what main.cpp's parent lookup passes through.
  */
-static uint32_t s_live_devtype[MT_COMP_MAX_ENDPOINTS];
-static uint16_t s_live_ep_id[MT_COMP_MAX_ENDPOINTS];
-static uint8_t s_live_variant[MT_COMP_MAX_ENDPOINTS];
-static uint8_t s_live_parent[MT_COMP_MAX_ENDPOINTS];
+static uint32_t s_live_devtype[kServiceableEndpoints];
+static uint16_t s_live_ep_id[kServiceableEndpoints];
+static uint8_t s_live_variant[kServiceableEndpoints];
+static uint8_t s_live_parent[kServiceableEndpoints];
 static uint16_t s_live_count;
 
 extern "C" uint16_t mt_matter_endpoint_count(void)
@@ -293,7 +307,7 @@ extern "C" int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16
 extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant,
                                           uint8_t parent_idx)
 {
-    if (s_live_count >= MT_COMP_MAX_ENDPOINTS) {
+    if (s_live_count >= kServiceableEndpoints) {
         return;
     }
     s_live_devtype[s_live_count] = devtype;
@@ -308,10 +322,72 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
 /*
  * ZCL type to signedness and byte width; anything outside the AT+MTATTR
  * integer family is MT_ATTR_ERR_TYPE.
+ *
+ * Fix round 2 (bench bug). The switch below knows only the BASE integer,
+ * bool, enum and bitmap type codes. Matter also has a large family of ALIAS
+ * type codes that are integers wearing a semantic name: ZCL_TEMPERATURE
+ * (0xD8), ZCL_PERCENT (0xE6), ZCL_PERCENT100THS (0xE7), ZCL_EPOCH_S,
+ * ZCL_ELAPSED_S, ZCL_VENDOR_ID and about thirty more. Catalogue batch 2 was
+ * the first round to declare any of them (the thermostat's TEMPERATURE
+ * setpoints, the fan's PERCENT settings, the window covering's
+ * PERCENT100THS lift positions), and every one of those attributes fell
+ * straight through to `default: return false`. The damage: an AT+MTATTR
+ * read answered +MTERR:5 and MatterPostAttributeChangeCallback dropped the
+ * +MTATTR URC for controller-driven changes, while the very same attributes
+ * worked perfectly over a controller's IM. Bench-confirmed on all three
+ * clusters.
+ *
+ * Nasty because at the AT layer the failure is indistinguishable from
+ * correct behaviour: mt_matter.h:178-181 makes a NULL nullable read answer
+ * MT_ATTR_ERR_TYPE too, so +MTERR:5 is the honest answer for a null value
+ * AND the answer for "not an integer attribute". A tester reading +MTERR:5
+ * on a fresh fan sees exactly what a null PercentSetting would look like.
+ *
+ * The fix normalises through the SDK's own alias table rather than
+ * transcribing one here. There is no shared core-side helper to reuse:
+ * core/include/mt_at.h exports no type-family classifier, and the C6's
+ * (main.cpp's attr_val_is_unsigned()/attr_val_to_i64()) is keyed on
+ * esp_matter_val_type_t, esp-matter's own enum, which is why the C6 never
+ * had this bug: esp-matter maps the alias types down to its INT16/UINT8/
+ * UINT16 val types before its AT bridge ever sees them. This port reads
+ * ember metadata directly, so it must do that mapping itself.
+ *
+ * chip::app::Compatibility::Internal::AttributeBaseType()
+ * (app/util/ember-io-storage.cpp:36-126, declared in ember-io-storage.h) is
+ * THE definition of the family in this tree: it maps every alias to its
+ * basic int(8|16|32|64)(s|u) code and, critically, returns any type it does
+ * not recognise unchanged (`default: return type`, :123-124). So the switch
+ * below is reached with exactly the value it used to be reached with for
+ * every base type and for every string, array, struct and float:
+ * base-type behaviour is unchanged by construction and no arm below is
+ * touched. What changes is only that aliases now arrive pre-translated.
+ *
+ * The mappings this catalogue needs, from that function:
+ *   ZCL_TEMPERATURE   (0xD8) -> ZCL_INT16S  (signed, 2)    :120-121
+ *   ZCL_PERCENT       (0xE6) -> ZCL_INT8U   (unsigned, 1)  :40-48
+ *   ZCL_PERCENT100THS (0xE7) -> ZCL_INT16U  (unsigned, 2)  :50-62
+ * and, covered for free the moment a future device type needs them:
+ * ENUM16/BITMAP16/VENDOR_ID/GROUP_ID/ENDPOINT_NO -> INT16U;
+ * EPOCH_S/ELAPSED_S/CLUSTER_ID/ATTRIB_ID/COMMAND_ID/EVENT_ID/DEVTYPE_ID/
+ * DATA_VER/BITMAP32 -> INT32U; EPOCH_US/POSIX_MS/SYSTIME_MS/SYSTIME_US/
+ * NODE_ID/FABRIC_ID/EVENT_NO/BITMAP64 -> INT64U; the electrical-measurement
+ * family (POWER_MW, POWER_MVA, POWER_MVAR, AMPERAGE_MA, VOLTAGE_MV,
+ * ENERGY_MWH, ENERGY_MVAH, ENERGY_MVARH, MONEY) -> INT64S;
+ * ACTION_ID/FABRIC_IDX/STATUS -> INT8U.
+ *
+ * Signedness agrees with chip::app::IsSignedAttributeType()
+ * (app-common/zap-generated/attribute-type.h), the tree's other oracle:
+ * TEMPERATURE is listed signed there and maps to INT16S here.
+ *
+ * attr_null_sentinel() below needs no change of its own. It is keyed on the
+ * (is_unsigned, bytes) pair this function produces, so TEMPERATURE gets the
+ * signed 2-byte sentinel 0x8000, PERCENT the unsigned 1-byte 0xFF and
+ * PERCENT100THS the unsigned 2-byte 0xFFFF: exactly the bytes
+ * mt_devtypes_zephyr.cpp's seed rows write for those attributes.
  */
 static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *bytes)
 {
-    switch (t) {
+    switch (chip::app::Compatibility::Internal::AttributeBaseType(t)) {
     case ZAP_TYPE(BOOLEAN): case ZAP_TYPE(BITMAP8): case ZAP_TYPE(ENUM8): case ZAP_TYPE(INT8U):
         *is_unsigned = true;  *bytes = 1; return true;
     case ZAP_TYPE(BITMAP16): case ZAP_TYPE(ENUM16): case ZAP_TYPE(INT16U):
@@ -675,4 +751,33 @@ void MatterPostAttributeChangeCallback(const chip::app::ConcreteAttributePath &p
                  (long long)sv);
     }
     mt_at_urc(line);
+}
+
+/*
+ * Catalogue batch 2, the air quality sensor (0x002C). Until this batch this
+ * function was a stub in mt_matter_stub.c returning 0, because no device
+ * type on this platform carried the AirQuality cluster.
+ *
+ * mt_matter.h's contract for it: one accessor, two callers, so the ember
+ * feature map and a server Instance's BitMask<Feature> cannot be edited
+ * apart. On the C6 those two callers are mk_air_quality_sensor() and
+ * mt_air_quality_register_all(). On this platform only the first exists:
+ * mt_devtypes_zephyr.cpp's seed_slots() fills the AirQuality FeatureMap slot
+ * from this value, and nothing constructs an AirQuality::Instance (see the
+ * audit note on airQualityAttrs for why - with none registered, ember serves
+ * the arena). If a later round adds one, it reads its BitMask from here and
+ * the two agree by construction.
+ *
+ * All four optional features are enabled. The base cluster only mandates
+ * Unknown/Good/Poor; Fair, Moderate, VeryPoor and ExtremelyPoor are each
+ * behind their own bit, and the host library's AirQuality_t publishes all
+ * seven SDK values, so anything less would let the library report a value
+ * this endpoint's feature map does not admit. Values are the CHIP enum's own
+ * (clusters/AirQuality/Enums.h:49-55), never transcribed literals.
+ */
+extern "C" uint32_t mt_air_quality_feature_mask(void)
+{
+    using chip::app::Clusters::AirQuality::Feature;
+    return chip::to_underlying(Feature::kFair) | chip::to_underlying(Feature::kModerate) |
+           chip::to_underlying(Feature::kVeryPoor) | chip::to_underlying(Feature::kExtremelyPoor);
 }

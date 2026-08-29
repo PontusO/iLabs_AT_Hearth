@@ -41,7 +41,7 @@
 #define GENERATED_DEFAULTS_COUNT (0)
 
 // This is an array of EmberAfAttributeMinMaxValue structures.
-#define GENERATED_MIN_MAX_DEFAULT_COUNT 4
+#define GENERATED_MIN_MAX_DEFAULT_COUNT 16
 #define GENERATED_MIN_MAX_DEFAULTS                                             \
   {                                                                            \
                                                                                \
@@ -51,11 +51,39 @@
       /* Endpoint: 240, Cluster: Level Control (server) */                     \
       {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0x3},   /* Options */           \
       {(uint16_t)0xFF, (uint16_t)0x1, (uint16_t)0xFE}, /* OnLevel */           \
-      {(uint16_t)0x32, (uint16_t)0x1, (uint16_t)0xFE}  /* DefaultMoveRate */   \
+      {(uint16_t)0x32, (uint16_t)0x1, (uint16_t)0xFE}, /* DefaultMoveRate */   \
+                                                                               \
+      /* Endpoint: 240, Cluster: Window Covering (server) */                   \
+      {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0xF}, /* Mode */                \
+                                                                               \
+      /* Endpoint: 240, Cluster: Thermostat (server) */                        \
+      {(uint16_t)0x960, (uint16_t)-0x6AB3,                                     \
+       (uint16_t)0x7FFF}, /* OccupiedCoolingSetpoint */                        \
+      {(uint16_t)0x640, (uint16_t)-0x6AB3,                                     \
+       (uint16_t)0x7FFF}, /* OccupiedHeatingSetpoint */                        \
+      {(uint16_t)0x2BC, (uint16_t)-0x6AB3,                                     \
+       (uint16_t)0x7FFF}, /* MinHeatSetpointLimit */                           \
+      {(uint16_t)0xBB8, (uint16_t)-0x6AB3,                                     \
+       (uint16_t)0x7FFF}, /* MaxHeatSetpointLimit */                           \
+      {(uint16_t)0x640, (uint16_t)-0x6AB3,                                     \
+       (uint16_t)0x7FFF}, /* MinCoolSetpointLimit */                           \
+      {(uint16_t)0xC80, (uint16_t)-0x6AB3,                                     \
+       (uint16_t)0x7FFF}, /* MaxCoolSetpointLimit */                           \
+      {(uint16_t)0x4, (uint16_t)0x0,                                           \
+       (uint16_t)0x5}, /* ControlSequenceOfOperation */                        \
+      {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0x9}, /* SystemMode */          \
+                                                                               \
+      /* Endpoint: 240, Cluster: Fan Control (server) */                       \
+      {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0x6},  /* FanMode */            \
+      {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0x64}, /* PercentSetting */     \
+                                                                               \
+      /* Endpoint: 240, Cluster: Color Control (server) */                     \
+      {(uint16_t)0xFA, (uint16_t)0x0, (uint16_t)0xFEFF}                        \
+      /* StartUpColorTemperatureMireds */                                      \
   }
 
 // This is an array of EmberAfAttributeMetadata structures.
-#define GENERATED_ATTRIBUTE_COUNT 234
+#define GENERATED_ATTRIBUTE_COUNT 279
 #define GENERATED_ATTRIBUTES                                                   \
   {                                                                            \
                                                                                \
@@ -697,6 +725,131 @@
        ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) |                                  \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                \
                                                                                \
+      /* Endpoint: 240, Cluster: Air Quality (server) */                       \
+      {ZAP_EMPTY_DEFAULT(), 0x00000000, 1, ZAP_TYPE(ENUM8),                    \
+       ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) |                                  \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* AirQuality */                     \
+      {ZAP_EMPTY_DEFAULT(), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),                 \
+       ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) |                                  \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* FeatureMap */                     \
+      {ZAP_SIMPLE_DEFAULT(1), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                 \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                    \
+                                                                               \
+      /* Endpoint: 240, Cluster: Window Covering (server) */                   \
+      {ZAP_SIMPLE_DEFAULT(0x00), 0x00000000, 1, ZAP_TYPE(ENUM8),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* Type */                               \
+      {ZAP_SIMPLE_DEFAULT(0x09), 0x00000007, 1, ZAP_TYPE(BITMAP8),             \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ConfigStatus */                       \
+      {ZAP_SIMPLE_DEFAULT(0x00), 0x0000000A, 1, ZAP_TYPE(BITMAP8),             \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* OperationalStatus */                  \
+      {ZAP_EMPTY_DEFAULT(), 0x0000000B, 2, ZAP_TYPE(PERCENT100THS),            \
+       ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(                                                 \
+               NULLABLE)}, /* TargetPositionLiftPercent100ths */               \
+      {ZAP_SIMPLE_DEFAULT(0x00), 0x0000000D, 1, ZAP_TYPE(ENUM8),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* EndProductType */                     \
+      {ZAP_EMPTY_DEFAULT(), 0x0000000E, 2, ZAP_TYPE(PERCENT100THS),            \
+       ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(                                                 \
+               NULLABLE)}, /* CurrentPositionLiftPercent100ths */              \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(4), 0x00000017, 1, ZAP_TYPE(BITMAP8),        \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* Mode */                           \
+      {ZAP_SIMPLE_DEFAULT(0x0005), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),          \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* FeatureMap */                         \
+      {ZAP_EMPTY_DEFAULT(), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                   \
+       ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) |                                  \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                \
+                                                                               \
+      /* Endpoint: 240, Cluster: Thermostat (server) */                        \
+      {ZAP_EMPTY_DEFAULT(), 0x00000000, 2, ZAP_TYPE(TEMPERATURE),              \
+       ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* LocalTemperature */               \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(5), 0x00000011, 2, ZAP_TYPE(TEMPERATURE),    \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* OccupiedCoolingSetpoint */        \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(6), 0x00000012, 2, ZAP_TYPE(TEMPERATURE),    \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* OccupiedHeatingSetpoint */        \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(7), 0x00000015, 2, ZAP_TYPE(TEMPERATURE),    \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* MinHeatSetpointLimit */           \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(8), 0x00000016, 2, ZAP_TYPE(TEMPERATURE),    \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* MaxHeatSetpointLimit */           \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(9), 0x00000017, 2, ZAP_TYPE(TEMPERATURE),    \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* MinCoolSetpointLimit */           \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(10), 0x00000018, 2, ZAP_TYPE(TEMPERATURE),   \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* MaxCoolSetpointLimit */           \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(11), 0x0000001B, 1, ZAP_TYPE(ENUM8),         \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* ControlSequenceOfOperation */     \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(12), 0x0000001C, 1, ZAP_TYPE(ENUM8),         \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* SystemMode */                     \
+      {ZAP_SIMPLE_DEFAULT(0x0003), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),          \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* FeatureMap */                         \
+      {ZAP_EMPTY_DEFAULT(), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                   \
+       ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) |                                  \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                \
+                                                                               \
+      /* Endpoint: 240, Cluster: Fan Control (server) */                       \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(13), 0x00000000, 1, ZAP_TYPE(ENUM8),         \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* FanMode */                        \
+      {ZAP_SIMPLE_DEFAULT(0x00), 0x00000001, 1, ZAP_TYPE(ENUM8),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* FanModeSequence */                    \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(14), 0x00000002, 1, ZAP_TYPE(PERCENT),       \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE) |                                      \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* PercentSetting */                 \
+      {ZAP_SIMPLE_DEFAULT(0x00), 0x00000003, 1, ZAP_TYPE(PERCENT),             \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* PercentCurrent */                     \
+      {ZAP_SIMPLE_DEFAULT(0x0000), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),          \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* FeatureMap */                         \
+      {ZAP_SIMPLE_DEFAULT(5), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                 \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                    \
+                                                                               \
+      /* Endpoint: 240, Cluster: Color Control (server) */                     \
+      {ZAP_SIMPLE_DEFAULT(0x00), 0x00000000, 1, ZAP_TYPE(INT8U),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* CurrentHue */                         \
+      {ZAP_SIMPLE_DEFAULT(0x00), 0x00000001, 1, ZAP_TYPE(INT8U),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* CurrentSaturation */                  \
+      {ZAP_SIMPLE_DEFAULT(0x616B), 0x00000003, 2, ZAP_TYPE(INT16U),            \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* CurrentX */                           \
+      {ZAP_SIMPLE_DEFAULT(0x607D), 0x00000004, 2, ZAP_TYPE(INT16U),            \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* CurrentY */                           \
+      {ZAP_SIMPLE_DEFAULT(0x00FA), 0x00000007, 2, ZAP_TYPE(INT16U),            \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ColorTemperatureMireds */             \
+      {ZAP_SIMPLE_DEFAULT(0x01), 0x00000008, 1, ZAP_TYPE(ENUM8),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ColorMode */                          \
+      {ZAP_SIMPLE_DEFAULT(0x00), 0x0000000F, 1, ZAP_TYPE(BITMAP8),             \
+       ZAP_ATTRIBUTE_MASK(WRITABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* Options */                        \
+      {ZAP_EMPTY_DEFAULT(), 0x00000010, 1, ZAP_TYPE(INT8U),                    \
+       ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* NumberOfPrimaries */              \
+      {ZAP_SIMPLE_DEFAULT(0x01), 0x00004001, 1, ZAP_TYPE(ENUM8),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* EnhancedColorMode */                  \
+      {ZAP_SIMPLE_DEFAULT(0x0019), 0x0000400A, 2, ZAP_TYPE(BITMAP16),          \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ColorCapabilities */                  \
+      {ZAP_SIMPLE_DEFAULT(0x0001), 0x0000400B, 2, ZAP_TYPE(INT16U),            \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ColorTempPhysicalMinMireds */         \
+      {ZAP_SIMPLE_DEFAULT(0xFEFF), 0x0000400C, 2, ZAP_TYPE(INT16U),            \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ColorTempPhysicalMaxMireds */         \
+      {ZAP_SIMPLE_DEFAULT(0x0001), 0x0000400D, 2, ZAP_TYPE(INT16U),            \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* CoupleColorTempToLevelMinMireds */    \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(15), 0x00004010, 2, ZAP_TYPE(INT16U),        \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE) |                                      \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* StartUpColorTemperatureMireds */  \
+      {ZAP_SIMPLE_DEFAULT(0x0019), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),          \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* FeatureMap */                         \
+      {ZAP_SIMPLE_DEFAULT(7), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                 \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                    \
+                                                                               \
       /* Endpoint: 240, Cluster: Illuminance Measurement (server) */           \
       {ZAP_EMPTY_DEFAULT(), 0x00000000, 2, ZAP_TYPE(INT16U),                   \
        ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
@@ -818,6 +971,32 @@
           emberAfLevelControlClusterServerInitCallback,                        \
       (EmberAfGenericClusterFunction)                                          \
           MatterLevelControlClusterServerShutdownCallback,                     \
+  };                                                                           \
+  const EmberAfGenericClusterFunction chipFuncArrayWindowCoveringServer[] = {  \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterWindowCoveringClusterServerAttributeChangedCallback,           \
+  };                                                                           \
+  const EmberAfGenericClusterFunction chipFuncArrayThermostatServer[] = {      \
+      (EmberAfGenericClusterFunction)                                          \
+          emberAfThermostatClusterServerInitCallback,                          \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterThermostatClusterServerAttributeChangedCallback,               \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterThermostatClusterServerShutdownCallback,                       \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterThermostatClusterServerPreAttributeChangedCallback,            \
+  };                                                                           \
+  const EmberAfGenericClusterFunction chipFuncArrayFanControlServer[] = {      \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterFanControlClusterServerAttributeChangedCallback,               \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterFanControlClusterServerPreAttributeChangedCallback,            \
+  };                                                                           \
+  const EmberAfGenericClusterFunction chipFuncArrayColorControlServer[] = {    \
+      (EmberAfGenericClusterFunction)                                          \
+          emberAfColorControlClusterServerInitCallback,                        \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterColorControlClusterServerShutdownCallback,                     \
   };                                                                           \
   const EmberAfGenericClusterFunction chipFuncArrayOccupancySensingServer[] =  \
       {                                                                        \
@@ -952,12 +1131,40 @@
   0x00000006 /* StepWithOnOff */, \
   0x00000007 /* StopWithOnOff */, \
   chip::kInvalidCommandId /* end of list */, \
+  /* Endpoint: 240, Cluster: Window Covering (server) */\
+  /*   AcceptedCommandList (index=92) */ \
+  0x00000000 /* UpOrOpen */, \
+  0x00000001 /* DownOrClose */, \
+  0x00000002 /* StopMotion */, \
+  0x00000005 /* GoToLiftPercentage */, \
+  chip::kInvalidCommandId /* end of list */, \
+  /* Endpoint: 240, Cluster: Thermostat (server) */\
+  /*   AcceptedCommandList (index=97) */ \
+  0x00000000 /* SetpointRaiseLower */, \
+  chip::kInvalidCommandId /* end of list */, \
+  /* Endpoint: 240, Cluster: Color Control (server) */\
+  /*   AcceptedCommandList (index=99) */ \
+  0x00000000 /* MoveToHue */, \
+  0x00000001 /* MoveHue */, \
+  0x00000002 /* StepHue */, \
+  0x00000003 /* MoveToSaturation */, \
+  0x00000004 /* MoveSaturation */, \
+  0x00000005 /* StepSaturation */, \
+  0x00000006 /* MoveToHueAndSaturation */, \
+  0x00000007 /* MoveToColor */, \
+  0x00000008 /* MoveColor */, \
+  0x00000009 /* StepColor */, \
+  0x0000000A /* MoveToColorTemperature */, \
+  0x00000047 /* StopMoveStep */, \
+  0x0000004B /* MoveColorTemperature */, \
+  0x0000004C /* StepColorTemperature */, \
+  chip::kInvalidCommandId /* end of list */, \
 }
 
 // clang-format on
 
 // This is an array of EmberAfCluster structures.
-#define GENERATED_CLUSTER_COUNT 27
+#define GENERATED_CLUSTER_COUNT 32
 // clang-format off
 #define GENERATED_CLUSTERS { \
   { \
@@ -1234,9 +1441,74 @@
       .eventCount = 0, \
     },\
   { \
+      /* Endpoint: 240, Cluster: Air Quality (server) */ \
+      .clusterId = 0x0000005B, \
+      .attributes = ZAP_ATTRIBUTE_INDEX(204), \
+      .attributeCount = 3, \
+      .clusterSize = 2, \
+      .mask = ZAP_CLUSTER_MASK(SERVER), \
+      .functions = NULL, \
+      .acceptedCommandList = nullptr, \
+      .generatedCommandList = nullptr, \
+      .eventList = nullptr, \
+      .eventCount = 0, \
+    },\
+  { \
+      /* Endpoint: 240, Cluster: Window Covering (server) */ \
+      .clusterId = 0x00000102, \
+      .attributes = ZAP_ATTRIBUTE_INDEX(207), \
+      .attributeCount = 9, \
+      .clusterSize = 13, \
+      .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(ATTRIBUTE_CHANGED_FUNCTION), \
+      .functions = chipFuncArrayWindowCoveringServer, \
+      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 92 ), \
+      .generatedCommandList = nullptr, \
+      .eventList = nullptr, \
+      .eventCount = 0, \
+    },\
+  { \
+      /* Endpoint: 240, Cluster: Thermostat (server) */ \
+      .clusterId = 0x00000201, \
+      .attributes = ZAP_ATTRIBUTE_INDEX(216), \
+      .attributeCount = 11, \
+      .clusterSize = 20, \
+      .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(INIT_FUNCTION) | ZAP_CLUSTER_MASK(ATTRIBUTE_CHANGED_FUNCTION) | ZAP_CLUSTER_MASK(SHUTDOWN_FUNCTION) | ZAP_CLUSTER_MASK(PRE_ATTRIBUTE_CHANGED_FUNCTION), \
+      .functions = chipFuncArrayThermostatServer, \
+      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 97 ), \
+      .generatedCommandList = nullptr, \
+      .eventList = nullptr, \
+      .eventCount = 0, \
+    },\
+  { \
+      /* Endpoint: 240, Cluster: Fan Control (server) */ \
+      .clusterId = 0x00000202, \
+      .attributes = ZAP_ATTRIBUTE_INDEX(227), \
+      .attributeCount = 6, \
+      .clusterSize = 10, \
+      .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(ATTRIBUTE_CHANGED_FUNCTION) | ZAP_CLUSTER_MASK(PRE_ATTRIBUTE_CHANGED_FUNCTION), \
+      .functions = chipFuncArrayFanControlServer, \
+      .acceptedCommandList = nullptr, \
+      .generatedCommandList = nullptr, \
+      .eventList = nullptr, \
+      .eventCount = 0, \
+    },\
+  { \
+      /* Endpoint: 240, Cluster: Color Control (server) */ \
+      .clusterId = 0x00000300, \
+      .attributes = ZAP_ATTRIBUTE_INDEX(233), \
+      .attributeCount = 16, \
+      .clusterSize = 28, \
+      .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(INIT_FUNCTION) | ZAP_CLUSTER_MASK(SHUTDOWN_FUNCTION), \
+      .functions = chipFuncArrayColorControlServer, \
+      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 99 ), \
+      .generatedCommandList = nullptr, \
+      .eventList = nullptr, \
+      .eventCount = 0, \
+    },\
+  { \
       /* Endpoint: 240, Cluster: Illuminance Measurement (server) */ \
       .clusterId = 0x00000400, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(204), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(249), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1249,7 +1521,7 @@
   { \
       /* Endpoint: 240, Cluster: Temperature Measurement (server) */ \
       .clusterId = 0x00000402, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(209), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(254), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1262,7 +1534,7 @@
   { \
       /* Endpoint: 240, Cluster: Pressure Measurement (server) */ \
       .clusterId = 0x00000403, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(214), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(259), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1275,7 +1547,7 @@
   { \
       /* Endpoint: 240, Cluster: Flow Measurement (server) */ \
       .clusterId = 0x00000404, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(219), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(264), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1288,7 +1560,7 @@
   { \
       /* Endpoint: 240, Cluster: Relative Humidity Measurement (server) */ \
       .clusterId = 0x00000405, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(224), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(269), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1301,7 +1573,7 @@
   { \
       /* Endpoint: 240, Cluster: Occupancy Sensing (server) */ \
       .clusterId = 0x00000406, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(229), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(274), \
       .attributeCount = 5, \
       .clusterSize = 3, \
       .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(INIT_FUNCTION), \
@@ -1315,13 +1587,13 @@
 
 // clang-format on
 
-#define ZAP_FIXED_ENDPOINT_DATA_VERSION_COUNT 26
+#define ZAP_FIXED_ENDPOINT_DATA_VERSION_COUNT 31
 
 // This is an array of EmberAfEndpointType structures.
 #define GENERATED_ENDPOINT_TYPES                                               \
   {                                                                            \
       {ZAP_CLUSTER_INDEX(0), 15, 23},                                          \
-      {ZAP_CLUSTER_INDEX(15), 12, 104},                                        \
+      {ZAP_CLUSTER_INDEX(15), 17, 177},                                        \
   }
 
 // Largest attribute size is needed for various buffers
@@ -1334,7 +1606,7 @@ static_assert(ATTRIBUTE_LARGEST <= CHIP_CONFIG_MAX_ATTRIBUTE_STORE_ELEMENT_SIZE,
 #define ATTRIBUTE_SINGLETONS_SIZE (0)
 
 // Total size of attribute storage
-#define ATTRIBUTE_MAX_SIZE (127)
+#define ATTRIBUTE_MAX_SIZE (200)
 
 // Number of fixed endpoints
 #define FIXED_ENDPOINT_COUNT (2)
