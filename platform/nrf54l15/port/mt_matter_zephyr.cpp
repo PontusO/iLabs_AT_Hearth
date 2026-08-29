@@ -19,8 +19,13 @@
  * ExpressedState priority recompute (std::array is the recompute's own
  * parameter type). */
 #include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
+/* Catalogue batch 4: the OperationalState Instance-plus-Delegate machinery
+ * for the washer/dishwasher/dryer trio; <new> for the placement-new the
+ * non-default-constructible Instance pool needs. */
+#include <app/clusters/operational-state-server/operational-state-server.h>
 
 #include <array>
+#include <new>
 #include <app/server/Server.h>
 #include <clusters/AirQuality/Enums.h>
 #include <app/server/CommissioningWindowManager.h>
@@ -1363,4 +1368,239 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
     /* RefrigeratorAlarm is not in this platform's catalogue yet; when the
      * composed-appliance batch brings it, its branch lands here. */
     return MT_ATTR_ERR_CLUSTER;
+}
+/* ---- laundry washer / dishwasher / laundry dryer (OperationalState) ----
+ *
+ * One Instance PLUS one Delegate object per endpoint; the audit trail for
+ * why (SetInstance's VerifyOrDie, the AAI-served attribute set, the forced
+ * construct-after-create ordering, the never-destroy policy) lives on
+ * opStateAttrs in mt_devtypes_zephyr.cpp. This section owns the objects.
+ *
+ * The verdict here IS the wire response, unlike the valve: the only caller
+ * of each Handle*StateCallback copies err straight into the
+ * OperationalCommandResponse (Instance::HandlePauseState,
+ * operational-state-server.cpp:414-447, "mDelegate->HandlePauseStateCallback
+ * (err); ... response.commandResponseState = err", and the
+ * Stop/Start/Resume handlers at :449, :467, :485 follow the same shape). So
+ * allow sets kNoError and deny sets kUnableToCompleteOperation, the same
+ * pair the C6 maps (kUnableToCompleteOperation rather than
+ * kUnableToStartOrResume matches the SDK's own dishwasher placeholder's
+ * choice for a generic delegate-side denial).
+ *
+ * The delegate deliberately does NOT call SetOperationalState() on allow.
+ * Same split-ownership rule as AT+MTLOCK and AT+MTVALVE: the verdict says
+ * the host MAY act; only the host knows when the physical appliance
+ * actually completed the transition, and it reports that separately with
+ * AT+MTOPSTATE (mt_matter_opstate_set below), which emits the attribute
+ * report a subscribed controller expects.
+ *
+ * The command hooks run on the CHIP task (the Instance's own
+ * CommandHandlerInterface; this cluster is CHI-only, config-data.yaml:63),
+ * so no StackLock in them, the batch 3 discipline.
+ *
+ * Instance reachability needs no registry: the Instance constructor calls
+ * mDelegate->SetInstance(this) (operational-state-server.cpp:48), the base
+ * Delegate stores it, and the protected GetInstance() accessor
+ * (operational-state-server.h:364-371) is reachable from this subclass;
+ * instance() below is the public passthrough mt_matter_opstate_set() uses,
+ * the C6's exact mechanism.
+ */
+class HearthOpStateDelegate : public chip::app::Clusters::OperationalState::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    void set_cluster(chip::ClusterId cluster) { m_cluster = cluster; }
+    chip::EndpointId endpoint() const { return m_ep; }
+    chip::ClusterId cluster() const { return m_cluster; }
+
+    /* GetInstance() is protected in the base Delegate; this passthrough is
+     * how mt_matter_opstate_set() reaches the Instance the constructor
+     * attached via SetInstance(). */
+    chip::app::Clusters::OperationalState::Instance *instance() { return GetInstance(); }
+
+    chip::app::DataModel::Nullable<uint32_t> GetCountdownTime() override
+    {
+        return chip::app::DataModel::NullNullable;
+    }
+
+    /* Exactly the four base states, in enum order. The SDK reads this list
+     * to serve OperationalStateList; kError is a member because the spec
+     * requires the error state to be listed even though AT+MTOPSTATE can
+     * never set it directly (kError is reserved for the error-detection
+     * path, and SetOperationalState() refuses it independently,
+     * operational-state-server.cpp:101-107). */
+    CHIP_ERROR GetOperationalStateAtIndex(
+        size_t index,
+        chip::app::Clusters::OperationalState::GenericOperationalState &operationalState) override
+    {
+        using chip::app::Clusters::OperationalState::OperationalStateEnum;
+        static const OperationalStateEnum states[] = {
+            OperationalStateEnum::kStopped,
+            OperationalStateEnum::kRunning,
+            OperationalStateEnum::kPaused,
+            OperationalStateEnum::kError,
+        };
+        if (index >= (sizeof(states) / sizeof(states[0]))) {
+            return CHIP_ERROR_NOT_FOUND;
+        }
+        operationalState.Set(chip::to_underlying(states[index]));
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR GetOperationalPhaseAtIndex(size_t index, chip::MutableCharSpan &operationalPhase) override
+    {
+        /* NOT_FOUND at index 0 makes PhaseList read null: these appliances
+         * publish no phases (operational-state-server.h:305-317 documents
+         * the convention). */
+        (void)index;
+        (void)operationalPhase;
+        return CHIP_ERROR_NOT_FOUND;
+    }
+
+    void HandlePauseStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Pause::Id, err);
+    }
+
+    void HandleResumeStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Resume::Id, err);
+    }
+
+    void HandleStartStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Start::Id, err);
+    }
+
+    void HandleStopStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Stop::Id, err);
+    }
+
+private:
+    void forward(uint32_t command, chip::app::Clusters::OperationalState::GenericOperationalError &err)
+    {
+        using chip::app::Clusters::OperationalState::ErrorStateEnum;
+        bool allow = mt_cmd_forward(m_ep, m_cluster, command);
+        err.Set(chip::to_underlying(allow ? ErrorStateEnum::kNoError
+                                          : ErrorStateEnum::kUnableToCompleteOperation));
+    }
+
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+    /* Only the base cluster exists in this catalogue; carried anyway so the
+     * +MTCMD cluster field always comes from the slot, not a literal, and a
+     * future derived-cluster consumer (the oven cavity) reuses this class
+     * unchanged, the C6's shape. */
+    chip::ClusterId m_cluster = chip::app::Clusters::OperationalState::Id;
+};
+
+/*
+ * The delegate pool, kServiceableEndpoints deep like the valve's (a
+ * seventeenth endpoint of ANY type fails its create before it could ask
+ * for a delegate; mt_matter.h's MT_COMP_MAX_ENDPOINTS sizing is the C6's,
+ * which serves all 28). The INSTANCE pool beside it is raw aligned
+ * storage: OperationalState::Instance has no default constructor (it
+ * takes the delegate and the endpoint id, neither known until create
+ * time), so each slot is placement-constructed exactly once in
+ * mt_matter_opstate_delegate_set_endpoint() and never destroyed, the
+ * allocate-only policy the valve pool and the endpoint block heap already
+ * follow: pools are handed out monotonically by the one boot rebuild and a
+ * reboot resets them wholesale, so no slot is ever re-constructed over a
+ * live Instance and no explicit destructor call is needed (or made; see
+ * the opStateAttrs audit note for what ~Instance() would do).
+ */
+static HearthOpStateDelegate s_opstate_delegates[kServiceableEndpoints];
+alignas(chip::app::Clusters::OperationalState::Instance) static uint8_t
+    s_opstate_instances[kServiceableEndpoints][sizeof(chip::app::Clusters::OperationalState::Instance)];
+static size_t s_opstate_delegate_next;
+
+extern "C" void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id)
+{
+    if (s_opstate_delegate_next >= kServiceableEndpoints) {
+        return nullptr;
+    }
+    HearthOpStateDelegate *d = &s_opstate_delegates[s_opstate_delegate_next++];
+    d->set_cluster(cluster_id);
+    return d;
+}
+
+/*
+ * The second half of the handout, and on this platform it is where the
+ * Instance is born: constructed into the slot's raw storage (the pool
+ * index is recovered from the delegate pointer, the two pools being
+ * parallel) and Init()ed, which registers the endpoint-scoped
+ * CommandHandlerInterface and AttributeAccessInterface. Must run below a
+ * successful emberAfSetDynamicEndpoint(): Init() opens with an
+ * emberAfContainsServer() check and bails otherwise
+ * (operational-state-server.cpp:65-70).
+ *
+ * An Init() failure is logged loudly and does not abort the create, the
+ * valve read-back's reasoning exactly: below a successful
+ * emberAfSetDynamicEndpoint() the contains-server check cannot fail, and
+ * the registry Register() calls fail only on a duplicate registration,
+ * which the construct-once pool rules out. If it ever fired anyway the
+ * endpoint is live and correctly seeded, and an appliance that reports
+ * state but does not adjudicate, plus a shouting log, beats tearing down
+ * a healthy endpoint.
+ */
+extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    auto *d = static_cast<HearthOpStateDelegate *>(delegate);
+    d->set_endpoint(ep);
+    size_t idx = (size_t)(d - s_opstate_delegates);
+    auto *inst = new (s_opstate_instances[idx])
+        chip::app::Clusters::OperationalState::Instance(d, ep);
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        LOG_ERR("opstate Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
+                "; commands on it will not reach the host and its attributes will not be served",
+                (unsigned)ep, err.Format());
+    }
+}
+
+/*
+ * AT+MTOPSTATE bridge. mt_at.c's cmd_mtopstate has already rejected
+ * anything outside the UNION of every opstate cluster family's legal set
+ * (and 3, kError, outright) before this is called; this bridge narrows to
+ * the one family this catalogue serves, the base cluster's {0 Stopped,
+ * 1 Running, 2 Paused}. A union-legal RVC state (0x40..0x42) on a washer
+ * answers MT_ATTR_ERR_VALUE here, exactly as the C6's base branch does;
+ * the RVC and oven-cavity branches arrive with their device types in later
+ * batches. SetOperationalState() enforces the same rule independently
+ * (operational-state-server.cpp:101-107, kError or an unsupported state
+ * answers CHIP_ERROR_INVALID_ARGUMENT), so a state that slipped both
+ * checks would still map to MT_ATTR_ERR_FAILED rather than being silently
+ * accepted.
+ *
+ * Called from the AT parser thread, so the StackLock IS taken, unlike the
+ * delegate hooks above.
+ */
+extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
+{
+    namespace OpState = chip::app::Clusters::OperationalState;
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, OpState::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (state > 2) {
+        return MT_ATTR_ERR_VALUE;
+    }
+
+    OpState::Instance *inst = nullptr;
+    for (auto &d : s_opstate_delegates) {
+        if (d.endpoint() == ep && d.cluster() == OpState::Id) {
+            inst = d.instance();
+            break;
+        }
+    }
+    if (inst == nullptr) {
+        /* Cannot happen once the boot rebuild has run: every endpoint
+         * carrying the cluster got its pair in mt_devtype_create().
+         * Defensive, the C6's same arm. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }

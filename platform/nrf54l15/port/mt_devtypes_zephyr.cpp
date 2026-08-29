@@ -1411,6 +1411,123 @@ DECLARE_DYNAMIC_ENDPOINT(smokeCoAlarmEndpoint, smokeCoAlarmClusters);
 
 constexpr EmberAfDeviceType kSmokeCoAlarmTypes[] = { { 0x0076, 1 } };
 
+/* ---- laundry washer (0x0073), dishwasher (0x0075), laundry dryer (0x007C)
+ *
+ * Catalogue batch 4 audit, OperationalState (0x0060). The three appliance
+ * types compose identically (OperationalState + Identify + Descriptor;
+ * the C6's three config_t are literally one aliased type and its three
+ * add() bodies differ only in the device type id), so one cluster list
+ * and one EmberAfEndpointType serve all three, the
+ * booleanStateSensorClusters principle; only the EmberAfDeviceType (id,
+ * revision) differs per registry row. No mode cluster, no controls
+ * cluster, no Temperature Control: the device library makes Operational
+ * State the only mandatory application cluster on all three, and the C6
+ * composes the same.
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; regenerating hearth.zap with the cluster on ep240 left
+ *   CodeDrivenInitShutdown.cpp byte-identical). It IS
+ *   CommandHandlerInterface-only (config-data.yaml:63), so no generated
+ *   IMClusterCommandHandler dispatch exists or is needed; the same
+ *   regeneration left IMClusterCommandHandler.cpp byte-identical too, and
+ *   invokes reach the Instance's own CommandHandlerInterface.
+ *
+ *   Delegate or plain ember? Instance PLUS Delegate, one PAIR per
+ *   endpoint, the batch's genuinely new machinery. Instance derives from
+ *   both CommandHandlerInterface and AttributeAccessInterface, each scoped
+ *   MakeOptional(aEndpointId), and its constructor calls
+ *   mDelegate->SetInstance(this) (operational-state-server.cpp:43-52);
+ *   Delegate::SetInstance() VerifyOrDies if a second Instance tries to
+ *   share one delegate object (operational-state-server.h:349-355), so the
+ *   pools in mt_matter_zephyr.cpp are strictly one delegate and one
+ *   Instance per endpoint, kServiceableEndpoints deep. All six cluster
+ *   attributes are AAI-served, never ember (the Read() switch from
+ *   operational-state-server.cpp:336: OperationalStateList :341,
+ *   OperationalState :360, OperationalError :365, PhaseList :370,
+ *   CurrentPhase :398, ClusterRevision :408 from Metadata kRevision).
+ *   They are declared below anyway so AttributeList is truthful; the two
+ *   scalars get inert slots, the arrays and the struct get none
+ *   (attr_gets_slot refuses ARRAY and STRUCT; the declared ARRAY/STRUCT
+ *   sizes are 0, mirroring what ZAP generates for External-storage list
+ *   attributes on the static endpoint).
+ *
+ *   Split to know on the bench: an AT+MTATTR read goes through the classic
+ *   ember path (emberAfReadAttribute) and answers this ARENA, not the
+ *   Instance, so OperationalState over AT reads the inert seed (0,
+ *   Stopped) no matter what the Instance last published; the fabric sees
+ *   the Instance. The host's state authority is its own AT+MTOPSTATE round
+ *   trip, and Instance-owned attributes never raise +MTATTR URCs, the
+ *   same rule the C6 documents for every Instance-served cluster.
+ *
+ *   ServerInit? None by name: no emberAfOperationalStateClusterServerInit
+ *   Callback exists, and MatterOperationalStatePluginServerInitCallback is
+ *   an empty definition in src/app/util/util.cpp:131. The REAL init is
+ *   Instance::Init(), the application's job, and its first act is
+ *   `if (!emberAfContainsServer(mEndpointId, mClusterId)) return
+ *   CHIP_ERROR_INVALID_ARGUMENT` (operational-state-server.cpp:65-70),
+ *   which forces construct-and-Init() to run only AFTER
+ *   emberAfSetDynamicEndpoint() succeeds: the same forced ordering as the
+ *   valve's SetDefaultDelegate(), one mechanism further in. It does NOT
+ *   join the B388 call site (that site substitutes for the ember
+ *   INIT_FUNCTION slot; this is not that mechanism); construction happens
+ *   in mt_matter_opstate_delegate_set_endpoint(), the delegate handout's
+ *   second half in mt_devtype_create() below.
+ *
+ *   Never destroyed, matching the valve pool and the allocate-only block
+ *   heap: ~Instance() would unregister both interfaces
+ *   (operational-state-server.cpp:55-63), but no teardown path exists on
+ *   this platform (the composition is edited by AT+MTEP and applied by a
+ *   reboot, which resets every pool wholesale, the same policy the valve
+ *   delegate pool set), so no explicit destructor call is ever needed or
+ *   made.
+ *
+ * Commands are hand-declared: the Instance registers NO
+ * EnumerateAcceptedCommands override, so AcceptedCommandList comes from
+ * this ember metadata, and operational_state::create() on the C6 famously
+ * created no command entries at all (finding F-C10-1, every invoke
+ * answered 0x81 until the thunk hand-added them). Pause 0x00, Stop 0x01,
+ * Start 0x02, Resume 0x03; the generated OperationalCommandResponse is
+ * the server-to-client response and deliberately NOT in the incoming
+ * list.
+ *
+ * The delegate publishes exactly Stopped/Running/Paused/Error in
+ * OperationalStateList and answers CHIP_ERROR_NOT_FOUND at phase index 0
+ * so PhaseList reads null; the verdict mapping (allow kNoError, deny
+ * kUnableToCompleteOperation, and why the delegate never calls
+ * SetOperationalState on allow) is on HearthOpStateDelegate in
+ * mt_matter_zephyr.cpp. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(opStateAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::PhaseList::Id, ARRAY, 0,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::CurrentPhase::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalStateList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalError::Id, STRUCT, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kOpStateIncoming[] = { OperationalState::Commands::Pause::Id,
+                                           OperationalState::Commands::Stop::Id,
+                                           OperationalState::Commands::Start::Id,
+                                           OperationalState::Commands::Resume::Id,
+                                           kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(applianceOpStateClusters)
+DECLARE_DYNAMIC_CLUSTER(OperationalState::Id, opStateAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kOpStateIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(applianceOpStateEndpoint, applianceOpStateClusters);
+
+constexpr EmberAfDeviceType kLaundryWasherTypes[] = { { 0x0073, 2 } };
+constexpr EmberAfDeviceType kDishwasherTypes[] = { { 0x0075, 2 } };
+constexpr EmberAfDeviceType kLaundryDryerTypes[] = { { 0x007C, 2 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -1452,6 +1569,9 @@ const hearth_devtype s_registry[] = {
     /* Catalogue batch 4: the appliance and notification types. */
     { 0x0011, 0, &powerSourceEndpoint, Span<const EmberAfDeviceType>(kPowerSourceTypes) },
     { 0x0076, 0, &smokeCoAlarmEndpoint, Span<const EmberAfDeviceType>(kSmokeCoAlarmTypes) },
+    { 0x0073, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kLaundryWasherTypes) },
+    { 0x0075, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kDishwasherTypes) },
+    { 0x007C, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kLaundryDryerTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -1563,6 +1683,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   fan                     0x002B            3     10      172        176
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
+ *   washer/dishwasher/dryer 0x0073 75 7C     3      8      140        144
  *   power source            0x0011            2      8      136        144
  *   boolean-state sensors, air quality        3      7      124        128
  *
@@ -1750,7 +1871,7 @@ constexpr size_t kActuatorSlots =
     kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)),
                 MT_COUNT(windowCoveringAttrs)),
           kMax2(kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)),
-                MT_COUNT(smokeCoAlarmAttrs)));
+                kMax2(MT_COUNT(smokeCoAlarmAttrs), MT_COUNT(opStateAttrs))));
 
 /* The widest of the light/plug family. The on/off light and plug (OnOff
  * alone) and the dimmable light and plug (OnOff + LevelControl) are strict
@@ -2297,6 +2418,24 @@ const attr_seed s_seeds[] = {
     { SmokeCoAlarm::Id, SmokeCoAlarm::Attributes::ExpressedState::Id, 1, { 0x00 } },
     { SmokeCoAlarm::Id, SmokeCoAlarm::Attributes::FeatureMap::Id, 4, { 0x03, 0x00, 0x00, 0x00 } },
     { SmokeCoAlarm::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* OperationalState (the washer/dishwasher/dryer trio). Every cluster
+     * attribute is served by the per-endpoint Instance's AAI, so these
+     * slots are INERT on the fabric and exist for AT+MTATTR arena
+     * consistency and AttributeList truthfulness (see the opStateAttrs
+     * audit note). Seeded to agree with the Instance's own boot state so
+     * the two stores at least start in agreement: OperationalState 0
+     * (kStopped, the Instance's member default,
+     * operational-state-server.h:224) is the zero-fill and carries no
+     * row; CurrentPhase boots null (nullable INT8U, sentinel 0xFF).
+     * FeatureMap 0 (the cluster defines no features). Revision 1 is
+     * OperationalState/Metadata.h:20 kRevision, which is also what the
+     * Instance's AAI answers for ClusterRevision
+     * (operational-state-server.cpp:408). */
+    { OperationalState::Id, OperationalState::Attributes::CurrentPhase::Id, 1, { 0xFF } }, /* null */
+    { OperationalState::Id, OperationalState::Attributes::FeatureMap::Id, 4,
+      { 0x00, 0x00, 0x00, 0x00 } },
+    { OperationalState::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -2600,6 +2739,30 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * call as well, which is exactly what "fix the real endpoint after
      * create" means here; this file still never names a CHIP delegate type.
      */
+    /* Catalogue batch 4: the OperationalState trio reuses the two-halves
+     * pattern verbatim. The alloc takes the CLUSTER id (mt_matter.h fixes
+     * it at alloc time; only the base 0x0060 exists in this catalogue),
+     * and set_endpoint below does more than the valve's: it
+     * placement-constructs the per-endpoint Instance and runs Init(),
+     * which is only legal below a successful emberAfSetDynamicEndpoint()
+     * because Init() bails on emberAfContainsServer (see the opStateAttrs
+     * audit note). Pool exhaustion aborts here, before anything is spent,
+     * for the valve's exact reasons. */
+    void *opstate_delegate = nullptr;
+    if (type_has_cluster(type->ep_type, OperationalState::Id)) {
+        opstate_delegate = mt_matter_opstate_delegate_alloc(OperationalState::Id);
+        if (opstate_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: opstate delegate pool exhausted (%u slots, one per "
+                    "serviceable endpoint); %u of %u serviceable endpoints in use, endpoint "
+                    "heap %zu of %u B used; host may declare %u, this build serves %u",
+                    (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
+                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints, s_ep_heap_used,
+                    (unsigned)HEARTH_EP_HEAP_BYTES, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                    (unsigned)kServiceableEndpoints);
+            return -1;
+        }
+    }
+
     void *valve_delegate = nullptr;
     if (type_has_cluster(type->ep_type, ValveConfigurationAndControl::Id)) {
         valve_delegate = mt_matter_valve_delegate_alloc();
@@ -2819,6 +2982,18 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * is the bench's signal that the SDK's silent-drop path fired. */
     if (valve_delegate != nullptr) {
         mt_matter_valve_delegate_set_endpoint(valve_delegate, d.ep_id);
+    }
+
+    /* The trio's second half: constructs the OperationalState::Instance in
+     * its slot's raw storage and runs Init(), which registers the
+     * endpoint-scoped command handler and AAI. Below the successful
+     * emberAfSetDynamicEndpoint() by necessity (Init() checks
+     * emberAfContainsServer) and below the B388 inits for tidiness. An
+     * Init() failure is logged loudly inside and does not abort, the
+     * valve read-back's reasoning: unreachable by ordering, and the
+     * endpoint is live and correct in every other respect by then. */
+    if (opstate_delegate != nullptr) {
+        mt_matter_opstate_delegate_set_endpoint(opstate_delegate, d.ep_id);
     }
 
     s_next_ep_id++;
