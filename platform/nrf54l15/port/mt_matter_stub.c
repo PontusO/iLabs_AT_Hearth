@@ -134,13 +134,10 @@ void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
  * the air quality sensor (0x002C) entered the registry: it lives in
  * mt_matter_zephyr.cpp now and returns the real bits. */
 
-int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
-{
-    (void)ep;
-    (void)field;
-    (void)value;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* mt_matter_alarm_set() left this file in catalogue batch 4, when the
+ * smoke/co alarm (0x0076) entered the registry: it lives in
+ * mt_matter_zephyr.cpp now, cluster-dispatched on the SmokeCoAlarmServer
+ * singleton with the B165 ExpressedState recompute. */
 
 void *mt_matter_chime_delegate_alloc(void) { return NULL; }
 

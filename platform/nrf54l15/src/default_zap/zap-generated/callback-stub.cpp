@@ -108,6 +108,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::RelativeHumidityMeasurement::Id:
     emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
     break;
+  case app::Clusters::SmokeCoAlarm::Id:
+    emberAfSmokeCoAlarmClusterInitCallback(endpoint);
+    break;
   case app::Clusters::SoftwareDiagnostics::Id:
     emberAfSoftwareDiagnosticsClusterInitCallback(endpoint);
     break;
@@ -267,6 +270,11 @@ emberAfPressureMeasurementClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfRelativeHumidityMeasurementClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfSmokeCoAlarmClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

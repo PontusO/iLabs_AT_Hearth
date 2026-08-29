@@ -1329,6 +1329,88 @@ DECLARE_DYNAMIC_ENDPOINT(powerSourceEndpoint, powerSourceClusters);
 
 constexpr EmberAfDeviceType kPowerSourceTypes[] = { { 0x0011, 1 } };
 
+/* ---- smoke/co alarm (0x0076) ------------------------------------------
+ *
+ * Catalogue batch 4 audit, SmokeCoAlarm (0x005C).
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; confirmed empirically, regenerating hearth.zap with the
+ *   cluster on ep240 left CodeDrivenInitShutdown.cpp byte-identical). Also
+ *   NOT CommandHandlerInterface-only (absent from
+ *   CommandHandlerInterfaceOnlyClusters, config-data.yaml:21-88), so
+ *   SelfTestRequest is dispatched by the generated IMClusterCommandHandler:
+ *   the regeneration added exactly the SmokeCoAlarm dispatch case, which is
+ *   why this cluster had to enter hearth.zap at all.
+ *
+ *   Delegate or plain ember? Plain ember with a SINGLETON server.
+ *   SmokeCoAlarmServer is `static SmokeCoAlarmServer sInstance`
+ *   (smoke-co-alarm-server.h:163), reached through Instance() (:36); every
+ *   setter takes an EndpointId and reads or writes ember storage through
+ *   the generated Accessors, so all nine declared attributes land in this
+ *   arena. No per-endpoint object, no pool, no placement-new: the simplest
+ *   server shape in the batch.
+ *
+ *   ServerInit? None. MatterSmokeCoAlarmPluginServerInitCallback and its
+ *   Shutdown twin are empty bodies (smoke-co-alarm-server.cpp:514-515), the
+ *   XML declares <server tick="false" init="false">
+ *   (smoke-co-alarm-cluster.xml:32), and no emberAfSmokeCoAlarmCluster*
+ *   InitCallback exists beyond the generated weak stub. Does NOT join the
+ *   B388 call site.
+ *
+ *   The one LINK-MANDATORY symbol in the batch:
+ *   emberAfPluginSmokeCoAlarmSelfTestRequestCommand(), declared at
+ *   smoke-co-alarm-server.h:178 and called from smoke-co-alarm-server.cpp
+ *   :112 (RequestSelfTest) and :450 (HandleRemoteSelfTestRequest), has NO
+ *   weak default anywhere under src/; the only definitions in the tree are
+ *   example apps'. Omitting it is a link error. Defined in
+ *   mt_matter_zephyr.cpp with the other command hooks, notify-only.
+ *
+ * Both features, SmokeAlarm 0x1 and CoAlarm 0x2 (SmokeCoAlarm/Enums.h:
+ * 115-119): AT+MTALARM's field table has no single-feature variant, the
+ * same reason the C6 enables both, so both feature-gated state attributes
+ * exist and FeatureMap is 3, which is also the XML's own declared default
+ * (smoke-co-alarm-cluster.xml:37). Identify is mandatory on this device
+ * type (matter-devices.xml:2523-2546, MA-smokecoalarm), so the port
+ * convention holds here, in contrast to the power source above. The
+ * device type's Power Source mandate is satisfied the C6's way: a flat
+ * sibling 0x0011 endpoint the host declares alongside, no composition
+ * tree.
+ *
+ * Nine attributes, every one a 1-byte enum or boolean plus the two
+ * globals (smoke-co-alarm-cluster.xml:49-76), so all of them slot
+ * cleanly. The optional DeviceMuted, InterconnectSmokeAlarm,
+ * InterconnectCOAlarm, ContaminationState and SmokeSensitivityLevel are
+ * NOT declared, matching the C6's composition exactly; an AT+MTALARM
+ * write to one of those fields passes its range check and then fails
+ * with a bare ERROR because the setter's underlying attribute write
+ * fails, the identical behaviour on both platforms. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(smokeCoAlarmAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::ExpressedState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::SmokeState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::COState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::BatteryAlert::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::TestInProgress::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::HardwareFaultAlert::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::EndOfServiceAlert::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kSmokeCoAlarmIncoming[] = { SmokeCoAlarm::Commands::SelfTestRequest::Id,
+                                                kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(smokeCoAlarmClusters)
+DECLARE_DYNAMIC_CLUSTER(SmokeCoAlarm::Id, smokeCoAlarmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kSmokeCoAlarmIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(smokeCoAlarmEndpoint, smokeCoAlarmClusters);
+
+constexpr EmberAfDeviceType kSmokeCoAlarmTypes[] = { { 0x0076, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -1369,6 +1451,7 @@ const hearth_devtype s_registry[] = {
     { 0x0042, 0, &waterValveEndpoint, Span<const EmberAfDeviceType>(kWaterValveTypes) },
     /* Catalogue batch 4: the appliance and notification types. */
     { 0x0011, 0, &powerSourceEndpoint, Span<const EmberAfDeviceType>(kPowerSourceTypes) },
+    { 0x0076, 0, &smokeCoAlarmEndpoint, Span<const EmberAfDeviceType>(kSmokeCoAlarmTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -1472,6 +1555,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   colour temperature lt   0x010C            5     32      532        536
  *   dimmable light / plug   0x0101 0x010B     4     20      336        344
  *   thermostat              0x0301            3     15      252        256
+ *   smoke/co alarm          0x0076            3     13      220        224
  *   window covering         0x0202            3     13      220        224
  *   door lock               0x000A            3     12      204        208
  *   on/off light / plug     0x0100 0x010A     3     11      188        192
@@ -1665,7 +1749,8 @@ constexpr size_t kSensorSlots =
 constexpr size_t kActuatorSlots =
     kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)),
                 MT_COUNT(windowCoveringAttrs)),
-          kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)));
+          kMax2(kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)),
+                MT_COUNT(smokeCoAlarmAttrs)));
 
 /* The widest of the light/plug family. The on/off light and plug (OnOff
  * alone) and the dimmable light and plug (OnOff + LevelControl) are strict
@@ -2196,6 +2281,22 @@ const attr_seed s_seeds[] = {
     { PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, 1, { 0xFF } }, /* null */
     { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x02, 0x00, 0x00, 0x00 } },
     { PowerSource::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x03, 0x00 } },
+
+    /* SmokeCoAlarm. Every state boots at its enum's zero: ExpressedState 0
+     * (kNormal), SmokeState/COState/BatteryAlert 0 (kNormal),
+     * TestInProgress and HardwareFaultAlert false, EndOfServiceAlert 0
+     * (kNormal): the truthful boot state for an alarm this firmware has
+     * never been told anything about, and all the zero-fill, so only
+     * ExpressedState is spelled out (it is the attribute the cluster
+     * derives everything toward; see mt_matter_alarm_set()'s B165
+     * recompute in mt_matter_zephyr.cpp). FeatureMap 3 is
+     * SmokeAlarm|CoAlarm (SmokeCoAlarm/Enums.h:115-119), both features
+     * because AT+MTALARM's field table has no single-feature variant.
+     * Revision 1 is SmokeCoAlarm/Metadata.h:20 kRevision and the XML's
+     * globalAttribute value (smoke-co-alarm-cluster.xml:35). */
+    { SmokeCoAlarm::Id, SmokeCoAlarm::Attributes::ExpressedState::Id, 1, { 0x00 } },
+    { SmokeCoAlarm::Id, SmokeCoAlarm::Attributes::FeatureMap::Id, 4, { 0x03, 0x00, 0x00, 0x00 } },
+    { SmokeCoAlarm::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
