@@ -995,7 +995,7 @@ constexpr EmberAfDeviceType kAirQualitySensorTypes[] = { { 0x002C, 1 } };
  *
  *   Code-driven? No. door-lock-server is the only door-lock directory in
  *   the tree, and DoorLock is absent from the CodeDrivenClusters list
- *   (src/app/common/templates/config-data.yaml:144-169). Confirmed
+ *   (src/app/common/templates/config-data.yaml:144-168). Confirmed
  *   empirically: regenerating hearth.zap with the cluster on ep240 left
  *   zap-generated/CodeDrivenInitShutdown.cpp byte-identical.
  *
@@ -1107,7 +1107,7 @@ constexpr EmberAfDeviceType kDoorLockTypes[] = { { 0x000A, 3 } };
  *   2025 and its BUILD.gn is now an empty group(), which makes it LOOK
  *   like a port to the ServerCluster path. It is not: there is no
  *   CodegenIntegration.cpp, no ServerClusterInterface subclass, and the
- *   cluster is absent from CodeDrivenClusters (config-data.yaml:144-169).
+ *   cluster is absent from CodeDrivenClusters (config-data.yaml:144-168).
  *   Confirmed empirically the same way as the door lock:
  *   CodeDrivenInitShutdown.cpp came back byte-identical.
  *
