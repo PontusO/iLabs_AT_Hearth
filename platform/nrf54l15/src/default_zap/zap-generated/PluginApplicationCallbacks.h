@@ -55,6 +55,7 @@ void MatterPressureMeasurementPluginServerInitCallback();
 void MatterFlowMeasurementPluginServerInitCallback();
 void MatterRelativeHumidityMeasurementPluginServerInitCallback();
 void MatterOccupancySensingPluginServerInitCallback();
+void MatterChimePluginServerInitCallback();
 
 #define MATTER_PLUGINS_INIT                                                    \
   MatterIdentifyPluginServerInitCallback();                                    \
@@ -92,4 +93,5 @@ void MatterOccupancySensingPluginServerInitCallback();
   MatterPressureMeasurementPluginServerInitCallback();                         \
   MatterFlowMeasurementPluginServerInitCallback();                             \
   MatterRelativeHumidityMeasurementPluginServerInitCallback();                 \
-  MatterOccupancySensingPluginServerInitCallback();
+  MatterOccupancySensingPluginServerInitCallback();                            \
+  MatterChimePluginServerInitCallback();

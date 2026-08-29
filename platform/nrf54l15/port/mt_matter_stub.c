@@ -121,30 +121,11 @@ void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
  * mt_matter_zephyr.cpp now, cluster-dispatched on the SmokeCoAlarmServer
  * singleton with the B165 ExpressedState recompute. */
 
-void *mt_matter_chime_delegate_alloc(void) { return NULL; }
-
-void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep)
-{
-    (void)delegate;
-    (void)ep;
-}
-
-int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const char *const *names, uint8_t count)
-{
-    (void)ep;
-    (void)ids;
-    (void)names;
-    (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
-}
-
-int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value)
-{
-    (void)ep;
-    (void)what;
-    (void)value;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* The chime slice (mt_matter_chime_delegate_alloc,
+ * mt_matter_chime_delegate_set_endpoint, mt_matter_chime_sounds_set,
+ * mt_matter_chime_set) left this file in catalogue batch 4, when the
+ * chime (0x0146) entered the registry: real in mt_matter_zephyr.cpp now,
+ * on a per-endpoint ChimeServer-plus-delegate pool. */
 
 void *mt_matter_mwoc_delegate_alloc(void) { return NULL; }
 

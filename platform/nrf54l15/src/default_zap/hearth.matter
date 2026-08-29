@@ -4464,6 +4464,27 @@ cluster OccupancySensing = 1030 {
   readonly attribute int16u clusterRevision = 65533;
 }
 
+/** This cluster provides facilities to configure and play Chime sounds, such as those used in a doorbell. */
+provisional cluster Chime = 1366 {
+  revision 1;
+
+  struct ChimeSoundStruct {
+    int8u chimeID = 0;
+    char_string<48> name = 1;
+  }
+
+  readonly attribute ChimeSoundStruct installedChimeSounds[] = 0;
+  attribute int8u selectedChime = 1;
+  attribute boolean enabled = 2;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
+
+  command PlayChimeSound(): DefaultSuccess = 0;
+}
+
 endpoint 0 {
   device type ma_rootdevice = 22, version 4;
   device type ma_otarequestor = 18, version 1;
@@ -5163,5 +5184,18 @@ endpoint 240 {
     callback attribute attributeList;
     callback attribute featureMap;
     callback attribute clusterRevision;
+  }
+
+  server cluster Chime {
+    callback attribute installedChimeSounds;
+    callback attribute selectedChime;
+    callback attribute enabled;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    ram      attribute featureMap default = 0;
+    ram      attribute clusterRevision default = 1;
+
+    handle command PlayChimeSound;
   }
 }

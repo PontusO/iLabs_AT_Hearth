@@ -42,6 +42,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::BooleanState::Id:
     emberAfBooleanStateClusterInitCallback(endpoint);
     break;
+  case app::Clusters::Chime::Id:
+    emberAfChimeClusterInitCallback(endpoint);
+    break;
   case app::Clusters::ColorControl::Id:
     emberAfColorControlClusterInitCallback(endpoint);
     break;
@@ -166,6 +169,11 @@ emberAfBasicInformationClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfBooleanStateClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfChimeClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

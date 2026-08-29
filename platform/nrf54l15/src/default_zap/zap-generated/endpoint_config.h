@@ -41,7 +41,7 @@
 #define GENERATED_DEFAULTS_COUNT (0)
 
 // This is an array of EmberAfAttributeMinMaxValue structures.
-#define GENERATED_MIN_MAX_DEFAULT_COUNT 17
+#define GENERATED_MIN_MAX_DEFAULT_COUNT 18
 #define GENERATED_MIN_MAX_DEFAULTS                                             \
   {                                                                            \
                                                                                \
@@ -81,12 +81,15 @@
       {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0x64}, /* PercentSetting */     \
                                                                                \
       /* Endpoint: 240, Cluster: Color Control (server) */                     \
-      {(uint16_t)0xFA, (uint16_t)0x0, (uint16_t)0xFEFF}                        \
-      /* StartUpColorTemperatureMireds */                                      \
+      {(uint16_t)0xFA, (uint16_t)0x0,                                          \
+       (uint16_t)0xFEFF}, /* StartUpColorTemperatureMireds */                  \
+                                                                               \
+      /* Endpoint: 240, Cluster: Chime (server) */                             \
+      {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0xFF} /* SelectedChime */       \
   }
 
 // This is an array of EmberAfAttributeMetadata structures.
-#define GENERATED_ATTRIBUTE_COUNT 326
+#define GENERATED_ATTRIBUTE_COUNT 331
 #define GENERATED_ATTRIBUTES                                                   \
   {                                                                            \
                                                                                \
@@ -1066,6 +1069,22 @@
       {ZAP_EMPTY_DEFAULT(), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                   \
        ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) |                                  \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                \
+                                                                               \
+      /* Endpoint: 240, Cluster: Chime (server) */                             \
+      {ZAP_EMPTY_DEFAULT(), 0x00000000, 0, ZAP_TYPE(ARRAY),                    \
+       ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) |                                  \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* InstalledChimeSounds */           \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(17), 0x00000001, 1, ZAP_TYPE(INT8U),         \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) |    \
+           ZAP_ATTRIBUTE_MASK(WRITABLE) |                                      \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* SelectedChime */                  \
+      {ZAP_EMPTY_DEFAULT(), 0x00000002, 1, ZAP_TYPE(BOOLEAN),                  \
+       ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) | ZAP_ATTRIBUTE_MASK(WRITABLE) |   \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* Enabled */                        \
+      {ZAP_SIMPLE_DEFAULT(0), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* FeatureMap */                         \
+      {ZAP_SIMPLE_DEFAULT(1), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                 \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                    \
   }
 
 // clang-format off
@@ -1351,12 +1370,16 @@
   0x0000004B /* MoveColorTemperature */, \
   0x0000004C /* StepColorTemperature */, \
   chip::kInvalidCommandId /* end of list */, \
+  /* Endpoint: 240, Cluster: Chime (server) */\
+  /*   AcceptedCommandList (index=131) */ \
+  0x00000000 /* PlayChimeSound */, \
+  chip::kInvalidCommandId /* end of list */, \
 }
 
 // clang-format on
 
 // This is an array of EmberAfCluster structures.
-#define GENERATED_CLUSTER_COUNT 38
+#define GENERATED_CLUSTER_COUNT 39
 // clang-format off
 #define GENERATED_CLUSTERS { \
   { \
@@ -1853,17 +1876,30 @@
       .eventList = nullptr, \
       .eventCount = 0, \
     },\
+  { \
+      /* Endpoint: 240, Cluster: Chime (server) */ \
+      .clusterId = 0x00000556, \
+      .attributes = ZAP_ATTRIBUTE_INDEX(326), \
+      .attributeCount = 5, \
+      .clusterSize = 6, \
+      .mask = ZAP_CLUSTER_MASK(SERVER), \
+      .functions = NULL, \
+      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 131 ), \
+      .generatedCommandList = nullptr, \
+      .eventList = nullptr, \
+      .eventCount = 0, \
+    },\
 }
 
 // clang-format on
 
-#define ZAP_FIXED_ENDPOINT_DATA_VERSION_COUNT 37
+#define ZAP_FIXED_ENDPOINT_DATA_VERSION_COUNT 38
 
 // This is an array of EmberAfEndpointType structures.
 #define GENERATED_ENDPOINT_TYPES                                               \
   {                                                                            \
       {ZAP_CLUSTER_INDEX(0), 15, 23},                                          \
-      {ZAP_CLUSTER_INDEX(15), 23, 371},                                        \
+      {ZAP_CLUSTER_INDEX(15), 24, 377},                                        \
   }
 
 // Largest attribute size is needed for various buffers
@@ -1876,7 +1912,7 @@ static_assert(ATTRIBUTE_LARGEST <= CHIP_CONFIG_MAX_ATTRIBUTE_STORE_ELEMENT_SIZE,
 #define ATTRIBUTE_SINGLETONS_SIZE (0)
 
 // Total size of attribute storage
-#define ATTRIBUTE_MAX_SIZE (394)
+#define ATTRIBUTE_MAX_SIZE (400)
 
 // Number of fixed endpoints
 #define FIXED_ENDPOINT_COUNT (2)

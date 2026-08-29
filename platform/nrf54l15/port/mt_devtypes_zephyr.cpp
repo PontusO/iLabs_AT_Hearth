@@ -1611,6 +1611,93 @@ DECLARE_DYNAMIC_ENDPOINT(modeSelectEndpoint, modeSelectClusters);
 
 constexpr EmberAfDeviceType kModeSelectTypes[] = { { 0x0027, 1 } };
 
+/* ---- chime (0x0146) ---------------------------------------------------
+ *
+ * Catalogue batch 4 audit, Chime (0x0556; the DEVICE type is 0x0146, the
+ * cluster 0x0556, easy to transpose). Marked apiMaturity="provisional" in
+ * this tree's XML (chime-cluster.xml:31).
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; regeneration left CodeDrivenInitShutdown.cpp byte-identical).
+ *   It IS CommandHandlerInterface-only (config-data.yaml:34), so
+ *   PlayChimeSound reaches the per-endpoint ChimeServer's own
+ *   CommandHandlerInterface and the same regeneration left
+ *   IMClusterCommandHandler.cpp byte-identical too.
+ *
+ *   Delegate or plain ember? Per-endpoint ChimeServer object PLUS a
+ *   ChimeDelegate, the OperationalState shape with the roles renamed.
+ *   ChimeServer(EndpointId, ChimeDelegate&) privately inherits
+ *   AttributeAccessInterface and CommandHandlerInterface
+ *   (chime-server.h:35, ctor :45) and is non-default-constructible, so
+ *   its pool in mt_matter_zephyr.cpp is alignas raw storage,
+ *   placement-constructed once per endpoint and never destroyed, the
+ *   same policy as the OperationalState Instances. Init() (:52, impl
+ *   chime-server.cpp:59-66) loads the two persisted attributes and
+ *   registers both endpoint-scoped interfaces, so it runs only AFTER
+ *   emberAfSetDynamicEndpoint() succeeds; LoadPersistentAttributes()
+ *   keys its KVS reads on GetEndpointId() (chime-server.cpp:68-97).
+ *
+ *   ServerInit? None: MatterChimePluginServerInitCallback and its
+ *   Shutdown twin are empty bodies (chime-server.cpp:285-286), the XML
+ *   says init="false" (chime-cluster.xml:38). Does NOT join B388; the
+ *   construction lives in mt_matter_chime_delegate_set_endpoint().
+ *
+ * NO Identify, matching the C6: the device type lists Identify with
+ * server="false" (matter-devices.xml:1180-1193, MA-chime), so only the
+ * Chime cluster and Descriptor are mandated.
+ *
+ * SelectedChime and Enabled are AAI-SHADOWED: the ChimeServer holds them
+ * as members (chime-server.h:98-99), serves every fabric read and write
+ * through its own AAI, and PERSISTS writes through
+ * SafeAttributePersistenceProvider into the settings partition
+ *   (SetSelectedChime/SetEnabled, chime-server.cpp:206-248; restored by
+ *   LoadPersistentAttributes at every endpoint create). Two consequences
+ *   worth naming: the ember slots declared below are inert on the fabric
+ *   (declared WRITABLE to keep the metadata honest about the cluster's
+ *   contract), and unlike everything else in this catalogue the pair
+ *   SURVIVES a reboot server-side, so a chatty host driving AT+MTCHIME is
+ *   a new ZMS wear source on a settings_storage partition whose occupancy
+ *   is already a watch item (platform README, measured section).
+ *
+ * InstalledChimeSounds is the host-fed array (AT+MTCHIMESOUNDS), served
+ * by the server's AAI walking the delegate's GetChimeSoundByIndex();
+ * no slot, declared for AttributeList truth.
+ *
+ * The PlayChimeSound wire divergence from the C6, DECIDED (user ruling
+ * DE396): in THIS tree the command takes NO argument
+ * (chime-cluster.xml:43-45 declares none; the delegate's PlayChimeSound()
+ * is argument-free, chime-server.h:164), where the esp tree's revision
+ * carries an optional ChimeID. The +MTCMD payload arity stays
+ * byte-identical to the C6 by forwarding the owning server's
+ * GetSelectedChime() as the single trailing field: the payload means
+ * "the chime id that will play". Also gone in this revision, both spec
+ * paragraphs handled by the controller side: the unknown-chimeID
+ * NotFound pre-check (HandlePlayChimeSound checks only mEnabled,
+ * chime-server.cpp:260-274) and the ChimeStartedPlaying event (no
+ * <event> in chime-cluster.xml at all). Enabled false answers Success
+ * with NO delegate call (:266-271), so no +MTCMD is raised then, same
+ * as the C6. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(chimeAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::InstalledChimeSounds::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::SelectedChime::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::Enabled::Id, BOOLEAN, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kChimeIncoming[] = { Chime::Commands::PlayChimeSound::Id, kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(chimeClusters)
+DECLARE_DYNAMIC_CLUSTER(Chime::Id, chimeAttrs, ZAP_CLUSTER_MASK(SERVER), kChimeIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(chimeEndpoint, chimeClusters);
+
+constexpr EmberAfDeviceType kChimeTypes[] = { { 0x0146, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -1656,6 +1743,7 @@ const hearth_devtype s_registry[] = {
     { 0x0075, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kDishwasherTypes) },
     { 0x007C, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kLaundryDryerTypes) },
     { 0x0027, 0, &modeSelectEndpoint, Span<const EmberAfDeviceType>(kModeSelectTypes) },
+    { 0x0146, 0, &chimeEndpoint, Span<const EmberAfDeviceType>(kChimeTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -1771,6 +1859,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   mode select             0x0027            3      8      140        144
  *   power source            0x0011            2      8      136        144
  *   boolean-state sensors, air quality        3      7      124        128
+ *   chime                   0x0146            2      4       72         80
  *
  * HEARTH_EP_HEAP_BYTES is 8192, which leaves roughly 8,100 usable after the
  * heap's own header and bucket table. Against kServiceableEndpoints = 16:
@@ -1973,7 +2062,7 @@ constexpr size_t kLightSlots = MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) +
  * metadata-only members (strings, structs, arrays beyond the LIST_END
  * convention) get no slot; that over-count only ever makes the asserted
  * floor MORE conservative, so it is left uncorrected. */
-constexpr size_t kNoIdentifySlots = MT_COUNT(powerSourceAttrs);
+constexpr size_t kNoIdentifySlots = kMax2(MT_COUNT(powerSourceAttrs), MT_COUNT(chimeAttrs));
 
 constexpr size_t kWidestEndpointSlots =
     kMax2(kIdentifySlots + kMax2(kMax2(kSensorSlots, kActuatorSlots), kLightSlots),
@@ -2536,6 +2625,21 @@ const attr_seed s_seeds[] = {
     { ModeSelect::Id, ModeSelect::Attributes::StandardNamespace::Id, 2, { 0xFF, 0xFF } }, /* null */
     { ModeSelect::Id, ModeSelect::Attributes::FeatureMap::Id, 4, { 0x00, 0x00, 0x00, 0x00 } },
     { ModeSelect::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x02, 0x00 } },
+
+    /* Chime. SelectedChime 0 is the zero-fill and the XML default;
+     * Enabled seeds TRUE, the XML default (chime-cluster.xml:42) and the
+     * ChimeServer's own constructed state (mEnabled true,
+     * chime-server.cpp:44). Both slots are inert on the fabric (the
+     * server's AAI shadows them, and its KVS-restored values win), so
+     * these seeds only keep an AT+MTATTR read of the arena from
+     * contradicting a fresh device's server state; after any controller
+     * or AT+MTCHIME write the server side is the truth. FeatureMap 0
+     * (the cluster declares no features). Revision 1 is
+     * Chime/Metadata.h:20 kRevision and the XML's globalAttribute value
+     * (chime-cluster.xml:39). */
+    { Chime::Id, Chime::Attributes::Enabled::Id, 1, { 0x01 } },
+    { Chime::Id, Chime::Attributes::FeatureMap::Id, 4, { 0x00, 0x00, 0x00, 0x00 } },
+    { Chime::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -2882,6 +2986,24 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 4: the chime's handout, the trio's pattern with a
+     * ChimeServer in place of an Instance. Same two halves, same
+     * exhaustion-aborts-before-spending rule. */
+    void *chime_delegate = nullptr;
+    if (type_has_cluster(type->ep_type, Chime::Id)) {
+        chime_delegate = mt_matter_chime_delegate_alloc();
+        if (chime_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: chime delegate pool exhausted (%u slots, one per "
+                    "serviceable endpoint); %u of %u serviceable endpoints in use, endpoint "
+                    "heap %zu of %u B used; host may declare %u, this build serves %u",
+                    (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
+                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints, s_ep_heap_used,
+                    (unsigned)HEARTH_EP_HEAP_BYTES, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                    (unsigned)kServiceableEndpoints);
+            return -1;
+        }
+    }
+
     void *valve_delegate = nullptr;
     if (type_has_cluster(type->ep_type, ValveConfigurationAndControl::Id)) {
         valve_delegate = mt_matter_valve_delegate_alloc();
@@ -3122,6 +3244,17 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * endpoint is live and correct in every other respect by then. */
     if (opstate_delegate != nullptr) {
         mt_matter_opstate_delegate_set_endpoint(opstate_delegate, d.ep_id);
+    }
+
+    /* The chime's second half: placement-constructs the ChimeServer
+     * (endpoint id plus delegate reference) and runs Init(), whose AAI
+     * and command-handler registrations are endpoint-scoped and whose
+     * LoadPersistentAttributes() keys on GetEndpointId(), so it belongs
+     * below the successful emberAfSetDynamicEndpoint() like the trio's.
+     * Failure is logged loudly inside and does not abort, the same
+     * reasoning. */
+    if (chime_delegate != nullptr) {
+        mt_matter_chime_delegate_set_endpoint(chime_delegate, d.ep_id);
     }
 
     s_next_ep_id++;
