@@ -344,7 +344,7 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
  * ember metadata directly, so it must do that mapping itself.
  *
  * chip::app::Compatibility::Internal::AttributeBaseType()
- * (app/util/ember-io-storage.cpp:36-127, declared in ember-io-storage.h) is
+ * (app/util/ember-io-storage.cpp:36-126, declared in ember-io-storage.h) is
  * THE definition of the family in this tree: it maps every alias to its
  * basic int(8|16|32|64)(s|u) code and, critically, returns any type it does
  * not recognise unchanged (`default: return type`, :123-124). So the switch
@@ -355,8 +355,8 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
  *
  * The mappings this catalogue needs, from that function:
  *   ZCL_TEMPERATURE   (0xD8) -> ZCL_INT16S  (signed, 2)    :120-121
- *   ZCL_PERCENT       (0xE6) -> ZCL_INT8U   (unsigned, 1)  :40-47
- *   ZCL_PERCENT100THS (0xE7) -> ZCL_INT16U  (unsigned, 2)  :49-61
+ *   ZCL_PERCENT       (0xE6) -> ZCL_INT8U   (unsigned, 1)  :40-48
+ *   ZCL_PERCENT100THS (0xE7) -> ZCL_INT16U  (unsigned, 2)  :50-62
  * and, covered for free the moment a future device type needs them:
  * ENUM16/BITMAP16/VENDOR_ID/GROUP_ID/ENDPOINT_NO -> INT16U;
  * EPOCH_S/ELAPSED_S/CLUSTER_ID/ATTRIB_ID/COMMAND_ID/EVENT_ID/DEVTYPE_ID/

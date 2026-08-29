@@ -1354,14 +1354,26 @@ const attr_seed s_seeds[] = {
      * Fix round 2 re-examined PercentSetting's 0, since it is a NULLABLE
      * attribute seeded with a real value rather than the null sentinel and
      * a bench reader saw that 0 come back from chip-tool before any write.
-     * The 0 is deliberate and stays. PercentSetting has NO default in
-     * FanControl.xml (neither a default= nor a <default> child), so there is
-     * no XML default to defer to. What the spec does bind is its pairing
-     * with FanMode, and the server implements it: setting FanMode to Off
-     * SHALL set PercentSetting, PercentCurrent, SpeedSetting and
-     * SpeedCurrent to 0 (fan-control-server.cpp:337-361). FanMode is seeded
-     * Off one row below, so 0 is the only value consistent with it, and a
-     * null seed would contradict that pairing at boot. Null is the
+     * The 0 is deliberate and stays, for two independent reasons.
+     *
+     * First, it IS the cluster's declared default. Mind which XML: the one
+     * this build's zap actually consumes is
+     * src/app/zap-templates/zcl/data-model/chip/fan-control-cluster.xml,
+     * reached through zcl.json's xmlRoot (['.', './data-model/chip']) and
+     * its xmlFile list, NOT the data_model/1.x spec snapshots this file
+     * cites for conformance and feature questions. Line 102 of that XML
+     * declares PercentSetting `default="0" isNullable="true"`, and that is
+     * where hearth.zap's generated defaultValue of 0x00 comes from. (The
+     * 1.5 snapshot carries no default for this attribute, which an earlier
+     * version of this comment wrongly read as "no XML default to defer to".
+     * Right seed, wrong reason; the build consumes the zap-templates copy.)
+     *
+     * Second, the spec binds its pairing with FanMode and the server
+     * implements it: setting FanMode to Off SHALL set PercentSetting,
+     * PercentCurrent, SpeedSetting and SpeedCurrent to 0
+     * (fan-control-server.cpp:337-361). FanMode is seeded Off one row
+     * below, so 0 is the only value consistent with it, and a null seed
+     * would contradict that pairing at boot. Null is the
      * Auto-mode answer instead (:363-380 sets PercentSetting null when
      * FanMode goes to Auto), and Auto sits behind the AUT feature this
      * endpoint does not advertise. It also matches esp-matter's own
