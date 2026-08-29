@@ -2675,11 +2675,12 @@ const attr_seed s_seeds[] = {
     /* Chime. SelectedChime 0 is the zero-fill and the XML default;
      * Enabled seeds TRUE, the XML default (chime-cluster.xml:42) and the
      * ChimeServer's own constructed state (mEnabled true,
-     * chime-server.cpp:44). Both slots are inert on the fabric (the
-     * server's AAI shadows them, and its KVS-restored values win), so
-     * these seeds only keep an AT+MTATTR read of the arena from
-     * contradicting a fresh device's server state; after any controller
-     * or AT+MTCHIME write the server side is the truth. FeatureMap 0
+     * chime-server.cpp:44). Both slots are fully inert since fix round 2
+     * (the server's AAI shadows them on the fabric, and DE397's carve-out
+     * routes both the AT+MTATTR read AND write legs to the live server,
+     * mt_matter_zephyr.cpp), so these seeds are never observable
+     * anywhere; kept truthful to a fresh server anyway, the arena
+     * discipline every other row follows. FeatureMap 0
      * (the cluster declares no features). Revision 1 is
      * Chime/Metadata.h:20 kRevision and the XML's globalAttribute value
      * (chime-cluster.xml:39). */

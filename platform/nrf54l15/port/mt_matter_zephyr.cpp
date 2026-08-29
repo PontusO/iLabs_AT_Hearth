@@ -456,19 +456,61 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  *   objects this file already owns, so an AT read answers what a
  *   subscribed controller sees.
  *
- *   WRITES on the C6 split by flag. The opstate pair is created
+ *   WRITES split by cluster, on both platforms, and the two dispositions
+ *   below mirror the C6's observable wire exactly (fix round 2, DE397 as
+ *   amended by the controller after the round 1 trace):
+ *
+ *   OperationalState pair: +MTERR:11. On the C6 these are created
  *   MANAGED_INTERNALLY without WRITABLE (esp_matter_attribute.cpp:
  *   2417-2421 CurrentPhase, :2435-2440 OperationalState), so set_val()
  *   returns ESP_ERR_NOT_SUPPORTED (esp_matter_data_model.cpp:1091-1104)
- *   and the C6 bridge maps that to MT_ATTR_ERR_READONLY, +MTERR:11
- *   (DE270). The chime pair is MANAGED_INTERNALLY WITH WRITABLE
- *   (esp_matter_attribute.cpp:4872-4884), so a C6 write actually routes
- *   through set_val_via_write_attribute() into the live server. DE397
- *   rules +MTERR:11 for ALL FOUR on this platform: AT+MTCHIME is the
- *   host's write path for the chime pair, and refusing here is strictly
- *   safer than this port's previous silent no-op. The chime-pair
- *   difference from the C6 (refused here, live-written there) is
- *   recorded in the batch report for the controller's wire-doc pass.
+ *   and the C6 bridge maps that to MT_ATTR_ERR_READONLY (DE270).
+ *   Mirrored as a refusal here; AT+MTOPSTATE is the write path.
+ *
+ *   Chime pair: the write ROUTES TO THE LIVE ChimeServer. On the C6
+ *   these are MANAGED_INTERNALLY WITH WRITABLE plus NONVOLATILE
+ *   (esp_matter_attribute.cpp:4872-4884), so set_val() takes the
+ *   set_val_via_write_attribute() branch (esp_matter_data_model.cpp:
+ *   1097-1098, impl :1026-1076): a real provider WriteAttribute into
+ *   ChimeCluster::WriteAttribute (esp tree ChimeCluster.cpp:203-221),
+ *   which decodes and calls SetSelectedChime()/SetEnabled(). The
+ *   observable C6 wire, mirrored by mt_chime_attr_write_live() below:
+ *     - out-of-width value (SelectedChime > 255, Enabled > 1): +MTERR:1
+ *       (the C6's i64_to_attr_val() width/bool rejection, main.cpp:
+ *       456-463, mapped to MT_ATTR_ERR_VALUE at its call site);
+ *     - an in-width but UNINSTALLED SelectedChime id: bare ERROR, not
+ *       +MTERR:1. ChimeCluster::SetSelectedChime answers Status::NotFound
+ *       (esp tree ChimeCluster.cpp:223-228), which
+ *       set_val_via_write_attribute() collapses to ESP_FAIL (:1069-1073)
+ *       and the C6 bridge's default arm renders MT_ATTR_ERR_FAILED. Note
+ *       the deliberate contrast with AT+MTCHIME, whose own contract maps
+ *       the same NotFound to +MTERR:1; the two commands' wires already
+ *       differ on the C6 and that difference is preserved, not invented;
+ *     - success, including a same-value re-push: OK (the C6 handler
+ *       returns Success without writing on same-value, and the provider
+ *       absorbs NOT_FINISHED, esp_matter_data_model_provider.cpp:419-429);
+ *     - NO +MTATTR URC in either notify mode: the provider path bypasses
+ *       esp-matter's attribute update callback entirely (the AirQuality
+ *       precedent, C6 main.cpp), and here the direct setter call bypasses
+ *       emberAfWriteAttribute and so this file's
+ *       MatterPostAttributeChangeCallback. The fabric still sees the
+ *       change: the setter marks the path dirty itself
+ *       (chime-server.cpp:224, :243). notify therefore selects nothing on
+ *       this path, exactly as on the C6.
+ *   KVS wear note: SetSelectedChime()/SetEnabled() persist every changed
+ *   write through SafeAttributePersistenceProvider (chime-server.cpp:
+ *   219-224, :238-243), so this write path is a settings_storage wear
+ *   source the round 1 inert slot was not; ties to the existing 32 KB
+ *   occupancy watch item. The C6's handler persists identically (esp
+ *   tree ChimeCluster.cpp:235-236), so the wear parity is exact too.
+ *
+ *   One C6 comment caught out by this trace, recorded for the controller:
+ *   the C6's DE270 note (main.cpp, the ESP_ERR_NOT_SUPPORTED mapping)
+ *   claims "no device type this firmware creates today ships such an
+ *   attribute" for the MANAGED_INTERNALLY+WRITABLE branch; the chime pair
+ *   is exactly such an attribute and shipped five rounds before that
+ *   comment was written. The branch's behaviour is what this carve-out
+ *   mirrors; the stale sentence is the C6's to fix.
  *
  * Table-driven and additive: exactly these four (cluster, attribute)
  * pairs, matched only after attr_locate() has proven the endpoint carries
@@ -504,6 +546,7 @@ static bool instance_attr_served(uint32_t cluster, uint32_t attr)
  * pools they read. Both run under the caller's StackLock. */
 static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
 
 /*
  * Locate an attribute's metadata, splitting endpoint/cluster/attribute
@@ -641,14 +684,17 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
         return r;
     }
 
-    /* DE397: a write to an Instance-served attribute is refused with
-     * +MTERR:11 rather than "succeeding" into the inert arena slot. The
-     * ruling covers all four pairs, including the chime pair the C6
-     * live-writes; see the carve-out comment above attr_locate() for the
-     * traced C6 evidence and the recorded difference. AT+MTOPSTATE and
-     * AT+MTCHIME are the write paths for these values. */
+    /* DE397 as amended (fix round 2): the two clusters part ways here,
+     * each mirroring its own C6 wire. The opstate pair is refused with
+     * +MTERR:11 (not writable over AT anywhere; AT+MTOPSTATE is the write
+     * path); the chime pair routes to the live ChimeServer's own setters,
+     * the C6's set_val_via_write_attribute() branch in this port's terms.
+     * Full traced evidence in the carve-out comment above attr_locate(). */
     if (instance_attr_served(cluster, attr)) {
-        return MT_ATTR_ERR_READONLY;
+        if (cluster == chip::app::Clusters::OperationalState::Id) {
+            return MT_ATTR_ERR_READONLY;
+        }
+        return mt_chime_attr_write_live(ep, attr, val);
     }
 
     bool unsigned_type;
@@ -2235,4 +2281,46 @@ static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, boo
         *out = srv->GetEnabled() ? 1 : 0;
     }
     return MT_ATTR_OK;
+}
+
+/*
+ * DE397 as amended, fix round 2: the AT+MTATTR write leg for the chime
+ * pair, routed to the live server the way the C6's
+ * MANAGED_INTERNALLY+WRITABLE branch routes through the data model
+ * provider. Dispatched from mt_matter_attr_write() under its StackLock;
+ * the status-to-wire mapping mirrors the traced C6 behaviour point for
+ * point (see the carve-out comment above attr_locate()): out-of-width
+ * +MTERR:1, uninstalled SelectedChime id a bare ERROR (NotFound collapsed,
+ * exactly as the C6's ESP_FAIL default arm renders it, and deliberately
+ * NOT AT+MTCHIME's +MTERR:1 for the same NotFound), success and
+ * same-value OK, no +MTATTR URC in either notify mode, KVS persistence
+ * on every changed write (the wear note is in the carve-out comment).
+ */
+static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val)
+{
+    using chip::Protocols::InteractionModel::Status;
+    chip::app::Clusters::ChimeServer *srv = nullptr;
+    for (auto &d : s_chime_delegates) {
+        if (d.endpoint() == ep) {
+            srv = d.server();
+            break;
+        }
+    }
+    if (srv == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    Status st;
+    if (attr == chip::app::Clusters::Chime::Attributes::SelectedChime::Id) {
+        if (val < 0 || val > 0xFF) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        st = srv->SetSelectedChime((uint8_t)val);
+    } else {
+        if (val < 0 || val > 1) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        st = srv->SetEnabled(val != 0);
+    }
+    return (st == Status::Success) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }
