@@ -128,6 +128,36 @@ second point:
   choice, traced in this tree and documented in `AT_MT_SPEC.md` 3.19. The
   verdict gates only whether the host actually moves the valve.
 
+**A `129`/`1` (valve `Close`) forward is not always a controller's doing.**
+The valve server closes the valve itself when a timed open expires, and that
+path re-enters the same delegate hook, so the host sees a **second,
+unsolicited** `+MTCMD:<seq>,<ep>,129,1` that no controller asked for. It is
+reachable on this build because `DefaultOpenDuration` is writable and
+mandatory: a controller that writes it, or that sends `Open` carrying a
+duration, arms the countdown, and at zero the server calls `CloseValve()`,
+which calls the delegate.
+
+Three consequences a host author needs:
+
+- **The verdict on that forward is meaningless.** `CloseValve()` has already
+  set `TargetState` to Closed, set `CurrentState` to Transitioning, nulled
+  `OpenDuration` and `RemainingDuration`, and emitted `ValveStateChanged`
+  **before** the delegate is consulted. A deny undoes none of it; the
+  fabric-visible state moves either way.
+- **It arrives from timer context and blocks.** The forward stalls the CHIP
+  event loop for up to the full 1000 ms window, once per timed open. A host
+  that lets that window time out costs the stack a second.
+- **So treat a `129`/`1` forward as possibly server-initiated.** Nothing on
+  the wire distinguishes it from a controller's `Close`; a host that wants
+  to act only on controller-driven closes has to infer it from its own state
+  (it knows whether it saw the matching `Open`).
+
+This is the SDK's structure, not a firmware choice: `HandleCloseValve()` is
+the only hook offered and it cannot tell an invoke from an auto-close. The
+C6 behaves identically for the same reason. Documented rather than worked
+around; the mechanism with line citations is on the water valve's audit note
+in `port/mt_devtypes_zephyr.cpp`.
+
 **Reporting back is the host's job, on both types.** An allowed verdict
 never changes `LockState` or `CurrentState` by itself, because only the host
 knows when the bolt or the valve actually moved. The host reports the
@@ -296,14 +326,15 @@ Catalogue batch 3 on top of that, pristine builds, 2026-08-29:
 
 | | Batch 2 + per-composition | Batch 3 (door lock, water valve) |
 |---|---|---|
-| RAM used, `ophelia_cpico` | 223,884 B (85.4%) | **224,964 B (85.8%)** |
-| RAM used, `nrf54l15dk` | 224,108 B (85.5%) | **225,188 B (85.9%)** |
-| Flash, `ophelia_cpico` | 789,792 B | **805,696 B** |
+| RAM used, `ophelia_cpico` | 223,884 B (85.4%) | **224,972 B (85.8%)** |
+| RAM used, `nrf54l15dk` | 224,108 B (85.5%) | **225,196 B (85.9%)** |
+| Flash, `ophelia_cpico` | 789,792 B | **806,208 B** |
+| Flash, `nrf54l15dk` | not recorded | 814,100 B |
 
-RAM `+1,080 B` on both boards, which is CHIP's own per-endpoint tables for
+RAM `+1,088 B` on both boards, which is CHIP's own per-endpoint tables for
 the two new servers (`DoorLockServer::mEndpointCtx`, the valve's delegate
 and `RemainingDuration` shadow arrays, each sized fixed + 16 dynamic) plus
-this port's 16-slot valve delegate pool. Flash `+15,904 B` is the two
+this port's 16-slot valve delegate pool. Flash `+16,416 B` is the two
 cluster servers themselves. No change to `HEARTH_EP_HEAP_BYTES`: neither
 device type is close to the widest, so the compile-time floor under the
 heap sizing is untouched.

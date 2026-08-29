@@ -839,7 +839,7 @@ extern "C" uint32_t mt_air_quality_feature_mask(void)
  * registered. A lock fails closed, and the firmware has no honest way to
  * tell a controller which of those four it was. Not kInvalidCredential in
  * particular: that value additionally triggers HandleWrongCodeEntry()
- * (:3719) and would count a host deny towards the wrong-code lockout, which
+ * (:3716) and would count a host deny towards the wrong-code lockout, which
  * would be a lie about what happened.
  */
 static bool mt_door_lock_adjudicate(chip::EndpointId endpointId, uint32_t command,
@@ -891,27 +891,12 @@ bool emberAfPluginDoorLockOnDoorUnlockCommand(chip::EndpointId endpointId,
 }
 
 /*
- * Strong override of the generated weak stub in
- * zap-generated/callback-stub.cpp. Nothing in the SDK calls
- * DoorLockServer::InitEndpoint() on its own; this hook is where an app is
- * expected to, and it is dispatched per endpoint by cluster id from
- * emberAfClusterInitCallback() inside initializeEndpoint()
- * (attribute-storage.cpp:480), which runs for dynamic endpoints too. See
- * the audit note on doorLockAttrs (mt_devtypes_zephyr.cpp) for why the
- * similarly-named emberAfDoorLockClusterServerInitCallback is NOT the hook
- * to define, and why this one does not belong at the B388 call site.
- *
- * InitEndpoint() sets LockState null and ActuatorEnabled true
- * (door-lock-server.cpp:101-106) and claims this endpoint's slot in the
- * server's mEndpointCtx table; without it, HandleRemoteLockOperation()
- * cannot resolve a context and the lock does not work at all. Same body as
- * the nRF lock sample's (nrf/samples/matter/lock/src/zcl_callbacks.cpp:
- * 97-99) and the C6's, minus each of their own lock-simulation calls.
+ * The lock's per-endpoint init hook, emberAfDoorLockClusterInitCallback(),
+ * is deliberately NOT here. It lives in mt_devtypes_zephyr.cpp, next to the
+ * door lock's device type declaration, because its failure has to abort
+ * mt_devtype_create() and that file owns the create. See the comment on the
+ * override there for the InitEndpoint-versus-InitServer reasoning.
  */
-void emberAfDoorLockClusterInitCallback(chip::EndpointId endpoint)
-{
-    DoorLockServer::Instance().InitServer(endpoint);
-}
 
 /*
  * AT+MTLOCK bridge (AT_MT_SPEC.md 3.18). Reports the host's OWN actuation
@@ -962,8 +947,8 @@ extern "C" uint8_t mt_matter_lock_source_max(void)
 
 /* ---- water valve (0x0042) ---------------------------------------------
  *
- * ValveConfigurationAndControl::Delegate has exactly three pure virtuals
- * (valve-configuration-and-control-delegate.h:40-42):
+ * ValveConfigurationAndControl::Delegate (delegate.h:34) has exactly three
+ * pure virtuals (valve-configuration-and-control-delegate.h:40-42):
  *
  *   virtual DataModel::Nullable<chip::Percent> HandleOpenValve(DataModel::Nullable<chip::Percent> level) = 0;
  *   virtual CHIP_ERROR HandleCloseValve()                                                                = 0;
@@ -972,19 +957,27 @@ extern "C" uint8_t mt_matter_lock_source_max(void)
  * The verdict cannot fail either command on the wire, and this is an SDK
  * property rather than a firmware choice (AT_MT_SPEC.md 3.19). Traced in
  * this tree, not assumed from the C6's note: CloseValve() calls
- * HandleCloseValve() and neither assigns, tests nor logs the CHIP_ERROR it
- * returns (cluster.cpp:301-306), then returns CHIP_NO_ERROR unconditionally
- * (:306), so the Close command handler's Failure arm (:516-523) is
+ * HandleCloseValve() (cluster.cpp:303) and neither assigns, tests nor logs
+ * the CHIP_ERROR it returns, then returns CHIP_NO_ERROR unconditionally
+ * (:306), so the Close command handler's Failure arm (:520-522) is
  * unreachable through the delegate. Open is worse: HandleOpenValve() has no
  * error channel at all, since it returns a LEVEL rather than a status, and
  * SetValveLevel() reads that level only to decide whether to republish
- * CurrentLevel (:359-366) before returning CHIP_NO_ERROR (:370); the Open
- * handler's status Optional is only ever filled from argument constraint
- * checks (:451, :456, :462, :482), never from anything the delegate did.
+ * CurrentLevel (:361-365) before returning CHIP_NO_ERROR (:370); the Open
+ * handler's status Optional (:440) is only ever filled from argument
+ * constraint checks (:451, :456, :462, :483), never from anything the
+ * delegate did.
  *
  * So the verdict here gates ONE thing: whether the host actually moves the
  * valve. That is still the whole point of forwarding it, which is why both
  * hooks forward anyway.
+ *
+ * One caller of HandleCloseValve() is NOT a controller invoke: the server's
+ * own auto-close timer re-enters it when a timed open expires, so the host
+ * sees an unsolicited 129/1 forward. Fix round I1; the full mechanism and
+ * why it is documented rather than fixed are on the water valve's audit
+ * note in mt_devtypes_zephyr.cpp, and the host-facing consequence is in the
+ * platform README.
  */
 class HearthValveDelegate : public chip::app::Clusters::ValveConfigurationAndControl::Delegate
 {
@@ -1022,15 +1015,27 @@ public:
     }
 
     /*
-     * Fires once a second on the CHIP event loop while a timed open counts
-     * down (cluster.cpp:235-255), and drives the server's own auto-close at
-     * zero. Nothing in this firmware's AT surface exposes that countdown as
-     * an event to forward, so there is nothing to do; RemainingDuration
-     * itself still ticks in the server's shadow store and is what a
-     * subscribed controller reads (see the seed note in
-     * mt_devtypes_zephyr.cpp). Must stay non-blocking: it is on the event
-     * loop, and mt_cmd_forward() from here would stall the stack for up to
-     * a second per tick.
+     * Fires once a second from a SystemLayer timer on the CHIP event loop
+     * while a timed open counts down (cluster.cpp:214, :235, :245).
+     * Nothing in this firmware's AT surface exposes that countdown as an
+     * event to forward, so there is nothing to do; RemainingDuration itself
+     * still ticks in the server's shadow store and is what a subscribed
+     * controller reads (see the seed note in mt_devtypes_zephyr.cpp).
+     *
+     * THIS FUNCTION must stay non-blocking: it runs on the event loop once
+     * per second, and a mt_cmd_forward() from here would stall the stack
+     * for up to 1000 ms on every tick.
+     *
+     * That rule is about this function only, and it is worth being exact,
+     * because the TERMINAL tick does reach mt_cmd_forward() anyway, just
+     * not through here. At zero the tick does not call this callback at
+     * all: startRemainingDurationTick() takes the else branch and calls
+     * CloseValve() (:250-252), which calls HandleCloseValve() (:303), which
+     * forwards and blocks. So the auto-close stall exists, it is one
+     * blocking forward per timed open rather than one per second, and it is
+     * the SDK's structure rather than something this class chooses.
+     * Documented, not fixed; fix round I1, full mechanism on the water
+     * valve's audit note in mt_devtypes_zephyr.cpp.
      */
     void HandleRemainingDurationTick(uint32_t duration) override { (void)duration; }
 
@@ -1072,12 +1077,14 @@ extern "C" void *mt_matter_valve_delegate_alloc(void)
  * comment has the full ordering argument and why it differs from the C6's.
  *
  * SetDefaultDelegate() returns void and drops the registration silently if
- * the endpoint index does not resolve (cluster.cpp:264-268: a lone
+ * the endpoint index does not resolve (cluster.cpp:264-269: a lone
  * `if (ep < table size)` with no else and no log). A valve in that state
  * still answers Open and Close with Success and still looks healthy to a
  * controller, while no +MTCMD is ever raised and the server's auto-close
  * tick never runs. So the registration is read back rather than trusted,
- * and a failure is logged loudly at the moment it happens.
+ * and a failure is logged loudly at the moment it happens. It does not
+ * abort the create; mt_devtype_create()'s own comment says why that is
+ * consistent with the pool check aborting rather than at odds with it.
  */
 extern "C" void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep)
 {
