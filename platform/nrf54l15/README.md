@@ -77,10 +77,10 @@ so the AT integer family tracks the SDK's definition instead of a
 hand-copied list. The C6 never had this gap because esp-matter maps the
 aliases down to its own value types before its AT bridge sees them.
 
-The BooleanState
-cluster (Contact/Rain/Water Freeze/Water Leak) is served over real Matter
-reads by a CHIP-registered `BooleanStateCluster` object rather than this
-build's external-storage arena directly; `MatterPostAttributeChangeCallback`
+The BooleanState cluster (Contact/Rain/Water Freeze/Water Leak) is served
+over real Matter reads by a CHIP-registered `BooleanStateCluster` object
+rather than this build's external-storage arena directly;
+`MatterPostAttributeChangeCallback`
 (`port/mt_matter_zephyr.cpp`) bridges the two, so an AT+MTATTR write of
 StateValue both answers a later AT+MTATTR read from this arena and reaches
 a real Matter controller's read, emitting the cluster's StateChange event
@@ -112,12 +112,22 @@ no such split because it serves the full 28.
 
 **What a host sees past capacity.** Nothing at declare time: `AT+MTEP`
 accepts the endpoint and the composition persists. The wall is at the next
-boot, in the rebuild, and it is loud and total. `mt_devtype_create()` logs
-which of the two limits was hit and how far away the other one was, returns
-an error, and the rebuild aborts rather than skipping the entry, so the
-device comes up **bare** rather than serving a silently truncated data
-model (design spec 12.1). That is the same abort a bad parent or an unknown
-device type already triggers.
+boot, in the rebuild. `mt_devtype_create()` logs which of the two limits was
+hit and how far away the other one was, returns an error, and the rebuild
+stops there.
+
+The abort is **stop-at-failure, not roll-back** (`AT_MT_SPEC.md` 501-506).
+The endpoints created before the failure **stay live as a prefix, with their
+ids unchanged**; the failed entry and everything after it are absent, and
+`AT+MTEP?` reports the live prefix. So a 20-endpoint composition on this
+build serves endpoints **1 through 16**, and endpoints 17 to 20 are simply
+not there.
+
+What the rule prevents is a **renumbered** model, not a partial one: skipping
+the failed entry and carrying on would shift every later endpoint down by
+one, and a commissioned controller would silently get a different data model
+than the one it was commissioned against (design spec 12.1). That is the same
+stop-at-failure a bad parent or an unknown device type already triggers.
 
 **Capacity is bounded by two resources, not one.** A composition can exhaust
 either first:
@@ -178,8 +188,10 @@ together in `port/mt_port_ids.h`, and the mirrored literal in
 `src/chip_project_config.h`, is the whole change: the header table, CHIP's
 per-endpoint pools and the block heap all follow from those two numbers, and
 the static assertions catch a mirror that drifts. 28 serviceable endpoints
-would want about 12.5 KB of block heap for an all-extended-colour worst
-case, plus roughly 3 KB back into CHIP's pools.
+would want `28 x 600` = 16,800 B (about 16.4 KB) of block heap for an
+all-extended-colour worst case, and would hand back to CHIP's per-endpoint
+pools the roughly 6.7 KB this round reclaimed from them by going the other
+way.
 
 ### Measured
 

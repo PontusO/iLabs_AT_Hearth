@@ -266,11 +266,20 @@ extern "C" const char *mt_thread_role_name(uint8_t role)
  *
  * Written only from the boot path in main.cpp, before mt_at_start() lets
  * any AT command run, so there is no concurrent access to guard.
+ *
+ * Depth is kServiceableEndpoints (capacity), not MT_COMP_MAX_ENDPOINTS
+ * (acceptance): the only writer is mt_matter_record_endpoint(), which
+ * main.cpp calls once per endpoint that mt_devtype_create() actually stood
+ * up, so an entry here can only exist for an endpoint this build is
+ * serving. A composition may DECLARE 28, but the seventeenth never gets
+ * created and so is never recorded. Nothing indexes these by composition
+ * index either: mt_matter_endpoint_info() bounds its caller against
+ * s_live_count, which is what main.cpp's parent lookup passes through.
  */
-static uint32_t s_live_devtype[MT_COMP_MAX_ENDPOINTS];
-static uint16_t s_live_ep_id[MT_COMP_MAX_ENDPOINTS];
-static uint8_t s_live_variant[MT_COMP_MAX_ENDPOINTS];
-static uint8_t s_live_parent[MT_COMP_MAX_ENDPOINTS];
+static uint32_t s_live_devtype[kServiceableEndpoints];
+static uint16_t s_live_ep_id[kServiceableEndpoints];
+static uint8_t s_live_variant[kServiceableEndpoints];
+static uint8_t s_live_parent[kServiceableEndpoints];
 static uint16_t s_live_count;
 
 extern "C" uint16_t mt_matter_endpoint_count(void)
@@ -298,7 +307,7 @@ extern "C" int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16
 extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant,
                                           uint8_t parent_idx)
 {
-    if (s_live_count >= MT_COMP_MAX_ENDPOINTS) {
+    if (s_live_count >= kServiceableEndpoints) {
         return;
     }
     s_live_devtype[s_live_count] = devtype;

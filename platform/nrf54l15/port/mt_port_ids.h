@@ -44,9 +44,11 @@ constexpr uint16_t kCatalogueEndpointId = 240;
  *
  * 16 rather than 28 is a deliberate trade for an nRF54L15's 256 KB. A host
  * may still DECLARE up to 28 endpoints and the composition still persists
- * intact; a composition longer than 16 simply fails its rebuild at the
- * seventeenth endpoint, loudly, and leaves the device bare rather than
- * half-built (design spec 12.1). The nRF54LM20 tier (512 KB, supported
+ * intact; a composition longer than 16 fails its rebuild at the seventeenth
+ * endpoint, loudly. That abort is stop-at-failure, not roll-back
+ * (AT_MT_SPEC.md 501-506), so the first sixteen stay live as a prefix with
+ * unchanged ids and the rest are absent: a twenty-endpoint composition
+ * serves 1..16. The nRF54LM20 tier (512 KB, supported
  * upstream in this NCS) is where this goes back up: raising this constant
  * and HEARTH_EP_HEAP_BYTES below is the whole change.
  *

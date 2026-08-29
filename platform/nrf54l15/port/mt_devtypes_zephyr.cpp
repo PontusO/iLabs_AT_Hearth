@@ -67,8 +67,15 @@ LOG_MODULE_REGISTER(hearth_devtypes, LOG_LEVEL_INF);
  *
  * The reverse (capacity BELOW acceptance) is the normal, intended state and
  * is not an error: a host may declare 28, and a stored composition longer
- * than 16 fails its rebuild loudly at the seventeenth endpoint, leaving the
- * device bare rather than half-built (design spec 12.1).
+ * than 16 fails its rebuild loudly at the seventeenth endpoint. The abort is
+ * STOP-AT-FAILURE, not roll-back (AT_MT_SPEC.md 501-506): the sixteen
+ * endpoints created before it stay live as a prefix with their ids
+ * unchanged, and the failed entry and everything after it are simply absent.
+ * A twenty-endpoint composition therefore serves endpoints 1..16. What the
+ * rule exists to prevent is a RENUMBERED model, not a partial one: skipping
+ * the failed entry and continuing would shift every later endpoint down by
+ * one and hand a commissioned controller a silently different data model
+ * (design spec 12.1).
  */
 static_assert(CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT == kServiceableEndpoints,
               "chip_project_config.h must mirror kServiceableEndpoints (mt_port_ids.h)");
@@ -1024,7 +1031,7 @@ struct attr_slot {
     uint8_t data[4];
 };
 
-constexpr size_t kSlotDataBytes = sizeof(((attr_slot *)nullptr)->data);
+constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
 
 /*
  * ---- the endpoint block heap ----------------------------------------
@@ -1048,11 +1055,15 @@ constexpr size_t kSlotDataBytes = sizeof(((attr_slot *)nullptr)->data);
  *     | attr_slot slots[n_slots]   |     16 * count_slots() bytes
  *     +----------------------------+
  *
- * dv first is what keeps the layout alignment-free: DataVersion is uint32_t
- * and attr_slot's leading members are uint32_t, so both want 4-byte
- * alignment, k_heap hands back 8-byte-aligned memory (CHUNK_UNIT), and an
- * integral number of uint32_t can never leave the slots misaligned.
- * block_dv() and block_slots() are the only two places that know this.
+ * dv first is what keeps the layout alignment-free. k_heap_alloc() routes
+ * through sys_heap_noalign_alloc() (kheap.c:119-129), and a chunk's memory
+ * starts one chunk header past an 8-byte-aligned chunk boundary
+ * (chunk_mem(), heap.c:24-27), so on this build a block is 4-byte aligned,
+ * NOT 8. That is exactly what both halves need and no more: DataVersion is
+ * uint32_t and attr_slot's leading members are uint32_t, so both want 4-byte
+ * alignment, and an integral number of uint32_t of dv can never leave the
+ * slots misaligned. block_dv() and block_slots() are the only two places
+ * that know this.
  *
  * A DEDICATED heap, not the system heap. Three reasons, all of which matter
  * more than the handful of bytes k_heap's own metadata costs:
@@ -1079,11 +1090,20 @@ constexpr size_t kSlotDataBytes = sizeof(((attr_slot *)nullptr)->data);
  * allocator cannot fragment.
  *
  * The one deliberate leak: if emberAfSetDynamicEndpoint() fails AFTER a
- * successful allocation, the block is not returned. That path returns -1,
- * the rebuild aborts, the device is left bare, and the only way forward is
- * a reboot. Freeing there would buy nothing and would cost the invariant
- * above, which is the thing that makes the heap's behaviour easy to reason
- * about. It is bounded at one block and unreachable.
+ * successful allocation, the block is not returned. That path returns -1
+ * and the rebuild stops there, so no further endpoint is created and the
+ * block can never be reached again before the reboot that resets the heap.
+ * Bounded at one block per boot.
+ *
+ * Freeing it would be actively worse, not merely pointless. CHIP keeps the
+ * dataVersions span it was handed in emAfEndpoints[index]
+ * (attribute-storage.cpp), and its own failure path does not always clear
+ * that slot: with CHIP_CONFIG_USE_ENDPOINT_UNIQUE_ID the later error returns
+ * inside emberAfSetDynamicEndpoint() leave the entry populated. Handing the
+ * memory back to the heap would turn that into a dangling pointer for the
+ * next allocation to reuse. Not freeing is strictly safer AND keeps the
+ * allocate-only invariant that makes this heap's behaviour easy to reason
+ * about.
  *
  * ---- sizing -----------------------------------------------------------
  *
@@ -1271,6 +1291,9 @@ constexpr size_t kLightSlots = MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) +
 constexpr size_t kWidestEndpointSlots =
     kIdentifySlots + kMax2(kMax2(kSensorSlots, kActuatorSlots), kLightSlots);
 
+/* Deliberately partial: every sensor and actuator device type shares the
+ * same three-cluster shape, so temperatureSensorClusters stands in for all
+ * of them rather than listing seventeen identical counts. */
 constexpr size_t kWidestClusterList = kMax2(
     kMax2(kMax2(MT_COUNT(onOffLightClusters), MT_COUNT(dimmableLightClusters)),
           kMax2(MT_COUNT(colorTemperatureLightClusters), MT_COUNT(extendedColorLightClusters))),
@@ -1280,14 +1303,55 @@ constexpr size_t kWidestClusterList = kMax2(
 
 constexpr size_t kWidestBlockBytes = block_bytes(kWidestClusterList, kWidestEndpointSlots);
 
-/* Zephyr charges roundup(payload + 4, 8) per allocation on a heap this
- * size; modelled here so the floor is checked against the real cost rather
- * than the bare payload. */
+/*
+ * Zephyr charges roundup(payload + 4, 8) per allocation on a heap this size,
+ * modelled here so the floor is checked against the real cost rather than
+ * the bare payload. The 4 is the SMALL-heap chunk header
+ * (heap.h chunk_header_bytes()); a big heap would charge 8 and every number
+ * in the table above would be wrong.
+ *
+ * Small-heap-ness is not a Kconfig here, it is derived, so the two things
+ * that would flip it are asserted rather than assumed. big_heap_chunks()
+ * (heap.h:80-90) returns true if CONFIG_SYS_HEAP_BIG_ONLY is set, or if
+ * pointers are wider than 4 bytes, or if the heap exceeds 0x7fff chunks. The
+ * third is checked by arithmetic below (8192/8 = 1024, far under); the first
+ * two are checked here.
+ */
+#ifdef CONFIG_SYS_HEAP_BIG_ONLY
+#error "CONFIG_SYS_HEAP_BIG_ONLY makes chunk headers 8 bytes; redo the sizing table"
+#endif
+BUILD_ASSERT(sizeof(void *) == 4,
+             "a 64-bit target forces a big heap (8-byte chunk headers); redo the sizing table");
+BUILD_ASSERT(HEARTH_EP_HEAP_BYTES / 8 <= 0x7fff,
+             "this heap is large enough to be a big heap (8-byte chunk headers); redo the "
+             "sizing table");
+
 constexpr size_t kHeapCostOf(size_t payload) { return ((payload + 4 + 7) / 8) * 8; }
+
+/*
+ * Usable bytes, not the gross define: sys_heap_init() spends some of the
+ * buffer on itself before any allocation happens, and asserting the floor
+ * against the gross number would quietly over-promise by that much.
+ *
+ * For this configuration (8192 B, small heap, CONFIG_SYS_HEAP_RUNTIME_STATS
+ * on, 32-bit) the overhead is exactly 80 bytes:
+ *
+ *   4   end-marker chunk header      heap_footer_bytes(8192), heap.c:538-539
+ *   4   lost rounding 8188 down to a CHUNK_UNIT boundary      heap.c:542-544
+ *  72   chunk 0, which holds struct z_heap itself: 28 bytes
+ *       (chunk0_hdr[2] + end_chunk + avail_buckets + the three runtime-stats
+ *       counters) plus 10 buckets x 4, so 68 rounded up to 9 chunks
+ *                                                            heap.c:564-566
+ *
+ * leaving 1023 - 9 = 1014 chunks, 8,112 bytes, which is the figure the
+ * README's capacity table is built on.
+ */
+constexpr size_t kHeapOverheadBytes = 80;
+constexpr size_t kHeapUsableBytes = HEARTH_EP_HEAP_BYTES - kHeapOverheadBytes;
 
 constexpr size_t kMinWidestEndpoints = 8;
 
-static_assert(kHeapCostOf(kWidestBlockBytes) * kMinWidestEndpoints <= HEARTH_EP_HEAP_BYTES,
+static_assert(kHeapCostOf(kWidestBlockBytes) * kMinWidestEndpoints <= kHeapUsableBytes,
               "the endpoint heap no longer holds eight of the widest device type; redo the "
               "sizing table beside K_HEAP_DEFINE and raise HEARTH_EP_HEAP_BYTES");
 
@@ -1837,11 +1901,12 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         type->device_types, (parent_devtype != 0) ? parent_ep_id : kInvalidEndpointId);
     if (err != CHIP_NO_ERROR) {
         /* The header goes back on the free list, the block does not: see the
-         * allocate-only note beside K_HEAP_DEFINE. This path returns -1, the
-         * rebuild aborts, and the device stays bare until a reboot resets the
-         * heap wholesale, so the one orphaned block is bounded and
-         * unreachable. Keeping the invariant is worth more than reclaiming
-         * it. */
+         * allocate-only note beside K_HEAP_DEFINE. This path returns -1 and
+         * the rebuild stops here, so nothing allocates again before the
+         * reboot that resets the heap: the orphaned block is bounded at one
+         * per boot and unreachable. Freeing it would be worse than keeping
+         * it, because CHIP may still hold this span in emAfEndpoints[index]
+         * on its own error paths. */
         d.used = false;
         d.block = nullptr;
         LOG_ERR("emberAfSetDynamicEndpoint(0x%04X) failed: %" CHIP_ERROR_FORMAT,
@@ -1886,7 +1951,8 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * emberAfGetClusterServerEndpointIndex() returns kEmberInvalidEndpointIndex
      * (0xFFFF) for an endpoint that is not yet configured and enabled
      * (attribute-storage.cpp:923-935). Called before the endpoint exists,
-     * that is a wild write far past a 29-entry array. The command handlers
+     * that is a wild write far past what is now a 17-entry array (one fixed
+     * catalogue endpoint plus kServiceableEndpoints). The command handlers
      * are safer than this (they all go through the bounds-checked
      * get*TransitionStateByIndex() getters), but the init is not, so the
      * call must stay below the successful emberAfSetDynamicEndpoint(). */

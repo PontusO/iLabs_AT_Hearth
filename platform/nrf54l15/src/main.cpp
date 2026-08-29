@@ -36,6 +36,23 @@ LOG_MODULE_REGISTER(hearth_main, LOG_LEVEL_INF);
  */
 static void rebuild_composition(void)
 {
+    /*
+     * Run-once, made checkable here rather than left as a property of the
+     * single call site. mt_devtype_create() allocates each endpoint's block
+     * from a dedicated heap and never frees (port/mt_devtypes_zephyr.cpp
+     * explains why that is safe), and the whole argument rests on the
+     * allocation sequence being one monotonic run in composition order. A
+     * second call would stack a second set of blocks on the first and
+     * quietly halve the capacity the README documents, so say so locally
+     * instead of making a future reader trace callers to be sure.
+     */
+    static bool s_rebuilt;
+    if (s_rebuilt) {
+        LOG_ERR("rebuild_composition() called twice; endpoint blocks are allocate-only");
+        return;
+    }
+    s_rebuilt = true;
+
     mt_composition_t comp;
     int rc = mt_comp_store_load(&comp);
     if (rc < 0) {
