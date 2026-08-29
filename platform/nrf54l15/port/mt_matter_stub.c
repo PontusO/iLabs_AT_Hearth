@@ -68,16 +68,10 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
     return MT_ATTR_ERR_ENDPOINT;
 }
 
-void *mt_matter_mode_select_manager(void) { return NULL; }
-
-int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels, uint8_t count)
-{
-    (void)ep;
-    (void)modes;
-    (void)labels;
-    (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* mt_matter_mode_select_manager() and mt_matter_modes_set() left this file
+ * in catalogue batch 4, when the mode select (0x0027) entered the
+ * registry: real in mt_matter_zephyr.cpp now, on the one process-global
+ * SupportedModesManager. */
 
 void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
 {
@@ -103,24 +97,12 @@ int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, 
     return MT_ATTR_ERR_ENDPOINT;
 }
 
-void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id)
-{
-    (void)cluster_id;
-    return NULL;
-}
-
-void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
-{
-    (void)delegate;
-    (void)ep;
-}
-
-int mt_matter_opstate_set(uint16_t ep, uint8_t state)
-{
-    (void)ep;
-    (void)state;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* The plain OperationalState slice (mt_matter_opstate_delegate_alloc,
+ * mt_matter_opstate_delegate_set_endpoint, mt_matter_opstate_set) left
+ * this file in catalogue batch 4, when the washer/dishwasher/dryer trio
+ * entered the registry: real in mt_matter_zephyr.cpp now, on a
+ * per-endpoint Instance-plus-Delegate pool. The RVC variant below is
+ * still a stub. */
 
 void *mt_matter_rvc_opstate_delegate_alloc(void) { return NULL; }
 
@@ -134,38 +116,16 @@ void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
  * the air quality sensor (0x002C) entered the registry: it lives in
  * mt_matter_zephyr.cpp now and returns the real bits. */
 
-int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
-{
-    (void)ep;
-    (void)field;
-    (void)value;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* mt_matter_alarm_set() left this file in catalogue batch 4, when the
+ * smoke/co alarm (0x0076) entered the registry: it lives in
+ * mt_matter_zephyr.cpp now, cluster-dispatched on the SmokeCoAlarmServer
+ * singleton with the B165 ExpressedState recompute. */
 
-void *mt_matter_chime_delegate_alloc(void) { return NULL; }
-
-void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep)
-{
-    (void)delegate;
-    (void)ep;
-}
-
-int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const char *const *names, uint8_t count)
-{
-    (void)ep;
-    (void)ids;
-    (void)names;
-    (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
-}
-
-int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value)
-{
-    (void)ep;
-    (void)what;
-    (void)value;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* The chime slice (mt_matter_chime_delegate_alloc,
+ * mt_matter_chime_delegate_set_endpoint, mt_matter_chime_sounds_set,
+ * mt_matter_chime_set) left this file in catalogue batch 4, when the
+ * chime (0x0146) entered the registry: real in mt_matter_zephyr.cpp now,
+ * on a per-endpoint ChimeServer-plus-delegate pool. */
 
 void *mt_matter_mwoc_delegate_alloc(void) { return NULL; }
 

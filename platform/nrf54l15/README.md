@@ -15,10 +15,13 @@ Water Leak Detector, `0x0106` Light Sensor, `0x0306` Flow Sensor, `0x010A`
 On/Off Plug-in Unit, `0x010B` Dimmable Plug-in Unit; and catalogue batch 2
 (the server-interaction types): `0x010C` Color Temperature Light, `0x010D`
 Extended Color Light, `0x0301` Thermostat, `0x002B` Fan, `0x0202` Window
-Covering, `0x002C` Air Quality Sensor; and catalogue batch 3 (the
-command-verdict types): `0x000A` Door Lock, `0x0042` Water Valve.
-**Twenty-two device types.** Anything else answers `+MTERR:6` until the
-catalogue grows toward C6 parity.
+Covering, `0x002C` Air Quality Sensor; catalogue batch 3 (the
+command-verdict types): `0x000A` Door Lock, `0x0042` Water Valve; and
+catalogue batch 4 (the appliance and notification types): `0x0011` Power
+Source, `0x0027` Mode Select, `0x0073` Laundry Washer, `0x0075`
+Dishwasher, `0x007C` Laundry Dryer, `0x0076` Smoke/CO Alarm, `0x0146`
+Chime. **Twenty-nine device types.** Anything else answers `+MTERR:6`
+until the catalogue grows toward C6 parity.
 
 Batch 2 takes on fewer cluster features than the specs allow, but never
 fewer commands than a feature it does take on requires. The boundaries are
@@ -339,6 +342,31 @@ cluster servers themselves. No change to `HEARTH_EP_HEAP_BYTES`: neither
 device type is close to the widest, so the compile-time floor under the
 heap sizing is untouched.
 
+Catalogue batch 4 on top of that, pristine builds, 2026-08-29
+(`ad37e7a`, including both fix rounds):
+
+| | Batch 3 | Batch 4 (seven appliance/notification types) |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 224,972 B (85.8%) | **242,852 B (92.64%)** |
+| RAM used, `nrf54l15dk` | 225,196 B (85.9%) | **243,076 B (92.73%)** |
+| Flash, `ophelia_cpico` | 806,208 B | **825,264 B (60.05%)** |
+| Flash, `nrf54l15dk` | 814,100 B | **833,168 B (56.98%)** |
+
+RAM `+17,880 B` on both boards, read from the linked image with `nm -S`:
+the host-fed mode store (7,040 B: 16 x 8 label entries plus their
+`ModeOptionStruct` CharSpan/List halves), the chime sound store (4,448 B:
+16 x 8 pairs of 33 B), the `OperationalState::Instance` raw-storage pool
+(3,840 B), the `ChimeServer` pool (640 B), the two delegate pools (448 B),
+CHIP's PowerSource table (272 B), and about 1.2 KB of metadata growth.
+Free RAM on `ophelia_cpico` is 19,292 B. The two 16-deep host-fed stores
+(11.5 KB together) are reserved even for compositions with no mode-select
+or chime endpoint; moving them into the per-endpoint block heap is the
+queued reclaim round. Flash `+19,056 B` is the five new cluster server
+translation units plus the two new generated command dispatchers. No
+change to `HEARTH_EP_HEAP_BYTES`: the widest batch 4 type (Smoke/CO
+Alarm, 224 B per endpoint) is far under the extended colour light's
+600 B, and every batch 4 type reaches the full 16 serviceable endpoints.
+
 ## Dev board wiring
 
 The CPico RP2350 dev board carries the module and hosts the bridging firmware. This table is the soldering contract: a deviation means editing both the board `pinctrl` file and the sketch defines together.
@@ -461,6 +489,14 @@ repository those relative paths resolve outside the NCS tree entirely. The
 `package` entries at the top of `hearth.zap` are pinned to absolute paths
 under `~/ncs/v3.3.4/modules/lib/matter/...` for that reason; keep them
 pinned there after any hand-edit or regeneration on this machine.
+
+A zap edit that adds a cluster also needs a CMake reconfigure before the
+next build: `zap_cluster_list.py` runs at CMake configure time
+(`chip_data_model.cmake:40-56`), so an incremental `west build` after the
+edit never compiles the new cluster's server sources and the link fails
+on its `Matter*PluginServerInitCallback`. Run `cmake build/nrf54l15` (or
+build pristine) after any cluster-list change; batch 4 paid for this once
+(`fbe0a35`).
 
 ## Keys
 

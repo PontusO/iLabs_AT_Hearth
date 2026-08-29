@@ -27,6 +27,7 @@ void MatterDescriptorPluginServerInitCallback();
 void MatterAccessControlPluginServerInitCallback();
 void MatterBasicInformationPluginServerInitCallback();
 void MatterOtaSoftwareUpdateRequestorPluginServerInitCallback();
+void MatterPowerSourcePluginServerInitCallback();
 void MatterGeneralCommissioningPluginServerInitCallback();
 void MatterNetworkCommissioningPluginServerInitCallback();
 void MatterDiagnosticLogsPluginServerInitCallback();
@@ -38,7 +39,10 @@ void MatterAdministratorCommissioningPluginServerInitCallback();
 void MatterOperationalCredentialsPluginServerInitCallback();
 void MatterGroupKeyManagementPluginServerInitCallback();
 void MatterBooleanStatePluginServerInitCallback();
+void MatterModeSelectPluginServerInitCallback();
 void MatterAirQualityPluginServerInitCallback();
+void MatterSmokeCoAlarmPluginServerInitCallback();
+void MatterOperationalStatePluginServerInitCallback();
 void MatterValveConfigurationAndControlPluginServerInitCallback();
 void MatterDoorLockPluginServerInitCallback();
 void MatterWindowCoveringPluginServerInitCallback();
@@ -51,6 +55,7 @@ void MatterPressureMeasurementPluginServerInitCallback();
 void MatterFlowMeasurementPluginServerInitCallback();
 void MatterRelativeHumidityMeasurementPluginServerInitCallback();
 void MatterOccupancySensingPluginServerInitCallback();
+void MatterChimePluginServerInitCallback();
 
 #define MATTER_PLUGINS_INIT                                                    \
   MatterIdentifyPluginServerInitCallback();                                    \
@@ -61,6 +66,7 @@ void MatterOccupancySensingPluginServerInitCallback();
   MatterAccessControlPluginServerInitCallback();                               \
   MatterBasicInformationPluginServerInitCallback();                            \
   MatterOtaSoftwareUpdateRequestorPluginServerInitCallback();                  \
+  MatterPowerSourcePluginServerInitCallback();                                 \
   MatterGeneralCommissioningPluginServerInitCallback();                        \
   MatterNetworkCommissioningPluginServerInitCallback();                        \
   MatterDiagnosticLogsPluginServerInitCallback();                              \
@@ -72,7 +78,10 @@ void MatterOccupancySensingPluginServerInitCallback();
   MatterOperationalCredentialsPluginServerInitCallback();                      \
   MatterGroupKeyManagementPluginServerInitCallback();                          \
   MatterBooleanStatePluginServerInitCallback();                                \
+  MatterModeSelectPluginServerInitCallback();                                  \
   MatterAirQualityPluginServerInitCallback();                                  \
+  MatterSmokeCoAlarmPluginServerInitCallback();                                \
+  MatterOperationalStatePluginServerInitCallback();                            \
   MatterValveConfigurationAndControlPluginServerInitCallback();                \
   MatterDoorLockPluginServerInitCallback();                                    \
   MatterWindowCoveringPluginServerInitCallback();                              \
@@ -84,4 +93,5 @@ void MatterOccupancySensingPluginServerInitCallback();
   MatterPressureMeasurementPluginServerInitCallback();                         \
   MatterFlowMeasurementPluginServerInitCallback();                             \
   MatterRelativeHumidityMeasurementPluginServerInitCallback();                 \
-  MatterOccupancySensingPluginServerInitCallback();
+  MatterOccupancySensingPluginServerInitCallback();                            \
+  MatterChimePluginServerInitCallback();

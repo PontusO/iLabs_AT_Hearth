@@ -15,6 +15,24 @@
 #include <app/clusters/door-lock-server/door-lock-server.h>
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-cluster.h>
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-delegate.h>
+/* Catalogue batch 4: the smoke/co alarm singleton server and its
+ * ExpressedState priority recompute (std::array is the recompute's own
+ * parameter type). */
+#include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
+/* Catalogue batch 4: the OperationalState Instance-plus-Delegate machinery
+ * for the washer/dishwasher/dryer trio; <new> for the placement-new the
+ * non-default-constructible Instance pool needs. */
+#include <app/clusters/operational-state-server/operational-state-server.h>
+/* Catalogue batch 4: the process-global SupportedModesManager for mode
+ * select, and MatterReportingAttributeChangeCallback() for the host-fed
+ * SupportedModes list's dirty-marking. */
+#include <app/clusters/mode-select-server/supported-modes-manager.h>
+/* Catalogue batch 4: the per-endpoint ChimeServer and its delegate. */
+#include <app/clusters/chime-server/chime-server.h>
+#include <app/reporting/reporting.h>
+
+#include <array>
+#include <new>
 #include <app/server/Server.h>
 #include <clusters/AirQuality/Enums.h>
 #include <app/server/CommissioningWindowManager.h>
@@ -415,6 +433,122 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
 }
 
 /*
+ * ---- the Instance-served attribute carve-out (fix round, DE397) --------
+ *
+ * Four attributes in this catalogue are served by a per-endpoint C++
+ * object, not by the arena: OperationalState and CurrentPhase on cluster
+ * 0x0060 (the appliance trio's Instance) and SelectedChime and Enabled on
+ * cluster 0x0556 (the ChimeServer). Their ember slots exist only for
+ * AttributeList truthfulness; without this carve-out an AT+MTATTR read
+ * answered the inert seed and a write "succeeded" into it, changing
+ * nothing fabric-visible while still echoing a +MTATTR URC.
+ *
+ * What the C6 actually does for these four, traced for this fix round
+ * (controller ruling DE397 asked for a mirror of the READ behaviour):
+ *
+ *   READS answer the LIVE served value on the C6. Its generic read leg
+ *   calls esp_matter::attribute::get_val(), whose (endpoint, cluster,
+ *   attribute) overload reads through the full data model provider,
+ *   provider::get_instance().ReadAttribute(request, encoder)
+ *   (esp-matter esp_matter_data_model.cpp:927-968, the provider call at
+ *   :957), which consults the registered Instance/server object ahead of
+ *   ember. Mirrored here: the two live-read helpers below fetch the same
+ *   objects this file already owns, so an AT read answers what a
+ *   subscribed controller sees.
+ *
+ *   WRITES split by cluster, on both platforms, and the two dispositions
+ *   below mirror the C6's observable wire exactly (fix round 2, DE397 as
+ *   amended by the controller after the round 1 trace):
+ *
+ *   OperationalState pair: +MTERR:11. On the C6 these are created
+ *   MANAGED_INTERNALLY without WRITABLE (esp_matter_attribute.cpp:
+ *   2417-2421 CurrentPhase, :2435-2440 OperationalState), so set_val()
+ *   returns ESP_ERR_NOT_SUPPORTED (esp_matter_data_model.cpp:1091-1104)
+ *   and the C6 bridge maps that to MT_ATTR_ERR_READONLY (DE270).
+ *   Mirrored as a refusal here; AT+MTOPSTATE is the write path.
+ *
+ *   Chime pair: the write ROUTES TO THE LIVE ChimeServer. On the C6
+ *   these are MANAGED_INTERNALLY WITH WRITABLE plus NONVOLATILE
+ *   (esp_matter_attribute.cpp:4872-4884), so set_val() takes the
+ *   set_val_via_write_attribute() branch (esp_matter_data_model.cpp:
+ *   1097-1098, impl :1026-1076): a real provider WriteAttribute into
+ *   ChimeCluster::WriteAttribute (esp tree ChimeCluster.cpp:203-221),
+ *   which decodes and calls SetSelectedChime()/SetEnabled(). The
+ *   observable C6 wire, mirrored by mt_chime_attr_write_live() below:
+ *     - out-of-width value (SelectedChime > 255, Enabled > 1): +MTERR:1
+ *       (the C6's i64_to_attr_val() width/bool rejection, main.cpp:
+ *       456-463, mapped to MT_ATTR_ERR_VALUE at its call site);
+ *     - an in-width but UNINSTALLED SelectedChime id: bare ERROR, not
+ *       +MTERR:1. ChimeCluster::SetSelectedChime answers Status::NotFound
+ *       (esp tree ChimeCluster.cpp:223-228), which
+ *       set_val_via_write_attribute() collapses to ESP_FAIL (:1069-1073)
+ *       and the C6 bridge's default arm renders MT_ATTR_ERR_FAILED. Note
+ *       the deliberate contrast with AT+MTCHIME, whose own contract maps
+ *       the same NotFound to +MTERR:1; the two commands' wires already
+ *       differ on the C6 and that difference is preserved, not invented;
+ *     - success, including a same-value re-push: OK (the C6 handler
+ *       returns Success without writing on same-value, and the provider
+ *       absorbs NOT_FINISHED, esp_matter_data_model_provider.cpp:419-429);
+ *     - NO +MTATTR URC in either notify mode: the provider path bypasses
+ *       esp-matter's attribute update callback entirely (the AirQuality
+ *       precedent, C6 main.cpp), and here the direct setter call bypasses
+ *       emberAfWriteAttribute and so this file's
+ *       MatterPostAttributeChangeCallback. The fabric still sees the
+ *       change: the setter marks the path dirty itself
+ *       (chime-server.cpp:224, :243). notify therefore selects nothing on
+ *       this path, exactly as on the C6.
+ *   KVS wear note: SetSelectedChime()/SetEnabled() persist every changed
+ *   write through SafeAttributePersistenceProvider (chime-server.cpp:
+ *   219-224, :238-243), so this write path is a settings_storage wear
+ *   source the round 1 inert slot was not; ties to the existing 32 KB
+ *   occupancy watch item. The C6's handler persists identically (esp
+ *   tree ChimeCluster.cpp:235-236), so the wear parity is exact too.
+ *
+ *   One C6 comment caught out by this trace, recorded for the controller:
+ *   the C6's DE270 note (main.cpp, the ESP_ERR_NOT_SUPPORTED mapping)
+ *   claims "no device type this firmware creates today ships such an
+ *   attribute" for the MANAGED_INTERNALLY+WRITABLE branch; the chime pair
+ *   is exactly such an attribute and shipped five rounds before that
+ *   comment was written. The branch's behaviour is what this carve-out
+ *   mirrors; the stale sentence is the C6's to fix.
+ *
+ * Table-driven and additive: exactly these four (cluster, attribute)
+ * pairs, matched only after attr_locate() has proven the endpoint carries
+ * the cluster, so no existing attribute's behaviour changes and the
+ * ENDPOINT/CLUSTER error division is untouched. The live-read helpers are
+ * defined beside their pools further down; only the dispatch lives here.
+ */
+struct instance_served_attr {
+    uint32_t cluster;
+    uint32_t attr;
+};
+
+static const instance_served_attr k_instance_served[] = {
+    { chip::app::Clusters::OperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
+    { chip::app::Clusters::OperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
+    { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::SelectedChime::Id },
+    { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::Enabled::Id },
+};
+
+static bool instance_attr_served(uint32_t cluster, uint32_t attr)
+{
+    for (auto &e : k_instance_served) {
+        if (e.cluster == cluster && e.attr == attr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Defined in the OperationalState and chime sections below, beside the
+ * pools they read. Both run under the caller's StackLock. */
+static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
+
+/*
  * Locate an attribute's metadata, splitting endpoint/cluster/attribute
  * absence the way mt_matter.h's mt_attr_result_t comments require it split:
  * an unknown endpoint index is MT_ATTR_ERR_ENDPOINT (emberAfIndexFromEndpoint
@@ -479,6 +613,14 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         return r;
     }
 
+    /* DE397: the four Instance-served attributes answer the live object,
+     * not the arena; see the carve-out comment above attr_locate(). */
+    if (instance_attr_served(cluster, attr)) {
+        return (cluster == chip::app::Clusters::OperationalState::Id)
+                   ? mt_opstate_attr_read_live(ep, attr, out, is_unsigned)
+                   : mt_chime_attr_read_live(ep, attr, out, is_unsigned);
+    }
+
     bool unsigned_type;
     uint8_t bytes;
     if (!attr_type_info(md->attributeType, &unsigned_type, &bytes)) {
@@ -540,6 +682,19 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
     mt_attr_result_t r = attr_locate(ep, cluster, attr, &md);
     if (r != MT_ATTR_OK) {
         return r;
+    }
+
+    /* DE397 as amended (fix round 2): the two clusters part ways here,
+     * each mirroring its own C6 wire. The opstate pair is refused with
+     * +MTERR:11 (not writable over AT anywhere; AT+MTOPSTATE is the write
+     * path); the chime pair routes to the live ChimeServer's own setters,
+     * the C6's set_val_via_write_attribute() branch in this port's terms.
+     * Full traced evidence in the carve-out comment above attr_locate(). */
+    if (instance_attr_served(cluster, attr)) {
+        if (cluster == chip::app::Clusters::OperationalState::Id) {
+            return MT_ATTR_ERR_READONLY;
+        }
+        return mt_chime_attr_write_live(ep, attr, val);
     }
 
     bool unsigned_type;
@@ -1136,4 +1291,1036 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
         }
     }
     return MT_ATTR_OK;
+}
+
+/* ============ catalogue batch 4: the appliance and notification types ====
+ *
+ * The smoke/co alarm (0x0076), the OperationalState trio (0x0073, 0x0075,
+ * 0x007C), the mode select (0x0027) and the chime (0x0146) land here in
+ * build order. The same file discipline as batch 3 holds throughout: SDK
+ * hooks that run on the CHIP task take no StackLock, AT bridges called from
+ * the parser thread always do, and nothing here reimplements any of core's
+ * verdict protocol.
+ */
+
+/* ---- smoke/co alarm (0x0076) ------------------------------------------ */
+
+/*
+ * The cluster's one mandatory link symbol: declared at
+ * smoke-co-alarm-server.h:178, called from smoke-co-alarm-server.cpp:112
+ * (RequestSelfTest) and :450 (HandleRemoteSelfTestRequest), and defined
+ * nowhere under src/, weak or otherwise; the only definitions in the tree
+ * are example apps'. Leaving it out is a link error, the same shape the C6
+ * documents for its own copy (design spec F4).
+ *
+ * Notify-only, the +MTCMD seq-0 form's first consumer on this platform
+ * (mt_cmd_notify(), core/mt/mt_at.c): no mailbox slot, never blocks, no
+ * verdict to give. In THIS tree HandleRemoteSelfTestRequest() has already
+ * set TestInProgress true (:447) and ExpressedState kTesting (:448) when it
+ * calls this hook (:450), and it answers the controller Status::Success
+ * only AFTER the hook returns (:452). That is the reverse of the C6
+ * comment's "already answered Success before calling this" ordering, re-read
+ * here rather than copied; the functional conclusion is unchanged, because
+ * the Success is hardcoded and nothing this hook does can influence it, so
+ * fire-and-forget notify remains the correct shape. The busy pre-check
+ * (:438-445) answers Status::Busy without ever reaching this hook, so a
+ * self-test requested while ExpressedState is any alarm/testing state
+ * raises no +MTCMD at all.
+ *
+ * Runs on the CHIP task (generated IMClusterCommandHandler dispatch), so no
+ * StackLock, the same reasoning as the door lock hooks above.
+ *
+ * The host is expected to run its own test and report completion with
+ * AT+MTALARM=<ep>,5,0 (TestInProgress false), which fires SelfTestComplete
+ * and recomputes ExpressedState below (bug B165).
+ */
+void emberAfPluginSmokeCoAlarmSelfTestRequestCommand(chip::EndpointId endpointId)
+{
+    mt_cmd_notify(endpointId, chip::app::Clusters::SmokeCoAlarm::Id,
+                  chip::app::Clusters::SmokeCoAlarm::Commands::SelfTestRequest::Id);
+}
+
+/*
+ * ExpressedState priority order (bug B165, C6 bench finding F-C10-2). The
+ * SDK's recompute contract, SetExpressedStateByPriority
+ * (smoke-co-alarm-server.h:54-55), leaves the order entirely to the
+ * application and ships NO default; every reference app in this tree pairs
+ * its state-changing setters with a recompute call. Without one the
+ * endpoint wedges: SetTestInProgress() fires SelfTestComplete but never
+ * touches ExpressedState, so a completed self-test would stay stuck at
+ * kTesting forever. Order ported from the C6
+ * (platform/esp32c6/main/main.cpp:5598-5608), which itself copied the SDK's
+ * dedicated example; the identical eight entries appear in THIS tree at
+ * examples/smoke-co-alarm-app/silabs/src/SmokeCoAlarmManager.cpp:32-36,
+ * verified rather than assumed: smoke alarm and its interconnect echo
+ * outrank CO alarm and its echo, then hardware fault, an in-progress self
+ * test, end-of-service, and low battery last.
+ */
+static const std::array<SmokeCoAlarmServer::ExpressedStateEnum, SmokeCoAlarmServer::kPriorityOrderLength>
+    s_alarm_expressed_state_priority = {
+        SmokeCoAlarmServer::ExpressedStateEnum::kSmokeAlarm,
+        SmokeCoAlarmServer::ExpressedStateEnum::kInterconnectSmoke,
+        SmokeCoAlarmServer::ExpressedStateEnum::kCOAlarm,
+        SmokeCoAlarmServer::ExpressedStateEnum::kInterconnectCO,
+        SmokeCoAlarmServer::ExpressedStateEnum::kHardwareFault,
+        SmokeCoAlarmServer::ExpressedStateEnum::kTesting,
+        SmokeCoAlarmServer::ExpressedStateEnum::kEndOfService,
+        SmokeCoAlarmServer::ExpressedStateEnum::kBatteryAlert,
+    };
+
+/*
+ * AT+MTALARM bridge, ported from the C6's cluster-dispatched form
+ * (platform/esp32c6/main/main.cpp mt_matter_alarm_set()). mt_at.c's
+ * cmd_mtalarm only checks the UNION bound 0..11 before calling this (it
+ * cannot know which cluster <ep> carries); this bridge dispatches on the
+ * cluster the endpoint actually has. On THIS platform only SmokeCoAlarm
+ * exists so far: RefrigeratorAlarm arrives with the composed-appliance
+ * types in a later batch, and until then an endpoint carrying neither
+ * answers MT_ATTR_ERR_CLUSTER through the single fall-through below, the
+ * same code the C6 answers. The dispatch shape is kept so that batch adds
+ * a branch rather than restructuring this function.
+ *
+ * Field 0 (ExpressedState) is derived by the server from the other fields
+ * and never settable directly; rejected here rather than in mt_at.c because
+ * field 0 is a legal RefrigeratorAlarm bit on the C6 and the union bound
+ * must stay shared (core/include/mt_matter.h:647-651, binding).
+ *
+ * Every legal field maps to the matching SmokeCoAlarmServer setter, never a
+ * raw attribute write: the setters emit the cluster's spec-mandated events
+ * (SmokeAlarm, COAlarm, LowBattery, HardwareFault, EndOfService,
+ * SelfTestComplete, AllClear) which a raw write to the same ember storage
+ * would silently skip. <value> is range-checked against THAT field's own
+ * enum bound before the cast, the two boolean fields against 0/1. Fields
+ * whose attributes this composition does not declare (4, 8..11) pass their
+ * range check and then fail inside the setter's attribute write,
+ * MT_ATTR_ERR_FAILED, identical to the C6.
+ *
+ * needs_recompute mirrors the C6 row for row (B165): every field that
+ * feeds s_alarm_expressed_state_priority recomputes after a successful
+ * set; DeviceMuted, ContaminationState and SmokeSensitivityLevel do not,
+ * on the reference apps' own evidence (no ExpressedStateEnum value
+ * corresponds to any of the three). SetExpressedState() is idempotent
+ * against the current value, so field 5's completion path emits
+ * SelfTestComplete once and the recompute's AllClear only when the
+ * priority verdict actually changes.
+ */
+extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
+{
+    using namespace chip::app::Clusters;
+    chip::DeviceLayer::StackLock lock;
+    /* attr_locate()'s two lookups, the same error division as every other
+     * bridge in this file. */
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+
+    if (emberAfContainsServer(ep, SmokeCoAlarm::Id)) {
+        if (field == 0) {
+            /* ExpressedState is derived; see the function comment. */
+            return MT_ATTR_ERR_VALUE;
+        }
+
+        SmokeCoAlarmServer &srv = SmokeCoAlarmServer::Instance();
+        bool ok;
+        bool needs_recompute = false;
+        switch (field) {
+        case 1: /* SmokeState */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetSmokeState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 2: /* COState */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetCOState(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 3: /* BatteryAlert */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetBatteryAlert(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 4: /* DeviceMuted: not declared here; the setter fails. Not an
+                 * ExpressedState priority, no recompute. */
+            if (value >= (uint8_t)SmokeCoAlarmServer::MuteStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetDeviceMuted(ep, (SmokeCoAlarmServer::MuteStateEnum)value);
+            break;
+        case 5: /* TestInProgress: bool, the self-test completion path at 0 */
+            if (value > 1) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetTestInProgress(ep, value != 0);
+            needs_recompute = true;
+            break;
+        case 6: /* HardwareFaultAlert: bool */
+            if (value > 1) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetHardwareFaultAlert(ep, value != 0);
+            needs_recompute = true;
+            break;
+        case 7: /* EndOfServiceAlert */
+            if (value >= (uint8_t)SmokeCoAlarmServer::EndOfServiceEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetEndOfServiceAlert(ep, (SmokeCoAlarmServer::EndOfServiceEnum)value);
+            needs_recompute = true;
+            break;
+        case 8: /* InterconnectSmokeAlarm: not declared here; setter fails */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetInterconnectSmokeAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 9: /* InterconnectCOAlarm: not declared here; setter fails */
+            if (value >= (uint8_t)SmokeCoAlarmServer::AlarmStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetInterconnectCOAlarm(ep, (SmokeCoAlarmServer::AlarmStateEnum)value);
+            needs_recompute = true;
+            break;
+        case 10: /* ContaminationState: not declared here; setter fails */
+            if (value >= (uint8_t)SmokeCoAlarmServer::ContaminationStateEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetContaminationState(ep, (SmokeCoAlarmServer::ContaminationStateEnum)value);
+            break;
+        case 11: /* SmokeSensitivityLevel: not declared here; setter fails */
+            if (value >= (uint8_t)SmokeCoAlarmServer::SensitivityEnum::kUnknownEnumValue) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            ok = srv.SetSmokeSensitivityLevel(ep, (SmokeCoAlarmServer::SensitivityEnum)value);
+            break;
+        default:
+            /* cmd_mtalarm caps field at 11; unreachable, kept defensive. */
+            return MT_ATTR_ERR_VALUE;
+        }
+        if (ok && needs_recompute) {
+            srv.SetExpressedStateByPriority(ep, s_alarm_expressed_state_priority);
+        }
+        return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+    }
+
+    /* RefrigeratorAlarm is not in this platform's catalogue yet; when the
+     * composed-appliance batch brings it, its branch lands here. */
+    return MT_ATTR_ERR_CLUSTER;
+}
+/* ---- laundry washer / dishwasher / laundry dryer (OperationalState) ----
+ *
+ * One Instance PLUS one Delegate object per endpoint; the audit trail for
+ * why (SetInstance's VerifyOrDie, the AAI-served attribute set, the forced
+ * construct-after-create ordering, the never-destroy policy) lives on
+ * opStateAttrs in mt_devtypes_zephyr.cpp. This section owns the objects.
+ *
+ * The verdict here IS the wire response, unlike the valve: the only caller
+ * of each Handle*StateCallback copies err straight into the
+ * OperationalCommandResponse (Instance::HandlePauseState,
+ * operational-state-server.cpp:414-447, "mDelegate->HandlePauseStateCallback
+ * (err); ... response.commandResponseState = err", and the
+ * Stop/Start/Resume handlers at :449, :467, :485 follow the same shape). So
+ * allow sets kNoError and deny sets kUnableToCompleteOperation, the same
+ * pair the C6 maps (kUnableToCompleteOperation rather than
+ * kUnableToStartOrResume matches the SDK's own dishwasher placeholder's
+ * choice for a generic delegate-side denial).
+ *
+ * The delegate deliberately does NOT call SetOperationalState() on allow.
+ * Same split-ownership rule as AT+MTLOCK and AT+MTVALVE: the verdict says
+ * the host MAY act; only the host knows when the physical appliance
+ * actually completed the transition, and it reports that separately with
+ * AT+MTOPSTATE (mt_matter_opstate_set below), which emits the attribute
+ * report a subscribed controller expects.
+ *
+ * The command hooks run on the CHIP task (the Instance's own
+ * CommandHandlerInterface; this cluster is CHI-only, config-data.yaml:63),
+ * so no StackLock in them, the batch 3 discipline.
+ *
+ * Instance reachability needs no registry: the Instance constructor calls
+ * mDelegate->SetInstance(this) (operational-state-server.cpp:48), the base
+ * Delegate stores it, and the protected GetInstance() accessor
+ * (operational-state-server.h:364-371) is reachable from this subclass;
+ * instance() below is the public passthrough mt_matter_opstate_set() uses,
+ * the C6's exact mechanism.
+ */
+class HearthOpStateDelegate : public chip::app::Clusters::OperationalState::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    void set_cluster(chip::ClusterId cluster) { m_cluster = cluster; }
+    chip::EndpointId endpoint() const { return m_ep; }
+    chip::ClusterId cluster() const { return m_cluster; }
+
+    /* GetInstance() is protected in the base Delegate; this passthrough is
+     * how mt_matter_opstate_set() reaches the Instance the constructor
+     * attached via SetInstance(). */
+    chip::app::Clusters::OperationalState::Instance *instance() { return GetInstance(); }
+
+    chip::app::DataModel::Nullable<uint32_t> GetCountdownTime() override
+    {
+        return chip::app::DataModel::NullNullable;
+    }
+
+    /* Exactly the four base states, in enum order. The SDK reads this list
+     * to serve OperationalStateList; kError is a member because the spec
+     * requires the error state to be listed even though AT+MTOPSTATE can
+     * never set it directly (kError is reserved for the error-detection
+     * path, and SetOperationalState() refuses it independently,
+     * operational-state-server.cpp:101-107). */
+    CHIP_ERROR GetOperationalStateAtIndex(
+        size_t index,
+        chip::app::Clusters::OperationalState::GenericOperationalState &operationalState) override
+    {
+        using chip::app::Clusters::OperationalState::OperationalStateEnum;
+        static const OperationalStateEnum states[] = {
+            OperationalStateEnum::kStopped,
+            OperationalStateEnum::kRunning,
+            OperationalStateEnum::kPaused,
+            OperationalStateEnum::kError,
+        };
+        if (index >= (sizeof(states) / sizeof(states[0]))) {
+            return CHIP_ERROR_NOT_FOUND;
+        }
+        operationalState.Set(chip::to_underlying(states[index]));
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR GetOperationalPhaseAtIndex(size_t index, chip::MutableCharSpan &operationalPhase) override
+    {
+        /* NOT_FOUND at index 0 makes PhaseList read null: these appliances
+         * publish no phases (operational-state-server.h:305-317 documents
+         * the convention). */
+        (void)index;
+        (void)operationalPhase;
+        return CHIP_ERROR_NOT_FOUND;
+    }
+
+    void HandlePauseStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Pause::Id, err);
+    }
+
+    void HandleResumeStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Resume::Id, err);
+    }
+
+    void HandleStartStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Start::Id, err);
+    }
+
+    void HandleStopStateCallback(chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::OperationalState::Commands::Stop::Id, err);
+    }
+
+private:
+    void forward(uint32_t command, chip::app::Clusters::OperationalState::GenericOperationalError &err)
+    {
+        using chip::app::Clusters::OperationalState::ErrorStateEnum;
+        bool allow = mt_cmd_forward(m_ep, m_cluster, command);
+        err.Set(chip::to_underlying(allow ? ErrorStateEnum::kNoError
+                                          : ErrorStateEnum::kUnableToCompleteOperation));
+    }
+
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+    /* Only the base cluster exists in this catalogue; carried anyway so the
+     * +MTCMD cluster field always comes from the slot, not a literal, and a
+     * future derived-cluster consumer (the oven cavity) reuses this class
+     * unchanged, the C6's shape. */
+    chip::ClusterId m_cluster = chip::app::Clusters::OperationalState::Id;
+};
+
+/*
+ * The delegate pool, kServiceableEndpoints deep like the valve's (a
+ * seventeenth endpoint of ANY type fails its create before it could ask
+ * for a delegate; mt_matter.h's MT_COMP_MAX_ENDPOINTS sizing is the C6's,
+ * which serves all 28). The INSTANCE pool beside it is raw aligned
+ * storage: OperationalState::Instance has no default constructor (it
+ * takes the delegate and the endpoint id, neither known until create
+ * time), so each slot is placement-constructed exactly once in
+ * mt_matter_opstate_delegate_set_endpoint() and never destroyed, the
+ * allocate-only policy the valve pool and the endpoint block heap already
+ * follow: pools are handed out monotonically by the one boot rebuild and a
+ * reboot resets them wholesale, so no slot is ever re-constructed over a
+ * live Instance and no explicit destructor call is needed (or made; see
+ * the opStateAttrs audit note for what ~Instance() would do).
+ */
+static HearthOpStateDelegate s_opstate_delegates[kServiceableEndpoints];
+alignas(chip::app::Clusters::OperationalState::Instance) static uint8_t
+    s_opstate_instances[kServiceableEndpoints][sizeof(chip::app::Clusters::OperationalState::Instance)];
+static size_t s_opstate_delegate_next;
+
+extern "C" void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id)
+{
+    if (s_opstate_delegate_next >= kServiceableEndpoints) {
+        return nullptr;
+    }
+    HearthOpStateDelegate *d = &s_opstate_delegates[s_opstate_delegate_next++];
+    d->set_cluster(cluster_id);
+    return d;
+}
+
+/*
+ * The second half of the handout, and on this platform it is where the
+ * Instance is born: constructed into the slot's raw storage (the pool
+ * index is recovered from the delegate pointer, the two pools being
+ * parallel) and Init()ed, which registers the endpoint-scoped
+ * CommandHandlerInterface and AttributeAccessInterface. Must run below a
+ * successful emberAfSetDynamicEndpoint(): Init() opens with an
+ * emberAfContainsServer() check and bails otherwise
+ * (operational-state-server.cpp:65-70).
+ *
+ * An Init() failure is logged loudly and does not abort the create, the
+ * valve read-back's reasoning exactly: below a successful
+ * emberAfSetDynamicEndpoint() the contains-server check cannot fail, and
+ * the registry Register() calls fail only on a duplicate registration,
+ * which the construct-once pool rules out. If it ever fired anyway the
+ * endpoint is live and correctly seeded, and an appliance that reports
+ * state but does not adjudicate, plus a shouting log, beats tearing down
+ * a healthy endpoint.
+ */
+extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    auto *d = static_cast<HearthOpStateDelegate *>(delegate);
+    d->set_endpoint(ep);
+    size_t idx = (size_t)(d - s_opstate_delegates);
+    auto *inst = new (s_opstate_instances[idx])
+        chip::app::Clusters::OperationalState::Instance(d, ep);
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        LOG_ERR("opstate Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
+                "; commands on it will not reach the host and its attributes will not be served",
+                (unsigned)ep, err.Format());
+    }
+}
+
+/*
+ * AT+MTOPSTATE bridge. mt_at.c's cmd_mtopstate has already rejected
+ * anything outside the UNION of every opstate cluster family's legal set
+ * (and 3, kError, outright) before this is called; this bridge narrows to
+ * the one family this catalogue serves, the base cluster's {0 Stopped,
+ * 1 Running, 2 Paused}. A union-legal RVC state (0x40..0x42) on a washer
+ * answers MT_ATTR_ERR_VALUE here, exactly as the C6's base branch does;
+ * the RVC and oven-cavity branches arrive with their device types in later
+ * batches. SetOperationalState() enforces the same rule independently
+ * (operational-state-server.cpp:101-107, kError or an unsupported state
+ * answers CHIP_ERROR_INVALID_ARGUMENT), so a state that slipped both
+ * checks would still map to MT_ATTR_ERR_FAILED rather than being silently
+ * accepted.
+ *
+ * Called from the AT parser thread, so the StackLock IS taken, unlike the
+ * delegate hooks above.
+ */
+extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
+{
+    namespace OpState = chip::app::Clusters::OperationalState;
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, OpState::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (state > 2) {
+        return MT_ATTR_ERR_VALUE;
+    }
+
+    OpState::Instance *inst = nullptr;
+    for (auto &d : s_opstate_delegates) {
+        if (d.endpoint() == ep && d.cluster() == OpState::Id) {
+            inst = d.instance();
+            break;
+        }
+    }
+    if (inst == nullptr) {
+        /* Cannot happen once the boot rebuild has run: every endpoint
+         * carrying the cluster got its pair in mt_devtype_create().
+         * Defensive, the C6's same arm. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+}
+
+/*
+ * DE397 live read for the trio's two Instance-served scalars, dispatched
+ * from mt_matter_attr_read() (see the carve-out comment above
+ * attr_locate()). Runs under that bridge's StackLock; the pool scan is
+ * the same one mt_matter_opstate_set() uses. Both attributes are unsigned
+ * (OperationalStateEnum enum8, CurrentPhase uint8), and a null
+ * CurrentPhase answers MT_ATTR_ERR_TYPE with the flag already set, the
+ * generic null-nullable contract (the AT grammar has no null literal).
+ * These appliances publish no phases, so CurrentPhase in practice always
+ * answers +MTERR:5 here, matching what a controller reads as null.
+ */
+static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned)
+{
+    namespace OpState = chip::app::Clusters::OperationalState;
+    if (is_unsigned) {
+        *is_unsigned = true;
+    }
+    OpState::Instance *inst = nullptr;
+    for (auto &d : s_opstate_delegates) {
+        if (d.endpoint() == ep && d.cluster() == OpState::Id) {
+            inst = d.instance();
+            break;
+        }
+    }
+    if (inst == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive, the
+         * same arm as mt_matter_opstate_set(). */
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (attr == OpState::Attributes::OperationalState::Id) {
+        *out = inst->GetCurrentOperationalState();
+        return MT_ATTR_OK;
+    }
+    chip::app::DataModel::Nullable<uint8_t> phase = inst->GetCurrentPhase();
+    if (phase.IsNull()) {
+        return MT_ATTR_ERR_TYPE;
+    }
+    *out = phase.Value();
+    return MT_ATTR_OK;
+}
+
+/* ---- mode select (0x0027) ---------------------------------------------
+ *
+ * ONE process-global manager for the whole device, not a pool: the SDK
+ * fetches it fresh through getSupportedModesManager() on every
+ * SupportedModes read and every ChangeToMode
+ * (mode-select-server.cpp:84, :123, :469), and setSupportedModesManager()
+ * (:62) stores a bare global pointer, so a second mode select endpoint
+ * re-registering it is harmless. The manager dispatches on endpoint id
+ * itself against the host-fed store below.
+ *
+ * The store is kServiceableEndpoints (16) deep, NOT MT_COMP_MAX_ENDPOINTS
+ * (28): a seventeenth endpoint of any type fails its create before
+ * AT+MTMODES could ever address it, the acceptance-versus-capacity split
+ * every pool in this file follows.
+ *
+ * CharSpan lifetime and the in-place rebuild, the C6's argument re-checked
+ * against THIS tree: both the label bytes and the ModeOptionStruct array
+ * live in static storage (s_mode_slots), never freed, and the struct
+ * array is rebuilt IN PLACE on every AT+MTMODES write to the same slot,
+ * never reallocated. What rules out a reader observing a half-rebuilt
+ * entry is mutual exclusion, not the rebuild order:
+ * mt_matter_modes_set() holds the StackLock for the whole rebuild, and
+ * the reads run on the CHIP task under the same lock. The SDK also
+ * re-fetches the provider per access rather than caching one, which
+ * rules out a stale provider outliving a rebuild; secondary, the lock is
+ * the guarantee.
+ */
+struct mt_mode_entry_t {
+    uint8_t mode;
+    char label[MT_MODES_MAX_LABEL_LEN + 1];
+};
+
+struct mt_mode_slot_t {
+    bool used;
+    uint16_t ep;
+    uint8_t count;
+    mt_mode_entry_t entries[MT_MODES_MAX_COUNT];
+    chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type structs[MT_MODES_MAX_COUNT];
+};
+static mt_mode_slot_t s_mode_slots[kServiceableEndpoints];
+
+class HearthSupportedModesManager : public chip::app::Clusters::ModeSelect::SupportedModesManager
+{
+private:
+    /*
+     * SupportedModesManager declares its ModeOptionStructType alias BEFORE
+     * its "public:" (supported-modes-manager.h:36), so the name is private
+     * to the base class even though a public virtual's signature uses it:
+     * a derived class inherits the member but not access to the name. The
+     * same private-alias shadow the esp32 platform's own
+     * StaticSupportedModesManager uses, mirrored from the C6.
+     */
+    using ModeOptionStructType = chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type;
+
+public:
+    ModeOptionsProvider getModeOptionsProvider(chip::EndpointId endpointId) const override
+    {
+        for (auto &slot : s_mode_slots) {
+            if (slot.used && slot.ep == endpointId) {
+                return ModeOptionsProvider(slot.structs, slot.structs + slot.count);
+            }
+        }
+        /* begin == end == nullptr: no entry for this endpoint, an empty
+         * SupportedModes list until the host feeds one. */
+        return ModeOptionsProvider();
+    }
+
+    chip::Protocols::InteractionModel::Status getModeOptionByMode(
+        chip::EndpointId endpointId, uint8_t mode, const ModeOptionStructType **dataPtr) const override
+    {
+        for (auto &slot : s_mode_slots) {
+            if (slot.used && slot.ep == endpointId) {
+                for (uint8_t i = 0; i < slot.count; i++) {
+                    if (slot.structs[i].mode == mode) {
+                        *dataPtr = &slot.structs[i];
+                        return chip::Protocols::InteractionModel::Status::Success;
+                    }
+                }
+                return chip::Protocols::InteractionModel::Status::InvalidCommand;
+            }
+        }
+        return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+    }
+};
+static HearthSupportedModesManager s_mode_select_manager;
+
+/*
+ * The accessor doubles as the registration: on this platform there is no
+ * esp_matter init-callback pass to defer to, so the global is (re)set here,
+ * each call, before mt_devtype_create() spends anything on the endpoint.
+ * Idempotent by construction (same pointer every time), and safe at any
+ * point in boot: setSupportedModesManager() is a bare pointer store with
+ * no CHIP state behind it.
+ */
+extern "C" void *mt_matter_mode_select_manager(void)
+{
+    chip::app::Clusters::ModeSelect::setSupportedModesManager(&s_mode_select_manager);
+    return &s_mode_select_manager;
+}
+
+/*
+ * AT+MTMODES bridge (the ModeSelect form). Grammar and content rules are
+ * enforced by cmd_mtmodes() in mt_at.c before this is called; the bounds
+ * re-checked here are defensive. Mirrors the C6's
+ * mt_matter_modes_set() with the ember lookups in place of esp_matter's
+ * and the same terminal MatterReportingAttributeChangeCallback() so an
+ * active subscription sees the new list; CurrentMode is deliberately not
+ * touched here (a controller's ChangeToMode owns it, and the host
+ * observes that as a +MTATTR URC).
+ */
+extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels,
+                                   uint8_t count)
+{
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::ModeSelect::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1 || count > MT_MODES_MAX_COUNT) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_mode_slot_t *slot = nullptr;
+    for (auto &sl : s_mode_slots) {
+        if (sl.used && sl.ep == ep) {
+            slot = &sl;
+            break;
+        }
+    }
+    if (!slot) {
+        for (auto &sl : s_mode_slots) {
+            if (!sl.used) {
+                slot = &sl;
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        /* Cannot happen: one slot per serviceable endpoint, and an
+         * unserved endpoint fails the lookups above first. Defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    /* Fix round, review M5: every label is validated BEFORE any entry is
+     * overwritten. The old single loop returned mid-write on a bad
+     * length, leaving entries[0..i-1] holding new bytes while
+     * slot->structs[] still published the previous list's CharSpan
+     * lengths over them: no overrun (everything stays in-buffer), but a
+     * served label could carry a stale tail. Unreachable in practice,
+     * because cmd_mtmodes has already enforced these exact bounds before
+     * the bridge is called; hardened anyway so the defensive check can
+     * never publish a half-written list, rather than relying on a
+     * comment to say why it could not. The chime twin needs no such
+     * split: its names are re-measured with strlen() on every read, not
+     * cached in a span. */
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(labels[i]);
+        if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+    }
+    for (uint8_t i = 0; i < count; i++) {
+        slot->entries[i].mode = modes[i];
+        memcpy(slot->entries[i].label, labels[i], strlen(labels[i]) + 1);
+    }
+    slot->ep = ep;
+    slot->count = count;
+    slot->used = true;
+
+    /* Rebuild the struct array in place, each CharSpan pointing into the
+     * static label buffer above; the lock held across this whole function
+     * is what makes the rebuild atomic against CHIP-task readers (see the
+     * section comment). SemanticTags publishes a default-constructed
+     * empty List per entry, mandatory-but-empty-legal. */
+    for (uint8_t i = 0; i < count; i++) {
+        slot->structs[i].mode = slot->entries[i].mode;
+        slot->structs[i].label = chip::CharSpan::fromCharString(slot->entries[i].label);
+        slot->structs[i].semanticTags = chip::app::DataModel::List<
+            const chip::app::Clusters::ModeSelect::Structs::SemanticTagStruct::Type>();
+    }
+
+    MatterReportingAttributeChangeCallback(
+        ep, chip::app::Clusters::ModeSelect::Id,
+        chip::app::Clusters::ModeSelect::Attributes::SupportedModes::Id);
+    return MT_ATTR_OK;
+}
+
+/* ---- chime (0x0146) ---------------------------------------------------
+ *
+ * Per-endpoint ChimeServer plus ChimeDelegate; the composition-side audit
+ * (CHI-only, no ServerInit, the AAI-shadowed KVS-persisted pair, the
+ * missing NotFound pre-check and event) is on chimeAttrs in
+ * mt_devtypes_zephyr.cpp. This section owns the objects and the two AT
+ * bridges.
+ *
+ * The verdict is the one on this firmware's whole +MTCMD surface that
+ * reaches the controller exactly as given: HandlePlayChimeSound() copies
+ * whatever Status the delegate returns straight into the command's
+ * response (chime-server.cpp:260-274), with no SDK-side remapping.
+ * Status::Success on allow, Status::Failure on deny.
+ *
+ * The payload, DECIDED (user ruling DE396): this tree's PlayChimeSound()
+ * takes NO argument (chime-server.h:164; the command XML declares none),
+ * so the C6's invoke-supplied chimeID does not exist to forward. The
+ * single trailing +MTCMD field instead carries the owning server's
+ * GetSelectedChime(): the wire arity stays byte-identical to the C6 and
+ * the payload means "the chime id that will play", which is also what the
+ * server will play by its own rules. The server pointer comes from the
+ * base class's own back-reference (the ctor calls SetChimeServer(this),
+ * chime-server.cpp:46, readable through the protected GetChimeServer(),
+ * chime-server.h:173), the OperationalState GetInstance() mechanism under
+ * another name.
+ */
+struct mt_chime_entry_t {
+    uint8_t id;
+    char name[MT_CHIME_MAX_NAME_LEN + 1];
+};
+
+struct mt_chime_slot_t {
+    bool used;
+    uint16_t ep;
+    uint8_t count;
+    mt_chime_entry_t entries[MT_CHIME_MAX_SOUNDS];
+};
+/* kServiceableEndpoints deep, not MT_COMP_MAX_ENDPOINTS: the same
+ * acceptance-versus-capacity split as every store and pool in this file.
+ * At 16 endpoints of 8 names of 33 bytes this is the batch's largest new
+ * .bss item, about 4.3 KB. */
+static mt_chime_slot_t s_chime_slots[kServiceableEndpoints];
+
+static mt_chime_slot_t *mt_chime_find_slot(uint16_t ep)
+{
+    for (auto &sl : s_chime_slots) {
+        if (sl.used && sl.ep == ep) {
+            return &sl;
+        }
+    }
+    return nullptr;
+}
+
+class HearthChimeDelegate : public chip::app::Clusters::ChimeDelegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+
+    /* GetChimeServer() is protected in the base; this passthrough is how
+     * the AT bridges below reach each endpoint's server object. */
+    chip::app::Clusters::ChimeServer *server() { return GetChimeServer(); }
+
+    CHIP_ERROR GetChimeSoundByIndex(uint8_t chimeIndex, uint8_t &chimeID,
+                                    chip::MutableCharSpan &name) override
+    {
+        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
+        if (slot == nullptr || chimeIndex >= slot->count) {
+            /* PROVIDER_LIST_EXHAUSTED, NOT the CHIP_ERROR_NOT_FOUND the
+             * header's doc comment names (chime-server.h:137-138): the
+             * implementation's two iteration loops terminate ONLY on
+             * PROVIDER_LIST_EXHAUSTED (EncodeSupportedChimeSounds,
+             * chime-server.cpp:148-151, and IsSupportedChimeID, :168).
+             * Answering NOT_FOUND would fail every InstalledChimeSounds
+             * read outright and, worse, spin IsSupportedChimeID forever
+             * on an unmatched id (its uint8_t index wraps and nothing
+             * else stops it), hanging the CHIP task. The code wins over
+             * its comment; same sentinel the C6 returns. */
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        chimeID = slot->entries[chimeIndex].id;
+        chip::CharSpan src(slot->entries[chimeIndex].name, strlen(slot->entries[chimeIndex].name));
+        return chip::CopyCharSpanToMutableCharSpan(src, name);
+    }
+
+    CHIP_ERROR GetChimeIDByIndex(uint8_t chimeIndex, uint8_t &chimeID) override
+    {
+        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
+        if (slot == nullptr || chimeIndex >= slot->count) {
+            /* Same sentinel note as GetChimeSoundByIndex above. */
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        chimeID = slot->entries[chimeIndex].id;
+        return CHIP_NO_ERROR;
+    }
+
+    /* Only reached when Enabled is true (chime-server.cpp:266-271; a
+     * disabled chime answers Success with no delegate call and no
+     * +MTCMD). Runs on the CHIP task, no StackLock. */
+    chip::Protocols::InteractionModel::Status PlayChimeSound() override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        chip::app::Clusters::ChimeServer *srv = GetChimeServer();
+        if (srv == nullptr) {
+            /* Unreachable by construction (the server's ctor set the
+             * back-reference before any command could dispatch);
+             * defensive, and failing closed beats forwarding a payload
+             * this delegate cannot know. */
+            return Status::Failure;
+        }
+        bool allow = mt_cmd_forward_payload(m_ep, chip::app::Clusters::Chime::Id,
+                                            chip::app::Clusters::Chime::Commands::PlayChimeSound::Id,
+                                            srv->GetSelectedChime());
+        return allow ? Status::Success : Status::Failure;
+    }
+
+private:
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+};
+
+/* Delegate pool plus raw storage for the non-default-constructible
+ * ChimeServer, parallel arrays indexed together, the OperationalState
+ * pools' exact shape and the same construct-once, never-destroy policy
+ * (chime's ~ChimeServer would unregister both interfaces,
+ * chime-server.cpp:49-57, and no teardown path exists on this
+ * platform). */
+static HearthChimeDelegate s_chime_delegates[kServiceableEndpoints];
+alignas(chip::app::Clusters::ChimeServer) static uint8_t
+    s_chime_servers[kServiceableEndpoints][sizeof(chip::app::Clusters::ChimeServer)];
+static size_t s_chime_delegate_next;
+
+extern "C" void *mt_matter_chime_delegate_alloc(void)
+{
+    if (s_chime_delegate_next >= kServiceableEndpoints) {
+        return nullptr;
+    }
+    return &s_chime_delegates[s_chime_delegate_next++];
+}
+
+/*
+ * The second half: placement-constructs the ChimeServer (its ctor stores
+ * the delegate reference and sets the delegate's back-reference) and runs
+ * Init(), which loads the two KVS-persisted attributes and registers the
+ * endpoint-scoped AAI and command handler (chime-server.cpp:59-66). Below
+ * a successful emberAfSetDynamicEndpoint() by the same reasoning as the
+ * OperationalState pool; an Init() failure is logged loudly and does not
+ * abort, the same unreachable-by-ordering argument.
+ */
+extern "C" void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    auto *d = static_cast<HearthChimeDelegate *>(delegate);
+    d->set_endpoint(ep);
+    size_t idx = (size_t)(d - s_chime_delegates);
+    auto *srv = new (s_chime_servers[idx]) chip::app::Clusters::ChimeServer(ep, *d);
+    CHIP_ERROR err = srv->Init();
+    if (err != CHIP_NO_ERROR) {
+        LOG_ERR("ChimeServer::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
+                "; the chime cluster on it will not be served",
+                (unsigned)ep, err.Format());
+    }
+}
+
+/*
+ * AT+MTCHIMESOUNDS bridge. Grammar and content rules are enforced by
+ * cmd_mtchimesounds() in mt_at.c; the bounds re-checked here are
+ * defensive. Ends by marking InstalledChimeSounds dirty with
+ * MatterReportingAttributeChangeCallback(), and NOT with the SDK's
+ * ReportInstalledChimeSoundsChange(): that method is DECLARED on
+ * ChimeServer (chime-server.h:92) and its own doc comments demand
+ * calling it, but it has NO DEFINITION anywhere in this tree (grep over
+ * src/, examples/ and zzz_generated/ finds only the declaration and the
+ * two doc mentions), so calling it is a link error. The same
+ * documented-but-nonexistent hole the C6 recorded against ITS tree
+ * (core/include/mt_matter.h's note), one revision later and one symbol
+ * shape over; the substitute is the same one, and it works identically
+ * here because the reporting engine's dirty-marking is not
+ * ember-specific.
+ */
+extern "C" int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids,
+                                          const char *const *names, uint8_t count)
+{
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::Chime::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1 || count > MT_CHIME_MAX_SOUNDS) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_chime_slot_t *slot = mt_chime_find_slot(ep);
+    if (!slot) {
+        for (auto &sl : s_chime_slots) {
+            if (!sl.used) {
+                slot = &sl;
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        /* Cannot happen: one slot per serviceable endpoint. Defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(names[i]);
+        if (len < 1 || len > MT_CHIME_MAX_NAME_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        slot->entries[i].id = ids[i];
+        memcpy(slot->entries[i].name, names[i], len + 1);
+    }
+    slot->ep = ep;
+    slot->count = count;
+    slot->used = true;
+
+    MatterReportingAttributeChangeCallback(
+        ep, chip::app::Clusters::Chime::Id,
+        chip::app::Clusters::Chime::Attributes::InstalledChimeSounds::Id);
+    return MT_ATTR_OK;
+}
+
+/*
+ * AT+MTCHIME bridge. mt_at.c's cmd_mtchime has already checked <what> is
+ * 0 or 1 and <value> fits a u8. Goes through the server object's own
+ * SetSelectedChime()/SetEnabled(), never a raw attribute write: the
+ * members are the served truth (the ember slots are inert shadows), and
+ * the setters persist to KVS and mark the path dirty themselves
+ * (chime-server.cpp:206-248). SetSelectedChime answers Status::NotFound
+ * for an id AT+MTCHIMESOUNDS never installed, mapped to MT_ATTR_ERR_VALUE
+ * (+MTERR:1), the C6's mapping.
+ */
+extern "C" int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value)
+{
+    using chip::Protocols::InteractionModel::Status;
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::Chime::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+
+    chip::app::Clusters::ChimeServer *srv = nullptr;
+    for (auto &d : s_chime_delegates) {
+        if (d.endpoint() == ep) {
+            srv = d.server();
+            break;
+        }
+    }
+    if (srv == nullptr) {
+        /* Cannot happen once the boot rebuild has run. Defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    Status st;
+    switch (what) {
+    case 0: /* SelectedChime */
+        st = srv->SetSelectedChime(value);
+        break;
+    case 1: /* Enabled */
+        st = srv->SetEnabled(value != 0);
+        break;
+    default:
+        /* cmd_mtchime already rejects <what> outside 0..1. Defensive. */
+        return MT_ATTR_ERR_VALUE;
+    }
+    return (st == Status::Success) ? MT_ATTR_OK : MT_ATTR_ERR_VALUE;
+}
+
+/*
+ * DE397 live read for the chime's two AAI-shadowed, KVS-persisted
+ * attributes, dispatched from mt_matter_attr_read() (see the carve-out
+ * comment above attr_locate()). Runs under that bridge's StackLock. Both
+ * unsigned, neither nullable; the values are the ChimeServer members a
+ * subscribed controller reads, KVS restore and all, so an AT read after a
+ * reboot answers the persisted pair rather than the arena's fresh seeds.
+ */
+static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned)
+{
+    if (is_unsigned) {
+        *is_unsigned = true;
+    }
+    chip::app::Clusters::ChimeServer *srv = nullptr;
+    for (auto &d : s_chime_delegates) {
+        if (d.endpoint() == ep) {
+            srv = d.server();
+            break;
+        }
+    }
+    if (srv == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (attr == chip::app::Clusters::Chime::Attributes::SelectedChime::Id) {
+        *out = srv->GetSelectedChime();
+    } else {
+        *out = srv->GetEnabled() ? 1 : 0;
+    }
+    return MT_ATTR_OK;
+}
+
+/*
+ * DE397 as amended, fix round 2: the AT+MTATTR write leg for the chime
+ * pair, routed to the live server the way the C6's
+ * MANAGED_INTERNALLY+WRITABLE branch routes through the data model
+ * provider. Dispatched from mt_matter_attr_write() under its StackLock;
+ * the status-to-wire mapping mirrors the traced C6 behaviour point for
+ * point (see the carve-out comment above attr_locate()): out-of-width
+ * +MTERR:1, uninstalled SelectedChime id a bare ERROR (NotFound collapsed,
+ * exactly as the C6's ESP_FAIL default arm renders it, and deliberately
+ * NOT AT+MTCHIME's +MTERR:1 for the same NotFound), success and
+ * same-value OK, no +MTATTR URC in either notify mode, KVS persistence
+ * on every changed write (the wear note is in the carve-out comment).
+ */
+static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val)
+{
+    using chip::Protocols::InteractionModel::Status;
+    chip::app::Clusters::ChimeServer *srv = nullptr;
+    for (auto &d : s_chime_delegates) {
+        if (d.endpoint() == ep) {
+            srv = d.server();
+            break;
+        }
+    }
+    if (srv == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    Status st;
+    if (attr == chip::app::Clusters::Chime::Attributes::SelectedChime::Id) {
+        if (val < 0 || val > 0xFF) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        st = srv->SetSelectedChime((uint8_t)val);
+    } else {
+        if (val < 0 || val > 1) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        st = srv->SetEnabled(val != 0);
+    }
+    return (st == Status::Success) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }

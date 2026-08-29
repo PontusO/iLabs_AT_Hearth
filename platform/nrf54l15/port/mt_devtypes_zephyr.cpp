@@ -1223,6 +1223,527 @@ DECLARE_DYNAMIC_ENDPOINT(waterValveEndpoint, waterValveClusters);
 
 constexpr EmberAfDeviceType kWaterValveTypes[] = { { 0x0042, 1 } };
 
+/* ---- power source (0x0011) --------------------------------------------
+ *
+ * Catalogue batch 4 audit, PowerSource (0x002F). Registry row and seeds
+ * only: there is no mt_matter_power* port function in core/include/
+ * mt_matter.h at all, so the generic AT+MTATTR bridge
+ * (mt_matter_attr_read/write, mt_matter_zephyr.cpp) is the whole host
+ * surface for this type.
+ *
+ *   Code-driven? No. PowerSource is absent from CodeDrivenClusters
+ *   (src/app/common/templates/config-data.yaml:144-168). Confirmed
+ *   empirically, the batch 3 method: regenerating hearth.zap with the
+ *   cluster on ep240 left zap-generated/CodeDrivenInitShutdown.cpp
+ *   byte-identical.
+ *
+ *   AAI? Yes, wildcard-endpoint, for three attributes. PowerSourceAttrAccess
+ *   (power-source-server.h:48, ctor at :52 with
+ *   Optional<EndpointId>::Missing(), registered from
+ *   MatterPowerSourcePluginServerInitCallback, power-source-server.cpp:
+ *   88-91) answers ActiveBatFaults (:108, not declared here), EndpointList
+ *   (:112, from PowerSourceServer's own table; empty list until something
+ *   calls SetEndpointList, which nothing on this firmware does) and
+ *   ClusterRevision (:131, from PowerSource::kRevision), and falls through
+ *   default: for everything else. So Status, Order, Description and the
+ *   three Bat* scalars are plain ember external storage against the arena,
+ *   and the ClusterRevision seed below must be that same kRevision (3,
+ *   PowerSource/Metadata.h:20), the Thermostat/WindowCovering discipline.
+ *   The server's per-endpoint table is already dynamic-endpoint aware:
+ *   sPowerSourceClusterInfo is sized MATTER_DM_POWER_SOURCE_CLUSTER_SERVER_
+ *   ENDPOINT_COUNT + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT
+ *   (power-source-server.cpp:75-81), which this file's static assert ties
+ *   to kServiceableEndpoints.
+ *
+ *   ServerInit? None per endpoint. MatterPowerSourcePluginServerInitCallback
+ *   only registers the AAI; no emberAfPowerSourceCluster*InitCallback
+ *   exists. Does NOT join the B388 call site.
+ *
+ * NO Identify, a documented exception to this port's "Identify rides on
+ * every device type" convention: the device type mandates Descriptor plus
+ * PowerSource and nothing else (matter-devices.xml:98-115, MA-powersource,
+ * lockOthers with exactly those two includes), and the C6
+ * composes exactly PowerSource plus Descriptor (esp_matter_endpoint.cpp
+ * power_source::add(), which creates no Identify). Adding Identify here
+ * would be a gratuitous divergence from the C6's data model and would cost
+ * four extra slots per endpoint.
+ *
+ * Feature set: the cluster VALIDATEs exactly one of Wired/Battery on the
+ * C6 (esp-matter's VALIDATE_FEATURES_EXACT_ONE); Battery (0x2,
+ * PowerSource/Enums.h:282-283) is taken, matching the C6's choice for
+ * upstream's battery-powered smoke/CO alarm devices, and the three
+ * BAT-gated attributes it makes mandatory (BatChargeLevel,
+ * BatReplacementNeeded, BatReplaceability) are declared.
+ *
+ * Description (char_string, length 60, so 61 ember bytes) and EndpointList
+ * (array) get no attribute slot: attr_gets_slot() refuses both, and
+ * seed_slots() skips them quietly as deliberate metadata-only declarations.
+ * They are declared anyway so AttributeList is truthful. EndpointList is
+ * served by the AAI (empty list); Description is served by nothing on this
+ * platform and reads UNSUPPORTED_ATTRIBUTE, pending a string-store
+ * decision. Both sizes pass emberAfSetDynamicEndpoint's IO-buffer check
+ * (ATTRIBUTE_LARGEST is 66, endpoint_config.h).
+ *
+ * BatPercentRemaining is NULLABLE with real 0..200 bounds, matching the C6
+ * thunk's hand-add (platform/esp32c6/main/mt_devtypes.cpp mk_power_source(),
+ * bounds copied there from battery_storage::add()). DECLARE_DYNAMIC_ATTRIBUTE
+ * cannot express MIN_MAX, so the entry below is hand-rolled to the exact
+ * shape ZAP generates for a bounded attribute: a MIN_MAX-flagged metadata
+ * row whose default union points at an EmberAfAttributeMinMaxValue. ember's
+ * bounds check runs on every write regardless of storage kind
+ * (attribute-table.cpp:368-406), so an out-of-range AT+MTATTR write answers
+ * +MTERR:1 here exactly as it does on the C6; the null sentinel stays
+ * writable because "null value is always in-range for a nullable attribute"
+ * (attribute-table.cpp:401-403). Seeded null. */
+
+constexpr EmberAfAttributeMinMaxValue kBatPercentRemainingBounds = {
+    (uint16_t)0xFF, /* default: null */
+    (uint16_t)0x00, (uint16_t)0xC8 /* 0..200, half-percent units */
+};
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(powerSourceAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Order::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Description::Id, CHAR_STRING, 61, 0),
+    /* Hand-rolled MIN_MAX entry; see the audit note above. The mask spells
+     * out the two flags DECLARE_DYNAMIC_ATTRIBUTE always adds. */
+    { &kBatPercentRemainingBounds, PowerSource::Attributes::BatPercentRemaining::Id, 1,
+      ZAP_TYPE(INT8U),
+      ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(NULLABLE) |
+          ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) | ZAP_ATTRIBUTE_MASK(READABLE) },
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatChargeLevel::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatReplacementNeeded::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatReplaceability::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::EndpointList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(powerSourceClusters)
+DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, powerSourceAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(powerSourceEndpoint, powerSourceClusters);
+
+constexpr EmberAfDeviceType kPowerSourceTypes[] = { { 0x0011, 1 } };
+
+/* ---- smoke/co alarm (0x0076) ------------------------------------------
+ *
+ * Catalogue batch 4 audit, SmokeCoAlarm (0x005C).
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; confirmed empirically, regenerating hearth.zap with the
+ *   cluster on ep240 left CodeDrivenInitShutdown.cpp byte-identical). Also
+ *   NOT CommandHandlerInterface-only (absent from
+ *   CommandHandlerInterfaceOnlyClusters, config-data.yaml:21-88), so
+ *   SelfTestRequest is dispatched by the generated IMClusterCommandHandler:
+ *   the regeneration added exactly the SmokeCoAlarm dispatch case, which is
+ *   why this cluster had to enter hearth.zap at all.
+ *
+ *   Delegate or plain ember? Plain ember with a SINGLETON server.
+ *   SmokeCoAlarmServer is `static SmokeCoAlarmServer sInstance`
+ *   (smoke-co-alarm-server.h:163), reached through Instance() (:36); every
+ *   setter takes an EndpointId and reads or writes ember storage through
+ *   the generated Accessors, so all nine declared attributes land in this
+ *   arena. No per-endpoint object, no pool, no placement-new: the simplest
+ *   server shape in the batch.
+ *
+ *   ServerInit? None. MatterSmokeCoAlarmPluginServerInitCallback and its
+ *   Shutdown twin are empty bodies (smoke-co-alarm-server.cpp:514-515), the
+ *   XML declares <server tick="false" init="false">
+ *   (smoke-co-alarm-cluster.xml:32), and no emberAfSmokeCoAlarmCluster*
+ *   InitCallback exists beyond the generated weak stub. Does NOT join the
+ *   B388 call site.
+ *
+ *   The one LINK-MANDATORY symbol in the batch:
+ *   emberAfPluginSmokeCoAlarmSelfTestRequestCommand(), declared at
+ *   smoke-co-alarm-server.h:178 and called from smoke-co-alarm-server.cpp
+ *   :112 (RequestSelfTest) and :450 (HandleRemoteSelfTestRequest), has NO
+ *   weak default anywhere under src/; the only definitions in the tree are
+ *   example apps'. Omitting it is a link error. Defined in
+ *   mt_matter_zephyr.cpp with the other command hooks, notify-only.
+ *
+ * Both features, SmokeAlarm 0x1 and CoAlarm 0x2 (SmokeCoAlarm/Enums.h:
+ * 115-119): AT+MTALARM's field table has no single-feature variant, the
+ * same reason the C6 enables both, so both feature-gated state attributes
+ * exist and FeatureMap is 3, which is also the XML's own declared default
+ * (smoke-co-alarm-cluster.xml:37). Identify is mandatory on this device
+ * type (matter-devices.xml:2522-2545, MA-smokecoalarm), so the port
+ * convention holds here, in contrast to the power source above. The
+ * device type's Power Source mandate is satisfied the C6's way: a flat
+ * sibling 0x0011 endpoint the host declares alongside, no composition
+ * tree.
+ *
+ * Nine attributes, every one a 1-byte enum or boolean plus the two
+ * globals (smoke-co-alarm-cluster.xml:49-76), so all of them slot
+ * cleanly. The optional DeviceMuted, InterconnectSmokeAlarm,
+ * InterconnectCOAlarm, ContaminationState and SmokeSensitivityLevel are
+ * NOT declared, matching the C6's composition exactly; an AT+MTALARM
+ * write to one of those fields passes its range check and then fails
+ * with a bare ERROR because the setter's underlying attribute write
+ * fails, the identical behaviour on both platforms. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(smokeCoAlarmAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::ExpressedState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::SmokeState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::COState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::BatteryAlert::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::TestInProgress::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::HardwareFaultAlert::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::EndOfServiceAlert::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kSmokeCoAlarmIncoming[] = { SmokeCoAlarm::Commands::SelfTestRequest::Id,
+                                                kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(smokeCoAlarmClusters)
+DECLARE_DYNAMIC_CLUSTER(SmokeCoAlarm::Id, smokeCoAlarmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kSmokeCoAlarmIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(smokeCoAlarmEndpoint, smokeCoAlarmClusters);
+
+constexpr EmberAfDeviceType kSmokeCoAlarmTypes[] = { { 0x0076, 1 } };
+
+/* ---- laundry washer (0x0073), dishwasher (0x0075), laundry dryer (0x007C)
+ *
+ * Catalogue batch 4 audit, OperationalState (0x0060). The three appliance
+ * types compose identically (OperationalState + Identify + Descriptor;
+ * the C6's three config_t are literally one aliased type and its three
+ * add() bodies differ only in the device type id), so one cluster list
+ * and one EmberAfEndpointType serve all three, the
+ * booleanStateSensorClusters principle; only the EmberAfDeviceType (id,
+ * revision) differs per registry row. No mode cluster, no controls
+ * cluster, no Temperature Control: the device library makes Operational
+ * State the only mandatory application cluster on all three, and the C6
+ * composes the same.
+ *
+ * Identify IS composed here although the device XML lists it server="false"
+ * on all three types (matter-devices.xml:2718 washer, :2609 dishwasher,
+ * :2749 dryer) and the C6 composes only OperationalState plus Descriptor.
+ * Optional-not-forbidden: server="false" under lockOthers means "not
+ * required as a server", not "locked out" (serverLocked="false" on the same
+ * lines), so adding it is legal, and the port's standing convention
+ * (Identify rides on every device type; the batch 4 brief directed it for
+ * this trio) wins over C6 parity here. The chime below makes the OPPOSITE
+ * call on the same XML shape because there the C6 also omits it and no
+ * brief direction says otherwise; the divergence is priced in the heap
+ * table and recorded in the batch report.
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; regenerating hearth.zap with the cluster on ep240 left
+ *   CodeDrivenInitShutdown.cpp byte-identical). It IS
+ *   CommandHandlerInterface-only (config-data.yaml:63), so no generated
+ *   IMClusterCommandHandler dispatch exists or is needed; the same
+ *   regeneration left IMClusterCommandHandler.cpp byte-identical too, and
+ *   invokes reach the Instance's own CommandHandlerInterface.
+ *
+ *   Delegate or plain ember? Instance PLUS Delegate, one PAIR per
+ *   endpoint, the batch's genuinely new machinery. Instance derives from
+ *   both CommandHandlerInterface and AttributeAccessInterface, each scoped
+ *   MakeOptional(aEndpointId), and its constructor calls
+ *   mDelegate->SetInstance(this) (operational-state-server.cpp:43-52);
+ *   Delegate::SetInstance() VerifyOrDies if a second Instance tries to
+ *   share one delegate object (operational-state-server.h:349-355), so the
+ *   pools in mt_matter_zephyr.cpp are strictly one delegate and one
+ *   Instance per endpoint, kServiceableEndpoints deep. All six cluster
+ *   attributes are AAI-served, never ember (the Read() switch from
+ *   operational-state-server.cpp:336: OperationalStateList :341,
+ *   OperationalState :360, OperationalError :365, PhaseList :370,
+ *   CurrentPhase :398, ClusterRevision :408 from Metadata kRevision).
+ *   They are declared below anyway so AttributeList is truthful; the two
+ *   scalars get inert slots, the arrays and the struct get none
+ *   (attr_gets_slot refuses ARRAY and STRUCT; the declared ARRAY/STRUCT
+ *   sizes are 0, mirroring what ZAP generates for External-storage list
+ *   attributes on the static endpoint).
+ *
+ *   Split to know on the bench: an AT+MTATTR read goes through the classic
+ *   ember path (emberAfReadAttribute) and answers this ARENA, not the
+ *   Instance, so OperationalState over AT reads the inert seed (0,
+ *   Stopped) no matter what the Instance last published; the fabric sees
+ *   the Instance. The host's state authority is its own AT+MTOPSTATE round
+ *   trip, and Instance-owned attributes never raise +MTATTR URCs, the
+ *   same rule the C6 documents for every Instance-served cluster.
+ *
+ *   ServerInit? None by name: no emberAfOperationalStateClusterServerInit
+ *   Callback exists, and MatterOperationalStatePluginServerInitCallback is
+ *   an empty definition in src/app/util/util.cpp:131. The REAL init is
+ *   Instance::Init(), the application's job, and its first act is
+ *   `if (!emberAfContainsServer(mEndpointId, mClusterId)) return
+ *   CHIP_ERROR_INVALID_ARGUMENT` (operational-state-server.cpp:65-70),
+ *   which forces construct-and-Init() to run only AFTER
+ *   emberAfSetDynamicEndpoint() succeeds: the same forced ordering as the
+ *   valve's SetDefaultDelegate(), one mechanism further in. It does NOT
+ *   join the B388 call site (that site substitutes for the ember
+ *   INIT_FUNCTION slot; this is not that mechanism); construction happens
+ *   in mt_matter_opstate_delegate_set_endpoint(), the delegate handout's
+ *   second half in mt_devtype_create() below.
+ *
+ *   Never destroyed, matching the valve pool and the allocate-only block
+ *   heap: ~Instance() would unregister both interfaces
+ *   (operational-state-server.cpp:55-63), but no teardown path exists on
+ *   this platform (the composition is edited by AT+MTEP and applied by a
+ *   reboot, which resets every pool wholesale, the same policy the valve
+ *   delegate pool set), so no explicit destructor call is ever needed or
+ *   made.
+ *
+ * Commands are hand-declared: the Instance registers NO
+ * EnumerateAcceptedCommands override, so AcceptedCommandList comes from
+ * this ember metadata, and operational_state::create() on the C6 famously
+ * created no command entries at all (finding F-C10-1, every invoke
+ * answered 0x81 until the thunk hand-added them). Pause 0x00, Stop 0x01,
+ * Start 0x02, Resume 0x03; the OperationalCommandResponse is the
+ * server-to-client response, so it lives in the OUTGOING list (fix round
+ * I1/DE399, see kOpStateOutgoing below), never the incoming one.
+ *
+ * The delegate publishes exactly Stopped/Running/Paused/Error in
+ * OperationalStateList and answers CHIP_ERROR_NOT_FOUND at phase index 0
+ * so PhaseList reads null; the verdict mapping (allow kNoError, deny
+ * kUnableToCompleteOperation, and why the delegate never calls
+ * SetOperationalState on allow) is on HearthOpStateDelegate in
+ * mt_matter_zephyr.cpp. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(opStateAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::PhaseList::Id, ARRAY, 0,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::CurrentPhase::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalStateList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalError::Id, STRUCT, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kOpStateIncoming[] = { OperationalState::Commands::Pause::Id,
+                                           OperationalState::Commands::Stop::Id,
+                                           OperationalState::Commands::Start::Id,
+                                           OperationalState::Commands::Resume::Id,
+                                           kInvalidCommandId };
+
+/* Fix round, review I1, RULED (graph DE399): the outgoing list is declared,
+ * NOT left nullptr like every other cluster in this file, because this is
+ * the port's first cluster that answers its commands with a RESPONSE
+ * COMMAND rather than a plain status: every one of the four handlers
+ * builds an OperationalCommandResponse and AddResponse()s it
+ * (operational-state-server.cpp:443-446 for Pause, and identically in the
+ * Stop/Start/Resume handlers), and the cluster spec requires that command
+ * in GeneratedCommandList when its triggers are supported. This KNOWINGLY
+ * diverges from the C6, whose identical nullptr gap is now tracked
+ * separately as bug B400: fabric metadata truthfulness beats parity of an
+ * untruth, and GeneratedCommandList is not part of the AT contract, so no
+ * host-visible behaviour moves. */
+constexpr CommandId kOpStateOutgoing[] = {
+    OperationalState::Commands::OperationalCommandResponse::Id, kInvalidCommandId
+};
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(applianceOpStateClusters)
+DECLARE_DYNAMIC_CLUSTER(OperationalState::Id, opStateAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kOpStateIncoming, kOpStateOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(applianceOpStateEndpoint, applianceOpStateClusters);
+
+constexpr EmberAfDeviceType kLaundryWasherTypes[] = { { 0x0073, 2 } };
+constexpr EmberAfDeviceType kDishwasherTypes[] = { { 0x0075, 2 } };
+constexpr EmberAfDeviceType kLaundryDryerTypes[] = { { 0x007C, 2 } };
+
+/* ---- mode select (0x0027) ---------------------------------------------
+ *
+ * Catalogue batch 4 audit, ModeSelect (0x0050).
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; the regeneration left CodeDrivenInitShutdown.cpp
+ *   byte-identical). NOT CommandHandlerInterface-only either, so
+ *   ChangeToMode needs the generated IMClusterCommandHandler dispatch,
+ *   which the regeneration added, exactly one case; that dispatch is why
+ *   the cluster had to enter hearth.zap.
+ *
+ *   Delegate or plain ember? Neither exactly. Description,
+ *   StandardNamespace and CurrentMode are plain ember against this arena;
+ *   SupportedModes is served by gModeSelectAttrAccess, a wildcard AAI
+ *   registered once from MatterModeSelectPluginServerInitCallback
+ *   (mode-select-server.cpp:416-419), which reads a single PROCESS-GLOBAL
+ *   SupportedModesManager fetched fresh on every access
+ *   (getSupportedModesManager(), :57; the setter at :62 stores a bare
+ *   global pointer). One manager for the whole device, not per endpoint:
+ *   the manager itself dispatches on endpoint id, so a second mode select
+ *   endpoint re-registering it is harmless, and the registration lives in
+ *   mt_matter_mode_select_manager() (mt_matter_zephyr.cpp), called from
+ *   mt_devtype_create() before any resource is spent.
+ *
+ *   ServerInit? YES, a real strong body, and this cluster JOINS the B388
+ *   by-hand call site. emberAfModeSelectClusterServerInitCallback
+ *   (mode-select-server.cpp:318-398) is reachable only through the
+ *   per-cluster functions array (Mode Select sits in
+ *   ClustersWithInitFunctions, config-data.yaml:97; the XML itself says
+ *   init="false", mode-select-cluster.xml:44), and DECLARE_DYNAMIC_CLUSTER
+ *   nulls that array, the exact B388 mechanism. Called by hand below next
+ *   to LevelControl/ColorControl. What it does HERE, traced in this tree
+ *   rather than assumed: its volatility gate passes on this endpoint
+ *   (emberAfIsKnownVolatileAttribute, util.cpp:156-166, answers false both
+ *   for our EXTERNAL-storage CurrentMode, IsExternal, and for the
+ *   undeclared StartUpMode, metadata null), and the body then skips at
+ *   Attributes::StartUpMode::Get() answering UnsupportedAttribute
+ *   (:334), StartUpMode not being declared. So the init is a no-op on
+ *   this composition today; it is called anyway because the moment a
+ *   later round declares StartUpMode, a dynamic endpoint that never ran
+ *   it boots with the wrong CurrentMode, which is exactly bug B388's
+ *   class. Bench-verify item: confirm no CurrentMode write and no error
+ *   log at rebuild time.
+ *
+ * Identify is composed per convention AND per mandate: unlike the trio
+ * above, this device type requires the Identify server outright
+ * (matter-devices.xml:2470, MA-modeselect).
+ *
+ * Description (char_string 64, so 65 ember bytes) gets no slot and reads
+ * UNSUPPORTED_ATTRIBUTE on this platform, pending a string-store
+ * decision; declared so AttributeList is truthful, same note as the
+ * power source's Description. StartUpMode and OnMode are optional and
+ * deliberately not declared (no DEPONOFF feature, no OnOff cluster on
+ * this endpoint), which also parks the cluster's
+ * PreAttributeChanged mode-membership guard: it only checks those two
+ * attributes (mode-select-server.cpp:434-454, dispatching to
+ * verifyModeValue at :462), is function-array-bound
+ * anyway, and CurrentMode is not writable over the fabric. A
+ * controller's ChangeToMode validates membership against the manager and
+ * writes CurrentMode itself (emberAfModeSelectClusterChangeToModeCallback,
+ * :284-311), which lands in this arena and reaches the host as an
+ * ordinary +MTATTR URC, the C6's documented contract for this type. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(modeSelectAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::Description::Id, CHAR_STRING, 65, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::StandardNamespace::Id, ENUM16, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::SupportedModes::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::CurrentMode::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kModeSelectIncoming[] = { ModeSelect::Commands::ChangeToMode::Id,
+                                              kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(modeSelectClusters)
+DECLARE_DYNAMIC_CLUSTER(ModeSelect::Id, modeSelectAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kModeSelectIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(modeSelectEndpoint, modeSelectClusters);
+
+constexpr EmberAfDeviceType kModeSelectTypes[] = { { 0x0027, 1 } };
+
+/* ---- chime (0x0146) ---------------------------------------------------
+ *
+ * Catalogue batch 4 audit, Chime (0x0556; the DEVICE type is 0x0146, the
+ * cluster 0x0556, easy to transpose). Marked apiMaturity="provisional" in
+ * this tree's XML (chime-cluster.xml:31).
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; regeneration left CodeDrivenInitShutdown.cpp byte-identical).
+ *   It IS CommandHandlerInterface-only (config-data.yaml:34), so
+ *   PlayChimeSound reaches the per-endpoint ChimeServer's own
+ *   CommandHandlerInterface and the same regeneration left
+ *   IMClusterCommandHandler.cpp byte-identical too.
+ *
+ *   Delegate or plain ember? Per-endpoint ChimeServer object PLUS a
+ *   ChimeDelegate, the OperationalState shape with the roles renamed.
+ *   ChimeServer(EndpointId, ChimeDelegate&) privately inherits
+ *   AttributeAccessInterface and CommandHandlerInterface
+ *   (chime-server.h:35, ctor :45) and is non-default-constructible, so
+ *   its pool in mt_matter_zephyr.cpp is alignas raw storage,
+ *   placement-constructed once per endpoint and never destroyed, the
+ *   same policy as the OperationalState Instances. Init() (:52, impl
+ *   chime-server.cpp:59-66) loads the two persisted attributes and
+ *   registers both endpoint-scoped interfaces, so it runs only AFTER
+ *   emberAfSetDynamicEndpoint() succeeds; LoadPersistentAttributes()
+ *   keys its KVS reads on GetEndpointId() (chime-server.cpp:68-97).
+ *
+ *   ServerInit? None: MatterChimePluginServerInitCallback and its
+ *   Shutdown twin are empty bodies (chime-server.cpp:285-286), the XML
+ *   says init="false" (chime-cluster.xml:38). Does NOT join B388; the
+ *   construction lives in mt_matter_chime_delegate_set_endpoint().
+ *
+ * NO Identify, matching the C6: the device type lists Identify with
+ * server="false" (matter-devices.xml:1179-1192, MA-chime), so only the
+ * Chime cluster and Descriptor are mandated.
+ *
+ * SelectedChime and Enabled are AAI-SHADOWED: the ChimeServer holds them
+ * as members (chime-server.h:98-99), serves every fabric read and write
+ * through its own AAI, and PERSISTS writes through
+ * SafeAttributePersistenceProvider into the settings partition
+ *   (SetSelectedChime/SetEnabled, chime-server.cpp:206-248; restored by
+ *   LoadPersistentAttributes at every endpoint create). Two consequences
+ *   worth naming: the ember slots declared below are inert on the fabric
+ *   (declared WRITABLE to keep the metadata honest about the cluster's
+ *   contract), and unlike everything else in this catalogue the pair
+ *   SURVIVES a reboot server-side, so a chatty host driving AT+MTCHIME is
+ *   a new ZMS wear source on a settings_storage partition whose occupancy
+ *   is already a watch item (platform README, measured section).
+ *
+ *   Fix round, review M6, platform note: the persistence keys on
+ *   ConcreteAttributePath(GetEndpointId(), Chime::Id, ...) and NOTHING on
+ *   this platform ever clears those keys (no endpoint teardown path
+ *   exists), so the pair survives a COMPOSITION change too, not just a
+ *   reboot: a host that re-edits its composition such that a chime lands
+ *   on an endpoint id a previous chime once occupied inherits that
+ *   chime's persisted SelectedChime and Enabled. The C6 does not have
+ *   this (its pair was not KVS-persisted). Deliberately documented, not
+ *   cleared-on-create: writing the fresh defaults at create would also
+ *   erase the LEGITIMATE reboot persistence the server implements on
+ *   purpose, and the create path cannot tell "same chime as last boot"
+ *   from "different chime, recycled endpoint id". Belongs in the
+ *   controller's AT_MT_SPEC amendment beside the DE396 payload note.
+ *
+ * InstalledChimeSounds is the host-fed array (AT+MTCHIMESOUNDS), served
+ * by the server's AAI walking the delegate's GetChimeSoundByIndex();
+ * no slot, declared for AttributeList truth.
+ *
+ * The PlayChimeSound wire divergence from the C6, DECIDED (user ruling
+ * DE396): in THIS tree the command takes NO argument
+ * (chime-cluster.xml:43-45 declares none; the delegate's PlayChimeSound()
+ * is argument-free, chime-server.h:164), where the esp tree's revision
+ * carries an optional ChimeID. The +MTCMD payload arity stays
+ * byte-identical to the C6 by forwarding the owning server's
+ * GetSelectedChime() as the single trailing field: the payload means
+ * "the chime id that will play". Also gone in this revision, both spec
+ * paragraphs handled by the controller side: the unknown-chimeID
+ * NotFound pre-check (HandlePlayChimeSound checks only mEnabled,
+ * chime-server.cpp:260-274) and the ChimeStartedPlaying event (no
+ * <event> in chime-cluster.xml at all). Enabled false answers Success
+ * with NO delegate call (:266-271), so no +MTCMD is raised then, same
+ * as the C6. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(chimeAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::InstalledChimeSounds::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::SelectedChime::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::Enabled::Id, BOOLEAN, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kChimeIncoming[] = { Chime::Commands::PlayChimeSound::Id, kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(chimeClusters)
+DECLARE_DYNAMIC_CLUSTER(Chime::Id, chimeAttrs, ZAP_CLUSTER_MASK(SERVER), kChimeIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(chimeEndpoint, chimeClusters);
+
+constexpr EmberAfDeviceType kChimeTypes[] = { { 0x0146, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -1261,6 +1782,14 @@ const hearth_devtype s_registry[] = {
     /* Catalogue batch 3: the command-verdict types. */
     { 0x000A, 0, &doorLockEndpoint, Span<const EmberAfDeviceType>(kDoorLockTypes) },
     { 0x0042, 0, &waterValveEndpoint, Span<const EmberAfDeviceType>(kWaterValveTypes) },
+    /* Catalogue batch 4: the appliance and notification types. */
+    { 0x0011, 0, &powerSourceEndpoint, Span<const EmberAfDeviceType>(kPowerSourceTypes) },
+    { 0x0076, 0, &smokeCoAlarmEndpoint, Span<const EmberAfDeviceType>(kSmokeCoAlarmTypes) },
+    { 0x0073, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kLaundryWasherTypes) },
+    { 0x0075, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kDishwasherTypes) },
+    { 0x007C, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kLaundryDryerTypes) },
+    { 0x0027, 0, &modeSelectEndpoint, Span<const EmberAfDeviceType>(kModeSelectTypes) },
+    { 0x0146, 0, &chimeEndpoint, Span<const EmberAfDeviceType>(kChimeTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -1364,6 +1893,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   colour temperature lt   0x010C            5     32      532        536
  *   dimmable light / plug   0x0101 0x010B     4     20      336        344
  *   thermostat              0x0301            3     15      252        256
+ *   smoke/co alarm          0x0076            3     13      220        224
  *   window covering         0x0202            3     13      220        224
  *   door lock               0x000A            3     12      204        208
  *   on/off light / plug     0x0100 0x010A     3     11      188        192
@@ -1371,7 +1901,11 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   fan                     0x002B            3     10      172        176
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
+ *   washer/dish/dryer 0x0073 0x0075 0x007C    3      8      140        144
+ *   mode select             0x0027            3      8      140        144
+ *   power source            0x0011            2      8      136        144
  *   boolean-state sensors, air quality        3      7      124        128
+ *   chime                   0x0146            2      4       72         80
  *
  * HEARTH_EP_HEAP_BYTES is 8192, which leaves roughly 8,100 usable after the
  * heap's own header and bucket table. Against kServiceableEndpoints = 16:
@@ -1422,7 +1956,13 @@ size_t s_ep_heap_used;
  */
 bool attr_gets_slot(const EmberAfAttributeMetadata &md)
 {
-    return md.attributeType != ZAP_TYPE(ARRAY) && md.size <= kSlotDataBytes;
+    /* STRUCT joined ARRAY in catalogue batch 4: OperationalState's
+     * OperationalError is a struct served entirely by the cluster's own
+     * AttributeAccessInterface, declared only so AttributeList is
+     * truthful, and a 4-byte slot could not hold a meaningful
+     * ErrorStateStruct whatever its declared ember size. */
+    return md.attributeType != ZAP_TYPE(ARRAY) && md.attributeType != ZAP_TYPE(STRUCT) &&
+           md.size <= kSlotDataBytes;
 }
 
 /* Descriptor is served by CHIP's own DescriptorCluster server object,
@@ -1550,7 +2090,9 @@ constexpr size_t kSensorSlots =
 constexpr size_t kActuatorSlots =
     kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)),
                 MT_COUNT(windowCoveringAttrs)),
-          kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)));
+          kMax2(kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)),
+                kMax2(MT_COUNT(smokeCoAlarmAttrs),
+                      kMax2(MT_COUNT(opStateAttrs), MT_COUNT(modeSelectAttrs)))));
 
 /* The widest of the light/plug family. The on/off light and plug (OnOff
  * alone) and the dimmable light and plug (OnOff + LevelControl) are strict
@@ -1558,8 +2100,19 @@ constexpr size_t kActuatorSlots =
 constexpr size_t kLightSlots = MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) +
     kMax2(MT_COUNT(colorTempAttrs), MT_COUNT(extendedColorAttrs));
 
+/* Catalogue batch 4 brought the first device types WITHOUT Identify (the
+ * power source and, later in the batch, the chime), so the widest-endpoint
+ * computation gained a second family: types that ride without the
+ * kIdentifySlots term. MT_COUNT over an attr list counts DECLARED entries
+ * plus the LIST_END ClusterRevision, which over-counts a list whose
+ * metadata-only members (strings, structs, arrays beyond the LIST_END
+ * convention) get no slot; that over-count only ever makes the asserted
+ * floor MORE conservative, so it is left uncorrected. */
+constexpr size_t kNoIdentifySlots = kMax2(MT_COUNT(powerSourceAttrs), MT_COUNT(chimeAttrs));
+
 constexpr size_t kWidestEndpointSlots =
-    kIdentifySlots + kMax2(kMax2(kSensorSlots, kActuatorSlots), kLightSlots);
+    kMax2(kIdentifySlots + kMax2(kMax2(kSensorSlots, kActuatorSlots), kLightSlots),
+          kNoIdentifySlots);
 
 /* Deliberately partial: every sensor and actuator device type shares the
  * same three-cluster shape, so temperatureSensorClusters stands in for all
@@ -2047,6 +2600,93 @@ const attr_seed s_seeds[] = {
       { 0x00, 0x00, 0x00, 0x00 } },
     { ValveConfigurationAndControl::Id, Globals::Attributes::ClusterRevision::Id, 2,
       { 0x02, 0x00 } },
+
+    /* ---- catalogue batch 4 ------------------------------------------- */
+
+    /* PowerSource. Status 0 (Unspecified), Order 0, BatChargeLevel 0 (OK),
+     * BatReplacementNeeded false and BatReplaceability 0 (Unspecified) are
+     * all the zero-fill and all match the C6's config defaults
+     * (esp_matter_cluster.h power_source config, all-zero; the battery
+     * sub-config likewise), so they carry no rows. BatPercentRemaining
+     * boots null: this firmware measures no battery, and only a host
+     * AT+MTATTR write can report a real reading (INT8U, so the unsigned
+     * 1-byte sentinel 0xFF; ember's MIN_MAX check admits it past the
+     * 0..200 bounds because null is always in-range for a nullable
+     * attribute, attribute-table.cpp:401-403). FeatureMap 0x02 is
+     * Feature::kBattery (PowerSource/Enums.h:282-283), the exact-one
+     * Wired/Battery choice matching the C6. Revision 3 is
+     * PowerSource/Metadata.h:20 kRevision, which is also what the
+     * cluster's wildcard AttributeAccessInterface answers for
+     * ClusterRevision (power-source-server.cpp:131), the same
+     * seed-agrees-with-AAI discipline as the Thermostat and
+     * WindowCovering rows above. Description gets no slot and no row. */
+    { PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, 1, { 0xFF } }, /* null */
+    { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x02, 0x00, 0x00, 0x00 } },
+    { PowerSource::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x03, 0x00 } },
+
+    /* SmokeCoAlarm. Every state boots at its enum's zero: ExpressedState 0
+     * (kNormal), SmokeState/COState/BatteryAlert 0 (kNormal),
+     * TestInProgress and HardwareFaultAlert false, EndOfServiceAlert 0
+     * (kNormal): the truthful boot state for an alarm this firmware has
+     * never been told anything about, and all the zero-fill, so only
+     * ExpressedState is spelled out (it is the attribute the cluster
+     * derives everything toward; see mt_matter_alarm_set()'s B165
+     * recompute in mt_matter_zephyr.cpp). FeatureMap 3 is
+     * SmokeAlarm|CoAlarm (SmokeCoAlarm/Enums.h:115-119), both features
+     * because AT+MTALARM's field table has no single-feature variant.
+     * Revision 1 is SmokeCoAlarm/Metadata.h:20 kRevision and the XML's
+     * globalAttribute value (smoke-co-alarm-cluster.xml:35). */
+    { SmokeCoAlarm::Id, SmokeCoAlarm::Attributes::ExpressedState::Id, 1, { 0x00 } },
+    { SmokeCoAlarm::Id, SmokeCoAlarm::Attributes::FeatureMap::Id, 4, { 0x03, 0x00, 0x00, 0x00 } },
+    { SmokeCoAlarm::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* OperationalState (the washer/dishwasher/dryer trio). Every cluster
+     * attribute is served by the per-endpoint Instance's AAI, so these
+     * slots are INERT on the fabric and exist for AT+MTATTR arena
+     * consistency and AttributeList truthfulness (see the opStateAttrs
+     * audit note). Seeded to agree with the Instance's own boot state so
+     * the two stores at least start in agreement: OperationalState 0
+     * (kStopped, the Instance's member default,
+     * operational-state-server.h:224) is the zero-fill and carries no
+     * row; CurrentPhase boots null (nullable INT8U, sentinel 0xFF).
+     * FeatureMap 0 (the cluster defines no features). Revision 1 is
+     * OperationalState/Metadata.h:20 kRevision, which is also what the
+     * Instance's AAI answers for ClusterRevision
+     * (operational-state-server.cpp:408). */
+    { OperationalState::Id, OperationalState::Attributes::CurrentPhase::Id, 1, { 0xFF } }, /* null */
+    { OperationalState::Id, OperationalState::Attributes::FeatureMap::Id, 4,
+      { 0x00, 0x00, 0x00, 0x00 } },
+    { OperationalState::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* ModeSelect. StandardNamespace boots null (nullable ENUM16, unsigned
+     * 2-byte sentinel 0xFFFF): this co-processor cannot know which
+     * standard namespace the host's modes belong to, and the C6's config
+     * default is the same null. CurrentMode 0 is the zero-fill and
+     * matches the C6's config default; the host's AT+MTMODES list
+     * conventionally starts at mode 0. FeatureMap 0 (no DEPONOFF; the
+     * cluster's only feature needs an OnOff server on the endpoint).
+     * Revision 2 is ModeSelect/Metadata.h:20 kRevision and the XML's
+     * globalAttribute value (mode-select-cluster.xml:45). Description
+     * gets no slot and no row. */
+    { ModeSelect::Id, ModeSelect::Attributes::StandardNamespace::Id, 2, { 0xFF, 0xFF } }, /* null */
+    { ModeSelect::Id, ModeSelect::Attributes::FeatureMap::Id, 4, { 0x00, 0x00, 0x00, 0x00 } },
+    { ModeSelect::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x02, 0x00 } },
+
+    /* Chime. SelectedChime 0 is the zero-fill and the XML default;
+     * Enabled seeds TRUE, the XML default (chime-cluster.xml:42) and the
+     * ChimeServer's own constructed state (mEnabled true,
+     * chime-server.cpp:44). Both slots are fully inert since fix round 2
+     * (the server's AAI shadows them on the fabric, and DE397's carve-out
+     * routes both the AT+MTATTR read AND write legs to the live server,
+     * mt_matter_zephyr.cpp), so these seeds are never observable
+     * anywhere; kept truthful to a fresh server anyway, the arena
+     * discipline every other row follows. FeatureMap 0
+     * (the cluster declares no features). Revision 1 is
+     * Chime/Metadata.h:20 kRevision and the XML's globalAttribute value
+     * (chime-cluster.xml:39). */
+    { Chime::Id, Chime::Attributes::Enabled::Id, 1, { 0x01 } },
+    { Chime::Id, Chime::Attributes::FeatureMap::Id, 4, { 0x00, 0x00, 0x00, 0x00 } },
+    { Chime::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -2067,8 +2707,17 @@ void seed_slots(dyn_endpoint *d)
                 /* Named here rather than in the predicate so an attribute
                  * too wide for a slot is visible in the log instead of
                  * silently unserved; the ARRAY globals are expected and
-                 * stay quiet. */
-                if (md.attributeType != ZAP_TYPE(ARRAY)) {
+                 * stay quiet. Catalogue batch 4 widened the quiet set to
+                 * CHAR_STRING and STRUCT: those are deliberate
+                 * metadata-only declarations (PowerSource/ModeSelect
+                 * Description, OperationalState's OperationalError), made
+                 * so AttributeList stays truthful for attributes this
+                 * arena cannot hold; each carries its own audit note at
+                 * the declaration. Anything ELSE too wide is still a
+                 * mistake worth shouting about. */
+                if (md.attributeType != ZAP_TYPE(ARRAY) &&
+                    md.attributeType != ZAP_TYPE(CHAR_STRING) &&
+                    md.attributeType != ZAP_TYPE(STRUCT)) {
                     LOG_ERR("attr 0x%08X on cluster 0x%08X is %u bytes, a slot holds %u",
                             (unsigned)md.attributeId, (unsigned)cl.clusterId, (unsigned)md.size,
                             (unsigned)kSlotDataBytes);
@@ -2341,6 +2990,67 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * call as well, which is exactly what "fix the real endpoint after
      * create" means here; this file still never names a CHIP delegate type.
      */
+    /* Catalogue batch 4: the OperationalState trio reuses the two-halves
+     * pattern verbatim. The alloc takes the CLUSTER id (mt_matter.h fixes
+     * it at alloc time; only the base 0x0060 exists in this catalogue),
+     * and set_endpoint below does more than the valve's: it
+     * placement-constructs the per-endpoint Instance and runs Init(),
+     * which is only legal below a successful emberAfSetDynamicEndpoint()
+     * because Init() bails on emberAfContainsServer (see the opStateAttrs
+     * audit note). Pool exhaustion aborts here, before anything is spent,
+     * for the valve's exact reasons. */
+    void *opstate_delegate = nullptr;
+    if (type_has_cluster(type->ep_type, OperationalState::Id)) {
+        opstate_delegate = mt_matter_opstate_delegate_alloc(OperationalState::Id);
+        if (opstate_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: opstate delegate pool exhausted (%u slots, one per "
+                    "serviceable endpoint); %u of %u serviceable endpoints in use, endpoint "
+                    "heap %zu of %u B used; host may declare %u, this build serves %u",
+                    (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
+                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints, s_ep_heap_used,
+                    (unsigned)HEARTH_EP_HEAP_BYTES, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                    (unsigned)kServiceableEndpoints);
+            return -1;
+        }
+    }
+
+    /* Catalogue batch 4: mode select's manager handout is the two-halves
+     * pattern collapsed to one half. There is no per-endpoint object at
+     * all, only the ONE process-global SupportedModesManager, and
+     * mt_matter_mode_select_manager() both registers it with the SDK
+     * (setSupportedModesManager, an idempotent bare-pointer store, so a
+     * second mode select endpoint re-registering is harmless) and returns
+     * it for this null check. Nothing to do after create: the manager
+     * dispatches on endpoint id internally, and the endpoint learns
+     * nothing the manager needs. Cannot fail today (the accessor returns
+     * a static object's address); checked anyway so a future refactor
+     * that CAN fail aborts before anything is spent, the pool checks'
+     * rule. */
+    if (type_has_cluster(type->ep_type, ModeSelect::Id)) {
+        if (mt_matter_mode_select_manager() == nullptr) {
+            LOG_ERR("devtype 0x%04X: mode select manager unavailable", (unsigned)devtype_id);
+            return -1;
+        }
+    }
+
+    /* Catalogue batch 4: the chime's handout, the trio's pattern with a
+     * ChimeServer in place of an Instance. Same two halves, same
+     * exhaustion-aborts-before-spending rule. */
+    void *chime_delegate = nullptr;
+    if (type_has_cluster(type->ep_type, Chime::Id)) {
+        chime_delegate = mt_matter_chime_delegate_alloc();
+        if (chime_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: chime delegate pool exhausted (%u slots, one per "
+                    "serviceable endpoint); %u of %u serviceable endpoints in use, endpoint "
+                    "heap %zu of %u B used; host may declare %u, this build serves %u",
+                    (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
+                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints, s_ep_heap_used,
+                    (unsigned)HEARTH_EP_HEAP_BYTES, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                    (unsigned)kServiceableEndpoints);
+            return -1;
+        }
+    }
+
     void *valve_delegate = nullptr;
     if (type_has_cluster(type->ep_type, ValveConfigurationAndControl::Id)) {
         valve_delegate = mt_matter_valve_delegate_alloc();
@@ -2542,6 +3252,15 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
             emberAfLevelControlClusterServerInitCallback(d.ep_id);
         } else if (type->ep_type->cluster[i].clusterId == ColorControl::Id) {
             emberAfColorControlClusterServerInitCallback(d.ep_id);
+        } else if (type->ep_type->cluster[i].clusterId == ModeSelect::Id) {
+            /* Catalogue batch 4: ModeSelect joined. Its ServerInit is a
+             * real strong body reached only through the nulled functions
+             * array; on this composition it verifiably does nothing (the
+             * StartUpMode read answers UnsupportedAttribute and the body
+             * skips), and it is called anyway so the day StartUpMode is
+             * declared a dynamic endpoint boots the right CurrentMode.
+             * See the modeSelectAttrs audit note. */
+            emberAfModeSelectClusterServerInitCallback(d.ep_id);
         }
     }
 
@@ -2560,6 +3279,29 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * is the bench's signal that the SDK's silent-drop path fired. */
     if (valve_delegate != nullptr) {
         mt_matter_valve_delegate_set_endpoint(valve_delegate, d.ep_id);
+    }
+
+    /* The trio's second half: constructs the OperationalState::Instance in
+     * its slot's raw storage and runs Init(), which registers the
+     * endpoint-scoped command handler and AAI. Below the successful
+     * emberAfSetDynamicEndpoint() by necessity (Init() checks
+     * emberAfContainsServer) and below the B388 inits for tidiness. An
+     * Init() failure is logged loudly inside and does not abort, the
+     * valve read-back's reasoning: unreachable by ordering, and the
+     * endpoint is live and correct in every other respect by then. */
+    if (opstate_delegate != nullptr) {
+        mt_matter_opstate_delegate_set_endpoint(opstate_delegate, d.ep_id);
+    }
+
+    /* The chime's second half: placement-constructs the ChimeServer
+     * (endpoint id plus delegate reference) and runs Init(), whose AAI
+     * and command-handler registrations are endpoint-scoped and whose
+     * LoadPersistentAttributes() keys on GetEndpointId(), so it belongs
+     * below the successful emberAfSetDynamicEndpoint() like the trio's.
+     * Failure is logged loudly inside and does not abort, the same
+     * reasoning. */
+    if (chime_delegate != nullptr) {
+        mt_matter_chime_delegate_set_endpoint(chime_delegate, d.ep_id);
     }
 
     s_next_ep_id++;
