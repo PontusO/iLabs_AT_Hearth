@@ -433,6 +433,79 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
 }
 
 /*
+ * ---- the Instance-served attribute carve-out (fix round, DE397) --------
+ *
+ * Four attributes in this catalogue are served by a per-endpoint C++
+ * object, not by the arena: OperationalState and CurrentPhase on cluster
+ * 0x0060 (the appliance trio's Instance) and SelectedChime and Enabled on
+ * cluster 0x0556 (the ChimeServer). Their ember slots exist only for
+ * AttributeList truthfulness; without this carve-out an AT+MTATTR read
+ * answered the inert seed and a write "succeeded" into it, changing
+ * nothing fabric-visible while still echoing a +MTATTR URC.
+ *
+ * What the C6 actually does for these four, traced for this fix round
+ * (controller ruling DE397 asked for a mirror of the READ behaviour):
+ *
+ *   READS answer the LIVE served value on the C6. Its generic read leg
+ *   calls esp_matter::attribute::get_val(), whose (endpoint, cluster,
+ *   attribute) overload reads through the full data model provider,
+ *   provider::get_instance().ReadAttribute(request, encoder)
+ *   (esp-matter esp_matter_data_model.cpp:927-968, the provider call at
+ *   :957), which consults the registered Instance/server object ahead of
+ *   ember. Mirrored here: the two live-read helpers below fetch the same
+ *   objects this file already owns, so an AT read answers what a
+ *   subscribed controller sees.
+ *
+ *   WRITES on the C6 split by flag. The opstate pair is created
+ *   MANAGED_INTERNALLY without WRITABLE (esp_matter_attribute.cpp:
+ *   2417-2421 CurrentPhase, :2435-2440 OperationalState), so set_val()
+ *   returns ESP_ERR_NOT_SUPPORTED (esp_matter_data_model.cpp:1091-1104)
+ *   and the C6 bridge maps that to MT_ATTR_ERR_READONLY, +MTERR:11
+ *   (DE270). The chime pair is MANAGED_INTERNALLY WITH WRITABLE
+ *   (esp_matter_attribute.cpp:4872-4884), so a C6 write actually routes
+ *   through set_val_via_write_attribute() into the live server. DE397
+ *   rules +MTERR:11 for ALL FOUR on this platform: AT+MTCHIME is the
+ *   host's write path for the chime pair, and refusing here is strictly
+ *   safer than this port's previous silent no-op. The chime-pair
+ *   difference from the C6 (refused here, live-written there) is
+ *   recorded in the batch report for the controller's wire-doc pass.
+ *
+ * Table-driven and additive: exactly these four (cluster, attribute)
+ * pairs, matched only after attr_locate() has proven the endpoint carries
+ * the cluster, so no existing attribute's behaviour changes and the
+ * ENDPOINT/CLUSTER error division is untouched. The live-read helpers are
+ * defined beside their pools further down; only the dispatch lives here.
+ */
+struct instance_served_attr {
+    uint32_t cluster;
+    uint32_t attr;
+};
+
+static const instance_served_attr k_instance_served[] = {
+    { chip::app::Clusters::OperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
+    { chip::app::Clusters::OperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
+    { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::SelectedChime::Id },
+    { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::Enabled::Id },
+};
+
+static bool instance_attr_served(uint32_t cluster, uint32_t attr)
+{
+    for (auto &e : k_instance_served) {
+        if (e.cluster == cluster && e.attr == attr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Defined in the OperationalState and chime sections below, beside the
+ * pools they read. Both run under the caller's StackLock. */
+static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+
+/*
  * Locate an attribute's metadata, splitting endpoint/cluster/attribute
  * absence the way mt_matter.h's mt_attr_result_t comments require it split:
  * an unknown endpoint index is MT_ATTR_ERR_ENDPOINT (emberAfIndexFromEndpoint
@@ -497,6 +570,14 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         return r;
     }
 
+    /* DE397: the four Instance-served attributes answer the live object,
+     * not the arena; see the carve-out comment above attr_locate(). */
+    if (instance_attr_served(cluster, attr)) {
+        return (cluster == chip::app::Clusters::OperationalState::Id)
+                   ? mt_opstate_attr_read_live(ep, attr, out, is_unsigned)
+                   : mt_chime_attr_read_live(ep, attr, out, is_unsigned);
+    }
+
     bool unsigned_type;
     uint8_t bytes;
     if (!attr_type_info(md->attributeType, &unsigned_type, &bytes)) {
@@ -558,6 +639,16 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
     mt_attr_result_t r = attr_locate(ep, cluster, attr, &md);
     if (r != MT_ATTR_OK) {
         return r;
+    }
+
+    /* DE397: a write to an Instance-served attribute is refused with
+     * +MTERR:11 rather than "succeeding" into the inert arena slot. The
+     * ruling covers all four pairs, including the chime pair the C6
+     * live-writes; see the carve-out comment above attr_locate() for the
+     * traced C6 evidence and the recorded difference. AT+MTOPSTATE and
+     * AT+MTCHIME are the write paths for these values. */
+    if (instance_attr_served(cluster, attr)) {
+        return MT_ATTR_ERR_READONLY;
     }
 
     bool unsigned_type;
@@ -1246,7 +1337,7 @@ static const std::array<SmokeCoAlarmServer::ExpressedStateEnum, SmokeCoAlarmServ
  * Field 0 (ExpressedState) is derived by the server from the other fields
  * and never settable directly; rejected here rather than in mt_at.c because
  * field 0 is a legal RefrigeratorAlarm bit on the C6 and the union bound
- * must stay shared (core/include/mt_matter.h:663-669, binding).
+ * must stay shared (core/include/mt_matter.h:647-651, binding).
  *
  * Every legal field maps to the matching SmokeCoAlarmServer setter, never a
  * raw attribute write: the setters emit the cluster's spec-mandated events
@@ -1612,6 +1703,47 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
     return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
 }
 
+/*
+ * DE397 live read for the trio's two Instance-served scalars, dispatched
+ * from mt_matter_attr_read() (see the carve-out comment above
+ * attr_locate()). Runs under that bridge's StackLock; the pool scan is
+ * the same one mt_matter_opstate_set() uses. Both attributes are unsigned
+ * (OperationalStateEnum enum8, CurrentPhase uint8), and a null
+ * CurrentPhase answers MT_ATTR_ERR_TYPE with the flag already set, the
+ * generic null-nullable contract (the AT grammar has no null literal).
+ * These appliances publish no phases, so CurrentPhase in practice always
+ * answers +MTERR:5 here, matching what a controller reads as null.
+ */
+static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned)
+{
+    namespace OpState = chip::app::Clusters::OperationalState;
+    if (is_unsigned) {
+        *is_unsigned = true;
+    }
+    OpState::Instance *inst = nullptr;
+    for (auto &d : s_opstate_delegates) {
+        if (d.endpoint() == ep && d.cluster() == OpState::Id) {
+            inst = d.instance();
+            break;
+        }
+    }
+    if (inst == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive, the
+         * same arm as mt_matter_opstate_set(). */
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (attr == OpState::Attributes::OperationalState::Id) {
+        *out = inst->GetCurrentOperationalState();
+        return MT_ATTR_OK;
+    }
+    chip::app::DataModel::Nullable<uint8_t> phase = inst->GetCurrentPhase();
+    if (phase.IsNull()) {
+        return MT_ATTR_ERR_TYPE;
+    }
+    *out = phase.Value();
+    return MT_ATTR_OK;
+}
+
 /* ---- mode select (0x0027) ---------------------------------------------
  *
  * ONE process-global manager for the whole device, not a pool: the SDK
@@ -1757,13 +1889,27 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
         return MT_ATTR_ERR_FAILED;
     }
 
+    /* Fix round, review M5: every label is validated BEFORE any entry is
+     * overwritten. The old single loop returned mid-write on a bad
+     * length, leaving entries[0..i-1] holding new bytes while
+     * slot->structs[] still published the previous list's CharSpan
+     * lengths over them: no overrun (everything stays in-buffer), but a
+     * served label could carry a stale tail. Unreachable in practice,
+     * because cmd_mtmodes has already enforced these exact bounds before
+     * the bridge is called; hardened anyway so the defensive check can
+     * never publish a half-written list, rather than relying on a
+     * comment to say why it could not. The chime twin needs no such
+     * split: its names are re-measured with strlen() on every read, not
+     * cached in a span. */
     for (uint8_t i = 0; i < count; i++) {
         size_t len = strlen(labels[i]);
         if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
             return MT_ATTR_ERR_FAILED;
         }
+    }
+    for (uint8_t i = 0; i < count; i++) {
         slot->entries[i].mode = modes[i];
-        memcpy(slot->entries[i].label, labels[i], len + 1);
+        memcpy(slot->entries[i].label, labels[i], strlen(labels[i]) + 1);
     }
     slot->ep = ep;
     slot->count = count;
@@ -2057,4 +2203,36 @@ extern "C" int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value)
         return MT_ATTR_ERR_VALUE;
     }
     return (st == Status::Success) ? MT_ATTR_OK : MT_ATTR_ERR_VALUE;
+}
+
+/*
+ * DE397 live read for the chime's two AAI-shadowed, KVS-persisted
+ * attributes, dispatched from mt_matter_attr_read() (see the carve-out
+ * comment above attr_locate()). Runs under that bridge's StackLock. Both
+ * unsigned, neither nullable; the values are the ChimeServer members a
+ * subscribed controller reads, KVS restore and all, so an AT read after a
+ * reboot answers the persisted pair rather than the arena's fresh seeds.
+ */
+static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned)
+{
+    if (is_unsigned) {
+        *is_unsigned = true;
+    }
+    chip::app::Clusters::ChimeServer *srv = nullptr;
+    for (auto &d : s_chime_delegates) {
+        if (d.endpoint() == ep) {
+            srv = d.server();
+            break;
+        }
+    }
+    if (srv == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (attr == chip::app::Clusters::Chime::Attributes::SelectedChime::Id) {
+        *out = srv->GetSelectedChime();
+    } else {
+        *out = srv->GetEnabled() ? 1 : 0;
+    }
+    return MT_ATTR_OK;
 }

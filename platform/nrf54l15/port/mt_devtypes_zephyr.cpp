@@ -1370,7 +1370,7 @@ constexpr EmberAfDeviceType kPowerSourceTypes[] = { { 0x0011, 1 } };
  * same reason the C6 enables both, so both feature-gated state attributes
  * exist and FeatureMap is 3, which is also the XML's own declared default
  * (smoke-co-alarm-cluster.xml:37). Identify is mandatory on this device
- * type (matter-devices.xml:2523-2546, MA-smokecoalarm), so the port
+ * type (matter-devices.xml:2522-2545, MA-smokecoalarm), so the port
  * convention holds here, in contrast to the power source above. The
  * device type's Power Source mandate is satisfied the C6's way: a flat
  * sibling 0x0011 endpoint the host declares alongside, no composition
@@ -1423,6 +1423,18 @@ constexpr EmberAfDeviceType kSmokeCoAlarmTypes[] = { { 0x0076, 1 } };
  * cluster, no Temperature Control: the device library makes Operational
  * State the only mandatory application cluster on all three, and the C6
  * composes the same.
+ *
+ * Identify IS composed here although the device XML lists it server="false"
+ * on all three types (matter-devices.xml:2718 washer, :2609 dishwasher,
+ * :2749 dryer) and the C6 composes only OperationalState plus Descriptor.
+ * Optional-not-forbidden: server="false" under lockOthers means "not
+ * required as a server", not "locked out" (serverLocked="false" on the same
+ * lines), so adding it is legal, and the port's standing convention
+ * (Identify rides on every device type; the batch 4 brief directed it for
+ * this trio) wins over C6 parity here. The chime below makes the OPPOSITE
+ * call on the same XML shape because there the C6 also omits it and no
+ * brief direction says otherwise; the divergence is priced in the heap
+ * table and recorded in the batch report.
  *
  *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
  *   144-168; regenerating hearth.zap with the cluster on ep240 left
@@ -1486,9 +1498,9 @@ constexpr EmberAfDeviceType kSmokeCoAlarmTypes[] = { { 0x0076, 1 } };
  * this ember metadata, and operational_state::create() on the C6 famously
  * created no command entries at all (finding F-C10-1, every invoke
  * answered 0x81 until the thunk hand-added them). Pause 0x00, Stop 0x01,
- * Start 0x02, Resume 0x03; the generated OperationalCommandResponse is
- * the server-to-client response and deliberately NOT in the incoming
- * list.
+ * Start 0x02, Resume 0x03; the OperationalCommandResponse is the
+ * server-to-client response, so it lives in the OUTGOING list (fix round
+ * I1/DE399, see kOpStateOutgoing below), never the incoming one.
  *
  * The delegate publishes exactly Stopped/Running/Paused/Error in
  * OperationalStateList and answers CHIP_ERROR_NOT_FOUND at phase index 0
@@ -1513,9 +1525,25 @@ constexpr CommandId kOpStateIncoming[] = { OperationalState::Commands::Pause::Id
                                            OperationalState::Commands::Resume::Id,
                                            kInvalidCommandId };
 
+/* Fix round, review I1, RULED (graph DE399): the outgoing list is declared,
+ * NOT left nullptr like every other cluster in this file, because this is
+ * the port's first cluster that answers its commands with a RESPONSE
+ * COMMAND rather than a plain status: every one of the four handlers
+ * builds an OperationalCommandResponse and AddResponse()s it
+ * (operational-state-server.cpp:443-446 for Pause, and identically in the
+ * Stop/Start/Resume handlers), and the cluster spec requires that command
+ * in GeneratedCommandList when its triggers are supported. This KNOWINGLY
+ * diverges from the C6, whose identical nullptr gap is now tracked
+ * separately as bug B400: fabric metadata truthfulness beats parity of an
+ * untruth, and GeneratedCommandList is not part of the AT contract, so no
+ * host-visible behaviour moves. */
+constexpr CommandId kOpStateOutgoing[] = {
+    OperationalState::Commands::OperationalCommandResponse::Id, kInvalidCommandId
+};
+
 DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(applianceOpStateClusters)
 DECLARE_DYNAMIC_CLUSTER(OperationalState::Id, opStateAttrs, ZAP_CLUSTER_MASK(SERVER),
-                        kOpStateIncoming, nullptr),
+                        kOpStateIncoming, kOpStateOutgoing),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
@@ -1561,7 +1589,7 @@ constexpr EmberAfDeviceType kLaundryDryerTypes[] = { { 0x007C, 2 } };
  *   nulls that array, the exact B388 mechanism. Called by hand below next
  *   to LevelControl/ColorControl. What it does HERE, traced in this tree
  *   rather than assumed: its volatility gate passes on this endpoint
- *   (emberAfIsKnownVolatileAttribute, util.cpp:155-165, answers false both
+ *   (emberAfIsKnownVolatileAttribute, util.cpp:156-166, answers false both
  *   for our EXTERNAL-storage CurrentMode, IsExternal, and for the
  *   undeclared StartUpMode, metadata null), and the body then skips at
  *   Attributes::StartUpMode::Get() answering UnsupportedAttribute
@@ -1571,6 +1599,10 @@ constexpr EmberAfDeviceType kLaundryDryerTypes[] = { { 0x007C, 2 } };
  *   it boots with the wrong CurrentMode, which is exactly bug B388's
  *   class. Bench-verify item: confirm no CurrentMode write and no error
  *   log at rebuild time.
+ *
+ * Identify is composed per convention AND per mandate: unlike the trio
+ * above, this device type requires the Identify server outright
+ * (matter-devices.xml:2470, MA-modeselect).
  *
  * Description (char_string 64, so 65 ember bytes) gets no slot and reads
  * UNSUPPORTED_ATTRIBUTE on this platform, pending a string-store
@@ -1643,7 +1675,7 @@ constexpr EmberAfDeviceType kModeSelectTypes[] = { { 0x0027, 1 } };
  *   construction lives in mt_matter_chime_delegate_set_endpoint().
  *
  * NO Identify, matching the C6: the device type lists Identify with
- * server="false" (matter-devices.xml:1180-1193, MA-chime), so only the
+ * server="false" (matter-devices.xml:1179-1192, MA-chime), so only the
  * Chime cluster and Descriptor are mandated.
  *
  * SelectedChime and Enabled are AAI-SHADOWED: the ChimeServer holds them
@@ -1658,6 +1690,20 @@ constexpr EmberAfDeviceType kModeSelectTypes[] = { { 0x0027, 1 } };
  *   SURVIVES a reboot server-side, so a chatty host driving AT+MTCHIME is
  *   a new ZMS wear source on a settings_storage partition whose occupancy
  *   is already a watch item (platform README, measured section).
+ *
+ *   Fix round, review M6, platform note: the persistence keys on
+ *   ConcreteAttributePath(GetEndpointId(), Chime::Id, ...) and NOTHING on
+ *   this platform ever clears those keys (no endpoint teardown path
+ *   exists), so the pair survives a COMPOSITION change too, not just a
+ *   reboot: a host that re-edits its composition such that a chime lands
+ *   on an endpoint id a previous chime once occupied inherits that
+ *   chime's persisted SelectedChime and Enabled. The C6 does not have
+ *   this (its pair was not KVS-persisted). Deliberately documented, not
+ *   cleared-on-create: writing the fresh defaults at create would also
+ *   erase the LEGITIMATE reboot persistence the server implements on
+ *   purpose, and the create path cannot tell "same chime as last boot"
+ *   from "different chime, recycled endpoint id". Belongs in the
+ *   controller's AT_MT_SPEC amendment beside the DE396 payload note.
  *
  * InstalledChimeSounds is the host-fed array (AT+MTCHIMESOUNDS), served
  * by the server's AAI walking the delegate's GetChimeSoundByIndex();
@@ -1855,7 +1901,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   fan                     0x002B            3     10      172        176
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
- *   washer/dishwasher/dryer 0x0073 75 7C     3      8      140        144
+ *   washer/dish/dryer 0x0073 0x0075 0x007C    3      8      140        144
  *   mode select             0x0027            3      8      140        144
  *   power source            0x0011            2      8      136        144
  *   boolean-state sensors, air quality        3      7      124        128
