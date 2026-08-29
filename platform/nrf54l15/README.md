@@ -286,13 +286,17 @@ bucket table) and 16 header slots:
 | 15 colour temperature lights | 8,040 B | **yes**, one short of 16 |
 | 13 extended colour lights | 7,800 B | **yes**, three short of 16 |
 | 16 extended colour lights | 9,600 B wanted | **no**, fails at the 14th |
+| 13 mode selects (store in-block since the reclaim round) | 7,592 B | **yes**, three short of 16 (bench-observed 2026-08-30) |
+| 16 mode selects | 9,344 B wanted | **no**, fails at the 14th |
+| 16 chimes (store in-block) | 5,632 B | **yes**, table-bound |
 
 So every device type in the catalogue reaches the full 16 **except** the two
-colour lights, which reach 15 and 13. Sizing the heap for 16 extended colour
-lights would want 9,600 B and buy a composition nobody builds; the RAM is
-worth more elsewhere. A compile-time assertion keeps the heap holding at
-least eight of whatever the widest device type happens to be, so this table
-cannot go stale unnoticed.
+colour lights (15 and 13) and, since the store reclaim round moved its
+host-fed mode store into the endpoint block, mode select (13). Sizing the
+heap for 16 extended colour lights would want 9,600 B and buy a composition
+nobody builds; the RAM is worth more elsewhere. A compile-time assertion
+keeps the heap holding at least eight of whatever the widest device type
+happens to be, so this table cannot go stale unnoticed.
 
 ### The LM20 tier
 
@@ -358,14 +362,37 @@ the host-fed mode store (7,040 B: 16 x 8 label entries plus their
 16 x 8 pairs of 33 B), the `OperationalState::Instance` raw-storage pool
 (3,840 B), the `ChimeServer` pool (640 B), the two delegate pools (448 B),
 CHIP's PowerSource table (272 B), and about 1.2 KB of metadata growth.
-Free RAM on `ophelia_cpico` is 19,292 B. The two 16-deep host-fed stores
-(11.5 KB together) are reserved even for compositions with no mode-select
-or chime endpoint; moving them into the per-endpoint block heap is the
-queued reclaim round. Flash `+19,056 B` is the five new cluster server
-translation units plus the two new generated command dispatchers. No
-change to `HEARTH_EP_HEAP_BYTES`: the widest batch 4 type (Smoke/CO
-Alarm, 224 B per endpoint) is far under the extended colour light's
-600 B, and every batch 4 type reaches the full 16 serviceable endpoints.
+Free RAM on `ophelia_cpico` was 19,292 B at the batch 4 merge; the store
+reclaim round below took it back over 30 KB. Flash `+19,056 B` is the
+five new cluster server translation units plus the two new generated
+command dispatchers. No change to `HEARTH_EP_HEAP_BYTES` in batch 4
+itself: the widest batch 4 type as merged (Smoke/CO Alarm, 224 B per
+endpoint) was far under the extended colour light's 600 B.
+
+### The store reclaim round (2026-08-30)
+
+Batch 4's two 16-deep host-fed .bss stores (`s_mode_slots` 7,040 B,
+`s_chime_slots` 4,448 B) were reserved even for compositions with no
+mode-select or chime endpoint. The reclaim round moved both into the
+per-endpoint block heap as type-conditional trailing regions
+(`mt_mode_store_t` 436 B, `mt_chime_store_t` 273 B per endpoint), so only
+compositions that declare those types pay:
+
+| | Batch 4 (`ad37e7a`) | Store reclaim |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 242,852 B (92.64%) | **231,364 B (88.26%)** |
+| RAM used, `nrf54l15dk` | 243,076 B (92.73%) | **231,588 B (88.34%)** |
+
+Exactly `-11,488 B` on both arms (nm-verified: both store symbols gone
+from the image), flash within a few hundred bytes. The per-endpoint heap
+cost of the two types rises accordingly: mode select 144 to **584 B**
+(now the widest type in the catalogue, and the shape the compile-time
+floor assertion guards), chime 80 to **352 B**. The capacity consequence
+is in the table above: an all-mode-select composition serves a
+13-endpoint prefix under the stop-at-failure semantics, observed on the
+bench exactly as computed; 16 chimes still fit. The
+`OperationalState::Instance`, `ChimeServer` and delegate pools stay in
+.bss deliberately (CHIP registration lifetime).
 
 ## Dev board wiring
 
