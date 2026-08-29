@@ -37,6 +37,13 @@ worth knowing before a bench session:
   two features not taken, so their five commands are correctly absent.
   Both types boot in color-temperature mode at 250 mireds, because
   StartUpColorTemperatureMireds is seeded non-null exactly as on the C6.
+  Bench note: a ColorControl command sent to a light whose OnOff attribute
+  is FALSE is discarded and still answers Success, and nothing moves. That
+  is the cluster's ExecuteIfOff rule, not a defect: with an On/Off server on
+  the same endpoint, an OnOff of FALSE and the Options bit
+  ExecuteIfOff clear, the server stops after Options processing
+  (`shouldExecuteIfOff`, `color-control-server.cpp:515`). Turn the light on
+  first, or send the command with OptionsMask/OptionsOverride set.
 - Thermostat: Heating|Cooling, SetpointRaiseLower, setpoints seeded 16 C /
   24 C. No Presets, schedules, Auto mode or occupancy: those need a
   delegate this firmware does not provide.
@@ -54,6 +61,21 @@ worth knowing before a bench session:
   levels advertised (Fair, Moderate, VeryPoor, ExtremelyPoor), so a host
   library's seven-value enum can never report a level the endpoint's
   feature map rejects.
+
+Batch 2 was the first round to declare attributes whose ZCL type is one of
+Matter's semantic **aliases** for an integer: the thermostat's setpoints are
+`temperature`, the fan's are `percent`, the window covering's lift positions
+are `percent100ths`. The AT attribute bridge's type classifier only knew the
+base integer codes, so those attributes answered `+MTERR:5` on an
+`AT+MTATTR` read and emitted no `+MTATTR` URC when a controller changed
+them, while working perfectly over the controller's own IM. The failure was
+easy to miss on the bench because `+MTERR:5` is also the honest answer for a
+nullable attribute currently holding null, the AT grammar having no null
+literal. Fixed by normalising through the SDK's own alias table
+(`AttributeBaseType()`, `app/util/ember-io-storage.cpp`) before classifying,
+so the AT integer family tracks the SDK's definition instead of a
+hand-copied list. The C6 never had this gap because esp-matter maps the
+aliases down to its own value types before its AT bridge sees them.
 
 RAM is the batch's real cost and the number to watch. Measured 2026-08-29,
 both figures from a pristine `build/` on `ophelia_cpico/nrf54l15/cpuapp`

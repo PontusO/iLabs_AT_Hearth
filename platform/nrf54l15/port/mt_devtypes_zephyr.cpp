@@ -1349,7 +1349,26 @@ const attr_seed s_seeds[] = {
      * kOffLowMedHigh (0) is the widest of them. FanMode Off, PercentSetting
      * and PercentCurrent 0 are the zero-fill, spelled out because they are
      * the attributes this cluster exists for. Revision 5 is
-     * FanControl/Metadata.h kRevision. */
+     * FanControl/Metadata.h kRevision.
+     *
+     * Fix round 2 re-examined PercentSetting's 0, since it is a NULLABLE
+     * attribute seeded with a real value rather than the null sentinel and
+     * a bench reader saw that 0 come back from chip-tool before any write.
+     * The 0 is deliberate and stays. PercentSetting has NO default in
+     * FanControl.xml (neither a default= nor a <default> child), so there is
+     * no XML default to defer to. What the spec does bind is its pairing
+     * with FanMode, and the server implements it: setting FanMode to Off
+     * SHALL set PercentSetting, PercentCurrent, SpeedSetting and
+     * SpeedCurrent to 0 (fan-control-server.cpp:337-361). FanMode is seeded
+     * Off one row below, so 0 is the only value consistent with it, and a
+     * null seed would contradict that pairing at boot. Null is the
+     * Auto-mode answer instead (:363-380 sets PercentSetting null when
+     * FanMode goes to Auto), and Auto sits behind the AUT feature this
+     * endpoint does not advertise. It also matches esp-matter's own
+     * fan_control config defaults (esp_matter_cluster.h:377-392, fan_mode 0
+     * and percent_setting 0), so the C6 boots the same pair. The bench's
+     * chip-tool 0 was this seed read back correctly: FanControl registers
+     * no AttributeAccessInterface at all, so nothing intercepts the read. */
     { FanControl::Id, FanControl::Attributes::FanMode::Id, 1, { 0x00 } },
     { FanControl::Id, FanControl::Attributes::FanModeSequence::Id, 1, { 0x00 } },
     { FanControl::Id, FanControl::Attributes::PercentSetting::Id, 1, { 0x00 } },
