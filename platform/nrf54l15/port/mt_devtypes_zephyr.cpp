@@ -510,10 +510,11 @@ constexpr EmberAfDeviceType kDimmablePlugInUnitTypes[] = { { 0x010B, 5 } };
  * the dimmable light's set verbatim.
  *
  * ColorTemperatureLight.xml mandates ColorControl feature CT only;
- * ExtendedColorLight.xml mandates XY and CT with HS optional. The HS
- * addition on 0x010D is the C6's deliberate step beyond the standard
- * namespace (platform/esp32c6/main/mt_devtypes.cpp mk_extended_color_light()
- * bolts hue_saturation onto the cluster after create() so the host library's
+ * ExtendedColorLight.xml mandates XY and CT and lists HS as
+ * optionalConform. HS is therefore inside the device type, not an extension
+ * of it: taking it is the C6's deliberate step beyond the MANDATORY set
+ * (platform/esp32c6/main/mt_devtypes.cpp mk_extended_color_light() bolts
+ * hue_saturation onto the cluster after create() so the host library's
  * HSV-driven class has CurrentHue/CurrentSaturation to write); mirrored
  * here. EHUE and CL are set on neither: the cluster XML makes HS mandatory
  * only when EHUE is set and EHUE mandatory only when CL is, so HS|XY|CT
@@ -571,22 +572,68 @@ DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CurrentHue::Id, INT8U, 1, 0)
     DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
     DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
 
-/* Every one of these is handled inside color-control-server.cpp with no
- * delegate anywhere in the path, so advertising them is honest: the server
- * drives the transition itself and writes the result back through the
- * external-storage callbacks at the bottom of this file. The CT light also
- * gets Move/StepColorTemperature (the round's scope ruling admits them "if
- * the server handles them without a delegate", and it does); the extended
- * light's ruling names an exact five, so it gets exactly those. */
+/*
+ * These two lists are the FULL mandatory command set for the feature map
+ * each device type advertises, not a chosen subset. Every command in
+ * ColorControl.xml is `mandatoryConform` on a feature, so advertising CT or
+ * HS or XY and then omitting one of that feature's commands is a
+ * conformance gap rather than a scope decision:
+ *
+ *   CT              -> 0x0A MoveToColorTemperature, 0x4B MoveColorTemperature,
+ *                      0x4C StepColorTemperature
+ *   HS              -> 0x00 MoveToHue, 0x01 MoveHue, 0x02 StepHue,
+ *                      0x03 MoveToSaturation, 0x04 MoveSaturation,
+ *                      0x05 StepSaturation, 0x06 MoveToHueAndSaturation
+ *   XY              -> 0x07 MoveToColor, 0x08 MoveColor, 0x09 StepColor
+ *   HS or XY or CT  -> 0x47 StopMoveStep (an orTerm over the three)
+ *
+ * So 0x010C (CT) owes four commands and 0x010D (HS|XY|CT) owes fourteen.
+ *
+ * All fourteen were audited the way the CT trio was, and all pass. Each
+ * handler validates its parameters, fetches its per-endpoint transition
+ * state through the bounds-checked getEndpointIndex() ->
+ * get*TransitionStateByIndex() pair (color-control-server.cpp:820-828,
+ * :848-856, :2075-2083, :2103-2111, :2451-2459 each return nullptr for an
+ * out-of-range index) and answers Status::UnsupportedEndpoint if that comes
+ * back null, then FULLY initialises the state it is about to run
+ * (initialValue, currentValue, finalValue, stepsRemaining, stepsTotal,
+ * timeRemaining, transitionTime, endpoint and the low/high limits) BEFORE
+ * scheduleTimerCallbackMs() is reached. No path calls a delegate; the ember
+ * callbacks (:3099-3290) are plain thunks into ColorControlServer plus
+ * AddStatus. The handlers themselves: moveHueCommand :1414, stepHueCommand
+ * :1664, moveSaturationCommand :1751, stepSaturationCommand :1837,
+ * moveColorCommand :2260, stepColorCommand :2344, stopMoveStepCommand :473.
+ *
+ * StopMoveStep is compiled unconditionally: its definition at :3283 sits
+ * outside all three MATTER_DM_PLUGIN_COLOR_CONTROL_SERVER_{HSV,XY,TEMP}
+ * guards (:3097-3281), and the HSV-specific half of its body is separately
+ * guarded, so it serves the CT-only light too.
+ *
+ * EHUE and CL commands (0x40-0x44) stay out: neither feature is advertised,
+ * so the XML does not mandate them.
+ */
 constexpr CommandId kColorTempIncoming[] = { ColorControl::Commands::MoveToColorTemperature::Id,
                                              ColorControl::Commands::MoveColorTemperature::Id,
                                              ColorControl::Commands::StepColorTemperature::Id,
+                                             ColorControl::Commands::StopMoveStep::Id,
                                              kInvalidCommandId };
 
 constexpr CommandId kExtendedColorIncoming[] = {
-    ColorControl::Commands::MoveToHue::Id,   ColorControl::Commands::MoveToSaturation::Id,
-    ColorControl::Commands::MoveToHueAndSaturation::Id, ColorControl::Commands::MoveToColor::Id,
-    ColorControl::Commands::MoveToColorTemperature::Id, kInvalidCommandId
+    ColorControl::Commands::MoveToHue::Id,
+    ColorControl::Commands::MoveHue::Id,
+    ColorControl::Commands::StepHue::Id,
+    ColorControl::Commands::MoveToSaturation::Id,
+    ColorControl::Commands::MoveSaturation::Id,
+    ColorControl::Commands::StepSaturation::Id,
+    ColorControl::Commands::MoveToHueAndSaturation::Id,
+    ColorControl::Commands::MoveToColor::Id,
+    ColorControl::Commands::MoveColor::Id,
+    ColorControl::Commands::StepColor::Id,
+    ColorControl::Commands::MoveToColorTemperature::Id,
+    ColorControl::Commands::MoveColorTemperature::Id,
+    ColorControl::Commands::StepColorTemperature::Id,
+    ColorControl::Commands::StopMoveStep::Id,
+    kInvalidCommandId
 };
 
 DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(colorTemperatureLightClusters)
@@ -732,8 +779,9 @@ constexpr EmberAfDeviceType kThermostatTypes[] = { { 0x0301, 4 } };
  * RockSupport/RockSetting (Rocking), WindSupport/WindSetting (Wind) and
  * AirflowDirection are each behind a feature this endpoint does not
  * advertise, and Rocking/Wind/AirflowDirection/Step are delegate territory
- * (fan-control-server.cpp's Step handler answers Failure with no delegate,
- * :371-374), which is why the Step feature is deliberately absent and no
+ * (emberAfFanControlClusterStepCallback, fan-control-server.cpp:453, calls
+ * GetDelegate() at :473 and answers Status::Failure at :478-482 when there
+ * is none), which is why the Step feature is deliberately absent and no
  * incoming command is advertised.
  *
  * FanModeSequence is seeded OffLowMedHigh (0), NOT esp-matter's constructor
@@ -745,7 +793,7 @@ constexpr EmberAfDeviceType kThermostatTypes[] = { { 0x0301, 4 } };
  *
  * Known limitation, documented rather than bridged: the server's own
  * FanMode <-> PercentSetting coupling lives in MatterFanControlCluster
- * ServerAttributeChangedCallback (:325-449), which is reached through the
+ * ServerAttributeChangedCallback (:327-451), which is reached through the
  * per-cluster functions array and therefore never runs on a dynamic
  * endpoint (the same mechanism as the OccupancySensing init in batch 1).
  * Both attributes read and write correctly over AT+MTATTR and over a
@@ -982,16 +1030,40 @@ constexpr uint8_t kMaxSlots = 38;
 /* The arithmetic in the comment above, checked by the compiler rather than
  * trusted. Each DECLARE_DYNAMIC_ATTRIBUTE_LIST array already includes the
  * ClusterRevision entry LIST_END() appends, and Descriptor contributes no
- * slots (seed_slots() skips it), so this sum IS the extended color light's
- * slot count. If a future round widens a cluster past the headroom, the
- * build stops here instead of the endpoint silently losing its last
- * attributes to seed_slots()' runtime guard. */
-static_assert(sizeof(onOffAttrs) / sizeof(onOffAttrs[0]) +
-                      sizeof(levelAttrs) / sizeof(levelAttrs[0]) +
-                      sizeof(extendedColorAttrs) / sizeof(extendedColorAttrs[0]) +
-                      sizeof(identifyAttrs) / sizeof(identifyAttrs[0]) <=
-                  kMaxSlots,
-              "the extended color light (0x010D) is the widest endpoint type; raise kMaxSlots");
+ * slots (seed_slots() skips it), so a per-devtype sum IS that device type's
+ * slot count.
+ *
+ * Fix round: written as a max over EVERY device type rather than as the
+ * single sum for today's widest one. The earlier form only tripped if the
+ * extended color light grew; widening the thermostat or window covering
+ * lists past 38 would have sailed past it and shown up as seed_slots()'
+ * runtime LOG_ERR and an endpoint quietly missing its last attributes. */
+#define MT_COUNT(array) (sizeof(array) / sizeof((array)[0]))
+
+constexpr size_t kMax2(size_t a, size_t b) { return a > b ? a : b; }
+
+/* Identify rides on every device type; Descriptor contributes nothing. */
+constexpr size_t kIdentifySlots = MT_COUNT(identifyAttrs);
+constexpr size_t kSensorSlots =
+    kMax2(kMax2(kMax2(MT_COUNT(tempAttrs), MT_COUNT(booleanStateAttrs)),
+                kMax2(MT_COUNT(occupancyAttrs), MT_COUNT(humidityAttrs))),
+          kMax2(kMax2(MT_COUNT(pressureAttrs), MT_COUNT(illuminanceAttrs)),
+                kMax2(MT_COUNT(flowAttrs), MT_COUNT(airQualityAttrs))));
+constexpr size_t kActuatorSlots =
+    kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)),
+          MT_COUNT(windowCoveringAttrs));
+
+/* The widest of the light/plug family. The on/off light and plug (OnOff
+ * alone) and the dimmable light and plug (OnOff + LevelControl) are strict
+ * prefixes of this, so covering the wider color light covers them all. */
+constexpr size_t kLightSlots = MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) +
+    kMax2(MT_COUNT(colorTempAttrs), MT_COUNT(extendedColorAttrs));
+
+constexpr size_t kWidestEndpointSlots =
+    kIdentifySlots + kMax2(kMax2(kSensorSlots, kActuatorSlots), kLightSlots);
+
+static_assert(kWidestEndpointSlots <= kMaxSlots,
+              "some device type's attribute lists no longer fit the slot arena; raise kMaxSlots");
 
 /* One data version per cluster; the widest endpoint type has exactly four.
  * emberAfSetDynamicEndpoint() returns CHIP_ERROR_NO_MEMORY outright if the
@@ -1011,12 +1083,20 @@ static_assert(sizeof(onOffAttrs) / sizeof(onOffAttrs[0]) +
  * dynamic endpoint times MT_COMP_MAX_ENDPOINTS (28) is 336 bytes of .bss. */
 constexpr uint8_t kMaxClusters = 7;
 
-/* Same idea as the kMaxSlots assertion: the color lights carry the longest
- * cluster list, and mt_devtype_create()'s runtime check would otherwise be
- * the first thing to notice a sixth or eighth cluster. */
-static_assert(sizeof(extendedColorLightClusters) / sizeof(extendedColorLightClusters[0]) <=
-                  kMaxClusters,
-              "the color lights carry the most clusters; raise kMaxClusters");
+/* Same idea as the kMaxSlots assertion, and a max over every cluster list
+ * for the same reason: naming only today's longest one would let a sixth
+ * cluster on some other device type slip past to mt_devtype_create()'s
+ * runtime check. Sensors all share the three-cluster shape, so one
+ * representative stands for them. */
+constexpr size_t kWidestClusterList = kMax2(
+    kMax2(kMax2(MT_COUNT(onOffLightClusters), MT_COUNT(dimmableLightClusters)),
+          kMax2(MT_COUNT(colorTemperatureLightClusters), MT_COUNT(extendedColorLightClusters))),
+    kMax2(kMax2(MT_COUNT(onOffPlugInUnitClusters), MT_COUNT(dimmablePlugInUnitClusters)),
+          kMax2(kMax2(MT_COUNT(thermostatClusters), MT_COUNT(fanClusters)),
+                kMax2(MT_COUNT(windowCoveringClusters), MT_COUNT(temperatureSensorClusters)))));
+
+static_assert(kWidestClusterList <= kMaxClusters,
+              "some device type's cluster list no longer fits dyn_endpoint::dv; raise kMaxClusters");
 
 struct dyn_endpoint {
     bool used;
@@ -1192,13 +1272,20 @@ const attr_seed s_seeds[] = {
      * sees the same boot state here.
      *
      * ColorMode and EnhancedColorMode are seeded kColorTemperatureMireds (2)
-     * rather than esp-matter's constructor default of 1: with
-     * StartUpColorTemperatureMireds seeded non-null, the cluster spec says
-     * the lamp powers up in color-temperature mode, and
-     * startUpColorTempCommand() writes exactly that pair at endpoint create
-     * (see the ColorControl audit note above). Seeding the same value means
-     * the arena is correct whether or not that init ever runs, and it is the
-     * only conformant answer for 0x010C, which supports no other mode.
+     * rather than esp-matter's constructor default of 1. Note this is NOT a
+     * conformance requirement: all three ColorModeEnum values are
+     * mandatoryConform and ungated in ColorControl.xml, so 0, 1 and 2 are
+     * each a legal value of the attribute in the abstract. The reason is the
+     * power-up rule. StartUpColorTemperatureMireds is seeded non-null (250,
+     * C6 parity), and the cluster spec says a lamp with a non-null startup
+     * color temperature powers up in color-temperature mode with ColorMode
+     * and EnhancedColorMode reflecting that; startUpColorTempCommand()
+     * (color-control-server.cpp:2577-2624) writes exactly that pair at
+     * endpoint create. Seeding the same value means the arena is right
+     * whether or not that init runs. For 0x010C there is a second reason:
+     * it declares neither CurrentHue/CurrentSaturation nor CurrentX/CurrentY,
+     * so ColorMode 0 or 1 would name a mode whose defining attributes the
+     * endpoint does not present.
      *
      * NumberOfPrimaries is null: this firmware drives no primaries of its
      * own and has no way to know what the host's lamp has. */
@@ -1534,7 +1621,19 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      *
      * The loop no longer stops at the first match: the color lights carry
      * BOTH LevelControl and ColorControl, and breaking after LevelControl
-     * would silently skip the second init. */
+     * would silently skip the second init.
+     *
+     * Running these AFTER emberAfSetDynamicEndpoint() is load-bearing for
+     * memory safety, not just ordering. startUpColorTempCommand() indexes
+     * quietTemperatureMireds[getEndpointIndex(endpoint)] with NO bounds
+     * check (color-control-server.cpp:2609-2612), and
+     * emberAfGetClusterServerEndpointIndex() returns kEmberInvalidEndpointIndex
+     * (0xFFFF) for an endpoint that is not yet configured and enabled
+     * (attribute-storage.cpp:923-935). Called before the endpoint exists,
+     * that is a wild write far past a 29-entry array. The command handlers
+     * are safer than this (they all go through the bounds-checked
+     * get*TransitionStateByIndex() getters), but the init is not, so the
+     * call must stay below the successful emberAfSetDynamicEndpoint(). */
     for (uint8_t i = 0; i < type->ep_type->clusterCount; i++) {
         if (type->ep_type->cluster[i].clusterId == LevelControl::Id) {
             emberAfLevelControlClusterServerInitCallback(d.ep_id);

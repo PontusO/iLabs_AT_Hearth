@@ -1145,10 +1145,17 @@
   /* Endpoint: 240, Cluster: Color Control (server) */\
   /*   AcceptedCommandList (index=99) */ \
   0x00000000 /* MoveToHue */, \
+  0x00000001 /* MoveHue */, \
+  0x00000002 /* StepHue */, \
   0x00000003 /* MoveToSaturation */, \
+  0x00000004 /* MoveSaturation */, \
+  0x00000005 /* StepSaturation */, \
   0x00000006 /* MoveToHueAndSaturation */, \
   0x00000007 /* MoveToColor */, \
+  0x00000008 /* MoveColor */, \
+  0x00000009 /* StepColor */, \
   0x0000000A /* MoveToColorTemperature */, \
+  0x00000047 /* StopMoveStep */, \
   0x0000004B /* MoveColorTemperature */, \
   0x0000004C /* StepColorTemperature */, \
   chip::kInvalidCommandId /* end of list */, \

@@ -18,18 +18,25 @@ Extended Color Light, `0x0301` Thermostat, `0x002B` Fan, `0x0202` Window
 Covering, `0x002C` Air Quality Sensor. Anything else answers
 `+MTERR:6` until the catalogue grows toward C6 parity.
 
-Batch 2's server-interaction surface is deliberately narrower than the
-cluster specs allow, and the boundaries are worth knowing before a bench
-session:
+Batch 2 takes on fewer cluster features than the specs allow, but never
+fewer commands than a feature it does take on requires. The boundaries are
+worth knowing before a bench session:
 
-- Color: `0x010C` advertises ColorControl feature CT alone and accepts
-  MoveToColorTemperature, MoveColorTemperature and StepColorTemperature;
-  `0x010D` advertises HS|XY|CT (the C6's own step beyond the standard
-  namespace, so a host library's HSV class has CurrentHue/CurrentSaturation)
-  and accepts MoveToHue, MoveToSaturation, MoveToHueAndSaturation,
-  MoveToColor and MoveToColorTemperature. Both boot in color-temperature
-  mode at 250 mireds, because StartUpColorTemperatureMireds is seeded
-  non-null exactly as it is on the C6.
+- Color: the command surface is **complete** for the features each type
+  advertises, since every ColorControl command is `mandatoryConform` on a
+  feature. `0x010C` advertises feature CT alone and accepts
+  MoveToColorTemperature, MoveColorTemperature, StepColorTemperature and
+  StopMoveStep. `0x010D` advertises HS|XY|CT (HS is `optionalConform`
+  inside the Extended Color Light device type, and taking it is the C6's
+  own step beyond the mandatory set, so a host library's HSV class has
+  CurrentHue and CurrentSaturation to write) and accepts all fourteen:
+  MoveToHue, MoveHue, StepHue, MoveToSaturation, MoveSaturation,
+  StepSaturation, MoveToHueAndSaturation, MoveToColor, MoveColor,
+  StepColor, MoveToColorTemperature, MoveColorTemperature,
+  StepColorTemperature and StopMoveStep. EnhancedHue and ColorLoop are the
+  two features not taken, so their five commands are correctly absent.
+  Both types boot in color-temperature mode at 250 mireds, because
+  StartUpColorTemperatureMireds is seeded non-null exactly as on the C6.
 - Thermostat: Heating|Cooling, SetpointRaiseLower, setpoints seeded 16 C /
   24 C. No Presets, schedules, Auto mode or occupancy: those need a
   delegate this firmware does not provide.
@@ -52,14 +59,18 @@ RAM is the batch's real cost and the number to watch. Measured 2026-08-29,
 both figures from a pristine `build/` on `ophelia_cpico/nrf54l15/cpuapp`
 (batch 2 at the branch tip, the baseline at `daddee0` in a scratch
 worktree): the app now uses 240,276 B of the 262,144 B available (91.7%,
-up from 222,052 B / 84.7% before the batch); flash 786,468 B, up from
-755,380 B. Roughly 7.5 KB of that is the dynamic
-endpoint slot arena growing with `kMaxSlots` and `kMaxClusters`
+up from 222,052 B / 84.7% before the batch); flash 789,488 B, up from
+755,380 B. Roughly 7.5 KB of the RAM growth is the dynamic endpoint slot
+arena growing with `kMaxSlots` and `kMaxClusters`
 (`port/mt_devtypes_zephyr.cpp` carries the arithmetic), and 7.7 KB is
 CHIP's own `ColorControlServer` per-endpoint transition state, sized for
 every dynamic endpoint this build can create. A third batch of this size
-does not fit as things stand; sizing the slot arena per device type
-instead of flat is the obvious reclamation.
+does not fit as things stand. Two reclamations, in order of payoff: sizing
+the slot arena per device type instead of flat (only the two color lights
+need all 38 slots; the median device type uses about 10), and lowering
+`MT_COMP_MAX_ENDPOINTS` from 28, which sizes both that arena and, through
+`CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT`, `ColorControlServer`'s own
+arrays.
 
 The BooleanState
 cluster (Contact/Rain/Water Freeze/Water Leak) is served over real Matter
