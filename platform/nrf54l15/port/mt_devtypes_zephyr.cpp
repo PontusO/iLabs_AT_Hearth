@@ -27,6 +27,9 @@
 extern "C" {
 #include "mt_composition.h"
 #include "mt_devtypes.h"
+/* For mt_air_quality_feature_mask(), the single accessor the AirQuality
+ * FeatureMap seed reads instead of transcribing the bits again. */
+#include "mt_matter.h"
 }
 #include "mt_dyn_store.h"
 
@@ -463,6 +466,437 @@ DECLARE_DYNAMIC_ENDPOINT(dimmablePlugInUnitEndpoint, dimmablePlugInUnitClusters)
 
 constexpr EmberAfDeviceType kDimmablePlugInUnitTypes[] = { { 0x010B, 5 } };
 
+/* ---- color temperature light (0x010C) and extended color light (0x010D)
+ *
+ * Catalogue batch 2 audit, ColorControl (0x0300). Three questions, three
+ * answers from this tree:
+ *
+ *   Code-driven? No. There is no CodegenIntegration.cpp under
+ *   src/app/clusters/color-control-server/, and adding the cluster to
+ *   hearth.zap emitted no case in zap-generated/CodeDrivenInitShutdown.cpp
+ *   (that file still lists exactly the thirteen clusters it did before this
+ *   batch, BooleanState last). So no registered ServerCluster object wins
+ *   ahead of ember, unlike BooleanState/Descriptor: reads and writes land in
+ *   the arena below.
+ *
+ *   AAI? No. MatterColorControlPluginServerInitCallback() is empty
+ *   (color-control-server.cpp:3345); nothing registers an
+ *   AttributeAccessInterface for this cluster.
+ *
+ *   ServerInit? YES, and it does observable work, so this cluster joins the
+ *   B388 call site in mt_devtype_create() below.
+ *   emberAfColorControlClusterServerInitCallback() (:3291) calls
+ *   startUpColorTempCommand(), which applies a non-null
+ *   StartUpColorTemperatureMireds to ColorTemperatureMireds and forces
+ *   ColorMode/EnhancedColorMode to kColorTemperatureMireds (:2577-2624).
+ *   With this batch's seeds the value it writes equals the seed already
+ *   there, so today it is a no-op; it is called anyway, because the moment
+ *   the StartUp seed changes (or a persisted value differs) a dynamic
+ *   endpoint that never ran it boots in the wrong color mode, and that is
+ *   exactly the class of bug B388 was.
+ *
+ *   Per-endpoint state arrays: safe. ColorControlServer's transition and
+ *   quiet-reporting arrays are sized kColorControlClusterServerMaxEndpointCount
+ *   = MATTER_DM_COLOR_CONTROL_CLUSTER_SERVER_ENDPOINT_COUNT +
+ *   CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT (color-control-server.h:293),
+ *   so dynamic endpoints are accounted for, and
+ *   emberAfGetClusterServerEndpointIndex() returns fixedCount + (epIndex -
+ *   FIXED_ENDPOINT_COUNT) for one (attribute-storage.cpp:957-962).
+ *
+ * The two device types differ only in which ColorControl attributes they
+ * declare and in three seeds (FeatureMap, ColorCapabilities), which is why
+ * s_seeds below grew an optional devtype qualifier rather than a second
+ * table. Everything else - OnOff, LevelControl, Identify, Descriptor - is
+ * the dimmable light's set verbatim.
+ *
+ * ColorTemperatureLight.xml mandates ColorControl feature CT only;
+ * ExtendedColorLight.xml mandates XY and CT with HS optional. The HS
+ * addition on 0x010D is the C6's deliberate step beyond the standard
+ * namespace (platform/esp32c6/main/mt_devtypes.cpp mk_extended_color_light()
+ * bolts hue_saturation onto the cluster after create() so the host library's
+ * HSV-driven class has CurrentHue/CurrentSaturation to write); mirrored
+ * here. EHUE and CL are set on neither: the cluster XML makes HS mandatory
+ * only when EHUE is set and EHUE mandatory only when CL is, so HS|XY|CT
+ * conforms with neither of them present.
+ *
+ * NumberOfPrimaries is here because it is mandatoryConform in
+ * ColorControl.xml with no feature gate (the ZAP conformance checker flagged
+ * its absence outright on the first regeneration); it is nullable and seeded
+ * null, since a co-processor has no idea how many physical primaries the
+ * host's lamp has. Options and CoupleColorTempToLevelMinMireds are likewise
+ * mandatory (the latter under CT) and not in the round's scope list; they
+ * are declared because the cluster XML binds them, the same OccupancySensing
+ * lesson as batch 1. RemainingTime is optional and stays out. */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(colorTempAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTemperatureMireds::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTempPhysicalMinMireds::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTempPhysicalMaxMireds::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CoupleColorTempToLevelMinMireds::Id, INT16U, 2,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::StartUpColorTemperatureMireds::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorMode::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::EnhancedColorMode::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorCapabilities::Id, BITMAP16, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::NumberOfPrimaries::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::Options::Id, BITMAP8, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+/* The extended light's list is colorTempAttrs plus the HS and XY quartet.
+ * Spelled out rather than composed: DECLARE_DYNAMIC_ATTRIBUTE_LIST_* builds a
+ * plain array and there is no concatenation macro. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(extendedColorAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CurrentHue::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CurrentSaturation::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CurrentX::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CurrentY::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTemperatureMireds::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTempPhysicalMinMireds::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTempPhysicalMaxMireds::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CoupleColorTempToLevelMinMireds::Id, INT16U, 2,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::StartUpColorTemperatureMireds::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorMode::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::EnhancedColorMode::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorCapabilities::Id, BITMAP16, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::NumberOfPrimaries::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::Options::Id, BITMAP8, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+/* Every one of these is handled inside color-control-server.cpp with no
+ * delegate anywhere in the path, so advertising them is honest: the server
+ * drives the transition itself and writes the result back through the
+ * external-storage callbacks at the bottom of this file. The CT light also
+ * gets Move/StepColorTemperature (the round's scope ruling admits them "if
+ * the server handles them without a delegate", and it does); the extended
+ * light's ruling names an exact five, so it gets exactly those. */
+constexpr CommandId kColorTempIncoming[] = { ColorControl::Commands::MoveToColorTemperature::Id,
+                                             ColorControl::Commands::MoveColorTemperature::Id,
+                                             ColorControl::Commands::StepColorTemperature::Id,
+                                             kInvalidCommandId };
+
+constexpr CommandId kExtendedColorIncoming[] = {
+    ColorControl::Commands::MoveToHue::Id,   ColorControl::Commands::MoveToSaturation::Id,
+    ColorControl::Commands::MoveToHueAndSaturation::Id, ColorControl::Commands::MoveToColor::Id,
+    ColorControl::Commands::MoveToColorTemperature::Id, kInvalidCommandId
+};
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(colorTemperatureLightClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ColorControl::Id, colorTempAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kColorTempIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(colorTemperatureLightEndpoint, colorTemperatureLightClusters);
+
+constexpr EmberAfDeviceType kColorTemperatureLightTypes[] = { { 0x010C, 4 } };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(extendedColorLightClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ColorControl::Id, extendedColorAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kExtendedColorIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(extendedColorLightEndpoint, extendedColorLightClusters);
+
+constexpr EmberAfDeviceType kExtendedColorLightTypes[] = { { 0x010D, 4 } };
+
+/* ---- thermostat (0x0301) ---------------------------------------------
+ *
+ * Catalogue batch 2 audit, Thermostat (0x0201). This is the one server in
+ * the batch that registers a wildcard AttributeAccessInterface, so it was
+ * audited attribute by attribute rather than by presence alone.
+ *
+ *   Code-driven? No: no CodegenIntegration.cpp under thermostat-server/, and
+ *   no case emitted in zap-generated/CodeDrivenInitShutdown.cpp.
+ *
+ *   AAI? Yes, and for EVERY endpoint: gThermostatAttrAccess is constructed
+ *   with Optional<EndpointId>::Missing() (thermostat-server.h:54) and
+ *   registered from MatterThermostatPluginServerInitCallback()
+ *   (thermostat-server.cpp:1415), which the generated MATTER_PLUGINS_INIT
+ *   now calls. It is nonetheless harmless here, because its Read() and
+ *   Write() switches fall through to "just read/write the attribute store"
+ *   for everything this file declares (:702-706 and :800-804 respectively):
+ *     - LocalTemperature is intercepted ONLY when the
+ *       LocalTemperatureNotExposed feature is set (:539-544). It is not.
+ *     - RemoteSensing, likewise gated on LTNE, is not declared here.
+ *     - Every delegate-backed case (PresetTypes, NumberOfPresets, Presets,
+ *       ActivePresetHandle, ScheduleTypes, Schedules, MaxThermostatSuggestions,
+ *       ThermostatSuggestions, CurrentThermostatSuggestion,
+ *       ThermostatSuggestionNotFollowingReason) belongs to the Presets /
+ *       MatterScheduleConfiguration / ThermostatSuggestions features, none of
+ *       which is in FeatureMap and none of whose attributes is declared, so
+ *       no read can reach a GetDelegate() call that would return nullptr.
+ *     - ClusterRevision is the one attribute the AAI answers itself, from
+ *       Thermostat::kRevision (:701). The seed below is that same 9, so the
+ *       arena and the fabric agree; a stale seed here would show up as
+ *       AT+MTATTR and a controller disagreeing about the revision.
+ *
+ *   ServerInit? emberAfThermostatClusterServerInitCallback()
+ *   (thermostat-server.cpp:866) is an empty TODO body. It caches nothing, so
+ *   this cluster does NOT join the B388 call site.
+ *
+ *   Delegate for the command? None. emberAfThermostatClusterSetpointRaiseLower
+ *   Callback() (:1176) works entirely off FeatureMap and the setpoint
+ *   attributes and never touches GetDelegate(); EnforceHeating/Cooling
+ *   SetpointLimits() fall back to spec defaults when the optional Abs*
+ *   limits are absent (:85-107), which is why they are not declared.
+ *
+ *   Deadband: MatterThermostatClusterServerAttributeChangedCallback() ->
+ *   EnsureDeadband() returns immediately unless the AutoMode feature is set
+ *   (:485-488), and it is function-array-bound so it never runs on a dynamic
+ *   endpoint anyway.
+ *
+ * Thermostat.xml makes HEAT and COOL a choice="a" min="1" group (at least
+ * one), so Heating|Cooling = 0x03 conforms and matches the C6, whose
+ * mk_thermostat() ORs exactly those two. Thermostat.xml (device type) marks
+ * SCH disallowConform; not set. SystemMode is seeded Off (0) rather than
+ * esp-matter's constructor default of Auto (1): Auto is only meaningful with
+ * the AutoMode feature, which this endpoint does not advertise. The setpoint
+ * seeds are 1600/2400 hundredths, the C6's own deliberate departure from
+ * esp-matter's 2000/2600 (cross-layer finding I1: the host library caches
+ * upstream's boot values, and a first write matching the cache is swallowed
+ * before it reaches the wire). */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(thermostatAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::LocalTemperature::Id, TEMPERATURE, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::OccupiedCoolingSetpoint::Id, TEMPERATURE, 2,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::OccupiedHeatingSetpoint::Id, TEMPERATURE, 2,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::MinHeatSetpointLimit::Id, TEMPERATURE, 2,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::MaxHeatSetpointLimit::Id, TEMPERATURE, 2,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::MinCoolSetpointLimit::Id, TEMPERATURE, 2,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::MaxCoolSetpointLimit::Id, TEMPERATURE, 2,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::ControlSequenceOfOperation::Id, ENUM8, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::SystemMode::Id, ENUM8, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kThermostatIncoming[] = { Thermostat::Commands::SetpointRaiseLower::Id,
+                                              kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(thermostatClusters)
+DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kThermostatIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(thermostatEndpoint, thermostatClusters);
+
+constexpr EmberAfDeviceType kThermostatTypes[] = { { 0x0301, 4 } };
+
+/* ---- fan (0x002B) -----------------------------------------------------
+ *
+ * Catalogue batch 2 audit, FanControl (0x0202). The simplest of the batch:
+ * no CodegenIntegration.cpp and no CodeDrivenInitShutdown case, no
+ * AttributeAccessInterface at all, and MatterFanControlPluginServerInit
+ * Callback() is an empty definition in CHIP's own src/app/util/util.cpp:112.
+ * There is no emberAfFanControlClusterServerInitCallback either, so nothing
+ * to join the B388 call site with. Plain ember external storage.
+ *
+ * FanControl.xml declares all six features optionalConform with no choice
+ * group, so FeatureMap 0 conforms - unlike OccupancySensing in batch 1,
+ * whose min-1 group was the lesson that sent us to the cluster XML in the
+ * first place. Every attribute declared below is mandatoryConform with no
+ * feature gate; SpeedMax/SpeedSetting/SpeedCurrent (MultiSpeed),
+ * RockSupport/RockSetting (Rocking), WindSupport/WindSetting (Wind) and
+ * AirflowDirection are each behind a feature this endpoint does not
+ * advertise, and Rocking/Wind/AirflowDirection/Step are delegate territory
+ * (fan-control-server.cpp's Step handler answers Failure with no delegate,
+ * :371-374), which is why the Step feature is deliberately absent and no
+ * incoming command is advertised.
+ *
+ * FanModeSequence is seeded OffLowMedHigh (0), NOT esp-matter's constructor
+ * default of OffLowMedHighAuto (2). FanControl.xml gates enum values 2, 3
+ * and 4 behind the AUT feature (choice "b") and values 0, 1 and 5 behind
+ * !AUT (choice "a"), so with FeatureMap 0 the esp-matter default is not a
+ * conformant value. Deliberate divergence from the C6, whose mk_fan() takes
+ * the default; noted rather than copied.
+ *
+ * Known limitation, documented rather than bridged: the server's own
+ * FanMode <-> PercentSetting coupling lives in MatterFanControlCluster
+ * ServerAttributeChangedCallback (:325-449), which is reached through the
+ * per-cluster functions array and therefore never runs on a dynamic
+ * endpoint (the same mechanism as the OccupancySensing init in batch 1).
+ * Both attributes read and write correctly over AT+MTATTR and over a
+ * controller's IM; what does not happen is FanMode=Off zeroing PercentSetting
+ * by itself. The host owns that coupling, which is the co-processor model
+ * everywhere else in this file. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(fanControlAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::FanMode::Id, ENUM8, 1,
+                          ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::FanModeSequence::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::PercentSetting::Id, PERCENT, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::PercentCurrent::Id, PERCENT, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(fanClusters)
+DECLARE_DYNAMIC_CLUSTER(FanControl::Id, fanControlAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(fanEndpoint, fanClusters);
+
+constexpr EmberAfDeviceType kFanTypes[] = { { 0x002B, 4 } };
+
+/* ---- window covering (0x0202) -----------------------------------------
+ *
+ * Catalogue batch 2 audit, WindowCovering (0x0102).
+ *
+ *   Code-driven? No: no CodegenIntegration.cpp, no CodeDrivenInitShutdown
+ *   case.
+ *
+ *   AAI? Yes, wildcard-endpoint (WindowCoverAttrAccess is constructed with
+ *   Optional<EndpointId>::Missing(), window-covering-server.h:79, registered
+ *   from MatterWindowCoveringPluginServerInitCallback(), :994). Its Read()
+ *   is four lines long (:118-128): it answers ClusterRevision from
+ *   WindowCovering::kRevision and falls through to the attribute store for
+ *   everything else. There is no Write() override at all. So the seed below
+ *   must carry that same revision (5), and every other attribute is plain
+ *   ember external storage.
+ *
+ *   ServerInit? There is no emberAfWindowCoveringClusterServerInitCallback
+ *   in this tree - the answer to the round's "the WC server caches
+ *   per-endpoint state?" question is no, it does not, and this cluster does
+ *   NOT join the B388 call site. The only per-endpoint state is the delegate
+ *   table, sized MATTER_DM_WINDOW_COVERING_CLUSTER_SERVER_ENDPOINT_COUNT +
+ *   CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT (:47-48), so a dynamic
+ *   endpoint index cannot run off it; GetDelegate() returns nullptr and
+ *   every command handler explicitly tolerates that.
+ *
+ *   Commands with no delegate: correct, not merely tolerated. UpOrOpen
+ *   (:637), DownOrClose (:687), StopMotion (:736) and GoToLiftPercentage
+ *   (:837) each set TargetPositionLiftPercent100ths in the arena first, then
+ *   log "WindowCovering has no delegate set" and still answer Success. That
+ *   is exactly the co-processor split we want: the fabric's target lands in
+ *   the arena, MatterPostAttributeChangeCallback turns it into a +MTATTR
+ *   URC, and the host moves the motor and writes CurrentPosition back.
+ *
+ * WindowCovering.xml makes LF and TL a choice="a" min="1" group; Lift plus
+ * PositionAwareLift (0x05) is the pair the percent100ths surface needs.
+ * Tilt is left out this round (the C6 enables all four bits; this is a
+ * narrower, honest subset rather than a parity bug - the tilt attributes and
+ * their two commands are simply not declared). ConfigStatus is seeded
+ * Operational|LiftPositionAware (0x09) rather than the C6's 0: the attribute
+ * has default="desc" in the XML, GetMotionLockStatus() (:585) reads it, and
+ * describing a position-aware, operational covering is the truthful answer
+ * for what this endpoint presents. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(windowCoveringAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::Type::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::ConfigStatus::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::OperationalStatus::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::TargetPositionLiftPercent100ths::Id,
+                              PERCENT100THS, 2, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::EndProductType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::CurrentPositionLiftPercent100ths::Id,
+                              PERCENT100THS, 2, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::Mode::Id, BITMAP8, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kWindowCoveringIncoming[] = { WindowCovering::Commands::UpOrOpen::Id,
+                                                  WindowCovering::Commands::DownOrClose::Id,
+                                                  WindowCovering::Commands::StopMotion::Id,
+                                                  WindowCovering::Commands::GoToLiftPercentage::Id,
+                                                  kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(windowCoveringClusters)
+DECLARE_DYNAMIC_CLUSTER(WindowCovering::Id, windowCoveringAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kWindowCoveringIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(windowCoveringEndpoint, windowCoveringClusters);
+
+constexpr EmberAfDeviceType kWindowCoveringTypes[] = { { 0x0202, 5 } };
+
+/* ---- air quality sensor (0x002C) --------------------------------------
+ *
+ * Catalogue batch 2 audit, AirQuality (0x005B). This is the "Instance that
+ * requires app construction" case from the round's lesson list, and it comes
+ * out clean:
+ *
+ *   Code-driven? No: no CodegenIntegration.cpp under air-quality-server/, no
+ *   CodeDrivenInitShutdown case.
+ *
+ *   Instance? air-quality-server.cpp defines an Instance whose Init()
+ *   registers it as an AttributeAccessInterface (:45-50), and if one existed
+ *   it WOULD answer AirQuality and FeatureMap ahead of ember. Nothing in
+ *   this firmware constructs one: the object file is linked, but
+ *   MatterAirQualityPluginServerInitCallback() is CHIP's own empty
+ *   definition in src/app/util/util.cpp:115, not something the cluster
+ *   provides, and this port has no equivalent of the C6's
+ *   mt_air_quality_register_all(). With no Instance registered, reads and
+ *   writes are plain ember external storage against the arena below - the
+ *   same shape as OccupancySensing in batch 1.
+ *
+ *   ServerInit? None exists; nothing joins the B388 call site.
+ *
+ * The four optional features (Fair, Moderate, VeryPoor, ExtremelyPoor) are
+ * all advertised, so the host library's seven-value AirQuality_t enum can
+ * never report a value this endpoint's feature map does not admit. The mask
+ * is NOT a literal in s_seeds: seed_slots() reads it from
+ * mt_air_quality_feature_mask() (mt_matter.h), the single accessor whose
+ * whole point is that the ember feature map and any future Instance's
+ * BitMask<Feature> cannot drift apart. On this platform that function was a
+ * stub returning 0 until this batch; it now lives in mt_matter_zephyr.cpp
+ * with the real bits. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(airQualityAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(AirQuality::Attributes::AirQuality::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(AirQuality::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(airQualitySensorClusters)
+DECLARE_DYNAMIC_CLUSTER(AirQuality::Id, airQualityAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(airQualitySensorEndpoint, airQualitySensorClusters);
+
+constexpr EmberAfDeviceType kAirQualitySensorTypes[] = { { 0x002C, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -489,6 +923,15 @@ const hearth_devtype s_registry[] = {
     { 0x0306, 0, &flowSensorEndpoint, Span<const EmberAfDeviceType>(kFlowSensorTypes) },
     { 0x010A, 0, &onOffPlugInUnitEndpoint, Span<const EmberAfDeviceType>(kOnOffPlugInUnitTypes) },
     { 0x010B, 0, &dimmablePlugInUnitEndpoint, Span<const EmberAfDeviceType>(kDimmablePlugInUnitTypes) },
+    /* Catalogue batch 2: the server-interaction types. */
+    { 0x010C, 0, &colorTemperatureLightEndpoint,
+      Span<const EmberAfDeviceType>(kColorTemperatureLightTypes) },
+    { 0x010D, 0, &extendedColorLightEndpoint,
+      Span<const EmberAfDeviceType>(kExtendedColorLightTypes) },
+    { 0x0301, 0, &thermostatEndpoint, Span<const EmberAfDeviceType>(kThermostatTypes) },
+    { 0x002B, 0, &fanEndpoint, Span<const EmberAfDeviceType>(kFanTypes) },
+    { 0x0202, 0, &windowCoveringEndpoint, Span<const EmberAfDeviceType>(kWindowCoveringTypes) },
+    { 0x002C, 0, &airQualitySensorEndpoint, Span<const EmberAfDeviceType>(kAirQualitySensorTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -515,8 +958,40 @@ struct attr_slot {
  * Catalogue batch 1 (nRF): the dimmable plug-in unit (0x010B) ties the
  * dimmable light at 20 slots (same OnOff + LevelControl + Identify set);
  * every other new devtype is narrower (the widest sensor is occupancy
- * sensing at 9). 22 still holds. */
-constexpr uint8_t kMaxSlots = 22;
+ * sensing at 9). 22 still holds.
+ *
+ * Catalogue batch 2: 22 no longer holds, and this is the moment the guard
+ * exists for. The extended color light (0x010D) is now the widest endpoint
+ * type at 36 slots: OnOff 6 declared + 1 auto ClusterRevision = 7,
+ * LevelControl 8 + 1 = 9, ColorControl 15 + 1 = 16, Identify 3 + 1 = 4,
+ * Descriptor skipped = 36. The color temperature light (0x010C) is 32 by the
+ * same arithmetic with an 11-attribute ColorControl; every other new devtype
+ * is far narrower (thermostat 15, window covering 13, fan 10, air quality
+ * sensor 7). Raised to 36 + 2 = 38, keeping the same two-slot headroom rule
+ * as before: raise it again when 38 is reached.
+ *
+ * RAM cost of the raise: attr_slot is 16 bytes (two 4-byte ids, a size byte
+ * and a 4-byte payload, padded to the id alignment), so 16 more slots per
+ * dynamic endpoint times MT_COMP_MAX_ENDPOINTS (28) is 7,168 bytes of .bss
+ * on top of the 22-slot arena's 9,856. This flat per-endpoint arena is the
+ * design's known cost: every endpoint pays for the widest device type
+ * whether it uses those slots or not. Sizing the arena per devtype would
+ * reclaim most of it and is the obvious next move if RAM gets tight. */
+constexpr uint8_t kMaxSlots = 38;
+
+/* The arithmetic in the comment above, checked by the compiler rather than
+ * trusted. Each DECLARE_DYNAMIC_ATTRIBUTE_LIST array already includes the
+ * ClusterRevision entry LIST_END() appends, and Descriptor contributes no
+ * slots (seed_slots() skips it), so this sum IS the extended color light's
+ * slot count. If a future round widens a cluster past the headroom, the
+ * build stops here instead of the endpoint silently losing its last
+ * attributes to seed_slots()' runtime guard. */
+static_assert(sizeof(onOffAttrs) / sizeof(onOffAttrs[0]) +
+                      sizeof(levelAttrs) / sizeof(levelAttrs[0]) +
+                      sizeof(extendedColorAttrs) / sizeof(extendedColorAttrs[0]) +
+                      sizeof(identifyAttrs) / sizeof(identifyAttrs[0]) <=
+                  kMaxSlots,
+              "the extended color light (0x010D) is the widest endpoint type; raise kMaxSlots");
 
 /* One data version per cluster; the widest endpoint type has exactly four.
  * emberAfSetDynamicEndpoint() returns CHIP_ERROR_NO_MEMORY outright if the
@@ -526,8 +1001,22 @@ constexpr uint8_t kMaxSlots = 22;
  * Catalogue batch 1: every new devtype has at most three server clusters
  * (measurement/boolean-state/occupancy + Identify + Descriptor, or OnOff +
  * LevelControl + Identify + Descriptor for the dimmable plug), so 4 still
- * holds. */
-constexpr uint8_t kMaxClusters = 4;
+ * holds.
+ *
+ * Catalogue batch 2: the two color lights carry five (OnOff + LevelControl +
+ * ColorControl + Identify + Descriptor), so 4 does not hold. Raised to
+ * 5 + 2 = 7, the same widest-plus-two headroom rule kMaxSlots uses, so the
+ * next cluster added to a device type does not have to touch this constant
+ * as well. RAM cost: DataVersion is 4 bytes, so three extra entries per
+ * dynamic endpoint times MT_COMP_MAX_ENDPOINTS (28) is 336 bytes of .bss. */
+constexpr uint8_t kMaxClusters = 7;
+
+/* Same idea as the kMaxSlots assertion: the color lights carry the longest
+ * cluster list, and mt_devtype_create()'s runtime check would otherwise be
+ * the first thing to notice a sixth or eighth cluster. */
+static_assert(sizeof(extendedColorLightClusters) / sizeof(extendedColorLightClusters[0]) <=
+                  kMaxClusters,
+              "the color lights carry the most clusters; raise kMaxClusters");
 
 struct dyn_endpoint {
     bool used;
@@ -568,12 +1057,26 @@ uint16_t s_next_ep_id = 1;
  * (attribute-storage-null-handling.h:77-81) is the type maximum for
  * unsigned and enum types (0xFF for a 1-byte one) and the type minimum for
  * signed ones (0x8000 for INT16S, stored little-endian as 00 80).
+ *
+ * Catalogue batch 2 added the trailing `devtype` qualifier. Until then one
+ * (cluster, attribute) pair had exactly one boot value across every device
+ * type carrying it, which stopped being true the moment two device types
+ * shared ColorControl with different feature sets: 0x010C advertises CT
+ * alone and 0x010D advertises HS|XY|CT, so FeatureMap and ColorCapabilities
+ * have to differ per device type while the other eleven ColorControl seeds
+ * stay shared. devtype 0 means "any device type" and is what every seed
+ * written before this batch means; a row naming a specific device type wins
+ * over the wildcard for that type (see seed_slots()). It is the LAST member
+ * on purpose: aggregate initialization zero-fills members a brace list does
+ * not reach, so every pre-existing row keeps its exact original text and
+ * gets devtype 0 for free.
  */
 struct attr_seed {
     ClusterId cluster;
     AttributeId attr;
     uint8_t size;
     uint8_t bytes[4];
+    uint32_t devtype;
 };
 
 const attr_seed s_seeds[] = {
@@ -680,6 +1183,120 @@ const attr_seed s_seeds[] = {
     /* On/Off and dimmable plug-in units reuse OnOff/LevelControl/Identify
      * verbatim (same FeatureMap and ClusterRevision seeds as the lights
      * above), so they need no seed rows of their own. */
+
+    /* ---- catalogue batch 2 ------------------------------------------- */
+
+    /* ColorControl, shared by both color lights. Values are esp-matter's own
+     * feature-config defaults (esp_matter_feature.h color_temperature:291-293,
+     * xy:306, hue_saturation:275), so a host library written against the C6
+     * sees the same boot state here.
+     *
+     * ColorMode and EnhancedColorMode are seeded kColorTemperatureMireds (2)
+     * rather than esp-matter's constructor default of 1: with
+     * StartUpColorTemperatureMireds seeded non-null, the cluster spec says
+     * the lamp powers up in color-temperature mode, and
+     * startUpColorTempCommand() writes exactly that pair at endpoint create
+     * (see the ColorControl audit note above). Seeding the same value means
+     * the arena is correct whether or not that init ever runs, and it is the
+     * only conformant answer for 0x010C, which supports no other mode.
+     *
+     * NumberOfPrimaries is null: this firmware drives no primaries of its
+     * own and has no way to know what the host's lamp has. */
+    { ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id, 2, { 0xFA, 0x00 } },
+    { ColorControl::Id, ColorControl::Attributes::ColorTempPhysicalMinMireds::Id, 2,
+      { 0x01, 0x00 } },
+    { ColorControl::Id, ColorControl::Attributes::ColorTempPhysicalMaxMireds::Id, 2,
+      { 0xFF, 0xFE } },
+    { ColorControl::Id, ColorControl::Attributes::CoupleColorTempToLevelMinMireds::Id, 2,
+      { 0x01, 0x00 } },
+    { ColorControl::Id, ColorControl::Attributes::StartUpColorTemperatureMireds::Id, 2,
+      { 0xFA, 0x00 } },
+    { ColorControl::Id, ColorControl::Attributes::ColorMode::Id, 1, { 0x02 } },
+    { ColorControl::Id, ColorControl::Attributes::EnhancedColorMode::Id, 1, { 0x02 } },
+    { ColorControl::Id, ColorControl::Attributes::NumberOfPrimaries::Id, 1, { 0xFF } }, /* null */
+    { ColorControl::Id, ColorControl::Attributes::CurrentX::Id, 2, { 0x6B, 0x61 } },
+    { ColorControl::Id, ColorControl::Attributes::CurrentY::Id, 2, { 0x7D, 0x60 } },
+    { ColorControl::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x07, 0x00 } },
+    /* CurrentHue, CurrentSaturation and Options are all zero at boot, which
+     * is the zero-fill, so they carry no row. */
+
+    /* The two per-device-type ColorControl seeds. ColorCapabilities must
+     * mirror FeatureMap bits 0..4 (ColorControl.xml constrains it to
+     * 0x001F), so the pairs move together: 0x010C is CT alone
+     * (Feature::kColorTemperature 0x10), 0x010D is HS|XY|CT (0x1|0x8|0x10 =
+     * 0x19). Bit values from ColorControl/Enums.h:148-155 and the matching
+     * ColorCapabilitiesBitmap. */
+    { ColorControl::Id, ColorControl::Attributes::FeatureMap::Id, 4, { 0x10, 0x00, 0x00, 0x00 },
+      0x010C },
+    { ColorControl::Id, ColorControl::Attributes::ColorCapabilities::Id, 2, { 0x10, 0x00 }, 0x010C },
+    { ColorControl::Id, ColorControl::Attributes::FeatureMap::Id, 4, { 0x19, 0x00, 0x00, 0x00 },
+      0x010D },
+    { ColorControl::Id, ColorControl::Attributes::ColorCapabilities::Id, 2, { 0x19, 0x00 }, 0x010D },
+
+    /* Thermostat. LocalTemperature is a `temperature` (int16s), so its null
+     * sentinel is the signed-type minimum, the same 00 80 the temperature
+     * and pressure sensors use. Setpoints are hundredths of a degree:
+     * 1600 = 16 C, 2400 = 24 C (the C6's cross-layer I1 values, not
+     * esp-matter's 2000/2600), limits are the spec defaults 700/3000 heating
+     * and 1600/3200 cooling. ControlSequenceOfOperation 4 is
+     * CoolingAndHeating, matching FeatureMap Heating|Cooling; SystemMode 0
+     * is Off, spelled out because esp-matter's default is 1 (Auto) and Auto
+     * is not a mode this endpoint can honour without the AutoMode feature.
+     * Revision 9 is Thermostat/Metadata.h kRevision, which is also what the
+     * cluster's own AttributeAccessInterface answers for ClusterRevision. */
+    { Thermostat::Id, Thermostat::Attributes::LocalTemperature::Id, 2, { 0x00, 0x80 } }, /* null */
+    { Thermostat::Id, Thermostat::Attributes::OccupiedHeatingSetpoint::Id, 2, { 0x40, 0x06 } },
+    { Thermostat::Id, Thermostat::Attributes::OccupiedCoolingSetpoint::Id, 2, { 0x60, 0x09 } },
+    { Thermostat::Id, Thermostat::Attributes::MinHeatSetpointLimit::Id, 2, { 0xBC, 0x02 } },
+    { Thermostat::Id, Thermostat::Attributes::MaxHeatSetpointLimit::Id, 2, { 0xB8, 0x0B } },
+    { Thermostat::Id, Thermostat::Attributes::MinCoolSetpointLimit::Id, 2, { 0x40, 0x06 } },
+    { Thermostat::Id, Thermostat::Attributes::MaxCoolSetpointLimit::Id, 2, { 0x80, 0x0C } },
+    { Thermostat::Id, Thermostat::Attributes::ControlSequenceOfOperation::Id, 1, { 0x04 } },
+    { Thermostat::Id, Thermostat::Attributes::SystemMode::Id, 1, { 0x00 } },
+    { Thermostat::Id, Thermostat::Attributes::FeatureMap::Id, 4, { 0x03, 0x00, 0x00, 0x00 } },
+    { Thermostat::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x09, 0x00 } },
+
+    /* FanControl. FeatureMap 0 conforms (FanControl.xml declares every
+     * feature optionalConform with no choice group), and FanModeSequence
+     * must therefore be one of the !AUT values 0, 1 or 5:
+     * kOffLowMedHigh (0) is the widest of them. FanMode Off, PercentSetting
+     * and PercentCurrent 0 are the zero-fill, spelled out because they are
+     * the attributes this cluster exists for. Revision 5 is
+     * FanControl/Metadata.h kRevision. */
+    { FanControl::Id, FanControl::Attributes::FanMode::Id, 1, { 0x00 } },
+    { FanControl::Id, FanControl::Attributes::FanModeSequence::Id, 1, { 0x00 } },
+    { FanControl::Id, FanControl::Attributes::PercentSetting::Id, 1, { 0x00 } },
+    { FanControl::Id, FanControl::Attributes::PercentCurrent::Id, 1, { 0x00 } },
+    { FanControl::Id, FanControl::Attributes::FeatureMap::Id, 4, { 0x00, 0x00, 0x00, 0x00 } },
+    { FanControl::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x05, 0x00 } },
+
+    /* WindowCovering. Target and current lift positions are percent100ths
+     * (uint16), so their null sentinel is the type maximum 0xFFFF, not the
+     * signed minimum: nothing is known about the covering's position until
+     * the host says so. ConfigStatus 0x09 is Operational|LiftPositionAware
+     * (ConfigStatus bitmap, WindowCovering/Enums.h:88-97). FeatureMap 0x05 is
+     * Lift|PositionAwareLift. Revision 5 is WindowCovering/Metadata.h
+     * kRevision, which is also what the cluster's AttributeAccessInterface
+     * answers for ClusterRevision (window-covering-server.cpp:122-123).
+     * Type, OperationalStatus, EndProductType and Mode are all zero at boot
+     * (roller shade, idle, no mode bits), which is the zero-fill. */
+    { WindowCovering::Id, WindowCovering::Attributes::ConfigStatus::Id, 1, { 0x09 } },
+    { WindowCovering::Id, WindowCovering::Attributes::TargetPositionLiftPercent100ths::Id, 2,
+      { 0xFF, 0xFF } },
+    { WindowCovering::Id, WindowCovering::Attributes::CurrentPositionLiftPercent100ths::Id, 2,
+      { 0xFF, 0xFF } },
+    { WindowCovering::Id, WindowCovering::Attributes::FeatureMap::Id, 4,
+      { 0x05, 0x00, 0x00, 0x00 } },
+    { WindowCovering::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x05, 0x00 } },
+
+    /* AirQuality. The AirQuality attribute is kUnknown (0) at boot, the
+     * zero-fill. FeatureMap deliberately has NO row here: seed_slots() fills
+     * it from mt_air_quality_feature_mask() instead, so this file and any
+     * future server Instance read the enabled feature set from one accessor
+     * rather than two transcribed literals (mt_matter.h's contract for that
+     * function). Revision 1 is AirQuality/Metadata.h kRevision. */
+    { AirQuality::Id, AirQuality::Attributes::AirQuality::Id, 1, { 0x00 } },
+    { AirQuality::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 void seed_slots(dyn_endpoint *d)
@@ -714,11 +1331,43 @@ void seed_slots(dyn_endpoint *d)
             s.attr = md.attributeId;
             s.size = (uint8_t)md.size;
             memset(s.data, 0, sizeof(s.data));
+
+            /* AirQuality's FeatureMap is the one boot value that is not a
+             * literal in s_seeds. mt_matter.h makes
+             * mt_air_quality_feature_mask() the single source of truth for
+             * which of Fair/Moderate/VeryPoor/ExtremelyPoor are enabled,
+             * precisely so an ember feature map and a server Instance's
+             * BitMask<Feature> cannot be edited apart; honour that here
+             * rather than transcribing the bits a second time. Written
+             * little-endian, the same convention as every seed row. */
+            if (cl.clusterId == AirQuality::Id &&
+                md.attributeId == Globals::Attributes::FeatureMap::Id) {
+                uint32_t mask = mt_air_quality_feature_mask();
+                for (uint8_t b = 0; b < s.size && b < sizeof(s.data); b++) {
+                    s.data[b] = (uint8_t)(mask >> (8 * b));
+                }
+                continue;
+            }
+
+            /* A seed row naming this device type wins over the wildcard row
+             * (devtype 0) for the same cluster and attribute; the loop
+             * handles either order in the table, since it only stops early
+             * on an exact match. */
+            const attr_seed *chosen = nullptr;
             for (auto &seed : s_seeds) {
-                if (seed.cluster == cl.clusterId && seed.attr == md.attributeId) {
-                    memcpy(s.data, seed.bytes, (seed.size < s.size) ? seed.size : s.size);
+                if (seed.cluster != cl.clusterId || seed.attr != md.attributeId) {
+                    continue;
+                }
+                if (seed.devtype == d->type->id) {
+                    chosen = &seed;
                     break;
                 }
+                if (seed.devtype == 0 && chosen == nullptr) {
+                    chosen = &seed;
+                }
+            }
+            if (chosen != nullptr) {
+                memcpy(s.data, chosen->bytes, (chosen->size < s.size) ? chosen->size : s.size);
             }
         }
     }
@@ -868,11 +1517,29 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * uninitialized, the cache reads 0/0 and every level transition clamps
      * to 0 (B388). Call it by hand for any devtype carrying LevelControl.
      * A future cluster with its own cached-state ServerInit joins this call
-     * site. */
+     * site.
+     *
+     * Catalogue batch 2: ColorControl joined it. Its ServerInit
+     * (color-control-server.cpp:3291) calls startUpColorTempCommand(), which
+     * applies a non-null StartUpColorTemperatureMireds to
+     * ColorTemperatureMireds and forces ColorMode/EnhancedColorMode to
+     * kColorTemperatureMireds. That is not a cache like LevelControl's, but
+     * it is per-endpoint boot state the endpoint would otherwise never get,
+     * which is the same class of defect. With this batch's seeds it writes
+     * the value already there; it is called so that stays true when the
+     * seeds change. Everything else in this batch was audited and has no
+     * ServerInit worth running: Thermostat's is an empty TODO body
+     * (thermostat-server.cpp:866), and FanControl, WindowCovering and
+     * AirQuality define none at all.
+     *
+     * The loop no longer stops at the first match: the color lights carry
+     * BOTH LevelControl and ColorControl, and breaking after LevelControl
+     * would silently skip the second init. */
     for (uint8_t i = 0; i < type->ep_type->clusterCount; i++) {
         if (type->ep_type->cluster[i].clusterId == LevelControl::Id) {
             emberAfLevelControlClusterServerInitCallback(d.ep_id);
-            break;
+        } else if (type->ep_type->cluster[i].clusterId == ColorControl::Id) {
+            emberAfColorControlClusterServerInitCallback(d.ep_id);
         }
     }
 

@@ -8,6 +8,7 @@
 #include <app/ConcreteAttributePath.h>
 #include <app/clusters/boolean-state-server/CodegenIntegration.h>
 #include <app/server/Server.h>
+#include <clusters/AirQuality/Enums.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/util/attribute-storage.h>
 #include <app/util/attribute-table.h>
@@ -675,4 +676,33 @@ void MatterPostAttributeChangeCallback(const chip::app::ConcreteAttributePath &p
                  (long long)sv);
     }
     mt_at_urc(line);
+}
+
+/*
+ * Catalogue batch 2, the air quality sensor (0x002C). Until this batch this
+ * function was a stub in mt_matter_stub.c returning 0, because no device
+ * type on this platform carried the AirQuality cluster.
+ *
+ * mt_matter.h's contract for it: one accessor, two callers, so the ember
+ * feature map and a server Instance's BitMask<Feature> cannot be edited
+ * apart. On the C6 those two callers are mk_air_quality_sensor() and
+ * mt_air_quality_register_all(). On this platform only the first exists:
+ * mt_devtypes_zephyr.cpp's seed_slots() fills the AirQuality FeatureMap slot
+ * from this value, and nothing constructs an AirQuality::Instance (see the
+ * audit note on airQualityAttrs for why - with none registered, ember serves
+ * the arena). If a later round adds one, it reads its BitMask from here and
+ * the two agree by construction.
+ *
+ * All four optional features are enabled. The base cluster only mandates
+ * Unknown/Good/Poor; Fair, Moderate, VeryPoor and ExtremelyPoor are each
+ * behind their own bit, and the host library's AirQuality_t publishes all
+ * seven SDK values, so anything less would let the library report a value
+ * this endpoint's feature map does not admit. Values are the CHIP enum's own
+ * (clusters/AirQuality/Enums.h:49-55), never transcribed literals.
+ */
+extern "C" uint32_t mt_air_quality_feature_mask(void)
+{
+    using chip::app::Clusters::AirQuality::Feature;
+    return chip::to_underlying(Feature::kFair) | chip::to_underlying(Feature::kModerate) |
+           chip::to_underlying(Feature::kVeryPoor) | chip::to_underlying(Feature::kExtremelyPoor);
 }

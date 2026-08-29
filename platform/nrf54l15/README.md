@@ -12,8 +12,56 @@ Dimmable Light, `0x0302` Temperature Sensor, `0x0015` Contact Sensor,
 `0x0107` Occupancy Sensor, `0x0307` Humidity Sensor, `0x0305` Pressure
 Sensor, `0x0044` Rain Sensor, `0x0041` Water Freeze Detector, `0x0043`
 Water Leak Detector, `0x0106` Light Sensor, `0x0306` Flow Sensor, `0x010A`
-On/Off Plug-in Unit, `0x010B` Dimmable Plug-in Unit; anything else answers
-`+MTERR:6` until the catalogue grows toward C6 parity. The BooleanState
+On/Off Plug-in Unit, `0x010B` Dimmable Plug-in Unit; and catalogue batch 2
+(the server-interaction types): `0x010C` Color Temperature Light, `0x010D`
+Extended Color Light, `0x0301` Thermostat, `0x002B` Fan, `0x0202` Window
+Covering, `0x002C` Air Quality Sensor. Anything else answers
+`+MTERR:6` until the catalogue grows toward C6 parity.
+
+Batch 2's server-interaction surface is deliberately narrower than the
+cluster specs allow, and the boundaries are worth knowing before a bench
+session:
+
+- Color: `0x010C` advertises ColorControl feature CT alone and accepts
+  MoveToColorTemperature, MoveColorTemperature and StepColorTemperature;
+  `0x010D` advertises HS|XY|CT (the C6's own step beyond the standard
+  namespace, so a host library's HSV class has CurrentHue/CurrentSaturation)
+  and accepts MoveToHue, MoveToSaturation, MoveToHueAndSaturation,
+  MoveToColor and MoveToColorTemperature. Both boot in color-temperature
+  mode at 250 mireds, because StartUpColorTemperatureMireds is seeded
+  non-null exactly as it is on the C6.
+- Thermostat: Heating|Cooling, SetpointRaiseLower, setpoints seeded 16 C /
+  24 C. No Presets, schedules, Auto mode or occupancy: those need a
+  delegate this firmware does not provide.
+- Fan: FanMode, FanModeSequence, PercentSetting and PercentCurrent only,
+  FeatureMap 0. No Step/Rock/Wind/AirflowDirection (delegate territory).
+  The server's own FanMode-to-PercentSetting coupling does not run on a
+  dynamic endpoint, so the host owns it; both attributes read and write
+  correctly over AT and over a controller's IM.
+- Window covering: Lift|PositionAwareLift, and UpOrOpen / DownOrClose /
+  StopMotion / GoToLiftPercentage all land the fabric's request in
+  TargetPositionLiftPercent100ths, emit the `+MTATTR` URC and answer
+  Success. The host moves the motor and writes CurrentPosition back. No
+  tilt this round.
+- Air quality: the AirQuality attribute with all four optional quality
+  levels advertised (Fair, Moderate, VeryPoor, ExtremelyPoor), so a host
+  library's seven-value enum can never report a level the endpoint's
+  feature map rejects.
+
+RAM is the batch's real cost and the number to watch. Measured 2026-08-29,
+both figures from a pristine `build/` on `ophelia_cpico/nrf54l15/cpuapp`
+(batch 2 at the branch tip, the baseline at `daddee0` in a scratch
+worktree): the app now uses 240,276 B of the 262,144 B available (91.7%,
+up from 222,052 B / 84.7% before the batch); flash 786,468 B, up from
+755,380 B. Roughly 7.5 KB of that is the dynamic
+endpoint slot arena growing with `kMaxSlots` and `kMaxClusters`
+(`port/mt_devtypes_zephyr.cpp` carries the arithmetic), and 7.7 KB is
+CHIP's own `ColorControlServer` per-endpoint transition state, sized for
+every dynamic endpoint this build can create. A third batch of this size
+does not fit as things stand; sizing the slot arena per device type
+instead of flat is the obvious reclamation.
+
+The BooleanState
 cluster (Contact/Rain/Water Freeze/Water Leak) is served over real Matter
 reads by a CHIP-registered `BooleanStateCluster` object rather than this
 build's external-storage arena directly; `MatterPostAttributeChangeCallback`

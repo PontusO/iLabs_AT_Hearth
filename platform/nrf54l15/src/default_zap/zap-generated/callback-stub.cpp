@@ -33,17 +33,26 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::AdministratorCommissioning::Id:
     emberAfAdministratorCommissioningClusterInitCallback(endpoint);
     break;
+  case app::Clusters::AirQuality::Id:
+    emberAfAirQualityClusterInitCallback(endpoint);
+    break;
   case app::Clusters::BasicInformation::Id:
     emberAfBasicInformationClusterInitCallback(endpoint);
     break;
   case app::Clusters::BooleanState::Id:
     emberAfBooleanStateClusterInitCallback(endpoint);
     break;
+  case app::Clusters::ColorControl::Id:
+    emberAfColorControlClusterInitCallback(endpoint);
+    break;
   case app::Clusters::Descriptor::Id:
     emberAfDescriptorClusterInitCallback(endpoint);
     break;
   case app::Clusters::DiagnosticLogs::Id:
     emberAfDiagnosticLogsClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::FanControl::Id:
+    emberAfFanControlClusterInitCallback(endpoint);
     break;
   case app::Clusters::FlowMeasurement::Id:
     emberAfFlowMeasurementClusterInitCallback(endpoint);
@@ -99,11 +108,17 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::TemperatureMeasurement::Id:
     emberAfTemperatureMeasurementClusterInitCallback(endpoint);
     break;
+  case app::Clusters::Thermostat::Id:
+    emberAfThermostatClusterInitCallback(endpoint);
+    break;
   case app::Clusters::ThreadNetworkDiagnostics::Id:
     emberAfThreadNetworkDiagnosticsClusterInitCallback(endpoint);
     break;
   case app::Clusters::WiFiNetworkDiagnostics::Id:
     emberAfWiFiNetworkDiagnosticsClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::WindowCovering::Id:
+    emberAfWindowCoveringClusterInitCallback(endpoint);
     break;
   default:
     // Unrecognized cluster ID
@@ -122,6 +137,11 @@ emberAfAdministratorCommissioningClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfAirQualityClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfBasicInformationClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
@@ -132,12 +152,22 @@ emberAfBooleanStateClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfColorControlClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfDescriptorClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
 void __attribute__((weak))
 emberAfDiagnosticLogsClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfFanControlClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
@@ -232,12 +262,22 @@ emberAfTemperatureMeasurementClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfThermostatClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfThreadNetworkDiagnosticsClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
 void __attribute__((weak))
 emberAfWiFiNetworkDiagnosticsClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfWindowCoveringClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

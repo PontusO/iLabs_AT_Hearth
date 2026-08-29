@@ -37,6 +37,105 @@ namespace app {
 
 namespace Clusters {
 
+namespace ColorControl {
+
+Protocols::InteractionModel::Status
+DispatchServerCommand(CommandHandler *apCommandObj,
+                      const ConcreteCommandPath &aCommandPath,
+                      TLV::TLVReader &aDataTlv) {
+  CHIP_ERROR TLVError = CHIP_NO_ERROR;
+  bool wasHandled = false;
+  {
+    switch (aCommandPath.mCommandId) {
+    case Commands::MoveToHue::Id: {
+      Commands::MoveToHue::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfColorControlClusterMoveToHueCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    case Commands::MoveToSaturation::Id: {
+      Commands::MoveToSaturation::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfColorControlClusterMoveToSaturationCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    case Commands::MoveToHueAndSaturation::Id: {
+      Commands::MoveToHueAndSaturation::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfColorControlClusterMoveToHueAndSaturationCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    case Commands::MoveToColor::Id: {
+      Commands::MoveToColor::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfColorControlClusterMoveToColorCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    case Commands::MoveToColorTemperature::Id: {
+      Commands::MoveToColorTemperature::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfColorControlClusterMoveToColorTemperatureCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    case Commands::MoveColorTemperature::Id: {
+      Commands::MoveColorTemperature::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfColorControlClusterMoveColorTemperatureCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    case Commands::StepColorTemperature::Id: {
+      Commands::StepColorTemperature::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfColorControlClusterStepColorTemperatureCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    default: {
+      // Unrecognized command ID, error status will apply.
+      ChipLogError(Zcl,
+                   "Unknown command " ChipLogFormatMEI
+                   " for cluster " ChipLogFormatMEI,
+                   ChipLogValueMEI(aCommandPath.mCommandId),
+                   ChipLogValueMEI(aCommandPath.mClusterId));
+      return Protocols::InteractionModel::Status::UnsupportedCommand;
+    }
+    }
+  }
+
+  if (CHIP_NO_ERROR != TLVError || !wasHandled) {
+    ChipLogProgress(Zcl,
+                    "Failed to dispatch command, TLVError=%" CHIP_ERROR_FORMAT,
+                    TLVError.Format());
+    return Protocols::InteractionModel::Status::InvalidCommand;
+  }
+
+  // We use success as a marker that no special handling is required
+  // This is to avoid having a std::optional which uses slightly more code.
+  return Protocols::InteractionModel::Status::Success;
+}
+
+} // namespace ColorControl
+
 namespace Groups {
 
 Protocols::InteractionModel::Status
@@ -377,6 +476,51 @@ DispatchServerCommand(CommandHandler *apCommandObj,
 
 } // namespace OnOff
 
+namespace Thermostat {
+
+Protocols::InteractionModel::Status
+DispatchServerCommand(CommandHandler *apCommandObj,
+                      const ConcreteCommandPath &aCommandPath,
+                      TLV::TLVReader &aDataTlv) {
+  CHIP_ERROR TLVError = CHIP_NO_ERROR;
+  bool wasHandled = false;
+  {
+    switch (aCommandPath.mCommandId) {
+    case Commands::SetpointRaiseLower::Id: {
+      Commands::SetpointRaiseLower::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfThermostatClusterSetpointRaiseLowerCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    default: {
+      // Unrecognized command ID, error status will apply.
+      ChipLogError(Zcl,
+                   "Unknown command " ChipLogFormatMEI
+                   " for cluster " ChipLogFormatMEI,
+                   ChipLogValueMEI(aCommandPath.mCommandId),
+                   ChipLogValueMEI(aCommandPath.mClusterId));
+      return Protocols::InteractionModel::Status::UnsupportedCommand;
+    }
+    }
+  }
+
+  if (CHIP_NO_ERROR != TLVError || !wasHandled) {
+    ChipLogProgress(Zcl,
+                    "Failed to dispatch command, TLVError=%" CHIP_ERROR_FORMAT,
+                    TLVError.Format());
+    return Protocols::InteractionModel::Status::InvalidCommand;
+  }
+
+  // We use success as a marker that no special handling is required
+  // This is to avoid having a std::optional which uses slightly more code.
+  return Protocols::InteractionModel::Status::Success;
+}
+
+} // namespace Thermostat
+
 namespace ThreadNetworkDiagnostics {
 
 Protocols::InteractionModel::Status
@@ -422,6 +566,78 @@ DispatchServerCommand(CommandHandler *apCommandObj,
 
 } // namespace ThreadNetworkDiagnostics
 
+namespace WindowCovering {
+
+Protocols::InteractionModel::Status
+DispatchServerCommand(CommandHandler *apCommandObj,
+                      const ConcreteCommandPath &aCommandPath,
+                      TLV::TLVReader &aDataTlv) {
+  CHIP_ERROR TLVError = CHIP_NO_ERROR;
+  bool wasHandled = false;
+  {
+    switch (aCommandPath.mCommandId) {
+    case Commands::UpOrOpen::Id: {
+      Commands::UpOrOpen::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfWindowCoveringClusterUpOrOpenCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    case Commands::DownOrClose::Id: {
+      Commands::DownOrClose::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfWindowCoveringClusterDownOrCloseCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    case Commands::StopMotion::Id: {
+      Commands::StopMotion::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfWindowCoveringClusterStopMotionCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    case Commands::GoToLiftPercentage::Id: {
+      Commands::GoToLiftPercentage::DecodableType commandData;
+      TLVError = DataModel::Decode(aDataTlv, commandData);
+      if (TLVError == CHIP_NO_ERROR) {
+        wasHandled = emberAfWindowCoveringClusterGoToLiftPercentageCallback(
+            apCommandObj, aCommandPath, commandData);
+      }
+      break;
+    }
+    default: {
+      // Unrecognized command ID, error status will apply.
+      ChipLogError(Zcl,
+                   "Unknown command " ChipLogFormatMEI
+                   " for cluster " ChipLogFormatMEI,
+                   ChipLogValueMEI(aCommandPath.mCommandId),
+                   ChipLogValueMEI(aCommandPath.mClusterId));
+      return Protocols::InteractionModel::Status::UnsupportedCommand;
+    }
+    }
+  }
+
+  if (CHIP_NO_ERROR != TLVError || !wasHandled) {
+    ChipLogProgress(Zcl,
+                    "Failed to dispatch command, TLVError=%" CHIP_ERROR_FORMAT,
+                    TLVError.Format());
+    return Protocols::InteractionModel::Status::InvalidCommand;
+  }
+
+  // We use success as a marker that no special handling is required
+  // This is to avoid having a std::optional which uses slightly more code.
+  return Protocols::InteractionModel::Status::Success;
+}
+
+} // namespace WindowCovering
+
 } // namespace Clusters
 
 void DispatchSingleClusterCommand(const ConcreteCommandPath &aCommandPath,
@@ -431,6 +647,10 @@ void DispatchSingleClusterCommand(const ConcreteCommandPath &aCommandPath,
       Protocols::InteractionModel::Status::Success;
 
   switch (aCommandPath.mClusterId) {
+  case Clusters::ColorControl::Id:
+    errorStatus = Clusters::ColorControl::DispatchServerCommand(
+        apCommandObj, aCommandPath, aReader);
+    break;
   case Clusters::Groups::Id:
     errorStatus = Clusters::Groups::DispatchServerCommand(
         apCommandObj, aCommandPath, aReader);
@@ -447,8 +667,16 @@ void DispatchSingleClusterCommand(const ConcreteCommandPath &aCommandPath,
     errorStatus = Clusters::OnOff::DispatchServerCommand(apCommandObj,
                                                          aCommandPath, aReader);
     break;
+  case Clusters::Thermostat::Id:
+    errorStatus = Clusters::Thermostat::DispatchServerCommand(
+        apCommandObj, aCommandPath, aReader);
+    break;
   case Clusters::ThreadNetworkDiagnostics::Id:
     errorStatus = Clusters::ThreadNetworkDiagnostics::DispatchServerCommand(
+        apCommandObj, aCommandPath, aReader);
+    break;
+  case Clusters::WindowCovering::Id:
+    errorStatus = Clusters::WindowCovering::DispatchServerCommand(
         apCommandObj, aCommandPath, aReader);
     break;
   default:
