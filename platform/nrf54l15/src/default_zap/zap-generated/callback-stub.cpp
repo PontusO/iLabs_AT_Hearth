@@ -51,6 +51,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::DiagnosticLogs::Id:
     emberAfDiagnosticLogsClusterInitCallback(endpoint);
     break;
+  case app::Clusters::DoorLock::Id:
+    emberAfDoorLockClusterInitCallback(endpoint);
+    break;
   case app::Clusters::FanControl::Id:
     emberAfFanControlClusterInitCallback(endpoint);
     break;
@@ -114,6 +117,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::ThreadNetworkDiagnostics::Id:
     emberAfThreadNetworkDiagnosticsClusterInitCallback(endpoint);
     break;
+  case app::Clusters::ValveConfigurationAndControl::Id:
+    emberAfValveConfigurationAndControlClusterInitCallback(endpoint);
+    break;
   case app::Clusters::WiFiNetworkDiagnostics::Id:
     emberAfWiFiNetworkDiagnosticsClusterInitCallback(endpoint);
     break;
@@ -163,6 +169,11 @@ emberAfDescriptorClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfDiagnosticLogsClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfDoorLockClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
@@ -268,6 +279,11 @@ emberAfThermostatClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfThreadNetworkDiagnosticsClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfValveConfigurationAndControlClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

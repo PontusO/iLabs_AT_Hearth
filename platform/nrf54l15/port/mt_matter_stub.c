@@ -39,6 +39,14 @@
  * (emberAfReadAttribute/emberAfWriteAttribute), alongside the strong
  * MatterPostAttributeChangeCallback() override that turns a changed
  * attribute into a +MTATTR URC.
+ *
+ * Catalogue batch 3 took the door lock and water valve slice out of here
+ * for the same reason: mt_matter_lock_state_set, mt_matter_lock_source_
+ * manual, mt_matter_lock_source_max, mt_matter_valve_delegate_alloc,
+ * mt_matter_valve_delegate_set_endpoint and mt_matter_valve_state_set are
+ * real in mt_matter_zephyr.cpp now, against DoorLockServer and the
+ * ValveConfigurationAndControl delegate, next to the +MTCMD command
+ * forwards those two device types need.
  */
 
 #include <stddef.h>
@@ -57,33 +65,6 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
     (void)ep;
     (void)labels;
     (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
-}
-
-int mt_matter_lock_state_set(uint16_t ep, uint8_t state, uint8_t source)
-{
-    (void)ep;
-    (void)state;
-    (void)source;
-    return MT_ATTR_ERR_ENDPOINT;
-}
-
-uint8_t mt_matter_lock_source_manual(void) { return 0; }
-uint8_t mt_matter_lock_source_max(void) { return 0; }
-
-void *mt_matter_valve_delegate_alloc(void) { return NULL; }
-
-void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep)
-{
-    (void)delegate;
-    (void)ep;
-}
-
-int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
-{
-    (void)ep;
-    (void)state;
-    (void)level;
     return MT_ATTR_ERR_ENDPOINT;
 }
 

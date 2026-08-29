@@ -15,8 +15,10 @@ Water Leak Detector, `0x0106` Light Sensor, `0x0306` Flow Sensor, `0x010A`
 On/Off Plug-in Unit, `0x010B` Dimmable Plug-in Unit; and catalogue batch 2
 (the server-interaction types): `0x010C` Color Temperature Light, `0x010D`
 Extended Color Light, `0x0301` Thermostat, `0x002B` Fan, `0x0202` Window
-Covering, `0x002C` Air Quality Sensor. Anything else answers
-`+MTERR:6` until the catalogue grows toward C6 parity.
+Covering, `0x002C` Air Quality Sensor; and catalogue batch 3 (the
+command-verdict types): `0x000A` Door Lock, `0x0042` Water Valve.
+**Twenty-two device types.** Anything else answers `+MTERR:6` until the
+catalogue grows toward C6 parity.
 
 Batch 2 takes on fewer cluster features than the specs allow, but never
 fewer commands than a feature it does take on requires. The boundaries are
@@ -95,6 +97,82 @@ mt_devtypes_zephyr.cpp` now invokes it by hand at endpoint create time).
 Direct AT+MTATTR writes to CurrentLevel and OnOff coupling both work
 correctly; store coherence (AT, controller, URCs) is fine throughout.
 
+### Batch 3: the command verdict frame (`+MTCMD`)
+
+The door lock and the water valve are the first device types on this
+platform whose commands need an **application verdict**. When a controller
+invokes `LockDoor`, `UnlockDoor`, valve `Open` or valve `Close`, the
+firmware does not decide on its own: it raises
+`+MTCMD:<seq>,<ep>,<cluster>,<cmd>` to the host and waits up to 1000 ms for
+`AT+MTCMDRESP=<seq>,<verdict>`. A missed window answers `+MTCMDTO:<seq>` and
+the command is denied. All four forwards are the payload-less form, cluster
+`257` commands `0`/`1` for the lock and cluster `129` commands `0`/`1` for
+the valve, exactly as `AT_MT_SPEC.md` 3.17 registers them.
+
+None of that protocol is new or platform-specific: sequence numbers, the
+window, the default-deny and the `+MTCMDTO` URC are core's
+(`core/mt/mt_cmdbox.c`), identical to the C6's, and this platform only calls
+into it from the right SDK hooks. What is new here is where those hooks are
+and what the SDK does with the answer, and the two types differ on that
+second point:
+
+- **Door lock: the verdict IS the wire response.** The forward happens in
+  the ember command callbacks `emberAfPluginDoorLockOnDoorLockCommand` /
+  `...OnDoorUnlockCommand`, and the server answers the controller
+  `Success` on allow and `Failure` on deny, plus a `LockOperationError`
+  event carrying `Unspecified`. A deny genuinely fails the command.
+- **Water valve: the verdict cannot fail the command.** The forward happens
+  in the `ValveConfigurationAndControl::Delegate`'s `HandleOpenValve` /
+  `HandleCloseValve`, and the SDK discards what they return: the controller
+  sees `Success` either way. This is an SDK property, not a firmware
+  choice, traced in this tree and documented in `AT_MT_SPEC.md` 3.19. The
+  verdict gates only whether the host actually moves the valve.
+
+**Reporting back is the host's job, on both types.** An allowed verdict
+never changes `LockState` or `CurrentState` by itself, because only the host
+knows when the bolt or the valve actually moved. The host reports the
+outcome with `AT+MTLOCK=<ep>,<state>[,<source>]` (3.18) or
+`AT+MTVALVE=<ep>,<state>[,<level>]` (3.19), and both go through the
+cluster's own setter rather than a raw attribute write, so the
+`LockOperation` / `ValveStateChanged` event a subscribed controller expects
+is actually emitted.
+
+Boundaries worth knowing before a bench session:
+
+- **Door lock, FeatureMap 0.** No PIN, RFID, user, schedule or Aliro
+  features, which is conformant: every DoorLock feature is optional, and
+  `USR` is mandatory only once a credential feature is claimed. So the
+  command surface is `LockDoor` and `UnlockDoor` only; `UnlockWithTimeout`
+  and `UnboltDoor` are not declared. `AutoRelockTime` **is** declared even
+  though it is optional: without it the SDK's own `SetLockState` reports
+  failure for an unlock that actually happened, which would turn every host
+  `AT+MTLOCK` unlock into a bare `ERROR` with the state changed underneath
+  (the C6's bug B129, which reproduces verbatim in this tree). Seeded 0,
+  which disables auto-relock; a controller may write it non-zero and the
+  server then relocks on its own timer, which the host sees as a `+MTATTR`
+  URC.
+- **Door lock, boot state.** `LockState` boots **null**, not
+  `NotFullyLocked`: the SDK's per-endpoint init sets it null and
+  `ActuatorEnabled` true, and the firmware never invents a lock state. A
+  bench `AT+MTATTR` read of `LockState` before any `AT+MTLOCK` therefore
+  answers `+MTERR:5`, which is the AT grammar having no null literal, not a
+  fault.
+- **Water valve, FeatureMap 0.** No `TS` (time sync) and no `LVL` (level).
+  `TS` is left clear deliberately, not by omission: setting it without a
+  Time Synchronization cluster server on the image makes **every** `Open`
+  answer `Failure`. Without `LVL`, `CurrentLevel` and `TargetLevel` are not
+  declared at all, so `AT+MTVALVE`'s `<level>` argument is accepted and does
+  nothing observable, the same as on the C6 and for the same reason
+  (`AT_MT_SPEC.md` 3.19).
+- **Water valve, `RemainingDuration`.** Served by the cluster's own
+  wildcard `AttributeAccessInterface` from a private shadow store, not from
+  this build's arena, so a subscribed controller sees the server's live
+  countdown while an `AT+MTATTR` read answers from the arena. Deliberately
+  not bridged the way BooleanState is: it is a countdown the server owns
+  and ticks, with no host write path in the AT contract to push into it.
+- **Both, RAM.** Neither type widens the endpoint block heap's worst case;
+  see the capacity table below.
+
 ## Endpoint capacity
 
 **Acceptance and capacity are two different numbers on this platform, and
@@ -153,7 +231,9 @@ Block payload is `4 x clusters + 16 x slots`; Zephyr charges
 | `0x0101` / `0x010B` Dimmable Light, Dimmable Plug | 4 | 20 | 344 B |
 | `0x0301` Thermostat | 3 | 15 | 256 B |
 | `0x0202` Window Covering | 3 | 13 | 224 B |
+| `0x000A` Door Lock | 3 | 12 | 208 B |
 | `0x0100` / `0x010A` On/Off Light, On/Off Plug | 3 | 11 | 192 B |
+| `0x0042` Water Valve | 3 | 11 | 192 B |
 | `0x002B` Fan | 3 | 10 | 176 B |
 | `0x0302` `0x0307` `0x0305` `0x0106` `0x0306` `0x0107` sensors | 3 | 9 | 160 B |
 | `0x0015` `0x0044` `0x0041` `0x0043` `0x002C` boolean-state, air quality | 3 | 7 | 128 B |
@@ -168,6 +248,7 @@ bucket table) and 16 header slots:
 | 16 sensors of any kind | 2,560 B | **yes**, table-bound, heap 68% idle |
 | 16 on/off or dimmable lights and plugs | up to 5,504 B | **yes**, table-bound |
 | 16 thermostats / window coverings / fans | up to 4,096 B | **yes**, table-bound |
+| 16 door locks or water valves | up to 3,328 B | **yes**, table-bound |
 | 2 extended colour + 2 dimmable + 12 sensors | 3,808 B | **yes**, comfortably |
 | 15 colour temperature lights | 8,040 B | **yes**, one short of 16 |
 | 13 extended colour lights | 7,800 B | **yes**, three short of 16 |
@@ -210,6 +291,22 @@ flat `28 x 648 B` arena to a `16 x 16 B` header table (-17,888 B), the new
 compile-time per-endpoint pools by about 6,700 B, of which
 `ColorControlServer` alone is 3,168 B. `nrf54l15dk` tracks it: 224,108 B
 (85.5%), a 16,384 byte reclaim.
+
+Catalogue batch 3 on top of that, pristine builds, 2026-08-29:
+
+| | Batch 2 + per-composition | Batch 3 (door lock, water valve) |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 223,884 B (85.4%) | **224,964 B (85.8%)** |
+| RAM used, `nrf54l15dk` | 224,108 B (85.5%) | **225,188 B (85.9%)** |
+| Flash, `ophelia_cpico` | 789,792 B | **805,696 B** |
+
+RAM `+1,080 B` on both boards, which is CHIP's own per-endpoint tables for
+the two new servers (`DoorLockServer::mEndpointCtx`, the valve's delegate
+and `RemainingDuration` shadow arrays, each sized fixed + 16 dynamic) plus
+this port's 16-slot valve delegate pool. Flash `+15,904 B` is the two
+cluster servers themselves. No change to `HEARTH_EP_HEAP_BYTES`: neither
+device type is close to the widest, so the compile-time floor under the
+heap sizing is untouched.
 
 ## Dev board wiring
 
