@@ -1869,11 +1869,13 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * NOT 8. That is exactly what every region needs and no more: DataVersion
  * is uint32_t and attr_slot's leading members are uint32_t, so both want
  * 4-byte alignment, and an integral number of uint32_t of dv can never
- * leave the slots misaligned. The trailing store starts at
- * 4 * clusterCount + 16 * n_slots, a multiple of 4, and neither store type
- * wants more than 4 (asserted beside store_bytes(), so a store gaining a
- * wider member cannot silently misalign). block_dv(), block_slots() and
- * the two mt_dyn_*_store() accessors are the only places that know this
+ * leave the slots misaligned. The trailing region starts at
+ * 4 * clusterCount + 16 * n_slots, a multiple of 4; store_walk() places
+ * each store within it at an offset rounded up to that store's own
+ * alignof (fix round 2), and neither store type may want more than the 4
+ * the region start guarantees (asserted beside kStoreWalk, so a store
+ * gaining a wider member cannot silently misalign). block_dv(),
+ * block_slots() and store_walk() are the only places that know this
  * layout.
  *
  * A DEDICATED heap, not the system heap. Three reasons, all of which matter
@@ -2074,55 +2076,77 @@ constexpr size_t block_bytes(size_t n_clusters, size_t n_slots)
 }
 
 /*
- * The type-conditional trailing store (store reclaim round): how many bytes
- * this device type's block carries AFTER its dv and slot regions, for the
- * host-fed stores mt_dyn_store.h defines. Asked of the declared cluster
- * list through type_has_cluster(), the same no-second-table-to-drift rule
- * that predicate exists for. Additive on purpose: no catalogue type
- * carries both clusters today, but a future one that did would simply get
- * both stores, mode store first (the order mt_dyn_chime_store() assumes).
+ * The type-conditional trailing stores (store reclaim round): the host-fed
+ * stores mt_dyn_store.h defines, laid out after the block's dv and slot
+ * regions. Membership is asked of the declared cluster list through
+ * type_has_cluster(), the same no-second-table-to-drift rule that
+ * predicate exists for.
+ *
+ * Fix round 2 (re-review of M2): the layout is alignment-correct BY
+ * CONSTRUCTION, not by ordering discipline. Round 1 pinned the
+ * mode-before-chime order with a static_assert that the re-review proved
+ * vacuous (alignof(mt_chime_store_t) is 1, so the modulo held for ANY
+ * mode-store size, a compiled misaligned counterexample included), and an
+ * order that only comments kept safe is exactly the hazard Minor 2 named.
+ * Now store_walk(), the one function both store_bytes() and
+ * store_offset() are, rounds the running offset up to each store's own
+ * alignof before placing it, so the walk order in kStoreWalk is TASTE:
+ * flip it, or grow a store to an odd size, and every store still lands
+ * aligned, only the padding moves. Sizing and placement are the same walk
+ * with a different stop condition, so they can never disagree.
+ *
+ * With the current types every align_up is a no-op (the mode store leads
+ * from the 4-aligned region start and the chime store accepts any
+ * offset), so this round changes no layout byte: every store offset, the
+ * 436 and 273 sizes and the 584/352 cost rows are unchanged.
+ *
+ * What stays load-bearing is the REGION START: it is only ever 4-aligned
+ * (the layout note beside K_HEAP_DEFINE), so align_up can deliver at most
+ * 4-byte alignment in memory whatever it computes. The two
+ * alignof-versus-DataVersion asserts below carry that real constraint,
+ * unchanged.
  */
-size_t store_bytes(const EmberAfEndpointType *t)
+struct store_desc {
+    ClusterId cluster;
+    size_t size;
+    size_t align;
+};
+
+constexpr store_desc kStoreWalk[] = {
+    { ModeSelect::Id, sizeof(mt_mode_store_t), alignof(mt_mode_store_t) },
+    { Chime::Id, sizeof(mt_chime_store_t), alignof(mt_chime_store_t) },
+};
+
+constexpr size_t align_up(size_t off, size_t align) { return ((off + align - 1) / align) * align; }
+
+/* stop_at = a store's cluster id answers that store's aligned offset
+ * within the region (the caller has established the type carries it);
+ * stop_at = kInvalidClusterId (matching no store) walks to the end and
+ * answers the region's total size. */
+size_t store_walk(const EmberAfEndpointType *t, ClusterId stop_at)
 {
-    size_t n = 0;
-    if (type_has_cluster(t, ModeSelect::Id)) {
-        n += sizeof(mt_mode_store_t);
+    size_t off = 0;
+    for (auto &s : kStoreWalk) {
+        if (!type_has_cluster(t, s.cluster)) {
+            continue;
+        }
+        off = align_up(off, s.align);
+        if (s.cluster == stop_at) {
+            return off;
+        }
+        off += s.size;
     }
-    if (type_has_cluster(t, Chime::Id)) {
-        n += sizeof(mt_chime_store_t);
-    }
-    return n;
+    return off;
 }
 
-/*
- * Fix round M2: the mode-before-chime ordering used to be encoded twice
- * (the placement-new run in mt_devtype_create() and mt_dyn_chime_store()),
- * agreeing only by discipline. Now this is the ONE encoder of a store's
- * offset within the trailing region; both the constructor run and both
- * accessors go through it, so the ordering cannot silently diverge
- * between writer and reader.
- *
- * The ordering itself is load-bearing for ALIGNMENT, not taste: the mode
- * store leads because its CharSpan/List members need 4-byte alignment and
- * the region's start is 4-aligned, while the chime store (alignment 1,
- * sizeof 273) can trail anything. Flipped, the mode store would land at
- * region + 273 and its spans would be misaligned. The assert below pins
- * the arithmetic the implemented order relies on; there is deliberately
- * no mirror assert, because the mirror condition (the chime store's size
- * being a multiple of the mode store's alignment, 273 % 4) is FALSE, and
- * that falsity is exactly why the order must stay as it is.
- */
-static_assert(sizeof(mt_mode_store_t) % alignof(mt_chime_store_t) == 0,
-              "the chime store trails the mode store; the mode store's size must satisfy "
-              "the chime store's alignment, or the trailing-region order must be redesigned");
+size_t store_bytes(const EmberAfEndpointType *t)
+{
+    return store_walk(t, kInvalidClusterId);
+}
 
 size_t store_offset(const EmberAfEndpointType *t, ClusterId which)
 {
-    size_t off = 0;
-    if (which == Chime::Id && type_has_cluster(t, ModeSelect::Id)) {
-        off += sizeof(mt_mode_store_t);
-    }
-    return off;
+    return store_walk(t, which);
 }
 
 /* The sizing table's two store figures, pinned so the table cannot go
@@ -3003,8 +3027,8 @@ bool mt_dyn_attr_slot(EndpointId ep, ClusterId cluster, AttributeId attr, uint8_
  * the exhausted/unclaimed .bss pool used to produce. The offset arithmetic
  * is the block layout's third knower (the note beside K_HEAP_DEFINE):
  * stores sit past the dv and slot regions, at the offset store_offset()
- * answers, the same encoder the create path constructed them through
- * (fix round M2).
+ * answers, the same alignment-correct walk (store_walk, fix round 2) the
+ * create path constructed them through.
  */
 mt_mode_store_t *mt_dyn_mode_store(EndpointId ep)
 {
@@ -3348,8 +3372,8 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * zeroed, ModeOptionStructs default-constructed", the empty-list state
      * every reader maps to the pre-reclaim no-slot answers (mt_dyn_store.h).
      * Never destroyed, the block policy; offsets come from store_offset(),
-     * the ordering's one encoder (fix round M2), shared with the
-     * accessors. */
+     * the alignment-correct store_walk (fix round 2) shared with the
+     * accessors, so writer and readers place every store identically. */
     {
         uint8_t *region = static_cast<uint8_t *>(block) + base;
         if (type_has_cluster(type->ep_type, ModeSelect::Id)) {
