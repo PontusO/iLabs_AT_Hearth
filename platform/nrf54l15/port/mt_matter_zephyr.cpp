@@ -2113,6 +2113,35 @@ extern "C" void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t e
 }
 
 /*
+ * Fix round M3: hand back the slot mt_matter_chime_delegate_alloc() gave
+ * out, for the create paths that fail AFTER the claim and BEFORE
+ * mt_matter_chime_delegate_set_endpoint(). Without this, every post-claim
+ * -1 return in mt_devtype_create() stranded one pool slot per boot
+ * (bounded, because the rebuild stops at the failure, but the unwind was
+ * incomplete where the door lock's is complete). Only the MOST RECENT
+ * claim can come back, which is the only case the caller can produce:
+ * claims and unclaims both run under the StackLock mt_devtype_create()
+ * holds, one endpoint at a time, and a slot that reached set_endpoint
+ * (its ChimeServer constructed and registered) is only reachable from the
+ * success path, so it can never be offered here. Anything else is a
+ * caller bug worth shouting about, not silently absorbing.
+ *
+ * Deliberately NOT declared in core/include/mt_matter.h (read-only this
+ * round): the pair contract there is unchanged, and the one caller
+ * declares this port-local extension itself (mt_devtypes_zephyr.cpp,
+ * beside the chime handout).
+ */
+extern "C" void mt_matter_chime_delegate_unclaim(void *delegate)
+{
+    if (s_chime_delegate_next > 0 &&
+        delegate == &s_chime_delegates[s_chime_delegate_next - 1]) {
+        s_chime_delegate_next--;
+        return;
+    }
+    LOG_ERR("chime delegate unclaim ignored: not the most recent claim");
+}
+
+/*
  * AT+MTCHIMESOUNDS bridge. Grammar and content rules are enforced by
  * cmd_mtchimesounds() in mt_at.c; the bounds re-checked here are
  * defensive. Ends by marking InstalledChimeSounds dirty with
