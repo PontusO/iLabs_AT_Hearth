@@ -12,6 +12,7 @@
  */
 
 #include <app/util/attribute-storage.h>
+#include <app-common/zap-generated/callback.h>
 #include <app-common/zap-generated/ids/Attributes.h>
 #include <app-common/zap-generated/ids/Clusters.h>
 #include <app-common/zap-generated/ids/Commands.h>
@@ -854,6 +855,25 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         LOG_ERR("emberAfSetDynamicEndpoint(0x%04X) failed: %" CHIP_ERROR_FORMAT,
                 (unsigned)devtype_id, err.Format());
         return -1;
+    }
+
+    /* Dynamic endpoints are declared with DECLARE_DYNAMIC_CLUSTER, which
+     * hardcodes functions=NULL: the per-endpoint ServerInit callbacks that
+     * static endpoints get for free via GENERATED_FUNCTION_ARRAYS never run
+     * here. That is harmless for a cluster whose server logic reads
+     * attributes directly (OnOff) or whose init is a no-op against our
+     * seeds (Occupancy), but LevelControl's ServerInitCallback caches
+     * Min/MaxLevel into EmberAfLevelControlState, and moveToLevelHandler()
+     * clamps every target against that cached state, not the attribute. Left
+     * uninitialized, the cache reads 0/0 and every level transition clamps
+     * to 0 (B388). Call it by hand for any devtype carrying LevelControl.
+     * A future cluster with its own cached-state ServerInit joins this call
+     * site. */
+    for (uint8_t i = 0; i < type->ep_type->clusterCount; i++) {
+        if (type->ep_type->cluster[i].clusterId == LevelControl::Id) {
+            emberAfLevelControlClusterServerInitCallback(d.ep_id);
+            break;
+        }
     }
 
     s_next_ep_id++;
