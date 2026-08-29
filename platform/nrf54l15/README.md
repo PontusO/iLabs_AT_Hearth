@@ -77,23 +77,6 @@ so the AT integer family tracks the SDK's definition instead of a
 hand-copied list. The C6 never had this gap because esp-matter maps the
 aliases down to its own value types before its AT bridge sees them.
 
-RAM is the batch's real cost and the number to watch. Measured 2026-08-29,
-both figures from a pristine `build/` on `ophelia_cpico/nrf54l15/cpuapp`
-(batch 2 at the branch tip, the baseline at `daddee0` in a scratch
-worktree): the app now uses 240,276 B of the 262,144 B available (91.7%,
-up from 222,052 B / 84.7% before the batch); flash 789,488 B, up from
-755,380 B. Roughly 7.5 KB of the RAM growth is the dynamic endpoint slot
-arena growing with `kMaxSlots` and `kMaxClusters`
-(`port/mt_devtypes_zephyr.cpp` carries the arithmetic), and 7.7 KB is
-CHIP's own `ColorControlServer` per-endpoint transition state, sized for
-every dynamic endpoint this build can create. A third batch of this size
-does not fit as things stand. Two reclamations, in order of payoff: sizing
-the slot arena per device type instead of flat (only the two color lights
-need all 38 slots; the median device type uses about 10), and lowering
-`MT_COMP_MAX_ENDPOINTS` from 28, which sizes both that arena and, through
-`CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT`, `ColorControlServer`'s own
-arrays.
-
 The BooleanState
 cluster (Contact/Rain/Water Freeze/Water Leak) is served over real Matter
 reads by a CHIP-registered `BooleanStateCluster` object rather than this
@@ -111,6 +94,110 @@ per-endpoint LevelControl server init that caches Min/MaxLevel; `port/
 mt_devtypes_zephyr.cpp` now invokes it by hand at endpoint create time).
 Direct AT+MTATTR writes to CurrentLevel and OnOff coupling both work
 correctly; store coherence (AT, controller, URCs) is fine throughout.
+
+## Endpoint capacity
+
+**Acceptance and capacity are two different numbers on this platform, and
+an integrator needs both.**
+
+*Acceptance* is `MT_COMP_MAX_ENDPOINTS` (28). It is a core constant and part
+of the `AT+MT` wire contract, identical on the C6 and here: a host may
+DECLARE up to 28 endpoints over `AT+MTEP`, and the composition store keeps
+all 28 intact.
+
+*Capacity* is `kServiceableEndpoints` (16, `port/mt_port_ids.h`). It is how
+many of those endpoints this build stands up and serves at once, and it is a
+port decision about a 256 KB part rather than a contract change. The C6 has
+no such split because it serves the full 28.
+
+**What a host sees past capacity.** Nothing at declare time: `AT+MTEP`
+accepts the endpoint and the composition persists. The wall is at the next
+boot, in the rebuild, and it is loud and total. `mt_devtype_create()` logs
+which of the two limits was hit and how far away the other one was, returns
+an error, and the rebuild aborts rather than skipping the entry, so the
+device comes up **bare** rather than serving a silently truncated data
+model (design spec 12.1). That is the same abort a bad parent or an unknown
+device type already triggers.
+
+**Capacity is bounded by two resources, not one.** A composition can exhaust
+either first:
+
+1. **The header table**, `kServiceableEndpoints` entries, 16 bytes each.
+2. **The endpoint block heap**, `HEARTH_EP_HEAP_BYTES` (8 KB), a dedicated
+   `K_HEAP_DEFINE(hearth_ep_heap)`. Each created endpoint takes one block
+   holding its `DataVersion` array and its attribute slots, sized for its
+   own device type rather than for the widest one in the catalogue.
+
+Sixteen sensors exhaust the table with the heap barely touched; fourteen
+extended colour lights exhaust the heap with headers to spare.
+
+### Per-endpoint cost
+
+Block payload is `4 x clusters + 16 x slots`; Zephyr charges
+`roundup(payload + 4, 8)`.
+
+| Device type | Clusters | Slots | Heap cost |
+|---|---|---|---|
+| `0x010D` Extended Colour Light | 5 | 36 | 600 B |
+| `0x010C` Colour Temperature Light | 5 | 32 | 536 B |
+| `0x0101` / `0x010B` Dimmable Light, Dimmable Plug | 4 | 20 | 344 B |
+| `0x0301` Thermostat | 3 | 15 | 256 B |
+| `0x0202` Window Covering | 3 | 13 | 224 B |
+| `0x0100` / `0x010A` On/Off Light, On/Off Plug | 3 | 11 | 192 B |
+| `0x002B` Fan | 3 | 10 | 176 B |
+| `0x0302` `0x0307` `0x0305` `0x0106` `0x0306` `0x0107` sensors | 3 | 9 | 160 B |
+| `0x0015` `0x0044` `0x0041` `0x0043` `0x002C` boolean-state, air quality | 3 | 7 | 128 B |
+
+### Worked examples
+
+Against 8 KB of heap (about 8,100 usable after the heap's own header and
+bucket table) and 16 header slots:
+
+| Composition | Heap | Fits? |
+|---|---|---|
+| 16 sensors of any kind | 2,560 B | **yes**, table-bound, heap 68% idle |
+| 16 on/off or dimmable lights and plugs | up to 5,504 B | **yes**, table-bound |
+| 16 thermostats / window coverings / fans | up to 4,096 B | **yes**, table-bound |
+| 2 extended colour + 2 dimmable + 12 sensors | 3,808 B | **yes**, comfortably |
+| 15 colour temperature lights | 8,040 B | **yes**, one short of 16 |
+| 13 extended colour lights | 7,800 B | **yes**, three short of 16 |
+| 16 extended colour lights | 9,600 B wanted | **no**, fails at the 14th |
+
+So every device type in the catalogue reaches the full 16 **except** the two
+colour lights, which reach 15 and 13. Sizing the heap for 16 extended colour
+lights would want 9,600 B and buy a composition nobody builds; the RAM is
+worth more elsewhere. A compile-time assertion keeps the heap holding at
+least eight of whatever the widest device type happens to be, so this table
+cannot go stale unnoticed.
+
+### The LM20 tier
+
+The nRF54LM20 (512 KB RAM, supported upstream in this NCS) is where the 16
+goes back up. Raising `kServiceableEndpoints` and `HEARTH_EP_HEAP_BYTES`
+together in `port/mt_port_ids.h`, and the mirrored literal in
+`src/chip_project_config.h`, is the whole change: the header table, CHIP's
+per-endpoint pools and the block heap all follow from those two numbers, and
+the static assertions catch a mirror that drifts. 28 serviceable endpoints
+would want about 12.5 KB of block heap for an all-extended-colour worst
+case, plus roughly 3 KB back into CHIP's pools.
+
+### Measured
+
+`ophelia_cpico/nrf54l15/cpuapp`, pristine builds, 2026-08-29:
+
+| | Flat arena (batch 2) | Per-composition (this round) |
+|---|---|---|
+| RAM used | 240,276 B (91.7%) | **223,884 B (85.4%)** |
+| RAM free | 21,868 B | **38,260 B** |
+| Flash | 789,488 B | 789,792 B |
+
+A 16,392 byte reclaim, from three places: the endpoint table went from a
+flat `28 x 648 B` arena to a `16 x 16 B` header table (-17,888 B), the new
+8 KB block heap costs +8,192 B, and dropping
+`CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT` from 28 to 16 shrank CHIP's own
+compile-time per-endpoint pools by about 6,700 B, of which
+`ColorControlServer` alone is 3,168 B. `nrf54l15dk` tracks it: 224,108 B
+(85.5%), a 16,384 byte reclaim.
 
 ## Dev board wiring
 

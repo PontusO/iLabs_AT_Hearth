@@ -22,7 +22,10 @@
 
 #include <string.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/mem_stats.h>
+#include <zephyr/sys/sys_heap.h>
 
 extern "C" {
 #include "mt_composition.h"
@@ -32,6 +35,7 @@ extern "C" {
 #include "mt_matter.h"
 }
 #include "mt_dyn_store.h"
+#include "mt_port_ids.h"
 
 using namespace chip;
 using namespace chip::app::Clusters;
@@ -40,12 +44,36 @@ using chip::Protocols::InteractionModel::Status;
 
 LOG_MODULE_REGISTER(hearth_devtypes, LOG_LEVEL_INF);
 
-/* The dynamic endpoint table must be as deep as the composition the AT
- * contract can stage, or a legal AT+MTEP sequence would be silently
- * truncated at boot. chip_project_config.h cannot include core headers
- * (CHIP pulls it in everywhere), so the two constants are tied here. */
-static_assert(CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT == MT_COMP_MAX_ENDPOINTS,
-              "chip_project_config.h must mirror MT_COMP_MAX_ENDPOINTS");
+/*
+ * Acceptance versus capacity, checked by the compiler.
+ *
+ * These two constants used to be one. MT_COMP_MAX_ENDPOINTS (28) is what
+ * the AT wire contract lets a host DECLARE over AT+MTEP, and it is core, so
+ * it is the same on both platforms. kServiceableEndpoints (16) is what this
+ * build can stand up and SERVE at once, and it is a port decision about a
+ * 256 KB part. Tying them together made every CHIP per-endpoint pool and
+ * this file's own endpoint table pay for 28 endpoints that a real
+ * composition on this part will not reach; see mt_port_ids.h for the full
+ * reasoning and the LM20 note.
+ *
+ * Two invariants follow, and both are asserted rather than trusted:
+ *
+ *   1. chip_project_config.h must still mirror kServiceableEndpoints. It
+ *      cannot include this header (CHIP pulls it into C translation units
+ *      everywhere), so the literal is duplicated there and tied here.
+ *   2. Capacity must never exceed acceptance. If it did, this build would
+ *      stand up endpoints the composition store cannot even describe, and
+ *      s_dyn would out-run mt_composition_t's own arrays.
+ *
+ * The reverse (capacity BELOW acceptance) is the normal, intended state and
+ * is not an error: a host may declare 28, and a stored composition longer
+ * than 16 fails its rebuild loudly at the seventeenth endpoint, leaving the
+ * device bare rather than half-built (design spec 12.1).
+ */
+static_assert(CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT == kServiceableEndpoints,
+              "chip_project_config.h must mirror kServiceableEndpoints (mt_port_ids.h)");
+static_assert(kServiceableEndpoints <= MT_COMP_MAX_ENDPOINTS,
+              "serviceable capacity cannot exceed the composition the AT contract accepts");
 
 namespace {
 
@@ -984,11 +1012,11 @@ const hearth_devtype s_registry[] = {
 
 /* ---- the external attribute store ------------------------------------ */
 
-/* One attribute-value arena per dynamic slot. Every dynamic attribute
+/* One attribute-value slot per served attribute. Every dynamic attribute
  * declared above is 4 bytes or fewer (BITMAP32 is the widest), so 4-byte
- * slots hold all of them; seed_slots() refuses anything larger rather than
- * overrunning. 28 endpoints times this arena is the dominant RAM cost of
- * the whole file, so the bounds are tight on purpose. */
+ * slots hold all of them; attr_gets_slot() below refuses anything larger
+ * rather than overrunning. sizeof is 16: two 4-byte ids, a size byte and a
+ * 4-byte payload, padded up to the ids' alignment. */
 struct attr_slot {
     ClusterId cluster;
     AttributeId attr;
@@ -996,48 +1024,229 @@ struct attr_slot {
     uint8_t data[4];
 };
 
-/* Two slots of headroom over the widest endpoint type. The dimmable light
- * uses 20: OnOff 6 + auto ClusterRevision, LevelControl 8 + 1, Identify
- * 3 + 1, Descriptor skipped. Sizing this to exactly 20 would make the
- * overflow guard in seed_slots() the normal path the moment anyone adds an
- * attribute, and a skipped slot shows up only as a wrong value at runtime.
- * The guard stays a backstop; raise this number when 22 is reached.
- *
- * Catalogue batch 1 (nRF): the dimmable plug-in unit (0x010B) ties the
- * dimmable light at 20 slots (same OnOff + LevelControl + Identify set);
- * every other new devtype is narrower (the widest sensor is occupancy
- * sensing at 9). 22 still holds.
- *
- * Catalogue batch 2: 22 no longer holds, and this is the moment the guard
- * exists for. The extended color light (0x010D) is now the widest endpoint
- * type at 36 slots: OnOff 6 declared + 1 auto ClusterRevision = 7,
- * LevelControl 8 + 1 = 9, ColorControl 15 + 1 = 16, Identify 3 + 1 = 4,
- * Descriptor skipped = 36. The color temperature light (0x010C) is 32 by the
- * same arithmetic with an 11-attribute ColorControl; every other new devtype
- * is far narrower (thermostat 15, window covering 13, fan 10, air quality
- * sensor 7). Raised to 36 + 2 = 38, keeping the same two-slot headroom rule
- * as before: raise it again when 38 is reached.
- *
- * RAM cost of the raise: attr_slot is 16 bytes (two 4-byte ids, a size byte
- * and a 4-byte payload, padded to the id alignment), so 16 more slots per
- * dynamic endpoint times MT_COMP_MAX_ENDPOINTS (28) is 7,168 bytes of .bss
- * on top of the 22-slot arena's 9,856. This flat per-endpoint arena is the
- * design's known cost: every endpoint pays for the widest device type
- * whether it uses those slots or not. Sizing the arena per devtype would
- * reclaim most of it and is the obvious next move if RAM gets tight. */
-constexpr uint8_t kMaxSlots = 38;
+constexpr size_t kSlotDataBytes = sizeof(((attr_slot *)nullptr)->data);
 
-/* The arithmetic in the comment above, checked by the compiler rather than
- * trusted. Each DECLARE_DYNAMIC_ATTRIBUTE_LIST array already includes the
- * ClusterRevision entry LIST_END() appends, and Descriptor contributes no
- * slots (seed_slots() skips it), so a per-devtype sum IS that device type's
- * slot count.
+/*
+ * ---- the endpoint block heap ----------------------------------------
  *
- * Fix round: written as a max over EVERY device type rather than as the
- * single sum for today's widest one. The earlier form only tripped if the
- * extended color light grew; widening the thermostat or window covering
- * lists past 38 would have sailed past it and shown up as seed_slots()'
- * runtime LOG_ERR and an endpoint quietly missing its last attributes. */
+ * What changed and why. Until this round every dynamic endpoint carried a
+ * FLAT arena: dyn_endpoint held DataVersion dv[kMaxClusters] and
+ * attr_slot slots[kMaxSlots] sized for the WIDEST device type in the
+ * catalogue, and the table was MT_COMP_MAX_ENDPOINTS (28) deep. That cost
+ * 28 x 648 = 18,144 bytes of .bss whether or not a single endpoint was ever
+ * created, and an on/off light (11 slots) paid the extended colour light's
+ * 36-slot bill. Catalogue batch 2 pushed the total to 91.7% of RAM and made
+ * the waste the obvious thing to reclaim.
+ *
+ * Now: a slim static header table (below) plus exactly ONE heap block per
+ * created endpoint, holding that endpoint's DataVersion array and its
+ * attribute slots, sized for ITS device type:
+ *
+ *     +----------------------------+  <- dyn_endpoint::block
+ *     | DataVersion dv[n_clusters] |     4 * clusterCount bytes
+ *     +----------------------------+
+ *     | attr_slot slots[n_slots]   |     16 * count_slots() bytes
+ *     +----------------------------+
+ *
+ * dv first is what keeps the layout alignment-free: DataVersion is uint32_t
+ * and attr_slot's leading members are uint32_t, so both want 4-byte
+ * alignment, k_heap hands back 8-byte-aligned memory (CHUNK_UNIT), and an
+ * integral number of uint32_t can never leave the slots misaligned.
+ * block_dv() and block_slots() are the only two places that know this.
+ *
+ * A DEDICATED heap, not the system heap. Three reasons, all of which matter
+ * more than the handful of bytes k_heap's own metadata costs:
+ *
+ *   - Failure is CONTAINED. An oversized composition cannot starve the CHIP
+ *     stack, mbedTLS or OpenThread, all of which draw on other pools; it
+ *     fails here, at the endpoint that does not fit, and nowhere else.
+ *   - Failure is MEASURABLE. The cap is one number in one place, so the
+ *     LOG_ERR in mt_devtype_create() can name exactly what was asked for
+ *     and what was left, rather than reporting a generic allocation
+ *     failure whose real cause is somewhere else entirely.
+ *   - The budget is auditable. "8 KB of endpoint blocks" is a line item in
+ *     the README's capacity table; "some of the system heap" is not.
+ *
+ * ALLOCATE-ONLY, and that is what makes fragmentation a non-question rather
+ * than a risk to be managed. Blocks are allocated in exactly one place,
+ * mt_devtype_create(), which is reached from exactly one caller,
+ * main.cpp's rebuild_composition(), which runs once at boot before the
+ * Matter server starts serving. Nothing frees. There is no AT command that
+ * destroys an endpoint: the composition is edited by AT+MTEP and applied by
+ * a reboot, and a reboot resets this heap wholesale. So the allocation
+ * sequence over the device's life is a single monotonic run of allocations
+ * in composition order, which is the one access pattern a first-fit
+ * allocator cannot fragment.
+ *
+ * The one deliberate leak: if emberAfSetDynamicEndpoint() fails AFTER a
+ * successful allocation, the block is not returned. That path returns -1,
+ * the rebuild aborts, the device is left bare, and the only way forward is
+ * a reboot. Freeing there would buy nothing and would cost the invariant
+ * above, which is the thing that makes the heap's behaviour easy to reason
+ * about. It is bounded at one block and unreachable.
+ *
+ * ---- sizing -----------------------------------------------------------
+ *
+ * Block payload is 4 * clusterCount + 16 * slots. Zephyr's sys_heap adds a
+ * 4-byte chunk header for a heap this size (heap.h chunk_header_bytes(),
+ * small heap because 8192/8 = 1024 chunks is far below the 0x7fff big-heap
+ * threshold) and rounds the total up to CHUNK_UNIT (8 bytes), so the true
+ * cost per endpoint is roundup(payload + 4, 8):
+ *
+ *   device type                        clusters  slots  payload  heap cost
+ *   extended colour light   0x010D            5     36      596        600
+ *   colour temperature lt   0x010C            5     32      532        536
+ *   dimmable light / plug   0x0101 0x010B     4     20      336        344
+ *   thermostat              0x0301            3     15      252        256
+ *   window covering         0x0202            3     13      220        224
+ *   on/off light / plug     0x0100 0x010A     3     11      188        192
+ *   fan                     0x002B            3     10      172        176
+ *   temp/humidity/pressure/light/flow         3      9      156        160
+ *   occupancy sensor        0x0107            3      9      156        160
+ *   boolean-state sensors, air quality        3      7      124        128
+ *
+ * HEARTH_EP_HEAP_BYTES is 8192, which leaves roughly 8,100 usable after the
+ * heap's own header and bucket table. Against kServiceableEndpoints = 16:
+ *
+ *   16 x anything but a colour light   <= 16 x 344 = 5,504    fits
+ *   16 x colour temperature light           15 fit (8,040)    ONE SHORT
+ *   16 x extended colour light              13 fit (7,800)    THREE SHORT
+ *   a realistic mixed composition, say
+ *     2 extended colour + 2 dimmable +
+ *     12 assorted sensors               1,200+688+1,920 = 3,808   fits easily
+ *
+ * That is the deliberate trade the round was asked for: sizing for 16 of
+ * the heaviest type would want 9,600 bytes and buy a composition nobody
+ * builds, when the same RAM is worth more elsewhere. A composition that
+ * does ask for more gets the loud, specific failure in mt_devtype_create()
+ * rather than a silent truncation, and the README's "Endpoint capacity"
+ * section tells an integrator the numbers up front.
+ *
+ * The floor is compiler-checked below, so the table above cannot go stale
+ * without the build noticing.
+ */
+/* Stepped out of the anonymous namespace deliberately: K_HEAP_DEFINE emits
+ * a STRUCT_SECTION_ITERABLE that Zephyr's own static-heap init walks at
+ * boot, and a section-placed object with external linkage is the shape that
+ * machinery expects. */
+} /* namespace */
+
+K_HEAP_DEFINE(hearth_ep_heap, HEARTH_EP_HEAP_BYTES);
+
+namespace {
+
+/* Payload bytes handed out so far. k_heap tracks its own occupancy, but
+ * this is the number the failure log wants: what the compositions asked
+ * for, independent of per-chunk rounding. */
+size_t s_ep_heap_used;
+
+/*
+ * Which attributes get a slot. The single predicate seed_slots() and
+ * count_slots() both consult, so the size counted at allocation time and
+ * the number actually written can never disagree: a mismatch would either
+ * overrun the block or leave an attribute unserved.
+ *
+ * ARRAY-typed attributes are the list globals (AttributeList,
+ * AcceptedCommandList, GeneratedCommandList), which CHIP's own machinery
+ * answers and which would not fit a 4-byte slot anyway. Anything wider than
+ * the slot payload is refused rather than truncated; seed_slots() logs it,
+ * this predicate stays silent so the two loops agree exactly.
+ */
+bool attr_gets_slot(const EmberAfAttributeMetadata &md)
+{
+    return md.attributeType != ZAP_TYPE(ARRAY) && md.size <= kSlotDataBytes;
+}
+
+/* Descriptor is served by CHIP's own DescriptorCluster server object,
+ * registered per endpoint by the cluster init callback that
+ * emberAfSetDynamicEndpoint() fires; its reads never reach the
+ * external-storage callbacks, so it gets no slots and no block space. */
+bool cluster_gets_slots(const EmberAfCluster &cl)
+{
+    return cl.clusterId != Descriptor::Id;
+}
+
+/* How many slots this device type needs. Walks the same two loops
+ * seed_slots() walks, through the same two predicates. */
+uint16_t count_slots(const EmberAfEndpointType *t)
+{
+    uint16_t n = 0;
+    for (uint8_t c = 0; c < t->clusterCount; c++) {
+        const EmberAfCluster &cl = t->cluster[c];
+        if (!cluster_gets_slots(cl)) {
+            continue;
+        }
+        for (uint16_t a = 0; a < cl.attributeCount; a++) {
+            if (attr_gets_slot(cl.attributes[a])) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+constexpr size_t block_bytes(size_t n_clusters, size_t n_slots)
+{
+    return sizeof(DataVersion) * n_clusters + sizeof(attr_slot) * n_slots;
+}
+
+/*
+ * The header table. Four fields plus the two counts the block walk needs;
+ * everything else about an endpoint lives in its heap block, which `block`
+ * points at. 16 of these is 256 bytes of .bss, against the 18,144 the flat
+ * arena cost.
+ *
+ * slot_capacity is what count_slots() said when the block was sized, and
+ * slot_count is how many seed_slots() actually wrote. They agree in every
+ * normal case; keeping both lets seed_slots() bound its writes by the
+ * allocation rather than by a shared constant that could drift from it.
+ */
+struct dyn_endpoint {
+    bool used;
+    EndpointId ep_id;
+    const hearth_devtype *type;
+    void *block;
+    uint16_t slot_capacity;
+    uint16_t slot_count;
+};
+
+/* The two accessors that know the block layout. Both assume d.block is
+ * non-null, which every caller guarantees by checking d.used first: a
+ * header is only marked used after a successful allocation. */
+DataVersion *block_dv(const dyn_endpoint &d)
+{
+    return static_cast<DataVersion *>(d.block);
+}
+
+attr_slot *block_slots(const dyn_endpoint &d)
+{
+    return reinterpret_cast<attr_slot *>(static_cast<uint8_t *>(d.block) +
+                                         sizeof(DataVersion) * d.type->ep_type->clusterCount);
+}
+
+/*
+ * ---- the compiler-checked floor under the heap sizing ------------------
+ *
+ * count_slots() runs at create time, so no device type's size is a
+ * compile-time constant any more, and the old kMaxSlots / kMaxClusters
+ * ceilings no longer bound any array: dv and slots are sized exactly. They
+ * are gone rather than kept as decoration.
+ *
+ * What DOES still need guarding is the heap sizing story.
+ * HEARTH_EP_HEAP_BYTES was chosen against the table above, and that table
+ * holds only while the catalogue's widest device type stays roughly the
+ * size it is now. Add a device type with 80 slots and the "13 extended
+ * colour lights fit" line goes quietly wrong: no build error, no runtime
+ * error, until a real composition hits the wall on someone's bench.
+ *
+ * So the widest type is still computed at compile time, from the same
+ * DECLARE_DYNAMIC_* arrays the registry is built from, and asserted against
+ * a floor: the heap must always hold at least kMinWidestEndpoints of the
+ * heaviest device type. Eight rather than sixteen because sizing for
+ * sixteen of the heaviest is precisely the trade this round declined;
+ * eight is the point below which the capacity table would be describing a
+ * different device.
+ */
 #define MT_COUNT(array) (sizeof(array) / sizeof((array)[0]))
 
 constexpr size_t kMax2(size_t a, size_t b) { return a > b ? a : b; }
@@ -1055,39 +1264,13 @@ constexpr size_t kActuatorSlots =
 
 /* The widest of the light/plug family. The on/off light and plug (OnOff
  * alone) and the dimmable light and plug (OnOff + LevelControl) are strict
- * prefixes of this, so covering the wider color light covers them all. */
+ * prefixes of this, so covering the wider colour light covers them all. */
 constexpr size_t kLightSlots = MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) +
     kMax2(MT_COUNT(colorTempAttrs), MT_COUNT(extendedColorAttrs));
 
 constexpr size_t kWidestEndpointSlots =
     kIdentifySlots + kMax2(kMax2(kSensorSlots, kActuatorSlots), kLightSlots);
 
-static_assert(kWidestEndpointSlots <= kMaxSlots,
-              "some device type's attribute lists no longer fit the slot arena; raise kMaxSlots");
-
-/* One data version per cluster; the widest endpoint type has exactly four.
- * emberAfSetDynamicEndpoint() returns CHIP_ERROR_NO_MEMORY outright if the
- * span is shorter than the server-cluster count
- * (attribute-storage.cpp:319-323), so a short array fails loudly.
- *
- * Catalogue batch 1: every new devtype has at most three server clusters
- * (measurement/boolean-state/occupancy + Identify + Descriptor, or OnOff +
- * LevelControl + Identify + Descriptor for the dimmable plug), so 4 still
- * holds.
- *
- * Catalogue batch 2: the two color lights carry five (OnOff + LevelControl +
- * ColorControl + Identify + Descriptor), so 4 does not hold. Raised to
- * 5 + 2 = 7, the same widest-plus-two headroom rule kMaxSlots uses, so the
- * next cluster added to a device type does not have to touch this constant
- * as well. RAM cost: DataVersion is 4 bytes, so three extra entries per
- * dynamic endpoint times MT_COMP_MAX_ENDPOINTS (28) is 336 bytes of .bss. */
-constexpr uint8_t kMaxClusters = 7;
-
-/* Same idea as the kMaxSlots assertion, and a max over every cluster list
- * for the same reason: naming only today's longest one would let a sixth
- * cluster on some other device type slip past to mt_devtype_create()'s
- * runtime check. Sensors all share the three-cluster shape, so one
- * representative stands for them. */
 constexpr size_t kWidestClusterList = kMax2(
     kMax2(kMax2(MT_COUNT(onOffLightClusters), MT_COUNT(dimmableLightClusters)),
           kMax2(MT_COUNT(colorTemperatureLightClusters), MT_COUNT(extendedColorLightClusters))),
@@ -1095,19 +1278,20 @@ constexpr size_t kWidestClusterList = kMax2(
           kMax2(kMax2(MT_COUNT(thermostatClusters), MT_COUNT(fanClusters)),
                 kMax2(MT_COUNT(windowCoveringClusters), MT_COUNT(temperatureSensorClusters)))));
 
-static_assert(kWidestClusterList <= kMaxClusters,
-              "some device type's cluster list no longer fits dyn_endpoint::dv; raise kMaxClusters");
+constexpr size_t kWidestBlockBytes = block_bytes(kWidestClusterList, kWidestEndpointSlots);
 
-struct dyn_endpoint {
-    bool used;
-    EndpointId ep_id;
-    const hearth_devtype *type;
-    DataVersion dv[kMaxClusters];
-    attr_slot slots[kMaxSlots];
-    uint8_t slot_count;
-};
+/* Zephyr charges roundup(payload + 4, 8) per allocation on a heap this
+ * size; modelled here so the floor is checked against the real cost rather
+ * than the bare payload. */
+constexpr size_t kHeapCostOf(size_t payload) { return ((payload + 4 + 7) / 8) * 8; }
 
-dyn_endpoint s_dyn[MT_COMP_MAX_ENDPOINTS];
+constexpr size_t kMinWidestEndpoints = 8;
+
+static_assert(kHeapCostOf(kWidestBlockBytes) * kMinWidestEndpoints <= HEARTH_EP_HEAP_BYTES,
+              "the endpoint heap no longer holds eight of the widest device type; redo the "
+              "sizing table beside K_HEAP_DEFINE and raise HEARTH_EP_HEAP_BYTES");
+
+dyn_endpoint s_dyn[kServiceableEndpoints];
 
 /* Endpoint ids run 1..N in composition order and are reassigned from 1 on
  * every boot. The composition itself is what persists, so replaying it in
@@ -1417,34 +1601,38 @@ const attr_seed s_seeds[] = {
     { AirQuality::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
+/* Fills this endpoint's block. Walks the same two predicates count_slots()
+ * used to size it, so slot_count lands on slot_capacity exactly; the bound
+ * below is a backstop against those two drifting, not a normal path. */
 void seed_slots(dyn_endpoint *d)
 {
+    attr_slot *slots = block_slots(*d);
     d->slot_count = 0;
     for (uint8_t c = 0; c < d->type->ep_type->clusterCount; c++) {
         const EmberAfCluster &cl = d->type->ep_type->cluster[c];
-        /* Descriptor is served by CHIP's own DescriptorCluster server
-         * object, registered per endpoint by the cluster init callback
-         * that emberAfSetDynamicEndpoint() fires; its reads never reach
-         * the external-storage callbacks, so it gets no slots. */
-        if (cl.clusterId == Descriptor::Id) {
+        if (!cluster_gets_slots(cl)) {
             continue;
         }
         for (uint16_t a = 0; a < cl.attributeCount; a++) {
             const EmberAfAttributeMetadata &md = cl.attributes[a];
-            if (md.attributeType == ZAP_TYPE(ARRAY)) {
+            if (!attr_gets_slot(md)) {
+                /* Named here rather than in the predicate so an attribute
+                 * too wide for a slot is visible in the log instead of
+                 * silently unserved; the ARRAY globals are expected and
+                 * stay quiet. */
+                if (md.attributeType != ZAP_TYPE(ARRAY)) {
+                    LOG_ERR("attr 0x%08X on cluster 0x%08X is %u bytes, a slot holds %u",
+                            (unsigned)md.attributeId, (unsigned)cl.clusterId, (unsigned)md.size,
+                            (unsigned)kSlotDataBytes);
+                }
                 continue;
             }
-            if (md.size > sizeof(d->slots[0].data)) {
-                LOG_ERR("attr 0x%08X on cluster 0x%08X is %u bytes, arena holds %u",
-                        (unsigned)md.attributeId, (unsigned)cl.clusterId, (unsigned)md.size,
-                        (unsigned)sizeof(d->slots[0].data));
-                continue;
-            }
-            if (d->slot_count >= kMaxSlots) {
-                LOG_ERR("slot arena full for devtype 0x%04X", (unsigned)d->type->id);
+            if (d->slot_count >= d->slot_capacity) {
+                LOG_ERR("devtype 0x%04X block holds %u slots, seeding wanted more",
+                        (unsigned)d->type->id, (unsigned)d->slot_capacity);
                 return;
             }
-            attr_slot &s = d->slots[d->slot_count++];
+            attr_slot &s = slots[d->slot_count++];
             s.cluster = cl.clusterId;
             s.attr = md.attributeId;
             s.size = (uint8_t)md.size;
@@ -1500,10 +1688,11 @@ bool mt_dyn_attr_slot(EndpointId ep, ClusterId cluster, AttributeId attr, uint8_
         if (!d.used || d.ep_id != ep) {
             continue;
         }
-        for (uint8_t i = 0; i < d.slot_count; i++) {
-            if (d.slots[i].cluster == cluster && d.slots[i].attr == attr) {
-                *data = d.slots[i].data;
-                *size = d.slots[i].size;
+        attr_slot *slots = block_slots(d);
+        for (uint16_t i = 0; i < d.slot_count; i++) {
+            if (slots[i].cluster == cluster && slots[i].attr == attr) {
+                *data = slots[i].data;
+                *size = slots[i].size;
                 return true;
             }
         }
@@ -1553,12 +1742,14 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         return -1;
     }
 
-    /* The lock covers the whole function, so every s_dyn and s_next_ep_id
-     * mutation happens under it and the invariant is statable: the dynamic
-     * endpoint table and the slot arena are only ever touched with the CHIP
-     * stack lock held. emberAfSetDynamicEndpoint() below enables the
-     * endpoint synchronously and runs cluster init callbacks that read this
-     * arena back, so the two must not be lockable separately. */
+    /* The lock covers the whole function, so every s_dyn, s_ep_heap_used and
+     * s_next_ep_id mutation happens under it and the invariant is statable:
+     * the dynamic endpoint header table, the endpoint block heap and the
+     * blocks themselves are only ever touched with the CHIP stack lock held.
+     * emberAfSetDynamicEndpoint() below enables the endpoint synchronously
+     * and runs cluster init callbacks that read this endpoint's block back
+     * through the external-storage callbacks, so the two must not be
+     * lockable separately. */
     chip::DeviceLayer::StackLock lock;
 
     const hearth_devtype *type = nullptr;
@@ -1583,29 +1774,56 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         return -1;
     }
 
-    /* Checked before the dv span below is built: emberAfSetDynamicEndpoint()
-     * takes Span<DataVersion>(d.dv, type->ep_type->clusterCount), and d.dv
-     * is exactly kMaxClusters wide. A devtype with more clusters than that
-     * would hand the span a length past the end of d.dv, the same
-     * silent-overrun kMaxSlots guards against above. Raise kMaxClusters
-     * when a devtype needs more. */
-    if (type->ep_type->clusterCount > kMaxClusters) {
-        LOG_ERR("devtype 0x%04X has %u clusters, kMaxClusters is %u; raise it",
-                (unsigned)devtype_id, (unsigned)type->ep_type->clusterCount, (unsigned)kMaxClusters);
+    /*
+     * The two capacity limits, checked in order and both named in whichever
+     * log fires. They are different resources and a composition can exhaust
+     * either one first: sixteen sensors exhaust the header table with the
+     * heap barely touched, while fourteen extended colour lights exhaust the
+     * heap with headers to spare. An integrator reading the log needs to
+     * know which wall was hit and how far away the other one was, so both
+     * messages carry both numbers.
+     */
+    uint16_t index = 0;
+    while (index < kServiceableEndpoints && s_dyn[index].used) {
+        index++;
+    }
+    if (index == kServiceableEndpoints) {
+        LOG_ERR("devtype 0x%04X: all %u serviceable endpoints in use "
+                "(endpoint heap %zu of %u B used); host may declare %u, this build serves %u",
+                (unsigned)devtype_id, (unsigned)kServiceableEndpoints, s_ep_heap_used,
+                (unsigned)HEARTH_EP_HEAP_BYTES, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                (unsigned)kServiceableEndpoints);
         return -1;
     }
 
-    uint16_t index = 0;
-    while (index < MT_COMP_MAX_ENDPOINTS && s_dyn[index].used) {
-        index++;
-    }
-    if (index == MT_COMP_MAX_ENDPOINTS) {
+    /* Sized for THIS device type, not for the widest in the catalogue. */
+    const uint16_t n_clusters = type->ep_type->clusterCount;
+    const uint16_t n_slots = count_slots(type->ep_type);
+    const size_t want = block_bytes(n_clusters, n_slots);
+
+    void *block = k_heap_alloc(&hearth_ep_heap, want, K_NO_WAIT);
+    if (block == nullptr) {
+        size_t free_bytes = 0;
+#ifdef CONFIG_SYS_HEAP_RUNTIME_STATS
+        struct sys_memory_stats st = {};
+        if (sys_heap_runtime_stats_get(&hearth_ep_heap.heap, &st) == 0) {
+            free_bytes = st.free_bytes;
+        }
+#endif
+        LOG_ERR("devtype 0x%04X: endpoint block of %zu B (%u clusters, %u slots) does not fit; "
+                "%zu of %u B handed out, %zu B free; this is endpoint %u of %u serviceable",
+                (unsigned)devtype_id, want, (unsigned)n_clusters, (unsigned)n_slots,
+                s_ep_heap_used, (unsigned)HEARTH_EP_HEAP_BYTES, free_bytes, (unsigned)(index + 1),
+                (unsigned)kServiceableEndpoints);
         return -1;
     }
+    s_ep_heap_used += want;
 
     dyn_endpoint &d = s_dyn[index];
     d.type = type;
     d.ep_id = s_next_ep_id;
+    d.block = block;
+    d.slot_capacity = n_slots;
     seed_slots(&d);
     /* Marked live BEFORE the call, not after: emberAfSetDynamicEndpoint()
      * enables the endpoint on the spot, which runs every cluster's init
@@ -1615,10 +1833,17 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     d.used = true;
 
     CHIP_ERROR err = emberAfSetDynamicEndpoint(
-        index, d.ep_id, type->ep_type, Span<DataVersion>(d.dv, type->ep_type->clusterCount),
+        index, d.ep_id, type->ep_type, Span<DataVersion>(block_dv(d), n_clusters),
         type->device_types, (parent_devtype != 0) ? parent_ep_id : kInvalidEndpointId);
     if (err != CHIP_NO_ERROR) {
+        /* The header goes back on the free list, the block does not: see the
+         * allocate-only note beside K_HEAP_DEFINE. This path returns -1, the
+         * rebuild aborts, and the device stays bare until a reboot resets the
+         * heap wholesale, so the one orphaned block is bounded and
+         * unreachable. Keeping the invariant is worth more than reclaiming
+         * it. */
         d.used = false;
+        d.block = nullptr;
         LOG_ERR("emberAfSetDynamicEndpoint(0x%04X) failed: %" CHIP_ERROR_FORMAT,
                 (unsigned)devtype_id, err.Format());
         return -1;
