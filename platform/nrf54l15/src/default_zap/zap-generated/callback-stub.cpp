@@ -99,6 +99,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::OperationalCredentials::Id:
     emberAfOperationalCredentialsClusterInitCallback(endpoint);
     break;
+  case app::Clusters::PowerSource::Id:
+    emberAfPowerSourceClusterInitCallback(endpoint);
+    break;
   case app::Clusters::PressureMeasurement::Id:
     emberAfPressureMeasurementClusterInitCallback(endpoint);
     break;
@@ -249,6 +252,11 @@ emberAfOnOffClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfOperationalCredentialsClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfPowerSourceClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

@@ -1223,6 +1223,112 @@ DECLARE_DYNAMIC_ENDPOINT(waterValveEndpoint, waterValveClusters);
 
 constexpr EmberAfDeviceType kWaterValveTypes[] = { { 0x0042, 1 } };
 
+/* ---- power source (0x0011) --------------------------------------------
+ *
+ * Catalogue batch 4 audit, PowerSource (0x002F). Registry row and seeds
+ * only: there is no mt_matter_power* port function in core/include/
+ * mt_matter.h at all, so the generic AT+MTATTR bridge
+ * (mt_matter_attr_read/write, mt_matter_zephyr.cpp) is the whole host
+ * surface for this type.
+ *
+ *   Code-driven? No. PowerSource is absent from CodeDrivenClusters
+ *   (src/app/common/templates/config-data.yaml:144-168). Confirmed
+ *   empirically, the batch 3 method: regenerating hearth.zap with the
+ *   cluster on ep240 left zap-generated/CodeDrivenInitShutdown.cpp
+ *   byte-identical.
+ *
+ *   AAI? Yes, wildcard-endpoint, for three attributes. PowerSourceAttrAccess
+ *   (power-source-server.h:48, ctor at :52 with
+ *   Optional<EndpointId>::Missing(), registered from
+ *   MatterPowerSourcePluginServerInitCallback, power-source-server.cpp:
+ *   88-91) answers ActiveBatFaults (:108, not declared here), EndpointList
+ *   (:112, from PowerSourceServer's own table; empty list until something
+ *   calls SetEndpointList, which nothing on this firmware does) and
+ *   ClusterRevision (:131, from PowerSource::kRevision), and falls through
+ *   default: for everything else. So Status, Order, Description and the
+ *   three Bat* scalars are plain ember external storage against the arena,
+ *   and the ClusterRevision seed below must be that same kRevision (3,
+ *   PowerSource/Metadata.h:20), the Thermostat/WindowCovering discipline.
+ *   The server's per-endpoint table is already dynamic-endpoint aware:
+ *   sPowerSourceClusterInfo is sized MATTER_DM_POWER_SOURCE_CLUSTER_SERVER_
+ *   ENDPOINT_COUNT + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT
+ *   (power-source-server.cpp:75-81), which this file's static assert ties
+ *   to kServiceableEndpoints.
+ *
+ *   ServerInit? None per endpoint. MatterPowerSourcePluginServerInitCallback
+ *   only registers the AAI; no emberAfPowerSourceCluster*InitCallback
+ *   exists. Does NOT join the B388 call site.
+ *
+ * NO Identify, a documented exception to this port's "Identify rides on
+ * every device type" convention: the device type mandates Descriptor plus
+ * PowerSource and nothing else (matter-devices.xml:98-115, MA-powersource,
+ * lockOthers with exactly those two includes), and the C6
+ * composes exactly PowerSource plus Descriptor (esp_matter_endpoint.cpp
+ * power_source::add(), which creates no Identify). Adding Identify here
+ * would be a gratuitous divergence from the C6's data model and would cost
+ * four extra slots per endpoint.
+ *
+ * Feature set: the cluster VALIDATEs exactly one of Wired/Battery on the
+ * C6 (esp-matter's VALIDATE_FEATURES_EXACT_ONE); Battery (0x2,
+ * PowerSource/Enums.h:282-283) is taken, matching the C6's choice for
+ * upstream's battery-powered smoke/CO alarm devices, and the three
+ * BAT-gated attributes it makes mandatory (BatChargeLevel,
+ * BatReplacementNeeded, BatReplaceability) are declared.
+ *
+ * Description (char_string, length 60, so 61 ember bytes) and EndpointList
+ * (array) get no attribute slot: attr_gets_slot() refuses both, and
+ * seed_slots() skips them quietly as deliberate metadata-only declarations.
+ * They are declared anyway so AttributeList is truthful. EndpointList is
+ * served by the AAI (empty list); Description is served by nothing on this
+ * platform and reads UNSUPPORTED_ATTRIBUTE, pending a string-store
+ * decision. Both sizes pass emberAfSetDynamicEndpoint's IO-buffer check
+ * (ATTRIBUTE_LARGEST is 66, endpoint_config.h).
+ *
+ * BatPercentRemaining is NULLABLE with real 0..200 bounds, matching the C6
+ * thunk's hand-add (platform/esp32c6/main/mt_devtypes.cpp mk_power_source(),
+ * bounds copied there from battery_storage::add()). DECLARE_DYNAMIC_ATTRIBUTE
+ * cannot express MIN_MAX, so the entry below is hand-rolled to the exact
+ * shape ZAP generates for a bounded attribute: a MIN_MAX-flagged metadata
+ * row whose default union points at an EmberAfAttributeMinMaxValue. ember's
+ * bounds check runs on every write regardless of storage kind
+ * (attribute-table.cpp:368-406), so an out-of-range AT+MTATTR write answers
+ * +MTERR:1 here exactly as it does on the C6; the null sentinel stays
+ * writable because "null value is always in-range for a nullable attribute"
+ * (attribute-table.cpp:401-403). Seeded null. */
+
+constexpr EmberAfAttributeMinMaxValue kBatPercentRemainingBounds = {
+    (uint16_t)0xFF, /* default: null */
+    (uint16_t)0x00, (uint16_t)0xC8 /* 0..200, half-percent units */
+};
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(powerSourceAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Order::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Description::Id, CHAR_STRING, 61, 0),
+    /* Hand-rolled MIN_MAX entry; see the audit note above. The mask spells
+     * out the two flags DECLARE_DYNAMIC_ATTRIBUTE always adds. */
+    { &kBatPercentRemainingBounds, PowerSource::Attributes::BatPercentRemaining::Id, 1,
+      ZAP_TYPE(INT8U),
+      ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(NULLABLE) |
+          ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) | ZAP_ATTRIBUTE_MASK(READABLE) },
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatChargeLevel::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatReplacementNeeded::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatReplaceability::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::EndpointList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(powerSourceClusters)
+DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, powerSourceAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(powerSourceEndpoint, powerSourceClusters);
+
+constexpr EmberAfDeviceType kPowerSourceTypes[] = { { 0x0011, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -1261,6 +1367,8 @@ const hearth_devtype s_registry[] = {
     /* Catalogue batch 3: the command-verdict types. */
     { 0x000A, 0, &doorLockEndpoint, Span<const EmberAfDeviceType>(kDoorLockTypes) },
     { 0x0042, 0, &waterValveEndpoint, Span<const EmberAfDeviceType>(kWaterValveTypes) },
+    /* Catalogue batch 4: the appliance and notification types. */
+    { 0x0011, 0, &powerSourceEndpoint, Span<const EmberAfDeviceType>(kPowerSourceTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -1371,6 +1479,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   fan                     0x002B            3     10      172        176
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
+ *   power source            0x0011            2      8      136        144
  *   boolean-state sensors, air quality        3      7      124        128
  *
  * HEARTH_EP_HEAP_BYTES is 8192, which leaves roughly 8,100 usable after the
@@ -1422,7 +1531,13 @@ size_t s_ep_heap_used;
  */
 bool attr_gets_slot(const EmberAfAttributeMetadata &md)
 {
-    return md.attributeType != ZAP_TYPE(ARRAY) && md.size <= kSlotDataBytes;
+    /* STRUCT joined ARRAY in catalogue batch 4: OperationalState's
+     * OperationalError is a struct served entirely by the cluster's own
+     * AttributeAccessInterface, declared only so AttributeList is
+     * truthful, and a 4-byte slot could not hold a meaningful
+     * ErrorStateStruct whatever its declared ember size. */
+    return md.attributeType != ZAP_TYPE(ARRAY) && md.attributeType != ZAP_TYPE(STRUCT) &&
+           md.size <= kSlotDataBytes;
 }
 
 /* Descriptor is served by CHIP's own DescriptorCluster server object,
@@ -1558,8 +1673,19 @@ constexpr size_t kActuatorSlots =
 constexpr size_t kLightSlots = MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) +
     kMax2(MT_COUNT(colorTempAttrs), MT_COUNT(extendedColorAttrs));
 
+/* Catalogue batch 4 brought the first device types WITHOUT Identify (the
+ * power source and, later in the batch, the chime), so the widest-endpoint
+ * computation gained a second family: types that ride without the
+ * kIdentifySlots term. MT_COUNT over an attr list counts DECLARED entries
+ * plus the LIST_END ClusterRevision, which over-counts a list whose
+ * metadata-only members (strings, structs, arrays beyond the LIST_END
+ * convention) get no slot; that over-count only ever makes the asserted
+ * floor MORE conservative, so it is left uncorrected. */
+constexpr size_t kNoIdentifySlots = MT_COUNT(powerSourceAttrs);
+
 constexpr size_t kWidestEndpointSlots =
-    kIdentifySlots + kMax2(kMax2(kSensorSlots, kActuatorSlots), kLightSlots);
+    kMax2(kIdentifySlots + kMax2(kMax2(kSensorSlots, kActuatorSlots), kLightSlots),
+          kNoIdentifySlots);
 
 /* Deliberately partial: every sensor and actuator device type shares the
  * same three-cluster shape, so temperatureSensorClusters stands in for all
@@ -2047,6 +2173,29 @@ const attr_seed s_seeds[] = {
       { 0x00, 0x00, 0x00, 0x00 } },
     { ValveConfigurationAndControl::Id, Globals::Attributes::ClusterRevision::Id, 2,
       { 0x02, 0x00 } },
+
+    /* ---- catalogue batch 4 ------------------------------------------- */
+
+    /* PowerSource. Status 0 (Unspecified), Order 0, BatChargeLevel 0 (OK),
+     * BatReplacementNeeded false and BatReplaceability 0 (Unspecified) are
+     * all the zero-fill and all match the C6's config defaults
+     * (esp_matter_cluster.h power_source config, all-zero; the battery
+     * sub-config likewise), so they carry no rows. BatPercentRemaining
+     * boots null: this firmware measures no battery, and only a host
+     * AT+MTATTR write can report a real reading (INT8U, so the unsigned
+     * 1-byte sentinel 0xFF; ember's MIN_MAX check admits it past the
+     * 0..200 bounds because null is always in-range for a nullable
+     * attribute, attribute-table.cpp:401-403). FeatureMap 0x02 is
+     * Feature::kBattery (PowerSource/Enums.h:282-283), the exact-one
+     * Wired/Battery choice matching the C6. Revision 3 is
+     * PowerSource/Metadata.h:20 kRevision, which is also what the
+     * cluster's wildcard AttributeAccessInterface answers for
+     * ClusterRevision (power-source-server.cpp:131), the same
+     * seed-agrees-with-AAI discipline as the Thermostat and
+     * WindowCovering rows above. Description gets no slot and no row. */
+    { PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, 1, { 0xFF } }, /* null */
+    { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x02, 0x00, 0x00, 0x00 } },
+    { PowerSource::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x03, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -2067,8 +2216,17 @@ void seed_slots(dyn_endpoint *d)
                 /* Named here rather than in the predicate so an attribute
                  * too wide for a slot is visible in the log instead of
                  * silently unserved; the ARRAY globals are expected and
-                 * stay quiet. */
-                if (md.attributeType != ZAP_TYPE(ARRAY)) {
+                 * stay quiet. Catalogue batch 4 widened the quiet set to
+                 * CHAR_STRING and STRUCT: those are deliberate
+                 * metadata-only declarations (PowerSource/ModeSelect
+                 * Description, OperationalState's OperationalError), made
+                 * so AttributeList stays truthful for attributes this
+                 * arena cannot hold; each carries its own audit note at
+                 * the declaration. Anything ELSE too wide is still a
+                 * mistake worth shouting about. */
+                if (md.attributeType != ZAP_TYPE(ARRAY) &&
+                    md.attributeType != ZAP_TYPE(CHAR_STRING) &&
+                    md.attributeType != ZAP_TYPE(STRUCT)) {
                     LOG_ERR("attr 0x%08X on cluster 0x%08X is %u bytes, a slot holds %u",
                             (unsigned)md.attributeId, (unsigned)cl.clusterId, (unsigned)md.size,
                             (unsigned)kSlotDataBytes);
