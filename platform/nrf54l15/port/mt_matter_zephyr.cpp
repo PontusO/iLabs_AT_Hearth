@@ -23,6 +23,11 @@
  * for the washer/dishwasher/dryer trio; <new> for the placement-new the
  * non-default-constructible Instance pool needs. */
 #include <app/clusters/operational-state-server/operational-state-server.h>
+/* Catalogue batch 4: the process-global SupportedModesManager for mode
+ * select, and MatterReportingAttributeChangeCallback() for the host-fed
+ * SupportedModes list's dirty-marking. */
+#include <app/clusters/mode-select-server/supported-modes-manager.h>
+#include <app/reporting/reporting.h>
 
 #include <array>
 #include <new>
@@ -1603,4 +1608,179 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
         return MT_ATTR_ERR_FAILED;
     }
     return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+}
+
+/* ---- mode select (0x0027) ---------------------------------------------
+ *
+ * ONE process-global manager for the whole device, not a pool: the SDK
+ * fetches it fresh through getSupportedModesManager() on every
+ * SupportedModes read and every ChangeToMode
+ * (mode-select-server.cpp:84, :123, :469), and setSupportedModesManager()
+ * (:62) stores a bare global pointer, so a second mode select endpoint
+ * re-registering it is harmless. The manager dispatches on endpoint id
+ * itself against the host-fed store below.
+ *
+ * The store is kServiceableEndpoints (16) deep, NOT MT_COMP_MAX_ENDPOINTS
+ * (28): a seventeenth endpoint of any type fails its create before
+ * AT+MTMODES could ever address it, the acceptance-versus-capacity split
+ * every pool in this file follows.
+ *
+ * CharSpan lifetime and the in-place rebuild, the C6's argument re-checked
+ * against THIS tree: both the label bytes and the ModeOptionStruct array
+ * live in static storage (s_mode_slots), never freed, and the struct
+ * array is rebuilt IN PLACE on every AT+MTMODES write to the same slot,
+ * never reallocated. What rules out a reader observing a half-rebuilt
+ * entry is mutual exclusion, not the rebuild order:
+ * mt_matter_modes_set() holds the StackLock for the whole rebuild, and
+ * the reads run on the CHIP task under the same lock. The SDK also
+ * re-fetches the provider per access rather than caching one, which
+ * rules out a stale provider outliving a rebuild; secondary, the lock is
+ * the guarantee.
+ */
+struct mt_mode_entry_t {
+    uint8_t mode;
+    char label[MT_MODES_MAX_LABEL_LEN + 1];
+};
+
+struct mt_mode_slot_t {
+    bool used;
+    uint16_t ep;
+    uint8_t count;
+    mt_mode_entry_t entries[MT_MODES_MAX_COUNT];
+    chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type structs[MT_MODES_MAX_COUNT];
+};
+static mt_mode_slot_t s_mode_slots[kServiceableEndpoints];
+
+class HearthSupportedModesManager : public chip::app::Clusters::ModeSelect::SupportedModesManager
+{
+private:
+    /*
+     * SupportedModesManager declares its ModeOptionStructType alias BEFORE
+     * its "public:" (supported-modes-manager.h:36), so the name is private
+     * to the base class even though a public virtual's signature uses it:
+     * a derived class inherits the member but not access to the name. The
+     * same private-alias shadow the esp32 platform's own
+     * StaticSupportedModesManager uses, mirrored from the C6.
+     */
+    using ModeOptionStructType = chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type;
+
+public:
+    ModeOptionsProvider getModeOptionsProvider(chip::EndpointId endpointId) const override
+    {
+        for (auto &slot : s_mode_slots) {
+            if (slot.used && slot.ep == endpointId) {
+                return ModeOptionsProvider(slot.structs, slot.structs + slot.count);
+            }
+        }
+        /* begin == end == nullptr: no entry for this endpoint, an empty
+         * SupportedModes list until the host feeds one. */
+        return ModeOptionsProvider();
+    }
+
+    chip::Protocols::InteractionModel::Status getModeOptionByMode(
+        chip::EndpointId endpointId, uint8_t mode, const ModeOptionStructType **dataPtr) const override
+    {
+        for (auto &slot : s_mode_slots) {
+            if (slot.used && slot.ep == endpointId) {
+                for (uint8_t i = 0; i < slot.count; i++) {
+                    if (slot.structs[i].mode == mode) {
+                        *dataPtr = &slot.structs[i];
+                        return chip::Protocols::InteractionModel::Status::Success;
+                    }
+                }
+                return chip::Protocols::InteractionModel::Status::InvalidCommand;
+            }
+        }
+        return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+    }
+};
+static HearthSupportedModesManager s_mode_select_manager;
+
+/*
+ * The accessor doubles as the registration: on this platform there is no
+ * esp_matter init-callback pass to defer to, so the global is (re)set here,
+ * each call, before mt_devtype_create() spends anything on the endpoint.
+ * Idempotent by construction (same pointer every time), and safe at any
+ * point in boot: setSupportedModesManager() is a bare pointer store with
+ * no CHIP state behind it.
+ */
+extern "C" void *mt_matter_mode_select_manager(void)
+{
+    chip::app::Clusters::ModeSelect::setSupportedModesManager(&s_mode_select_manager);
+    return &s_mode_select_manager;
+}
+
+/*
+ * AT+MTMODES bridge (the ModeSelect form). Grammar and content rules are
+ * enforced by cmd_mtmodes() in mt_at.c before this is called; the bounds
+ * re-checked here are defensive. Mirrors the C6's
+ * mt_matter_modes_set() with the ember lookups in place of esp_matter's
+ * and the same terminal MatterReportingAttributeChangeCallback() so an
+ * active subscription sees the new list; CurrentMode is deliberately not
+ * touched here (a controller's ChangeToMode owns it, and the host
+ * observes that as a +MTATTR URC).
+ */
+extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels,
+                                   uint8_t count)
+{
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::ModeSelect::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1 || count > MT_MODES_MAX_COUNT) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_mode_slot_t *slot = nullptr;
+    for (auto &sl : s_mode_slots) {
+        if (sl.used && sl.ep == ep) {
+            slot = &sl;
+            break;
+        }
+    }
+    if (!slot) {
+        for (auto &sl : s_mode_slots) {
+            if (!sl.used) {
+                slot = &sl;
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        /* Cannot happen: one slot per serviceable endpoint, and an
+         * unserved endpoint fails the lookups above first. Defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(labels[i]);
+        if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        slot->entries[i].mode = modes[i];
+        memcpy(slot->entries[i].label, labels[i], len + 1);
+    }
+    slot->ep = ep;
+    slot->count = count;
+    slot->used = true;
+
+    /* Rebuild the struct array in place, each CharSpan pointing into the
+     * static label buffer above; the lock held across this whole function
+     * is what makes the rebuild atomic against CHIP-task readers (see the
+     * section comment). SemanticTags publishes a default-constructed
+     * empty List per entry, mandatory-but-empty-legal. */
+    for (uint8_t i = 0; i < count; i++) {
+        slot->structs[i].mode = slot->entries[i].mode;
+        slot->structs[i].label = chip::CharSpan::fromCharString(slot->entries[i].label);
+        slot->structs[i].semanticTags = chip::app::DataModel::List<
+            const chip::app::Clusters::ModeSelect::Structs::SemanticTagStruct::Type>();
+    }
+
+    MatterReportingAttributeChangeCallback(
+        ep, chip::app::Clusters::ModeSelect::Id,
+        chip::app::Clusters::ModeSelect::Attributes::SupportedModes::Id);
+    return MT_ATTR_OK;
 }

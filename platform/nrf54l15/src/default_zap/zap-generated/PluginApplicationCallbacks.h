@@ -39,6 +39,7 @@ void MatterAdministratorCommissioningPluginServerInitCallback();
 void MatterOperationalCredentialsPluginServerInitCallback();
 void MatterGroupKeyManagementPluginServerInitCallback();
 void MatterBooleanStatePluginServerInitCallback();
+void MatterModeSelectPluginServerInitCallback();
 void MatterAirQualityPluginServerInitCallback();
 void MatterSmokeCoAlarmPluginServerInitCallback();
 void MatterOperationalStatePluginServerInitCallback();
@@ -76,6 +77,7 @@ void MatterOccupancySensingPluginServerInitCallback();
   MatterOperationalCredentialsPluginServerInitCallback();                      \
   MatterGroupKeyManagementPluginServerInitCallback();                          \
   MatterBooleanStatePluginServerInitCallback();                                \
+  MatterModeSelectPluginServerInitCallback();                                  \
   MatterAirQualityPluginServerInitCallback();                                  \
   MatterSmokeCoAlarmPluginServerInitCallback();                                \
   MatterOperationalStatePluginServerInitCallback();                            \

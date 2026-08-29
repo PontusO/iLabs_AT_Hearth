@@ -68,16 +68,10 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
     return MT_ATTR_ERR_ENDPOINT;
 }
 
-void *mt_matter_mode_select_manager(void) { return NULL; }
-
-int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels, uint8_t count)
-{
-    (void)ep;
-    (void)modes;
-    (void)labels;
-    (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* mt_matter_mode_select_manager() and mt_matter_modes_set() left this file
+ * in catalogue batch 4, when the mode select (0x0027) entered the
+ * registry: real in mt_matter_zephyr.cpp now, on the one process-global
+ * SupportedModesManager. */
 
 void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
 {

@@ -1528,6 +1528,89 @@ constexpr EmberAfDeviceType kLaundryWasherTypes[] = { { 0x0073, 2 } };
 constexpr EmberAfDeviceType kDishwasherTypes[] = { { 0x0075, 2 } };
 constexpr EmberAfDeviceType kLaundryDryerTypes[] = { { 0x007C, 2 } };
 
+/* ---- mode select (0x0027) ---------------------------------------------
+ *
+ * Catalogue batch 4 audit, ModeSelect (0x0050).
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; the regeneration left CodeDrivenInitShutdown.cpp
+ *   byte-identical). NOT CommandHandlerInterface-only either, so
+ *   ChangeToMode needs the generated IMClusterCommandHandler dispatch,
+ *   which the regeneration added, exactly one case; that dispatch is why
+ *   the cluster had to enter hearth.zap.
+ *
+ *   Delegate or plain ember? Neither exactly. Description,
+ *   StandardNamespace and CurrentMode are plain ember against this arena;
+ *   SupportedModes is served by gModeSelectAttrAccess, a wildcard AAI
+ *   registered once from MatterModeSelectPluginServerInitCallback
+ *   (mode-select-server.cpp:416-419), which reads a single PROCESS-GLOBAL
+ *   SupportedModesManager fetched fresh on every access
+ *   (getSupportedModesManager(), :57; the setter at :62 stores a bare
+ *   global pointer). One manager for the whole device, not per endpoint:
+ *   the manager itself dispatches on endpoint id, so a second mode select
+ *   endpoint re-registering it is harmless, and the registration lives in
+ *   mt_matter_mode_select_manager() (mt_matter_zephyr.cpp), called from
+ *   mt_devtype_create() before any resource is spent.
+ *
+ *   ServerInit? YES, a real strong body, and this cluster JOINS the B388
+ *   by-hand call site. emberAfModeSelectClusterServerInitCallback
+ *   (mode-select-server.cpp:318-398) is reachable only through the
+ *   per-cluster functions array (Mode Select sits in
+ *   ClustersWithInitFunctions, config-data.yaml:97; the XML itself says
+ *   init="false", mode-select-cluster.xml:44), and DECLARE_DYNAMIC_CLUSTER
+ *   nulls that array, the exact B388 mechanism. Called by hand below next
+ *   to LevelControl/ColorControl. What it does HERE, traced in this tree
+ *   rather than assumed: its volatility gate passes on this endpoint
+ *   (emberAfIsKnownVolatileAttribute, util.cpp:155-165, answers false both
+ *   for our EXTERNAL-storage CurrentMode, IsExternal, and for the
+ *   undeclared StartUpMode, metadata null), and the body then skips at
+ *   Attributes::StartUpMode::Get() answering UnsupportedAttribute
+ *   (:334), StartUpMode not being declared. So the init is a no-op on
+ *   this composition today; it is called anyway because the moment a
+ *   later round declares StartUpMode, a dynamic endpoint that never ran
+ *   it boots with the wrong CurrentMode, which is exactly bug B388's
+ *   class. Bench-verify item: confirm no CurrentMode write and no error
+ *   log at rebuild time.
+ *
+ * Description (char_string 64, so 65 ember bytes) gets no slot and reads
+ * UNSUPPORTED_ATTRIBUTE on this platform, pending a string-store
+ * decision; declared so AttributeList is truthful, same note as the
+ * power source's Description. StartUpMode and OnMode are optional and
+ * deliberately not declared (no DEPONOFF feature, no OnOff cluster on
+ * this endpoint), which also parks the cluster's
+ * PreAttributeChanged mode-membership guard: it only checks those two
+ * attributes (mode-select-server.cpp:434-454, dispatching to
+ * verifyModeValue at :462), is function-array-bound
+ * anyway, and CurrentMode is not writable over the fabric. A
+ * controller's ChangeToMode validates membership against the manager and
+ * writes CurrentMode itself (emberAfModeSelectClusterChangeToModeCallback,
+ * :284-311), which lands in this arena and reaches the host as an
+ * ordinary +MTATTR URC, the C6's documented contract for this type. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(modeSelectAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::Description::Id, CHAR_STRING, 65, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::StandardNamespace::Id, ENUM16, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::SupportedModes::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::CurrentMode::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kModeSelectIncoming[] = { ModeSelect::Commands::ChangeToMode::Id,
+                                              kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(modeSelectClusters)
+DECLARE_DYNAMIC_CLUSTER(ModeSelect::Id, modeSelectAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kModeSelectIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(modeSelectEndpoint, modeSelectClusters);
+
+constexpr EmberAfDeviceType kModeSelectTypes[] = { { 0x0027, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -1572,6 +1655,7 @@ const hearth_devtype s_registry[] = {
     { 0x0073, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kLaundryWasherTypes) },
     { 0x0075, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kDishwasherTypes) },
     { 0x007C, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kLaundryDryerTypes) },
+    { 0x0027, 0, &modeSelectEndpoint, Span<const EmberAfDeviceType>(kModeSelectTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -1684,6 +1768,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
  *   washer/dishwasher/dryer 0x0073 75 7C     3      8      140        144
+ *   mode select             0x0027            3      8      140        144
  *   power source            0x0011            2      8      136        144
  *   boolean-state sensors, air quality        3      7      124        128
  *
@@ -1871,7 +1956,8 @@ constexpr size_t kActuatorSlots =
     kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)),
                 MT_COUNT(windowCoveringAttrs)),
           kMax2(kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)),
-                kMax2(MT_COUNT(smokeCoAlarmAttrs), MT_COUNT(opStateAttrs))));
+                kMax2(MT_COUNT(smokeCoAlarmAttrs),
+                      kMax2(MT_COUNT(opStateAttrs), MT_COUNT(modeSelectAttrs)))));
 
 /* The widest of the light/plug family. The on/off light and plug (OnOff
  * alone) and the dimmable light and plug (OnOff + LevelControl) are strict
@@ -2436,6 +2522,20 @@ const attr_seed s_seeds[] = {
     { OperationalState::Id, OperationalState::Attributes::FeatureMap::Id, 4,
       { 0x00, 0x00, 0x00, 0x00 } },
     { OperationalState::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* ModeSelect. StandardNamespace boots null (nullable ENUM16, unsigned
+     * 2-byte sentinel 0xFFFF): this co-processor cannot know which
+     * standard namespace the host's modes belong to, and the C6's config
+     * default is the same null. CurrentMode 0 is the zero-fill and
+     * matches the C6's config default; the host's AT+MTMODES list
+     * conventionally starts at mode 0. FeatureMap 0 (no DEPONOFF; the
+     * cluster's only feature needs an OnOff server on the endpoint).
+     * Revision 2 is ModeSelect/Metadata.h:20 kRevision and the XML's
+     * globalAttribute value (mode-select-cluster.xml:45). Description
+     * gets no slot and no row. */
+    { ModeSelect::Id, ModeSelect::Attributes::StandardNamespace::Id, 2, { 0xFF, 0xFF } }, /* null */
+    { ModeSelect::Id, ModeSelect::Attributes::FeatureMap::Id, 4, { 0x00, 0x00, 0x00, 0x00 } },
+    { ModeSelect::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x02, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -2763,6 +2863,25 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 4: mode select's manager handout is the two-halves
+     * pattern collapsed to one half. There is no per-endpoint object at
+     * all, only the ONE process-global SupportedModesManager, and
+     * mt_matter_mode_select_manager() both registers it with the SDK
+     * (setSupportedModesManager, an idempotent bare-pointer store, so a
+     * second mode select endpoint re-registering is harmless) and returns
+     * it for this null check. Nothing to do after create: the manager
+     * dispatches on endpoint id internally, and the endpoint learns
+     * nothing the manager needs. Cannot fail today (the accessor returns
+     * a static object's address); checked anyway so a future refactor
+     * that CAN fail aborts before anything is spent, the pool checks'
+     * rule. */
+    if (type_has_cluster(type->ep_type, ModeSelect::Id)) {
+        if (mt_matter_mode_select_manager() == nullptr) {
+            LOG_ERR("devtype 0x%04X: mode select manager unavailable", (unsigned)devtype_id);
+            return -1;
+        }
+    }
+
     void *valve_delegate = nullptr;
     if (type_has_cluster(type->ep_type, ValveConfigurationAndControl::Id)) {
         valve_delegate = mt_matter_valve_delegate_alloc();
@@ -2964,6 +3083,15 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
             emberAfLevelControlClusterServerInitCallback(d.ep_id);
         } else if (type->ep_type->cluster[i].clusterId == ColorControl::Id) {
             emberAfColorControlClusterServerInitCallback(d.ep_id);
+        } else if (type->ep_type->cluster[i].clusterId == ModeSelect::Id) {
+            /* Catalogue batch 4: ModeSelect joined. Its ServerInit is a
+             * real strong body reached only through the nulled functions
+             * array; on this composition it verifiably does nothing (the
+             * StartUpMode read answers UnsupportedAttribute and the body
+             * skips), and it is called anyway so the day StartUpMode is
+             * declared a dynamic endpoint boots the right CurrentMode.
+             * See the modeSelectAttrs audit note. */
+            emberAfModeSelectClusterServerInitCallback(d.ep_id);
         }
     }
 

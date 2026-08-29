@@ -81,6 +81,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::LevelControl::Id:
     emberAfLevelControlClusterInitCallback(endpoint);
     break;
+  case app::Clusters::ModeSelect::Id:
+    emberAfModeSelectClusterInitCallback(endpoint);
+    break;
   case app::Clusters::NetworkCommissioning::Id:
     emberAfNetworkCommissioningClusterInitCallback(endpoint);
     break;
@@ -228,6 +231,11 @@ emberAfIlluminanceMeasurementClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfLevelControlClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfModeSelectClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
