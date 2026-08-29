@@ -62,6 +62,10 @@ extern "C" {
 #include "mt_composition.h"
 #include "mt_matter.h"
 }
+/* Store reclaim round: the mode select and chime host-fed stores live in
+ * each endpoint's block on the endpoint heap, reached through the
+ * mt_dyn_*_store() accessors this header declares. */
+#include "mt_dyn_store.h"
 #include "mt_port_ids.h"
 
 LOG_MODULE_REGISTER(hearth_matter, LOG_LEVEL_INF);
@@ -1798,38 +1802,33 @@ static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, b
  * (mode-select-server.cpp:84, :123, :469), and setSupportedModesManager()
  * (:62) stores a bare global pointer, so a second mode select endpoint
  * re-registering it is harmless. The manager dispatches on endpoint id
- * itself against the host-fed store below.
+ * itself against that endpoint's host-fed store.
  *
- * The store is kServiceableEndpoints (16) deep, NOT MT_COMP_MAX_ENDPOINTS
- * (28): a seventeenth endpoint of any type fails its create before
- * AT+MTMODES could ever address it, the acceptance-versus-capacity split
- * every pool in this file follows.
+ * The store (mt_mode_store_t, mt_dyn_store.h) lives in the endpoint's own
+ * heap block since the store reclaim round, reached through
+ * mt_dyn_mode_store(): only a composition that declares mode select
+ * endpoints pays for it, and the .bss pool this section used to hold
+ * (7,040 B for 16 slots) is gone. Capacity did not move: the block heap
+ * serves at most kServiceableEndpoints (16) endpoints, and an endpoint the
+ * create path refused is unaddressable by AT+MTMODES anyway, the
+ * acceptance-versus-capacity split every pool in this file follows. A
+ * fresh store has count 0, which every reader below maps to exactly the
+ * answers the pool's no-used-slot arm used to give, so the wire cannot
+ * tell the storage moved.
  *
  * CharSpan lifetime and the in-place rebuild, the C6's argument re-checked
  * against THIS tree: both the label bytes and the ModeOptionStruct array
- * live in static storage (s_mode_slots), never freed, and the struct
- * array is rebuilt IN PLACE on every AT+MTMODES write to the same slot,
- * never reallocated. What rules out a reader observing a half-rebuilt
- * entry is mutual exclusion, not the rebuild order:
- * mt_matter_modes_set() holds the StackLock for the whole rebuild, and
- * the reads run on the CHIP task under the same lock. The SDK also
- * re-fetches the provider per access rather than caching one, which
+ * live in the endpoint's block, which is allocated once at boot and never
+ * freed (the allocate-only invariant beside K_HEAP_DEFINE in
+ * mt_devtypes_zephyr.cpp), and the struct array is rebuilt IN PLACE on
+ * every AT+MTMODES write to the same store, never reallocated. What rules
+ * out a reader observing a half-rebuilt entry is mutual exclusion, not the
+ * rebuild order: mt_matter_modes_set() holds the StackLock for the whole
+ * rebuild, and the reads run on the CHIP task under the same lock. The SDK
+ * also re-fetches the provider per access rather than caching one, which
  * rules out a stale provider outliving a rebuild; secondary, the lock is
  * the guarantee.
  */
-struct mt_mode_entry_t {
-    uint8_t mode;
-    char label[MT_MODES_MAX_LABEL_LEN + 1];
-};
-
-struct mt_mode_slot_t {
-    bool used;
-    uint16_t ep;
-    uint8_t count;
-    mt_mode_entry_t entries[MT_MODES_MAX_COUNT];
-    chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type structs[MT_MODES_MAX_COUNT];
-};
-static mt_mode_slot_t s_mode_slots[kServiceableEndpoints];
 
 class HearthSupportedModesManager : public chip::app::Clusters::ModeSelect::SupportedModesManager
 {
@@ -1847,31 +1846,35 @@ private:
 public:
     ModeOptionsProvider getModeOptionsProvider(chip::EndpointId endpointId) const override
     {
-        for (auto &slot : s_mode_slots) {
-            if (slot.used && slot.ep == endpointId) {
-                return ModeOptionsProvider(slot.structs, slot.structs + slot.count);
-            }
+        mt_mode_store_t *store = mt_dyn_mode_store(endpointId);
+        if (store != nullptr && store->count > 0) {
+            return ModeOptionsProvider(store->structs, store->structs + store->count);
         }
-        /* begin == end == nullptr: no entry for this endpoint, an empty
-         * SupportedModes list until the host feeds one. */
+        /* begin == end == nullptr: no store on this endpoint, or the host
+         * has not fed a list yet (count 0, what the pool's unclaimed slot
+         * used to mean), an empty SupportedModes list either way. */
         return ModeOptionsProvider();
     }
 
     chip::Protocols::InteractionModel::Status getModeOptionByMode(
         chip::EndpointId endpointId, uint8_t mode, const ModeOptionStructType **dataPtr) const override
     {
-        for (auto &slot : s_mode_slots) {
-            if (slot.used && slot.ep == endpointId) {
-                for (uint8_t i = 0; i < slot.count; i++) {
-                    if (slot.structs[i].mode == mode) {
-                        *dataPtr = &slot.structs[i];
-                        return chip::Protocols::InteractionModel::Status::Success;
-                    }
-                }
-                return chip::Protocols::InteractionModel::Status::InvalidCommand;
+        mt_mode_store_t *store = mt_dyn_mode_store(endpointId);
+        if (store == nullptr || store->count == 0) {
+            /* count 0 lands here, NOT in the InvalidCommand arm below:
+             * before the reclaim round an endpoint the host had not fed
+             * had no used pool slot at all and answered UnsupportedCluster,
+             * and a ChangeToMode against a fresh mode select endpoint must
+             * keep answering exactly that. */
+            return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+        }
+        for (uint8_t i = 0; i < store->count; i++) {
+            if (store->structs[i].mode == mode) {
+                *dataPtr = &store->structs[i];
+                return chip::Protocols::InteractionModel::Status::Success;
             }
         }
-        return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+        return chip::Protocols::InteractionModel::Status::InvalidCommand;
     }
 };
 static HearthSupportedModesManager s_mode_select_manager;
@@ -1914,24 +1917,12 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_mode_slot_t *slot = nullptr;
-    for (auto &sl : s_mode_slots) {
-        if (sl.used && sl.ep == ep) {
-            slot = &sl;
-            break;
-        }
-    }
+    mt_mode_store_t *slot = mt_dyn_mode_store(ep);
     if (!slot) {
-        for (auto &sl : s_mode_slots) {
-            if (!sl.used) {
-                slot = &sl;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* Cannot happen: one slot per serviceable endpoint, and an
-         * unserved endpoint fails the lookups above first. Defensive. */
+        /* Cannot happen: the two lookups above proved ep live with a
+         * ModeSelect server, and every such endpoint's block carries its
+         * store from create. Defensive, the role the exhausted pool arm
+         * used to play. */
         return MT_ATTR_ERR_FAILED;
     }
 
@@ -1957,15 +1948,14 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
         slot->entries[i].mode = modes[i];
         memcpy(slot->entries[i].label, labels[i], strlen(labels[i]) + 1);
     }
-    slot->ep = ep;
     slot->count = count;
-    slot->used = true;
 
     /* Rebuild the struct array in place, each CharSpan pointing into the
-     * static label buffer above; the lock held across this whole function
-     * is what makes the rebuild atomic against CHIP-task readers (see the
-     * section comment). SemanticTags publishes a default-constructed
-     * empty List per entry, mandatory-but-empty-legal. */
+     * store's own label buffer (block-resident, never freed; the section
+     * comment's lifetime argument); the lock held across this whole
+     * function is what makes the rebuild atomic against CHIP-task readers
+     * (see the section comment). SemanticTags publishes a
+     * default-constructed empty List per entry, mandatory-but-empty-legal. */
     for (uint8_t i = 0; i < count; i++) {
         slot->structs[i].mode = slot->entries[i].mode;
         slot->structs[i].label = chip::CharSpan::fromCharString(slot->entries[i].label);
@@ -2005,32 +1995,13 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
  * chime-server.h:173), the OperationalState GetInstance() mechanism under
  * another name.
  */
-struct mt_chime_entry_t {
-    uint8_t id;
-    char name[MT_CHIME_MAX_NAME_LEN + 1];
-};
-
-struct mt_chime_slot_t {
-    bool used;
-    uint16_t ep;
-    uint8_t count;
-    mt_chime_entry_t entries[MT_CHIME_MAX_SOUNDS];
-};
-/* kServiceableEndpoints deep, not MT_COMP_MAX_ENDPOINTS: the same
- * acceptance-versus-capacity split as every store and pool in this file.
- * At 16 endpoints of 8 names of 33 bytes this is the batch's largest new
- * .bss item, about 4.3 KB. */
-static mt_chime_slot_t s_chime_slots[kServiceableEndpoints];
-
-static mt_chime_slot_t *mt_chime_find_slot(uint16_t ep)
-{
-    for (auto &sl : s_chime_slots) {
-        if (sl.used && sl.ep == ep) {
-            return &sl;
-        }
-    }
-    return nullptr;
-}
+/* The sounds store (mt_chime_store_t, mt_dyn_store.h) lives in the chime
+ * endpoint's own heap block since the store reclaim round, reached through
+ * mt_dyn_chime_store(); the 4,448 B .bss pool this section used to hold is
+ * gone, and only compositions that declare chime endpoints pay for the
+ * store. A fresh store has count 0, which both delegate lookups below
+ * already answer with PROVIDER_LIST_EXHAUSTED at any index, exactly what
+ * the pool's no-slot arm produced. */
 
 class HearthChimeDelegate : public chip::app::Clusters::ChimeDelegate
 {
@@ -2045,7 +2016,7 @@ public:
     CHIP_ERROR GetChimeSoundByIndex(uint8_t chimeIndex, uint8_t &chimeID,
                                     chip::MutableCharSpan &name) override
     {
-        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
+        mt_chime_store_t *slot = mt_dyn_chime_store(m_ep);
         if (slot == nullptr || chimeIndex >= slot->count) {
             /* PROVIDER_LIST_EXHAUSTED, NOT the CHIP_ERROR_NOT_FOUND the
              * header's doc comment names (chime-server.h:137-138): the
@@ -2066,7 +2037,7 @@ public:
 
     CHIP_ERROR GetChimeIDByIndex(uint8_t chimeIndex, uint8_t &chimeID) override
     {
-        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
+        mt_chime_store_t *slot = mt_dyn_chime_store(m_ep);
         if (slot == nullptr || chimeIndex >= slot->count) {
             /* Same sentinel note as GetChimeSoundByIndex above. */
             return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
@@ -2171,17 +2142,11 @@ extern "C" int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids,
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_chime_slot_t *slot = mt_chime_find_slot(ep);
+    mt_chime_store_t *slot = mt_dyn_chime_store(ep);
     if (!slot) {
-        for (auto &sl : s_chime_slots) {
-            if (!sl.used) {
-                slot = &sl;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* Cannot happen: one slot per serviceable endpoint. Defensive. */
+        /* Cannot happen: the two lookups above proved ep live with a
+         * Chime server, and every such endpoint's block carries its store
+         * from create. Defensive. */
         return MT_ATTR_ERR_FAILED;
     }
 
@@ -2193,9 +2158,7 @@ extern "C" int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids,
         slot->entries[i].id = ids[i];
         memcpy(slot->entries[i].name, names[i], len + 1);
     }
-    slot->ep = ep;
     slot->count = count;
-    slot->used = true;
 
     MatterReportingAttributeChangeCallback(
         ep, chip::app::Clusters::Chime::Id,
