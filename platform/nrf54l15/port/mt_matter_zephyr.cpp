@@ -7,6 +7,14 @@
 
 #include <app/ConcreteAttributePath.h>
 #include <app/clusters/boolean-state-server/CodegenIntegration.h>
+/* Catalogue batch 3, the two command-verdict types. door-lock-server.h also
+ * pulls DlLockState, OperationSourceEnum, OperationErrorEnum, Nullable and
+ * Optional into the global namespace itself (:46-64), which is why the
+ * ember hook definitions further down can spell their signatures exactly as
+ * the header declares them. */
+#include <app/clusters/door-lock-server/door-lock-server.h>
+#include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-cluster.h>
+#include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-delegate.h>
 #include <app/server/Server.h>
 #include <clusters/AirQuality/Enums.h>
 #include <app/server/CommissioningWindowManager.h>
@@ -780,4 +788,352 @@ extern "C" uint32_t mt_air_quality_feature_mask(void)
     using chip::app::Clusters::AirQuality::Feature;
     return chip::to_underlying(Feature::kFair) | chip::to_underlying(Feature::kModerate) |
            chip::to_underlying(Feature::kVeryPoor) | chip::to_underlying(Feature::kExtremelyPoor);
+}
+
+/*
+ * ============ catalogue batch 3: the command verdict frame ==============
+ *
+ * The door lock (0x000A) and the water valve (0x0042) are the first device
+ * types on this platform whose commands need an APPLICATION verdict, and
+ * this section is where that verdict is fetched. Everything about the
+ * verdict protocol itself, the sequence numbers, the 1000 ms window, the
+ * default-deny, the +MTCMDTO URC, belongs to core (mt_at.h, mt_cmdbox.h)
+ * and is identical on both platforms; nothing here reimplements any of it.
+ * All this code does is call mt_cmd_forward() from the right SDK hook and
+ * translate the boolean it returns into whatever that hook's caller expects.
+ *
+ * Both types forward the PAYLOAD-LESS form. AT_MT_SPEC.md 3.17 registers
+ * the door lock as cluster 257 commands 0/1 and the valve as cluster 129
+ * commands 0/1, with no trailing fields on either, so mt_cmd_forward() is
+ * the right entry point and neither mt_cmd_forward_payload() nor
+ * mt_cmd_forward_fields() is involved.
+ *
+ * NO StackLock in the command hooks, unlike every mt_matter_* bridge
+ * function in this file. They already run ON the CHIP event-loop task: the
+ * lock's two are ember command callbacks and the valve's two are Delegate
+ * methods the SDK calls synchronously from that same task.
+ * mt_cmd_forward() takes no lock of its own either, for the same reason,
+ * and mt_at.c's AT+MTCMDRESP handler must never take the stack lock on the
+ * reply path (see its comment) or the two would deadlock. The AT+MTLOCK
+ * and AT+MTVALVE bridges below DO take it, because those are called from
+ * the AT parser thread like every other bridge function here.
+ */
+
+/* ---- door lock (0x000A) ----------------------------------------------- */
+
+/*
+ * One helper for both commands, differing only in the command id forwarded,
+ * mirroring the C6's mt_door_lock_adjudicate() exactly.
+ *
+ * The verdict-to-status mapping is the SDK's, not a choice made here:
+ * HandleRemoteLockOperation() answers the controller
+ * `success ? Status::Success : Status::Failure` (door-lock-server.cpp:3726)
+ * straight off this function's return value, and reads `err` only to
+ * annotate the LockOperationError event it emits on the failure path
+ * (:3762-3765). So an allow is Success and a deny is Failure on the wire,
+ * with an event carrying the reason.
+ *
+ * kUnspecified is the reason on every deny, because mt_cmd_forward()'s
+ * false is deliberately undifferentiated: it covers an explicit host deny,
+ * a missed 1000 ms window, the AT link not being up, and no host callback
+ * registered. A lock fails closed, and the firmware has no honest way to
+ * tell a controller which of those four it was. Not kInvalidCredential in
+ * particular: that value additionally triggers HandleWrongCodeEntry()
+ * (:3716) and would count a host deny towards the wrong-code lockout, which
+ * would be a lie about what happened.
+ */
+static bool mt_door_lock_adjudicate(chip::EndpointId endpointId, uint32_t command,
+                                    OperationErrorEnum &err)
+{
+    if (mt_cmd_forward(endpointId, chip::app::Clusters::DoorLock::Id, command)) {
+        return true;
+    }
+    err = OperationErrorEnum::kUnspecified;
+    return false;
+}
+
+/*
+ * Strong overrides of the weak defaults in door-lock-server-callback.cpp
+ * (:46 and :55). Signatures verbatim from door-lock-server.h:1112-1114 and
+ * :1128-1130; note the argument order, fabricIdx and nodeId BEFORE the PIN,
+ * and that pinCode is an Optional, not a Nullable.
+ *
+ * fabricIdx/nodeId/pinCode go unused. With FeatureMap 0 this endpoint
+ * advertises no credential feature at all, so a PIN-carrying invoke is
+ * refused by the server before the app is consulted, and fabricIdx/nodeId
+ * are event-annotation fields with no adjudication use: the host is told
+ * which endpoint and which command, which is what the +MTCMD frame carries.
+ */
+bool emberAfPluginDoorLockOnDoorLockCommand(chip::EndpointId endpointId,
+                                            const Nullable<chip::FabricIndex> &fabricIdx,
+                                            const Nullable<chip::NodeId> &nodeId,
+                                            const Optional<chip::ByteSpan> &pinCode,
+                                            OperationErrorEnum &err)
+{
+    (void)fabricIdx;
+    (void)nodeId;
+    (void)pinCode;
+    return mt_door_lock_adjudicate(endpointId, chip::app::Clusters::DoorLock::Commands::LockDoor::Id,
+                                   err);
+}
+
+bool emberAfPluginDoorLockOnDoorUnlockCommand(chip::EndpointId endpointId,
+                                              const Nullable<chip::FabricIndex> &fabricIdx,
+                                              const Nullable<chip::NodeId> &nodeId,
+                                              const Optional<chip::ByteSpan> &pinCode,
+                                              OperationErrorEnum &err)
+{
+    (void)fabricIdx;
+    (void)nodeId;
+    (void)pinCode;
+    return mt_door_lock_adjudicate(endpointId,
+                                   chip::app::Clusters::DoorLock::Commands::UnlockDoor::Id, err);
+}
+
+/*
+ * The lock's per-endpoint init hook, emberAfDoorLockClusterInitCallback(),
+ * is deliberately NOT here. It lives in mt_devtypes_zephyr.cpp, next to the
+ * door lock's device type declaration, because its failure has to abort
+ * mt_devtype_create() and that file owns the create. See the comment on the
+ * override there for the InitEndpoint-versus-InitServer reasoning.
+ */
+
+/*
+ * AT+MTLOCK bridge (AT_MT_SPEC.md 3.18). Reports the host's OWN actuation
+ * as LockState, through the source-taking SetLockState() overload so the
+ * LockOperation event a controller subscribes to is actually emitted; the
+ * 2-arg overload (door-lock-server.h:160) writes the attribute silently and
+ * is deliberately not used. mt_matter.h calls this the 6-arg form after the
+ * C6's SDK; in this tree it is 7-arg with defaults
+ * (door-lock-server.h:144-148), same call.
+ *
+ * The firmware never calls this itself after an allowed +MTCMD verdict:
+ * actuation timing belongs to the host, which calls AT+MTLOCK once its own
+ * mechanism confirms the bolt moved.
+ */
+extern "C" int mt_matter_lock_state_set(uint16_t ep, uint8_t state, uint8_t source)
+{
+    chip::DeviceLayer::StackLock lock;
+    /* Same two lookups, in the same order, that attr_locate() above uses to
+     * separate MT_ATTR_ERR_ENDPOINT from MT_ATTR_ERR_CLUSTER, so AT+MTLOCK's
+     * error division (AT_MT_SPEC.md 3.18) matches AT+MTATTR's by
+     * construction rather than by two hand-written lookups agreeing. */
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::DoorLock::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    bool ok = DoorLockServer::Instance().SetLockState(ep, (DlLockState)state,
+                                                      (OperationSourceEnum)source);
+    return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+}
+
+extern "C" uint8_t mt_matter_lock_source_manual(void)
+{
+    return (uint8_t)OperationSourceEnum::kManual;
+}
+
+extern "C" uint8_t mt_matter_lock_source_max(void)
+{
+    /* kUnknownEnumValue is one past the last real source and is not itself
+     * a valid one to report (mt_matter.h); kAliro is the highest that is.
+     * Read from the pinned header at call time rather than transcribed, so
+     * an SDK that grows the enum grows AT+MTLOCK's accepted range with it.
+     * This tree agrees with the C6's: AT_MT_SPEC.md 3.18's documented
+     * 0..10 range holds on both. */
+    return (uint8_t)OperationSourceEnum::kAliro;
+}
+
+/* ---- water valve (0x0042) ---------------------------------------------
+ *
+ * ValveConfigurationAndControl::Delegate (delegate.h:34) has exactly three
+ * pure virtuals (valve-configuration-and-control-delegate.h:40-42):
+ *
+ *   virtual DataModel::Nullable<chip::Percent> HandleOpenValve(DataModel::Nullable<chip::Percent> level) = 0;
+ *   virtual CHIP_ERROR HandleCloseValve()                                                                = 0;
+ *   virtual void HandleRemainingDurationTick(uint32_t duration)                                          = 0;
+ *
+ * The verdict cannot fail either command on the wire, and this is an SDK
+ * property rather than a firmware choice (AT_MT_SPEC.md 3.19). Traced in
+ * this tree, not assumed from the C6's note: CloseValve() calls
+ * HandleCloseValve() (cluster.cpp:303) and neither assigns, tests nor logs
+ * the CHIP_ERROR it returns, then returns CHIP_NO_ERROR unconditionally
+ * (:306), so the Close command handler's Failure arm (:520-522) is
+ * unreachable through the delegate. Open is worse: HandleOpenValve() has no
+ * error channel at all, since it returns a LEVEL rather than a status, and
+ * SetValveLevel() reads that level only to decide whether to republish
+ * CurrentLevel (:361-365) before returning CHIP_NO_ERROR (:370); the Open
+ * handler's status Optional (:440) is only ever filled from argument
+ * constraint checks (:451, :456, :462, :483), never from anything the
+ * delegate did.
+ *
+ * So the verdict here gates ONE thing: whether the host actually moves the
+ * valve. That is still the whole point of forwarding it, which is why both
+ * hooks forward anyway.
+ *
+ * One caller of HandleCloseValve() is NOT a controller invoke: the server's
+ * own auto-close timer re-enters it when a timed open expires, so the host
+ * sees an unsolicited 129/1 forward. Fix round I1; the full mechanism and
+ * why it is documented rather than fixed are on the water valve's audit
+ * note in mt_devtypes_zephyr.cpp, and the host-facing consequence is in the
+ * platform README.
+ */
+class HearthValveDelegate : public chip::app::Clusters::ValveConfigurationAndControl::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+
+    /*
+     * Return the level asked for on allow (the caller republishes it as
+     * CurrentLevel when the Level feature is present, which it is not on
+     * this build), and NullNullable on deny: "no level to report", which is
+     * the nearest thing to a refusal this signature can express. Not an
+     * error, because there is no error to express.
+     */
+    chip::app::DataModel::Nullable<chip::Percent> HandleOpenValve(
+        chip::app::DataModel::Nullable<chip::Percent> level) override
+    {
+        if (mt_cmd_forward(m_ep, chip::app::Clusters::ValveConfigurationAndControl::Id,
+                           chip::app::Clusters::ValveConfigurationAndControl::Commands::Open::Id)) {
+            return level;
+        }
+        return chip::app::DataModel::NullNullable;
+    }
+
+    /*
+     * Forward for adjudication and answer CHIP_NO_ERROR regardless: the
+     * caller discards this return (see the section comment), so returning
+     * an error on deny would change nothing on the wire while making this
+     * function's contract with its caller a lie.
+     */
+    CHIP_ERROR HandleCloseValve() override
+    {
+        mt_cmd_forward(m_ep, chip::app::Clusters::ValveConfigurationAndControl::Id,
+                       chip::app::Clusters::ValveConfigurationAndControl::Commands::Close::Id);
+        return CHIP_NO_ERROR;
+    }
+
+    /*
+     * Fires once a second from a SystemLayer timer on the CHIP event loop
+     * while a timed open counts down (cluster.cpp:214, :235, :245).
+     * Nothing in this firmware's AT surface exposes that countdown as an
+     * event to forward, so there is nothing to do; RemainingDuration itself
+     * still ticks in the server's shadow store and is what a subscribed
+     * controller reads (see the seed note in mt_devtypes_zephyr.cpp).
+     *
+     * THIS FUNCTION must stay non-blocking: it runs on the event loop once
+     * per second, and a mt_cmd_forward() from here would stall the stack
+     * for up to 1000 ms on every tick.
+     *
+     * That rule is about this function only, and it is worth being exact,
+     * because the TERMINAL tick does reach mt_cmd_forward() anyway, just
+     * not through here. At zero the tick does not call this callback at
+     * all: startRemainingDurationTick() takes the else branch and calls
+     * CloseValve() (:250-252), which calls HandleCloseValve() (:303), which
+     * forwards and blocks. So the auto-close stall exists, it is one
+     * blocking forward per timed open rather than one per second, and it is
+     * the SDK's structure rather than something this class chooses.
+     * Documented, not fixed; fix round I1, full mechanism on the water
+     * valve's audit note in mt_devtypes_zephyr.cpp.
+     */
+    void HandleRemainingDurationTick(uint32_t duration) override { (void)duration; }
+
+private:
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+};
+
+/*
+ * Pool of delegate objects, handed out in composition order by
+ * mt_devtype_create() (mt_devtypes_zephyr.cpp). Static rather than heap:
+ * the composition rebuild runs once at boot and these must outlive the
+ * device, so a fixed array is both simpler and cheaper than a block per
+ * object.
+ *
+ * Sized kServiceableEndpoints, not MT_COMP_MAX_ENDPOINTS. mt_matter.h's
+ * contract names the latter because it was written for the C6, which
+ * serves all 28; this port serves 16 (mt_port_ids.h, acceptance versus
+ * capacity), so a seventeenth endpoint of ANY device type fails its create
+ * before it could ask for a delegate. Sizing for 28 would reserve twelve
+ * slots no composition on this part can reach. The exhaustion behaviour
+ * the contract specifies is unchanged: nullptr, and the caller aborts the
+ * boot rebuild.
+ */
+static HearthValveDelegate s_valve_delegates[kServiceableEndpoints];
+static size_t s_valve_delegate_next;
+
+extern "C" void *mt_matter_valve_delegate_alloc(void)
+{
+    if (s_valve_delegate_next >= kServiceableEndpoints) {
+        return nullptr;
+    }
+    return &s_valve_delegates[s_valve_delegate_next++];
+}
+
+/*
+ * Fixes the slot's endpoint AND registers it with the cluster server. Both
+ * halves belong here because both need the endpoint id, which is not known
+ * until emberAfSetDynamicEndpoint() has succeeded; mt_devtype_create()'s
+ * comment has the full ordering argument and why it differs from the C6's.
+ *
+ * SetDefaultDelegate() returns void and drops the registration silently if
+ * the endpoint index does not resolve (cluster.cpp:264-269: a lone
+ * `if (ep < table size)` with no else and no log). A valve in that state
+ * still answers Open and Close with Success and still looks healthy to a
+ * controller, while no +MTCMD is ever raised and the server's auto-close
+ * tick never runs. So the registration is read back rather than trusted,
+ * and a failure is logged loudly at the moment it happens. It does not
+ * abort the create; mt_devtype_create()'s own comment says why that is
+ * consistent with the pool check aborting rather than at odds with it.
+ */
+extern "C" void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    auto *d = static_cast<HearthValveDelegate *>(delegate);
+    d->set_endpoint(ep);
+    chip::app::Clusters::ValveConfigurationAndControl::SetDefaultDelegate(ep, d);
+    if (chip::app::Clusters::ValveConfigurationAndControl::GetDefaultDelegate(ep) != d) {
+        LOG_ERR("valve delegate registration dropped for endpoint %u: commands on it will not "
+                "reach the host and auto-close will not run",
+                (unsigned)ep);
+    }
+}
+
+/*
+ * AT+MTVALVE bridge (AT_MT_SPEC.md 3.19). Reports the host's own actuation
+ * through the cluster's own UpdateCurrentState()/UpdateCurrentLevel() calls
+ * rather than a raw attribute write, so the ValveStateChanged event a
+ * subscribed controller expects is emitted. Same split as AT+MTLOCK, and
+ * doubly so here: the verdict never reached the wire anyway, so only the
+ * host can say the valve moved.
+ *
+ * level == -1 means absent; mt_at.c has already validated 0..100 for any
+ * value it passes through. As on the C6, <level> publishes nowhere on this
+ * build: FeatureMap is 0, so CurrentLevel is not a declared attribute and
+ * UpdateCurrentLevel() checks the feature before touching it and returns
+ * success either way. The argument is accepted and does nothing observable,
+ * which is exactly what AT_MT_SPEC.md 3.19 documents.
+ */
+extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
+{
+    chip::DeviceLayer::StackLock lock;
+    namespace Valve = chip::app::Clusters::ValveConfigurationAndControl;
+    /* attr_locate()'s two lookups again, for AT_MT_SPEC.md 3.19's error
+     * division; see the note in mt_matter_lock_state_set() above. */
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, Valve::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    CHIP_ERROR err = Valve::UpdateCurrentState(ep, (Valve::ValveStateEnum)state);
+    if (err != CHIP_NO_ERROR) {
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (level >= 0) {
+        err = Valve::UpdateCurrentLevel(ep, (chip::Percent)level);
+        if (err != CHIP_NO_ERROR) {
+            return MT_ATTR_ERR_FAILED;
+        }
+    }
+    return MT_ATTR_OK;
 }

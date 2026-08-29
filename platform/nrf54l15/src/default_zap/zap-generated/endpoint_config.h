@@ -41,7 +41,7 @@
 #define GENERATED_DEFAULTS_COUNT (0)
 
 // This is an array of EmberAfAttributeMinMaxValue structures.
-#define GENERATED_MIN_MAX_DEFAULT_COUNT 16
+#define GENERATED_MIN_MAX_DEFAULT_COUNT 17
 #define GENERATED_MIN_MAX_DEFAULTS                                             \
   {                                                                            \
                                                                                \
@@ -52,6 +52,9 @@
       {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0x3},   /* Options */           \
       {(uint16_t)0xFF, (uint16_t)0x1, (uint16_t)0xFE}, /* OnLevel */           \
       {(uint16_t)0x32, (uint16_t)0x1, (uint16_t)0xFE}, /* DefaultMoveRate */   \
+                                                                               \
+      /* Endpoint: 240, Cluster: Door Lock (server) */                         \
+      {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0x4}, /* OperatingMode */       \
                                                                                \
       /* Endpoint: 240, Cluster: Window Covering (server) */                   \
       {(uint16_t)0x0, (uint16_t)0x0, (uint16_t)0xF}, /* Mode */                \
@@ -83,7 +86,7 @@
   }
 
 // This is an array of EmberAfAttributeMetadata structures.
-#define GENERATED_ATTRIBUTE_COUNT 279
+#define GENERATED_ATTRIBUTE_COUNT 294
 #define GENERATED_ATTRIBUTES                                                   \
   {                                                                            \
                                                                                \
@@ -735,6 +738,48 @@
       {ZAP_SIMPLE_DEFAULT(1), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                 \
        ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                    \
                                                                                \
+      /* Endpoint: 240, Cluster: Valve Configuration and Control (server) */   \
+      {ZAP_EMPTY_DEFAULT(), 0x00000000, 4, ZAP_TYPE(ELAPSED_S),                \
+       ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* OpenDuration */                   \
+      {ZAP_EMPTY_DEFAULT(), 0x00000001, 4, ZAP_TYPE(ELAPSED_S),                \
+       ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(READABLE) |           \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* DefaultOpenDuration */            \
+      {ZAP_EMPTY_DEFAULT(), 0x00000003, 4, ZAP_TYPE(ELAPSED_S),                \
+       ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) | ZAP_ATTRIBUTE_MASK(READABLE) |   \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* RemainingDuration */              \
+      {ZAP_EMPTY_DEFAULT(), 0x00000004, 1, ZAP_TYPE(ENUM8),                    \
+       ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* CurrentState */                   \
+      {ZAP_EMPTY_DEFAULT(), 0x00000005, 1, ZAP_TYPE(ENUM8),                    \
+       ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* TargetState */                    \
+      {ZAP_SIMPLE_DEFAULT(0), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* FeatureMap */                         \
+      {ZAP_SIMPLE_DEFAULT(2), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                 \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                    \
+                                                                               \
+      /* Endpoint: 240, Cluster: Door Lock (server) */                         \
+      {ZAP_EMPTY_DEFAULT(), 0x00000000, 1, ZAP_TYPE(ENUM8),                    \
+       ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* LockState */                      \
+      {ZAP_SIMPLE_DEFAULT(0), 0x00000001, 1, ZAP_TYPE(ENUM8),                  \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* LockType */                           \
+      {ZAP_SIMPLE_DEFAULT(1), 0x00000002, 1, ZAP_TYPE(BOOLEAN),                \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ActuatorEnabled */                    \
+      {ZAP_SIMPLE_DEFAULT(0), 0x00000023, 4, ZAP_TYPE(INT32U),                 \
+       ZAP_ATTRIBUTE_MASK(WRITABLE) |                                          \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* AutoRelockTime */                 \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(4), 0x00000025, 1, ZAP_TYPE(ENUM8),          \
+       ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
+           ZAP_ATTRIBUTE_MASK(READABLE)}, /* OperatingMode */                  \
+      {ZAP_SIMPLE_DEFAULT(0xFFF6), 0x00000026, 2, ZAP_TYPE(BITMAP16),          \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* SupportedOperatingModes */            \
+      {ZAP_SIMPLE_DEFAULT(0), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),               \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* FeatureMap */                         \
+      {ZAP_SIMPLE_DEFAULT(7), 0x0000FFFD, 2, ZAP_TYPE(INT16U),                 \
+       ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                    \
+                                                                               \
       /* Endpoint: 240, Cluster: Window Covering (server) */                   \
       {ZAP_SIMPLE_DEFAULT(0x00), 0x00000000, 1, ZAP_TYPE(ENUM8),               \
        ZAP_ATTRIBUTE_MASK(READABLE)}, /* Type */                               \
@@ -752,7 +797,7 @@
        ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
            ZAP_ATTRIBUTE_MASK(                                                 \
                NULLABLE)}, /* CurrentPositionLiftPercent100ths */              \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(4), 0x00000017, 1, ZAP_TYPE(BITMAP8),        \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(5), 0x00000017, 1, ZAP_TYPE(BITMAP8),        \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* Mode */                           \
       {ZAP_SIMPLE_DEFAULT(0x0005), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),          \
@@ -765,28 +810,28 @@
       {ZAP_EMPTY_DEFAULT(), 0x00000000, 2, ZAP_TYPE(TEMPERATURE),              \
        ZAP_ATTRIBUTE_MASK(READABLE) |                                          \
            ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* LocalTemperature */               \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(5), 0x00000011, 2, ZAP_TYPE(TEMPERATURE),    \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(6), 0x00000011, 2, ZAP_TYPE(TEMPERATURE),    \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* OccupiedCoolingSetpoint */        \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(6), 0x00000012, 2, ZAP_TYPE(TEMPERATURE),    \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(7), 0x00000012, 2, ZAP_TYPE(TEMPERATURE),    \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* OccupiedHeatingSetpoint */        \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(7), 0x00000015, 2, ZAP_TYPE(TEMPERATURE),    \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(8), 0x00000015, 2, ZAP_TYPE(TEMPERATURE),    \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* MinHeatSetpointLimit */           \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(8), 0x00000016, 2, ZAP_TYPE(TEMPERATURE),    \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(9), 0x00000016, 2, ZAP_TYPE(TEMPERATURE),    \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* MaxHeatSetpointLimit */           \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(9), 0x00000017, 2, ZAP_TYPE(TEMPERATURE),    \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(10), 0x00000017, 2, ZAP_TYPE(TEMPERATURE),   \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* MinCoolSetpointLimit */           \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(10), 0x00000018, 2, ZAP_TYPE(TEMPERATURE),   \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(11), 0x00000018, 2, ZAP_TYPE(TEMPERATURE),   \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* MaxCoolSetpointLimit */           \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(11), 0x0000001B, 1, ZAP_TYPE(ENUM8),         \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(12), 0x0000001B, 1, ZAP_TYPE(ENUM8),         \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* ControlSequenceOfOperation */     \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(12), 0x0000001C, 1, ZAP_TYPE(ENUM8),         \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(13), 0x0000001C, 1, ZAP_TYPE(ENUM8),         \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* SystemMode */                     \
       {ZAP_SIMPLE_DEFAULT(0x0003), 0x0000FFFC, 4, ZAP_TYPE(BITMAP32),          \
@@ -796,12 +841,12 @@
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* ClusterRevision */                \
                                                                                \
       /* Endpoint: 240, Cluster: Fan Control (server) */                       \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(13), 0x00000000, 1, ZAP_TYPE(ENUM8),         \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(14), 0x00000000, 1, ZAP_TYPE(ENUM8),         \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE)}, /* FanMode */                        \
       {ZAP_SIMPLE_DEFAULT(0x00), 0x00000001, 1, ZAP_TYPE(ENUM8),               \
        ZAP_ATTRIBUTE_MASK(READABLE)}, /* FanModeSequence */                    \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(14), 0x00000002, 1, ZAP_TYPE(PERCENT),       \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(15), 0x00000002, 1, ZAP_TYPE(PERCENT),       \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE) |                                      \
            ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* PercentSetting */                 \
@@ -841,7 +886,7 @@
        ZAP_ATTRIBUTE_MASK(READABLE)}, /* ColorTempPhysicalMaxMireds */         \
       {ZAP_SIMPLE_DEFAULT(0x0001), 0x0000400D, 2, ZAP_TYPE(INT16U),            \
        ZAP_ATTRIBUTE_MASK(READABLE)}, /* CoupleColorTempToLevelMinMireds */    \
-      {ZAP_MIN_MAX_DEFAULTS_INDEX(15), 0x00004010, 2, ZAP_TYPE(INT16U),        \
+      {ZAP_MIN_MAX_DEFAULTS_INDEX(16), 0x00004010, 2, ZAP_TYPE(INT16U),        \
        ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(WRITABLE) |            \
            ZAP_ATTRIBUTE_MASK(READABLE) |                                      \
            ZAP_ATTRIBUTE_MASK(NULLABLE)}, /* StartUpColorTemperatureMireds */  \
@@ -941,7 +986,7 @@
   }
 
 // clang-format off
-#define GENERATED_EVENT_COUNT 6
+#define GENERATED_EVENT_COUNT 11
 #define GENERATED_EVENTS { \
   /* Endpoint: 0, Cluster: Basic Information (server) */ \
   /* EventList (index=0) */ \
@@ -953,6 +998,15 @@
   0x00000000, /* StateTransition */ \
   0x00000001, /* VersionApplied */ \
   0x00000002, /* DownloadError */ \
+  /* Endpoint: 240, Cluster: Valve Configuration and Control (server) */ \
+  /* EventList (index=6) */ \
+  0x00000000, /* ValveStateChanged */ \
+  0x00000001, /* ValveFault */ \
+  /* Endpoint: 240, Cluster: Door Lock (server) */ \
+  /* EventList (index=8) */ \
+  0x00000000, /* DoorLockAlarm */ \
+  0x00000002, /* LockOperation */ \
+  0x00000003, /* LockOperationError */ \
 }
 
 // clang-format on
@@ -971,6 +1025,14 @@
           emberAfLevelControlClusterServerInitCallback,                        \
       (EmberAfGenericClusterFunction)                                          \
           MatterLevelControlClusterServerShutdownCallback,                     \
+  };                                                                           \
+  const EmberAfGenericClusterFunction chipFuncArrayDoorLockServer[] = {        \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterDoorLockClusterServerAttributeChangedCallback,                 \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterDoorLockClusterServerShutdownCallback,                         \
+      (EmberAfGenericClusterFunction)                                          \
+          MatterDoorLockClusterServerPreAttributeChangedCallback,              \
   };                                                                           \
   const EmberAfGenericClusterFunction chipFuncArrayWindowCoveringServer[] = {  \
       (EmberAfGenericClusterFunction)                                          \
@@ -1131,19 +1193,29 @@
   0x00000006 /* StepWithOnOff */, \
   0x00000007 /* StopWithOnOff */, \
   chip::kInvalidCommandId /* end of list */, \
-  /* Endpoint: 240, Cluster: Window Covering (server) */\
+  /* Endpoint: 240, Cluster: Valve Configuration and Control (server) */\
   /*   AcceptedCommandList (index=92) */ \
+  0x00000000 /* Open */, \
+  0x00000001 /* Close */, \
+  chip::kInvalidCommandId /* end of list */, \
+  /* Endpoint: 240, Cluster: Door Lock (server) */\
+  /*   AcceptedCommandList (index=95) */ \
+  0x00000000 /* LockDoor */, \
+  0x00000001 /* UnlockDoor */, \
+  chip::kInvalidCommandId /* end of list */, \
+  /* Endpoint: 240, Cluster: Window Covering (server) */\
+  /*   AcceptedCommandList (index=98) */ \
   0x00000000 /* UpOrOpen */, \
   0x00000001 /* DownOrClose */, \
   0x00000002 /* StopMotion */, \
   0x00000005 /* GoToLiftPercentage */, \
   chip::kInvalidCommandId /* end of list */, \
   /* Endpoint: 240, Cluster: Thermostat (server) */\
-  /*   AcceptedCommandList (index=97) */ \
+  /*   AcceptedCommandList (index=103) */ \
   0x00000000 /* SetpointRaiseLower */, \
   chip::kInvalidCommandId /* end of list */, \
   /* Endpoint: 240, Cluster: Color Control (server) */\
-  /*   AcceptedCommandList (index=99) */ \
+  /*   AcceptedCommandList (index=105) */ \
   0x00000000 /* MoveToHue */, \
   0x00000001 /* MoveHue */, \
   0x00000002 /* StepHue */, \
@@ -1164,7 +1236,7 @@
 // clang-format on
 
 // This is an array of EmberAfCluster structures.
-#define GENERATED_CLUSTER_COUNT 32
+#define GENERATED_CLUSTER_COUNT 34
 // clang-format off
 #define GENERATED_CLUSTERS { \
   { \
@@ -1454,14 +1526,40 @@
       .eventCount = 0, \
     },\
   { \
+      /* Endpoint: 240, Cluster: Valve Configuration and Control (server) */ \
+      .clusterId = 0x00000081, \
+      .attributes = ZAP_ATTRIBUTE_INDEX(207), \
+      .attributeCount = 7, \
+      .clusterSize = 16, \
+      .mask = ZAP_CLUSTER_MASK(SERVER), \
+      .functions = NULL, \
+      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 92 ), \
+      .generatedCommandList = nullptr, \
+      .eventList = ZAP_GENERATED_EVENTS_INDEX( 6 ), \
+      .eventCount = 2, \
+    },\
+  { \
+      /* Endpoint: 240, Cluster: Door Lock (server) */ \
+      .clusterId = 0x00000101, \
+      .attributes = ZAP_ATTRIBUTE_INDEX(214), \
+      .attributeCount = 8, \
+      .clusterSize = 16, \
+      .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(ATTRIBUTE_CHANGED_FUNCTION) | ZAP_CLUSTER_MASK(SHUTDOWN_FUNCTION) | ZAP_CLUSTER_MASK(PRE_ATTRIBUTE_CHANGED_FUNCTION), \
+      .functions = chipFuncArrayDoorLockServer, \
+      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 95 ), \
+      .generatedCommandList = nullptr, \
+      .eventList = ZAP_GENERATED_EVENTS_INDEX( 8 ), \
+      .eventCount = 3, \
+    },\
+  { \
       /* Endpoint: 240, Cluster: Window Covering (server) */ \
       .clusterId = 0x00000102, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(207), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(222), \
       .attributeCount = 9, \
       .clusterSize = 13, \
       .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(ATTRIBUTE_CHANGED_FUNCTION), \
       .functions = chipFuncArrayWindowCoveringServer, \
-      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 92 ), \
+      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 98 ), \
       .generatedCommandList = nullptr, \
       .eventList = nullptr, \
       .eventCount = 0, \
@@ -1469,12 +1567,12 @@
   { \
       /* Endpoint: 240, Cluster: Thermostat (server) */ \
       .clusterId = 0x00000201, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(216), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(231), \
       .attributeCount = 11, \
       .clusterSize = 20, \
       .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(INIT_FUNCTION) | ZAP_CLUSTER_MASK(ATTRIBUTE_CHANGED_FUNCTION) | ZAP_CLUSTER_MASK(SHUTDOWN_FUNCTION) | ZAP_CLUSTER_MASK(PRE_ATTRIBUTE_CHANGED_FUNCTION), \
       .functions = chipFuncArrayThermostatServer, \
-      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 97 ), \
+      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 103 ), \
       .generatedCommandList = nullptr, \
       .eventList = nullptr, \
       .eventCount = 0, \
@@ -1482,7 +1580,7 @@
   { \
       /* Endpoint: 240, Cluster: Fan Control (server) */ \
       .clusterId = 0x00000202, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(227), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(242), \
       .attributeCount = 6, \
       .clusterSize = 10, \
       .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(ATTRIBUTE_CHANGED_FUNCTION) | ZAP_CLUSTER_MASK(PRE_ATTRIBUTE_CHANGED_FUNCTION), \
@@ -1495,12 +1593,12 @@
   { \
       /* Endpoint: 240, Cluster: Color Control (server) */ \
       .clusterId = 0x00000300, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(233), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(248), \
       .attributeCount = 16, \
       .clusterSize = 28, \
       .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(INIT_FUNCTION) | ZAP_CLUSTER_MASK(SHUTDOWN_FUNCTION), \
       .functions = chipFuncArrayColorControlServer, \
-      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 99 ), \
+      .acceptedCommandList = ZAP_GENERATED_COMMANDS_INDEX( 105 ), \
       .generatedCommandList = nullptr, \
       .eventList = nullptr, \
       .eventCount = 0, \
@@ -1508,7 +1606,7 @@
   { \
       /* Endpoint: 240, Cluster: Illuminance Measurement (server) */ \
       .clusterId = 0x00000400, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(249), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(264), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1521,7 +1619,7 @@
   { \
       /* Endpoint: 240, Cluster: Temperature Measurement (server) */ \
       .clusterId = 0x00000402, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(254), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(269), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1534,7 +1632,7 @@
   { \
       /* Endpoint: 240, Cluster: Pressure Measurement (server) */ \
       .clusterId = 0x00000403, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(259), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(274), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1547,7 +1645,7 @@
   { \
       /* Endpoint: 240, Cluster: Flow Measurement (server) */ \
       .clusterId = 0x00000404, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(264), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(279), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1560,7 +1658,7 @@
   { \
       /* Endpoint: 240, Cluster: Relative Humidity Measurement (server) */ \
       .clusterId = 0x00000405, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(269), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(284), \
       .attributeCount = 5, \
       .clusterSize = 12, \
       .mask = ZAP_CLUSTER_MASK(SERVER), \
@@ -1573,7 +1671,7 @@
   { \
       /* Endpoint: 240, Cluster: Occupancy Sensing (server) */ \
       .clusterId = 0x00000406, \
-      .attributes = ZAP_ATTRIBUTE_INDEX(274), \
+      .attributes = ZAP_ATTRIBUTE_INDEX(289), \
       .attributeCount = 5, \
       .clusterSize = 3, \
       .mask = ZAP_CLUSTER_MASK(SERVER) | ZAP_CLUSTER_MASK(INIT_FUNCTION), \
@@ -1587,13 +1685,13 @@
 
 // clang-format on
 
-#define ZAP_FIXED_ENDPOINT_DATA_VERSION_COUNT 31
+#define ZAP_FIXED_ENDPOINT_DATA_VERSION_COUNT 33
 
 // This is an array of EmberAfEndpointType structures.
 #define GENERATED_ENDPOINT_TYPES                                               \
   {                                                                            \
       {ZAP_CLUSTER_INDEX(0), 15, 23},                                          \
-      {ZAP_CLUSTER_INDEX(15), 17, 177},                                        \
+      {ZAP_CLUSTER_INDEX(15), 19, 209},                                        \
   }
 
 // Largest attribute size is needed for various buffers
@@ -1606,7 +1704,7 @@ static_assert(ATTRIBUTE_LARGEST <= CHIP_CONFIG_MAX_ATTRIBUTE_STORE_ELEMENT_SIZE,
 #define ATTRIBUTE_SINGLETONS_SIZE (0)
 
 // Total size of attribute storage
-#define ATTRIBUTE_MAX_SIZE (200)
+#define ATTRIBUTE_MAX_SIZE (232)
 
 // Number of fixed endpoints
 #define FIXED_ENDPOINT_COUNT (2)
