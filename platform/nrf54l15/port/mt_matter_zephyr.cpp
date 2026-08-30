@@ -588,7 +588,7 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
     /* Catalogue batch 7a, the DE407 option-C rows: the seven
      * ElectricalPowerMeasurement push fields are declared with their true
-     * 64-bit ZCL types (the AAI gate at CodegenDataModelProvider_Read.cpp:107
+     * 64-bit ZCL types (the AAI gate at CodegenDataModelProvider_Read.cpp:108-109
      * requires ember metadata), take no arena slot (attr_gets_slot()'s
      * md.size <= kSlotDataBytes refusal), and are served by the EPM
      * Instance from the HearthEpmDelegate cache below, so an AT read
@@ -3261,7 +3261,7 @@ static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *ou
  *   NotifyCumulativeEnergyMeasured() stores the timestamped structs into
  *   the server's own per-endpoint MeasurementData AND emits the
  *   CumulativeEnergyMeasured event in one call (ElectricalEnergyMeasurement
- *   Cluster.cpp:191-236, the LogEvent at :229-235), this port's second
+ *   Cluster.cpp:191-218, the LogEvent at :207), this port's second
  *   event emitter after batch 5's InitialPress. Its per-endpoint storage
  *   covers dynamic endpoints: gMeasurements is sized
  *   MATTER_DM_..._ENDPOINT_COUNT + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT
@@ -3346,8 +3346,15 @@ static const chip::app::Clusters::ElectricalEnergyMeasurement::Structs::Measurem
  * the fixed answers the pull-model server needs. Mirrored from the C6's
  * HearthEpmDelegate (main.cpp) with no semantic change; base-class
  * SetEndpointId()/mEndpointId (electrical-power-measurement-server.h:36)
- * carry the endpoint, set by mt_matter_meas_delegate_set_endpoint() and
- * again (idempotently, same value) by the Instance constructor it runs.
+ * carry the endpoint, set ONCE, by the Instance constructor that
+ * mt_matter_meas_delegate_set_endpoint() runs (the ctor's
+ * mDelegate.SetEndpointId(aEndpointId), server.h:107): the setter itself
+ * makes no SetEndpointId() call of its own for this pool, so endpoint()
+ * and meas_epm_for() resolve only from the construction onward, which is
+ * always before the first push can name the endpoint. The PTOP branch
+ * differs: its set_endpoint() writes the port delegate's OWN member (the
+ * base PowerTopology::Delegate has none), and the Instance ctor there
+ * sets nothing back.
  */
 class HearthEpmDelegate : public chip::app::Clusters::ElectricalPowerMeasurement::Delegate
 {
@@ -3884,7 +3891,7 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
     }
 
     /* Notify writes the store and emits the event but reports no attribute
-     * change (ElectricalEnergyMeasurementCluster.cpp:191-236 has no
+     * change (ElectricalEnergyMeasurementCluster.cpp:191-218 has no
      * MatterReportingAttributeChangeCallback), so subscriptions on the
      * attributes themselves are fired here, one per pushed side, the same
      * one-report-per-applied-field contract as the EPM branch. */

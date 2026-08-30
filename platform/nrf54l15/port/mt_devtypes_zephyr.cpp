@@ -2324,7 +2324,8 @@ constexpr EmberAfDeviceType kRvcTypes[] = { { 0x0074, 4 } };
  * (voltage_mv/amperage_ma/power_mw/int64s, electrical-power-measurement-
  * cluster.xml:64-138) and size 8, because the AAI is only consulted for
  * attributes that have ember metadata (CodegenDataModelProvider_Read.cpp:
- * 107, "we only allow AAI on ember-registered clusters") and because
+ * 108-109, "we only allow AAI on ember-registered clusters" and the
+ * metadata gate it explains) and because
  * AttributeList must be truthful. They get NO arena slot
  * (attr_gets_slot()'s existing md.size <= kSlotDataBytes refusal) and NO
  * seed, and they are in seed_slots()'s narrow per-(cluster, attribute)
@@ -2739,7 +2740,8 @@ constexpr EmberAfDeviceType kElectricalUtilityMeterTypes[] = { { 0x0511, 1 } };
  * ClusterRevision (6) + DEMMode 3; v1 drops OptOutState (5 + 3). The two
  * power_mw attributes are DE407 metadata-only declarations (quiet-table
  * rows), Instance-served, carve-out read. Block: v0 3 clusters, 9 slots,
- * 306 B store = 464 B heap; v1 448 B. Far under the RVC's 864 B widest.
+ * 306 B store = 462 B payload, 472 B heap (roundup(462 + 4, 8)); v1 446
+ * B payload, 456 B heap. Far under the RVC's 864 B widest.
  *
  * ESAState's shadow seeds kOnline (1), the delegate's default and the
  * spec's pre-first-push answer (3.25); ESAType/ESACanGenerate/OptOutState
@@ -3015,34 +3017,34 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *
  *   device type                        clusters  slots  payload  heap cost
  *   robotic vacuum cleaner  0x0074            5     14      856        864
- *   device energy mgmt v0   0x050D            3      9      462        464
- *   device energy mgmt v1   0x050D            3      8      446        448
  *   extended colour light   0x010D            5     36      596        600
  *   mode select             0x0027            3      8      576        584
  *   colour temperature lt   0x010C            5     32      532        536
+ *   device energy mgmt v0   0x050D            3      9      462        472
+ *   device energy mgmt v1   0x050D            3      8      446        456
  *   chime                   0x0146            2      4      345        352
  *   dimmable light/plug/mnt  0x0101 0x010B 0x0110  4  20      336        344
  *   pump / room air cond    0x0303 0x0072     4     18      304        312
  *   thermostat              0x0301            3     15      252        256
+ *   heat pump / solar v0    0x0309 0x0017     5     13      228        232
  *   smoke/co alarm          0x0076            3     13      220        224
  *   window covering         0x0202            3     13      220        224
  *   door lock               0x000A            3     12      204        208
+ *   solar power v1          0x0017            4     11      192        200
  *   on/off light/plug/mount  0x0100 0x010A 0x010F  3  11      188        192
  *   water valve             0x0042            3     11      188        192
  *   fan / air purifier      0x002B 0x002D     3     10      172        176
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
- *   heat pump / solar v0    0x0309 0x0017     5     13      228        232
- *   solar power v1          0x0017            4     11      192        200
  *   electrical sensor v0    0x0510            4      8      144        152
- *   electrical sensor v1    0x0510            3      6      108        112
- *   electrical meter v0     0x0514            3      6      108        112
- *   electrical meter v1     0x0514            2      4       72         80
- *   electrical utility mtr  0x0511            3      7      124        128
  *   washer/dish/dryer 0x0073 0x0075 0x007C    3      8      140        144
  *   generic switch          0x000F            3      8      140        144
  *   power source            0x0011            2      8      136        144
+ *   electrical utility mtr  0x0511            3      7      124        128
  *   boolean-state sensors, air quality        3      7      124        128
+ *   electrical sensor v1    0x0510            3      6      108        112
+ *   electrical meter v0     0x0514            3      6      108        112
+ *   electrical meter v1     0x0514            2      4       72         80
  *
  * (Mode select payload is 140 + 436 store, chime 72 + 273 store; both rows
  * sat at bare 140/72 before the reclaim round moved their stores in. The
@@ -3480,11 +3482,11 @@ constexpr size_t kWidestClusterList = kMax2(
 /*
  * Store reclaim round: the floor must price the trailing stores too, or a
  * grown store could quietly out-size the widest colour light and the
- * assertion below would be guarding the wrong number. The two store-bearing
- * types are computed as their own candidates, each from its OWN cluster
+ * assertion below would be guarding the wrong number. Every store-bearing
+ * type is computed as its own candidate, each from its OWN cluster
  * list and attribute lists plus its store's sizeof, rather than folding
  * store bytes into the shared cluster/slot maxima (which would charge
- * every candidate for a store only these two types carry). The MT_COUNT
+ * every candidate for a store only these types carry). The MT_COUNT
  * over-count note above applies here the same way: it only pushes the
  * asserted floor higher, never lower. The chime candidate repeats
  * MT_COUNT(chimeAttrs) rather than reusing kNoIdentifySlots on purpose:
@@ -3507,9 +3509,25 @@ constexpr size_t kRvcBlockBytes =
                 kIdentifySlots + 2 * MT_COUNT(modeBaseAttrs) + MT_COUNT(opStateAttrs)) +
     2 * sizeof(mt_mb_store_t);
 
+/* Catalogue batch 7a fix round (review B7A-3): the DEM device type is the
+ * fourth store-bearing block shape, so it is a candidate like the other
+ * three, not a silent bystander: the whole point of deriving the floor
+ * from the declarations is that a grown store or attribute list cannot
+ * out-size the guarded widest type unnoticed. The variant-0 list is the
+ * wider one (demAttrs strictly contains demReportOnlyAttrs); MT_COUNT
+ * over-counts the metadata-only members as ever, only pushing the
+ * asserted floor higher than the real 462 B payload. It loses to the RVC
+ * today; batch 7b's EVSE (two stores, eight clusters) is the candidate
+ * expected to take the title and force the heap decision the audit
+ * records. */
+constexpr size_t kDemBlockBytes =
+    block_bytes(MT_COUNT(demClusters), MT_COUNT(demAttrs) + MT_COUNT(modeBaseAttrs)) +
+    sizeof(mt_mb_store_t);
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
-          kMax2(kMax2(kModeSelectBlockBytes, kChimeBlockBytes), kRvcBlockBytes));
+          kMax2(kMax2(kModeSelectBlockBytes, kChimeBlockBytes),
+                kMax2(kRvcBlockBytes, kDemBlockBytes)));
 
 /*
  * Zephyr charges roundup(payload + 4, 8) per allocation on a heap this size,
