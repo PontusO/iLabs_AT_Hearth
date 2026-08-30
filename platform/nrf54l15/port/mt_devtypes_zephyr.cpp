@@ -2456,6 +2456,111 @@ DECLARE_DYNAMIC_ENDPOINT(electricalMeterPowerOnlyEndpoint, electricalMeterPowerO
 constexpr EmberAfDeviceType kElectricalSensorTypes[] = { { 0x0510, 1 } };
 constexpr EmberAfDeviceType kElectricalMeterTypes[] = { { 0x0514, 1 } };
 
+/* ---- heat pump (0x0309) and solar power (0x0017) ----------------------
+ *
+ * Catalogue batch 7a audit sections 3.4/3.5. Zero new clusters: both types
+ * are the Electrical Sensor composition grafted onto the SAME endpoint as
+ * a Wired power source, the C6's hand-built stacks (mk_heat_pump(),
+ * mt_devtypes.cpp:1790-1867, and mk_solar_power(), :2101-2136) rendered as
+ * declared lists. The endpoint advertises THREE device types at once
+ * (0x0309 or 0x0017, plus 0x0011 Power Source and 0x0510 Electrical
+ * Sensor, same endpoint, NOT children), the C6's exact span through
+ * add_device_type().
+ *
+ * A NEW Wired PowerSource attribute list, never the battery-shaped
+ * powerSourceAttrs above: reusing that list here would advertise
+ * BatChargeLevel/BatReplacementNeeded/BatReplaceability on a mains device,
+ * a conformance break no build check catches (the audit's heat pump risk
+ * line). The wired list is Status, Order, Description (CHAR_STRING,
+ * metadata-only, no slot), WiredCurrentType (mandatory under the WIRED
+ * feature, PowerSource.xml), EndpointList (ARRAY, served by the cluster's
+ * wildcard AAI as an empty list, the batch 4 note on powerSourceAttrs)
+ * and FeatureMap 0x1 Feature::kWired, seeded per device type below since
+ * the battery wildcard seed row must keep winning for 0x0011.
+ * WiredCurrentType boots kAc, which is 0 (PowerSource/Enums.h
+ * WiredCurrentTypeEnum, kAc = 0x00), the zero-fill, so it carries no seed
+ * row; the C6's wired feature::add() creates it 0 identically.
+ *
+ * THE C6'S WORKAROUNDS DO NOT TRANSFER, THE POSITIVE OBLIGATIONS DO (the
+ * audit's solar risk line, restated here as the batch brief directs).
+ * mk_heat_pump() exists because heat_pump::add() boot-panics on EEM
+ * feature validation with a default config and would bolt on a DEM pair
+ * (esp_matter_endpoint.cpp:2015-2020); mk_solar_power() exists because
+ * solar_power::add() silently ASSIGNS feature flags over any pre-seed,
+ * fixes an EEM mask of exported|cumulative that would contradict the
+ * wildcard AAI's Imported|Exported|Cumulative and lose
+ * CumulativeEnergyImported entirely, and creates Voltage/ActiveCurrent as
+ * non-null zeros, irreversibly breaking the null-until-pushed contract
+ * (mt_devtypes.cpp:1890-1903). None of those SDK code paths exist on this
+ * port; what carries over is what they were protecting: (1) the seven EPM
+ * fields are declared 64-bit, slotless and null until pushed (epmAttrs);
+ * (2) the EEM mask is exactly Imported|Exported|Cumulative
+ * (mt_matter_eem_register and the eemAttrs seed); (3) the EEM cluster is
+ * present only where declared below.
+ *
+ * Variants: heat pump has ONE variant (the C6 row's max_variant 0). Solar
+ * spends its variant on the graft's EEM: variant 0 with, variant 1
+ * without, and variant 1 is DISCLOSED SUB-CONFORMANT against
+ * SolarPower.xml's composedDeviceTypes block, which mandates EPM and EEM
+ * both on the composed sensor (AT_MT_SPEC.md 3.9:735-739; the conformant
+ * declaration is variant 0).
+ *
+ * DISCLOSED GAPS, matching the C6 and the SDK build's own omissions
+ * (mt_devtypes.cpp:1781-1789, :2096-2099): HeatPump.xml's
+ * composedDeviceTypes block also mandates a composed Thermostat device
+ * type with User Label, which neither platform builds; both types' User
+ * Label describedConform rows likewise. Disclosed, not wired.
+ *
+ * Device revisions: both 1 per data_model/1.5/device_types/HeatPump.xml /
+ * SolarPower.xml. */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(wiredPowerSourceAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Order::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Description::Id, CHAR_STRING, 61, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::WiredCurrentType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::EndpointList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+/* One cluster list serves the heat pump and the variant-0 solar (the
+ * booleanStateSensorClusters sharing principle: the whole composition is
+ * identical, only the EmberAfDeviceType span differs per row). */
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(wiredElectricalSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, wiredPowerSourceAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+/* Solar variant 1: the same stack without the energy cluster. */
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(wiredElectricalSensorPowerOnlyClusters)
+DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, wiredPowerSourceAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(wiredElectricalSensorEndpoint, wiredElectricalSensorClusters);
+DECLARE_DYNAMIC_ENDPOINT(wiredElectricalSensorPowerOnlyEndpoint,
+                         wiredElectricalSensorPowerOnlyClusters);
+
+/* The same-endpoint grafts: three device types per span, the C6's
+ * add_device_type() sequence (0x0011 revision 1 matching the standalone
+ * power source row, 0x0510 revision 1 matching the sensor row above). */
+constexpr EmberAfDeviceType kHeatPumpTypes[] = { { 0x0309, 1 }, { 0x0011, 1 }, { 0x0510, 1 } };
+constexpr EmberAfDeviceType kSolarPowerTypes[] = { { 0x0017, 1 }, { 0x0011, 1 }, { 0x0510, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 /* Catalogue batch 7a added ep_type_v1, the port's rendering of the C6's
@@ -2532,6 +2637,9 @@ const hearth_devtype s_registry[] = {
       &electricalSensorPowerOnlyEndpoint },
     { 0x0514, 1, &electricalMeterEndpoint, Span<const EmberAfDeviceType>(kElectricalMeterTypes),
       &electricalMeterPowerOnlyEndpoint },
+    { 0x0309, 0, &wiredElectricalSensorEndpoint, Span<const EmberAfDeviceType>(kHeatPumpTypes) },
+    { 0x0017, 1, &wiredElectricalSensorEndpoint, Span<const EmberAfDeviceType>(kSolarPowerTypes),
+      &wiredElectricalSensorPowerOnlyEndpoint },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -3091,7 +3199,7 @@ constexpr size_t kWidestClusterList = kMax2(
     kMax2(kMax2(kMax2(MT_COUNT(onOffLightClusters), MT_COUNT(dimmableLightClusters)),
                 kMax2(MT_COUNT(colorTemperatureLightClusters),
                       MT_COUNT(extendedColorLightClusters))),
-          MT_COUNT(rvcClusters)),
+          kMax2(MT_COUNT(rvcClusters), MT_COUNT(wiredElectricalSensorClusters))),
     kMax2(kMax2(MT_COUNT(onOffPlugInUnitClusters), MT_COUNT(dimmablePlugInUnitClusters)),
           kMax2(kMax2(MT_COUNT(thermostatClusters), MT_COUNT(fanClusters)),
                 kMax2(MT_COUNT(windowCoveringClusters), MT_COUNT(temperatureSensorClusters)))));
@@ -3627,6 +3735,19 @@ const attr_seed s_seeds[] = {
     { PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, 1, { 0xFF } }, /* null */
     { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x02, 0x00, 0x00, 0x00 } },
     { PowerSource::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x03, 0x00 } },
+    /* Catalogue batch 7a: the WIRED PowerSource FeatureMap for the heat
+     * pump and solar endpoints, keyed per device type so the battery
+     * wildcard row above keeps winning for the standalone power source
+     * (0x0011), the ColorControl 0x010C/0x010D mechanism. 0x1 is
+     * Feature::kWired (PowerSource/Enums.h:282). Status 0, Order 0 and
+     * WiredCurrentType 0 (kAc, WiredCurrentTypeEnum) are the zero-fill;
+     * the four battery-list seeds above target attributes
+     * wiredPowerSourceAttrs does not declare and never match here. The
+     * revision row (3) is shared: same cluster, same AAI answer. */
+    { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x01, 0x00, 0x00, 0x00 },
+      0x0309 },
+    { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x01, 0x00, 0x00, 0x00 },
+      0x0017 },
 
     /* SmokeCoAlarm. Every state boots at its enum's zero: ExpressedState 0
      * (kNormal), SmokeState/COState/BatteryAlert 0 (kNormal),
