@@ -3523,6 +3523,129 @@ cluster WindowCovering = 258 {
   command GoToTiltPercentage(GoToTiltPercentageRequest): DefaultSuccess = 8;
 }
 
+/** An interface for configuring and controlling pumps. */
+cluster PumpConfigurationAndControl = 512 {
+  revision 4;
+
+  enum ControlModeEnum : enum8 {
+    kConstantSpeed = 0;
+    kConstantPressure = 1;
+    kProportionalPressure = 2;
+    kConstantFlow = 3;
+    kConstantTemperature = 5;
+    kAutomatic = 7;
+  }
+
+  enum OperationModeEnum : enum8 {
+    kNormal = 0;
+    kMinimum = 1;
+    kMaximum = 2;
+    kLocal = 3;
+  }
+
+  bitmap Feature : bitmap32 {
+    kConstantPressure = 0x1;
+    kCompensatedPressure = 0x2;
+    kConstantFlow = 0x4;
+    kConstantSpeed = 0x8;
+    kConstantTemperature = 0x10;
+    kAutomatic = 0x20;
+    kLocalOperation = 0x40;
+  }
+
+  bitmap PumpStatusBitmap : bitmap16 {
+    kDeviceFault = 0x1;
+    kSupplyFault = 0x2;
+    kSpeedLow = 0x4;
+    kSpeedHigh = 0x8;
+    kLocalOverride = 0x10;
+    kRunning = 0x20;
+    kRemotePressure = 0x40;
+    kRemoteFlow = 0x80;
+    kRemoteTemperature = 0x100;
+  }
+
+  info event SupplyVoltageLow = 0 {
+  }
+
+  info event SupplyVoltageHigh = 1 {
+  }
+
+  info event PowerMissingPhase = 2 {
+  }
+
+  info event SystemPressureLow = 3 {
+  }
+
+  info event SystemPressureHigh = 4 {
+  }
+
+  critical event DryRunning = 5 {
+  }
+
+  info event MotorTemperatureHigh = 6 {
+  }
+
+  critical event PumpMotorFatalFailure = 7 {
+  }
+
+  info event ElectronicTemperatureHigh = 8 {
+  }
+
+  critical event PumpBlocked = 9 {
+  }
+
+  info event SensorFailure = 10 {
+  }
+
+  info event ElectronicNonFatalFailure = 11 {
+  }
+
+  critical event ElectronicFatalFailure = 12 {
+  }
+
+  info event GeneralFault = 13 {
+  }
+
+  info event Leakage = 14 {
+  }
+
+  info event AirDetection = 15 {
+  }
+
+  info event TurbineOperation = 16 {
+  }
+
+  readonly attribute nullable int16s maxPressure = 0;
+  readonly attribute nullable int16u maxSpeed = 1;
+  readonly attribute nullable int16u maxFlow = 2;
+  readonly attribute optional nullable int16s minConstPressure = 3;
+  readonly attribute optional nullable int16s maxConstPressure = 4;
+  readonly attribute optional nullable int16s minCompPressure = 5;
+  readonly attribute optional nullable int16s maxCompPressure = 6;
+  readonly attribute optional nullable int16u minConstSpeed = 7;
+  readonly attribute optional nullable int16u maxConstSpeed = 8;
+  readonly attribute optional nullable int16u minConstFlow = 9;
+  readonly attribute optional nullable int16u maxConstFlow = 10;
+  readonly attribute optional nullable int16s minConstTemp = 11;
+  readonly attribute optional nullable int16s maxConstTemp = 12;
+  readonly attribute optional PumpStatusBitmap pumpStatus = 16;
+  readonly attribute OperationModeEnum effectiveOperationMode = 17;
+  readonly attribute ControlModeEnum effectiveControlMode = 18;
+  readonly attribute nullable int16s capacity = 19;
+  readonly attribute optional nullable int16u speed = 20;
+  attribute access(write: manage) optional nullable int24u lifetimeRunningHours = 21;
+  readonly attribute optional nullable int24u power = 22;
+  attribute access(write: manage) optional nullable int32u lifetimeEnergyConsumed = 23;
+  attribute access(write: manage) OperationModeEnum operationMode = 32;
+  attribute access(write: manage) optional ControlModeEnum controlMode = 33;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
+}
+
 /** An interface for configuring and controlling the functionality of a thermostat. */
 cluster Thermostat = 513 {
   revision 9;
@@ -5116,6 +5239,23 @@ endpoint 240 {
     handle command DownOrClose;
     handle command StopMotion;
     handle command GoToLiftPercentage;
+  }
+
+  server cluster PumpConfigurationAndControl {
+    callback attribute maxPressure;
+    callback attribute maxSpeed;
+    callback attribute maxFlow;
+    callback attribute minConstSpeed;
+    callback attribute maxConstSpeed;
+    callback attribute effectiveOperationMode;
+    callback attribute effectiveControlMode;
+    callback attribute capacity;
+    callback attribute operationMode default = 0x00;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    ram      attribute featureMap default = 8;
+    ram      attribute clusterRevision default = 4;
   }
 
   server cluster Thermostat {

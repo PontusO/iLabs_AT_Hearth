@@ -114,6 +114,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::PressureMeasurement::Id:
     emberAfPressureMeasurementClusterInitCallback(endpoint);
     break;
+  case app::Clusters::PumpConfigurationAndControl::Id:
+    emberAfPumpConfigurationAndControlClusterInitCallback(endpoint);
+    break;
   case app::Clusters::RelativeHumidityMeasurement::Id:
     emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
     break;
@@ -292,6 +295,11 @@ emberAfPowerSourceClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfPressureMeasurementClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfPumpConfigurationAndControlClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

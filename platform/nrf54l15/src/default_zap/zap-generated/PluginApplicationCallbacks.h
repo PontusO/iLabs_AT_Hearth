@@ -47,6 +47,7 @@ void MatterOperationalStatePluginServerInitCallback();
 void MatterValveConfigurationAndControlPluginServerInitCallback();
 void MatterDoorLockPluginServerInitCallback();
 void MatterWindowCoveringPluginServerInitCallback();
+void MatterPumpConfigurationAndControlPluginServerInitCallback();
 void MatterThermostatPluginServerInitCallback();
 void MatterFanControlPluginServerInitCallback();
 void MatterColorControlPluginServerInitCallback();
@@ -87,6 +88,7 @@ void MatterChimePluginServerInitCallback();
   MatterValveConfigurationAndControlPluginServerInitCallback();                \
   MatterDoorLockPluginServerInitCallback();                                    \
   MatterWindowCoveringPluginServerInitCallback();                              \
+  MatterPumpConfigurationAndControlPluginServerInitCallback();                 \
   MatterThermostatPluginServerInitCallback();                                  \
   MatterFanControlPluginServerInitCallback();                                  \
   MatterColorControlPluginServerInitCallback();                                \

@@ -1921,6 +1921,136 @@ DECLARE_DYNAMIC_ENDPOINT(genericSwitchEndpoint, genericSwitchClusters);
 /* Revision 3 per data_model/1.5/device_types/GenericSwitch.xml. */
 constexpr EmberAfDeviceType kGenericSwitchTypes[] = { { 0x000F, 3 } };
 
+/* ---- the featureless OnOff list (pump 0x0303, room air conditioner
+ * 0x0072) ---------------------------------------------------------------
+ *
+ * Catalogue batch 5. A THREE-slot OnOff list for device types whose OnOff
+ * cluster carries no Lighting feature: OnOff, FeatureMap and the implicit
+ * ClusterRevision, nothing else. onOffAttrs above must NEVER be reused for
+ * these types, because it declares GlobalSceneControl, OnTime, OffWaitTime
+ * and StartUpOnOff, and all four are mandatoryConform ON FEATURE LT in the
+ * cluster XML (onoff-cluster.xml:92-112): declaring them on an endpoint
+ * whose FeatureMap is 0 (pump) or 0x02 (RAC's DeadFrontBehavior) is a
+ * conformance break no build check would catch. The C6 composes the same
+ * three-attribute shape for both types (pump::add() and
+ * room_air_conditioner::add() call on_off::create() with no lighting::add;
+ * the RAC adds dead_front_behavior::add(), which sets the feature bit and
+ * creates nothing, esp_matter_feature.cpp:491-505).
+ *
+ * The two types need DIFFERENT FeatureMap seeds on the same cluster (pump
+ * 0x00, RAC 0x02 DeadFrontBehavior, the latter mandatory per the RAC's
+ * element requirements, Device-Library-Specification.md:5137), which is
+ * exactly what s_seeds' per-device-type qualifier exists for: two rows
+ * naming 0x0303 and 0x0072 win over the wildcard OnOff FeatureMap row
+ * (0x01, the Lighting types'). Named for the RAC because that type is the
+ * reason the list exists; the pump lands first in the build order and
+ * shares it. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(racOnOffAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::OnOff::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+/* ---- pump (0x0303) ----------------------------------------------------
+ *
+ * Catalogue batch 5 audit, PumpConfigurationAndControl (0x0200).
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; regenerating hearth.zap with the cluster on ep240 left
+ *   CodeDrivenInitShutdown.cpp byte-identical). Not CHI-only either
+ *   (config-data.yaml:21-88), harmlessly: the cluster declares no commands
+ *   at all (pump-configuration-and-control-cluster.xml is attributes and
+ *   events only), and the regeneration left IMClusterCommandHandler.cpp
+ *   byte-identical too. One generated file did move, against the batch
+ *   audit's prediction: access.h gained the OperationMode write-privilege
+ *   row (the XML gives it access op="write" privilege="manage"), joining
+ *   the DoorLock/WindowCovering/Thermostat manage-write entries already
+ *   there. That is the generated access module doing its job for a
+ *   controller write; nothing on this port consults it locally.
+ *
+ *   Delegate or plain ember? Plain ember, no server object of any kind:
+ *   pump-configuration-and-control-server.cpp registers no AAI and defines
+ *   no class; every declared attribute is external storage against this
+ *   arena.
+ *
+ *   ServerInit? The cluster sits in ClustersWithInitFunctions,
+ *   ClustersWithAttributeChangedFunctions AND
+ *   ClustersWithPreAttributeChangeFunctions (config-data.yaml:100, :111,
+ *   :136), all three reached only through the per-cluster functions array
+ *   DECLARE_DYNAMIC_CLUSTER nulls, so none of them runs here. Its
+ *   emberAf...ServerInitCallback is a real strong body whose entire
+ *   content is one ChipLogProgress line (pump-configuration-and-control-
+ *   server.cpp:248-251): it does NOT join the B388 call site, whose bar is
+ *   "per-endpoint boot state the endpoint would otherwise never get", and
+ *   running a log line buys none. Do not add it later either: the
+ *   attribute-changed callback's setEffectiveModes() reads
+ *   emberAfLocateAttributeMetadata(...)->defaultValue unconditionally when
+ *   ControlMode is absent (:82-86), which on a dynamic endpoint is
+ *   ZAP_EMPTY_DEFAULT garbage; unreachable today only because the
+ *   functions array is null.
+ *
+ *   Two never-run callbacks, documented as HOST responsibilities rather
+ *   than rediscovered on a bench:
+ *     - MatterPumpConfigurationAndControlClusterServerAttributeChanged
+ *       Callback (:355-369) derives EffectiveOperationMode/
+ *       EffectiveControlMode from OperationMode/ControlMode. It never runs
+ *       on a dynamic endpoint, so a write of OperationMode (host AT+MTATTR
+ *       or controller IM) does NOT update EffectiveOperationMode by
+ *       itself; the host owns that coupling, the FanControl
+ *       FanMode/PercentSetting precedent above.
+ *     - The PreAttributeChanged guard (:253-353) answers ConstraintError
+ *       for a ControlMode value whose feature is absent. ControlMode is
+ *       not composed here (optional, C6 parity), so a controller cannot
+ *       change the control mode at all and the guard is moot twice over.
+ *
+ * Feature ConstantSpeed (0x8, PumpConfigurationAndControl/Enums.h:67), the
+ * C6 thunk's documented choice (mk_pump(), mt_devtypes.cpp:467-478:
+ * esp-matter VALIDATEs at least one operation-mode feature and constant
+ * speed is the least constrained), which is what makes MinConstSpeed and
+ * MaxConstSpeed mandatory and everything else feature-gated-absent.
+ * ControlModeEnum::kConstantSpeed and OperationModeEnum::kNormal are both
+ * 0x00 (Enums.h:34, :50), so the three zero-fill mode seeds are legal
+ * under this feature map. Eleven slots; the optional PumpStatus and
+ * ControlMode are not created, matching the C6. Eight events are declared
+ * in the XML, all optional, none emitted by either platform. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(pumpAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::MaxPressure::Id, INT16S, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::MaxSpeed::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::MaxFlow::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::MinConstSpeed::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::MaxConstSpeed::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::EffectiveOperationMode::Id,
+                              ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::EffectiveControlMode::Id,
+                              ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::Capacity::Id, INT16S, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::OperationMode::Id, ENUM8, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::FeatureMap::Id, BITMAP32, 4,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(pumpClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(PumpConfigurationAndControl::Id, pumpAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(pumpEndpoint, pumpClusters);
+
+/* Revision 3 per data_model/1.5/device_types/Pump.xml. */
+constexpr EmberAfDeviceType kPumpTypes[] = { { 0x0303, 3 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -1974,6 +2104,7 @@ const hearth_devtype s_registry[] = {
     { 0x0110, 0, &dimmablePlugInUnitEndpoint,
       Span<const EmberAfDeviceType>(kMountedDimmableLoadControlTypes) },
     { 0x000F, 0, &genericSwitchEndpoint, Span<const EmberAfDeviceType>(kGenericSwitchTypes) },
+    { 0x0303, 0, &pumpEndpoint, Span<const EmberAfDeviceType>(kPumpTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -2107,6 +2238,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   colour temperature lt   0x010C            5     32      532        536
  *   chime                   0x0146            2      4      345        352
  *   dimmable light/plug/mnt  0x0101 0x010B 0x0110  4  20      336        344
+ *   pump                    0x0303            4     18      304        312
  *   thermostat              0x0301            3     15      252        256
  *   smoke/co alarm          0x0076            3     13      220        224
  *   window covering         0x0202            3     13      220        224
@@ -2423,6 +2555,14 @@ constexpr size_t kActuatorSlots =
 constexpr size_t kLightSlots = MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) +
     kMax2(MT_COUNT(colorTempAttrs), MT_COUNT(extendedColorAttrs));
 
+/* Catalogue batch 5's two-app-cluster appliances: the pump (racOnOffAttrs
+ * + pumpAttrs) and the room air conditioner (racOnOffAttrs +
+ * thermostatAttrs), both far under kLightSlots today, computed anyway so
+ * the floor keeps deriving from the same declarations the registry is
+ * built from. */
+constexpr size_t kOnOffApplianceSlots =
+    MT_COUNT(racOnOffAttrs) + kMax2(MT_COUNT(pumpAttrs), MT_COUNT(thermostatAttrs));
+
 /* Catalogue batch 4 brought the first device types WITHOUT Identify (the
  * power source and, later in the batch, the chime), so the widest-endpoint
  * computation gained a second family: types that ride without the
@@ -2434,7 +2574,8 @@ constexpr size_t kLightSlots = MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) +
 constexpr size_t kNoIdentifySlots = kMax2(MT_COUNT(powerSourceAttrs), MT_COUNT(chimeAttrs));
 
 constexpr size_t kWidestEndpointSlots =
-    kMax2(kIdentifySlots + kMax2(kMax2(kSensorSlots, kActuatorSlots), kLightSlots),
+    kMax2(kIdentifySlots +
+              kMax2(kMax2(kSensorSlots, kActuatorSlots), kMax2(kLightSlots, kOnOffApplianceSlots)),
           kNoIdentifySlots);
 
 /* Deliberately partial: every sensor and actuator device type shares the
@@ -3046,6 +3187,51 @@ const attr_seed s_seeds[] = {
     { Switch::Id, Switch::Attributes::NumberOfPositions::Id, 1, { 0x02 } },
     { Switch::Id, Switch::Attributes::FeatureMap::Id, 4, { 0x02, 0x00, 0x00, 0x00 } },
     { Switch::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x02, 0x00 } },
+
+    /* The featureless-OnOff pair (racOnOffAttrs): the wildcard OnOff
+     * FeatureMap row above says 0x01 (Lighting) for the light and plug
+     * family, so the pump and the RAC each need a per-device-type row
+     * that wins over it (the ColorControl 0x010C/0x010D mechanism). The
+     * pump's OnOff has no features at all; the RAC's carries exactly
+     * DeadFrontBehavior (0x02, OnOff/Enums.h:84), mandatory per the RAC's
+     * element requirements. The wildcard OnOff ClusterRevision row (6)
+     * stays correct for both, and the four LT-gated seeds above target
+     * attributes racOnOffAttrs does not declare, so they simply never
+     * match on these endpoints. */
+    { OnOff::Id, OnOff::Attributes::FeatureMap::Id, 4, { 0x00, 0x00, 0x00, 0x00 }, 0x0303 },
+    { OnOff::Id, OnOff::Attributes::FeatureMap::Id, 4, { 0x02, 0x00, 0x00, 0x00 }, 0x0072 },
+
+    /* PumpConfigurationAndControl. The five capability attributes boot
+     * null, the truthful answer for hardware this co-processor has never
+     * seen: MaxPressure and Capacity are int16s (sentinel 0x8000, stored
+     * 00 80, the temperature/pressure convention), MaxSpeed, MaxFlow,
+     * MinConstSpeed and MaxConstSpeed are int16u (sentinel 0xFFFF). All
+     * six match the C6's config defaults (esp_matter_cluster.h pump
+     * config, max_* and capacity nullable-null; constant_speed::config_t
+     * both null). EffectiveOperationMode, EffectiveControlMode and
+     * OperationMode are all 0, the zero-fill, and all three are LEGAL
+     * zeros under a ConstantSpeed-only feature map because
+     * OperationModeEnum::kNormal and ControlModeEnum::kConstantSpeed are
+     * both 0x00 (PumpConfigurationAndControl/Enums.h:50, :34), so they
+     * carry no rows. FeatureMap 0x8 is Feature::kConstantSpeed
+     * (Enums.h:67). Revision 4 is PumpConfigurationAndControl/
+     * Metadata.h:20 kRevision in THIS tree. */
+    { PumpConfigurationAndControl::Id, PumpConfigurationAndControl::Attributes::MaxPressure::Id, 2,
+      { 0x00, 0x80 } }, /* null */
+    { PumpConfigurationAndControl::Id, PumpConfigurationAndControl::Attributes::MaxSpeed::Id, 2,
+      { 0xFF, 0xFF } }, /* null */
+    { PumpConfigurationAndControl::Id, PumpConfigurationAndControl::Attributes::MaxFlow::Id, 2,
+      { 0xFF, 0xFF } }, /* null */
+    { PumpConfigurationAndControl::Id, PumpConfigurationAndControl::Attributes::MinConstSpeed::Id,
+      2, { 0xFF, 0xFF } }, /* null */
+    { PumpConfigurationAndControl::Id, PumpConfigurationAndControl::Attributes::MaxConstSpeed::Id,
+      2, { 0xFF, 0xFF } }, /* null */
+    { PumpConfigurationAndControl::Id, PumpConfigurationAndControl::Attributes::Capacity::Id, 2,
+      { 0x00, 0x80 } }, /* null */
+    { PumpConfigurationAndControl::Id, PumpConfigurationAndControl::Attributes::FeatureMap::Id, 4,
+      { 0x08, 0x00, 0x00, 0x00 } },
+    { PumpConfigurationAndControl::Id, Globals::Attributes::ClusterRevision::Id, 2,
+      { 0x04, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
