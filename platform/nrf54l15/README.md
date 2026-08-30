@@ -307,9 +307,9 @@ Block payload is `4 x clusters + 16 x slots`; Zephyr charges
 | `0x0100` / `0x010A` / `0x010F` On/Off Light, On/Off Plug, Mounted On/Off Control | 3 | 11 | 192 B |
 | `0x0042` Water Valve | 3 | 11 | 192 B |
 | `0x002B` / `0x002D` Fan, Air Purifier | 3 | 10 | 176 B |
+| `0x0302` `0x0307` `0x0305` `0x0106` `0x0306` `0x0107` sensors | 3 | 9 | 160 B |
 | `0x0510` Electrical Sensor (v0) | 4 | 8 | 152 B |
 | `0x000F` Generic Switch | 3 | 8 | 144 B |
-| `0x0302` `0x0307` `0x0305` `0x0106` `0x0306` `0x0107` sensors | 3 | 9 | 160 B |
 | `0x0511` Electrical Utility Meter | 3 | 7 | 128 B |
 | `0x0015` `0x0044` `0x0041` `0x0043` `0x002C` boolean-state, air quality | 3 | 7 | 128 B |
 | `0x0514` Electrical Meter (v0) | 3 | 6 | 112 B |
@@ -462,6 +462,25 @@ mode base); RvcOperationalState rides the already-compiled
 operational-state server. The RVC's two in-block ModeBase stores make it
 the widest type in the catalogue (864 B per endpoint, capacity table
 above); `HEARTH_EP_HEAP_BYTES` is unchanged.
+
+Catalogue batch 7a on top of that, pristine builds, 2026-08-30 (`f614936`,
+including the fix round):
+
+| | Batch 5 | Batch 7a (six energy foundation types) |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 237,900 B (90.75%) | **251,812 B (96.06%)** |
+| RAM used, `nrf54l15dk` | 238,124 B (90.84%) | **252,036 B (96.14%)** |
+
+RAM `+13,912 B` on both arms, dominated by one item this port does not
+own: the SDK's `ElectricalEnergyMeasurement` server keeps a static
+17-entry `gMeasurements` table (measured 8,432 B) charged the moment the
+cluster enters `hearth.zap`, composition or not, indexed from inside the
+SDK and therefore not reclaimable by the endpoint-heap technique. The
+rest is the measurement, DEM and meter pools at the C6's own depths
+(8/4/2 per ruling DE407, never 16) plus metadata for six new clusters.
+Free RAM is 10,332 B: batch 7b (Water Heater, Battery Storage, Energy
+EVSE) starts from here, and its sizing levers, including the nRF54LM20
+tier, are recorded in the batch 7 audit.
 
 ## Dev board wiring
 
