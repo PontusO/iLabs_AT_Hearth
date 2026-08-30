@@ -879,6 +879,30 @@ DECLARE_DYNAMIC_ENDPOINT(fanEndpoint, fanClusters);
 
 constexpr EmberAfDeviceType kFanTypes[] = { { 0x002B, 4 } };
 
+/* ---- air purifier (0x002D) --------------------------------------------
+ *
+ * Catalogue batch 5. A registry row, not a new endpoint type: the C6's
+ * air_purifier::add() creates Identify and FanControl and nothing else
+ * (esp_matter_endpoint.cpp:745-754), which is byte-identical to the fan
+ * 0x002B's composition above, so &fanEndpoint is reused verbatim and only
+ * the EmberAfDeviceType differs. The device library lists Groups, OnOff
+ * and the two filter-monitoring clusters (HepaFilterMonitoring 0x0071,
+ * ActivatedCarbonFilterMonitoring 0x0072) as optional on this device type
+ * (Device-Library-Specification.md:3936-3939) and the C6 takes none of
+ * them, so resource-monitoring is deliberately NOT composed here either.
+ *
+ * The fan's known FanMode <-> PercentSetting coupling gap (the audit note
+ * on fanControlAttrs above: MatterFanControlClusterServerAttributeChanged
+ * Callback is functions-array-bound and never runs on a dynamic endpoint)
+ * now ships under a SECOND device-type name. Restated deliberately, not
+ * silently inherited: an air purifier host owns that coupling exactly the
+ * way a fan host does, and nothing about this row re-solves it.
+ *
+ * Revision 2 per data_model/1.5/device_types/AirPurifier.xml (the same
+ * source the temperature sensor's fix-round correction pinned as this
+ * file's authority for device revisions). */
+constexpr EmberAfDeviceType kAirPurifierTypes[] = { { 0x002D, 2 } };
+
 /* ---- window covering (0x0202) -----------------------------------------
  *
  * Catalogue batch 2 audit, WindowCovering (0x0102).
@@ -1806,6 +1830,8 @@ const hearth_devtype s_registry[] = {
     { 0x007C, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kLaundryDryerTypes) },
     { 0x0027, 0, &modeSelectEndpoint, Span<const EmberAfDeviceType>(kModeSelectTypes) },
     { 0x0146, 0, &chimeEndpoint, Span<const EmberAfDeviceType>(kChimeTypes) },
+    /* Catalogue batch 5: the standalone remainder. */
+    { 0x002D, 0, &fanEndpoint, Span<const EmberAfDeviceType>(kAirPurifierTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -1945,7 +1971,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   door lock               0x000A            3     12      204        208
  *   on/off light / plug     0x0100 0x010A     3     11      188        192
  *   water valve             0x0042            3     11      188        192
- *   fan                     0x002B            3     10      172        176
+ *   fan / air purifier      0x002B 0x002D     3     10      172        176
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
  *   washer/dish/dryer 0x0073 0x0075 0x007C    3      8      140        144
