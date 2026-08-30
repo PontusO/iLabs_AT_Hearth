@@ -1,0 +1,48 @@
+# Patches this platform carries against the pinned NCS workspace.
+#
+# Schema: zephyr/scripts/schemas/patch-schema.yml in the NCS tree. Applied
+# with `west patch apply`; see README.md in this directory for the two
+# commands and for how to tell whether a tree is patched.
+#
+# `module` is a path relative to the west workspace top directory, and
+# `path` is relative to this directory (the --patch-base). `sha256sum` is
+# checked before anything is applied, so a patch edited without refreshing
+# the hash fails loudly instead of applying something nobody reviewed;
+# README.md has the one-liner that regenerates it.
+#
+# clean-command is deliberately overridden. The schema's default is
+# `git clean -d -f -x`, which in a module the size of connectedhomeip would
+# delete every untracked file in the tree, build output and local notes
+# included. `west patch clean` here reverts tracked files only, which is all
+# that is needed to undo a patch.
+
+checkout-command: "git checkout ."
+clean-command: ""
+
+patches:
+  - path: matter/electrical-energy-measurement-instance-pool.patch
+    sha256sum: 0d13478c9430d0a582d43bccc772633b7121114df46c3f1229db9ee8c913cac8
+    module: modules/lib/matter
+    author: Pontus Oldberg
+    email: pontus.oldberg@invector.se
+    date: 2026-08-30
+    upstreamable: true
+    merge-status: false
+    apply-command: git apply
+    comments: |
+      ElectricalEnergyMeasurement's gMeasurements table is sized by the whole
+      dynamic endpoint space (17 x 496 = 8,432 bytes here) and charged in full
+      the moment the cluster enters the build, whether or not a composition
+      ever declares an energy endpoint. The patch caps it at
+      CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES and claims slots
+      by endpoint id on first use, reclaiming 6,436 bytes of .bss at
+      MAX_INSTANCES 4 (set in src/chip_project_config.h).
+
+      The macro DEFAULTS TO THE OLD EXPRESSION, so an unpatched build and a
+      patched build that does not set it are identical. That is what makes the
+      change upstreamable, and it is also why an unpatched tree does not fail
+      to build: CMakeLists.txt checks for the patch explicitly rather than
+      letting the RAM quietly come back.
+
+      Not yet submitted upstream. When it is, put the pull request URL in
+      merge-pr and flip merge-status when it lands.

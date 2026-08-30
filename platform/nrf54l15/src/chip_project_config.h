@@ -23,3 +23,26 @@
 #pragma once
 
 #define CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT 16
+
+/*
+ * How many endpoints may carry ElectricalEnergyMeasurement AT ONCE.
+ *
+ * REQUIRES THE SDK PATCH in ../sdk-patches. Stock connectedhomeip does not
+ * read this macro: it sizes its measurement table by the whole dynamic
+ * endpoint space instead, 17 x 496 = 8,432 bytes charged the moment the
+ * cluster enters the build, whether or not any composition declares an
+ * energy endpoint. CMakeLists.txt refuses to configure against an unpatched
+ * tree precisely so that this line cannot become a no-op nobody notices;
+ * see sdk-patches/README.md.
+ *
+ * 4 is the MT_DEM_MAX / MT_WHM_MAX depth (core/include/mt_matter.h), the
+ * shape of pool every energy family in this port already uses, and it is
+ * comfortably above the one or two EEM-bearing endpoints any plausible
+ * composition declares. A fifth simultaneous EEM endpoint does not fail the
+ * composition: MeasurementDataForEndpoint() answers nullptr, which the
+ * cluster's own readers already render as null or NOT_FOUND, and the SDK
+ * logs the macro to raise. A slot is reclaimed automatically once its
+ * endpoint stops serving the cluster, so this is a concurrency bound and
+ * not a lifetime budget.
+ */
+#define CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES 4
