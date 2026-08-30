@@ -183,21 +183,32 @@ namespace {
  * What one 8-aligned allocation of `bytes` really costs this heap.
  *
  * sys_heap chunks are CHUNK_UNIT (8) aligned and carry a 4-byte header at
- * the front, so chunk_mem() always lands at 8k+4 and an ordinary payload
- * can never be 8-aligned. sys_heap_aligned_alloc() (heap.c:309-353) rounds
- * that up to 8k+8, which puts the payload in the NEXT chunk: mem_to_chunkid()
- * returns c0+1, and the allocator then runs
- * `if (c > c0) { split_chunks(h, c0, c); free_list_add(h, c0); }`.
+ * the front, so chunk_mem(c0) always lands at 8*c0+4 and an ordinary payload
+ * can never be 8-aligned. sys_heap_aligned_alloc() (heap.c:309-385) rounds
+ * that up to 8*(c0+1), and asks for one extra chunk to pay for the move:
+ * padded_sz = bytes_to_chunksz(h, bytes, align - gap) with align - gap = 4,
+ * so the allocation is roundup(bytes, 8) + 8 bytes wide.
  *
- * So a LEADING FRAGMENT of exactly one 8-byte chunk is split off and freed
- * on every single allocation. It is unreachable afterwards: it lands in
- * bucket 0, nothing on this heap ever asks for a payload of four bytes or
- * fewer, and it cannot coalesce because both its neighbours are in use. The
- * `+ 8` below is precisely what pays for that stranded prefix, which is why
- * the model is exact rather than an upper bound and why it must not be
- * "simplified" to roundup(bytes + 4, 8) by a later reader who sees only the
- * chunk the caller gets back. There is no TRAILING fragment: the aligned
- * allocation ends at c0 + padded_sz exactly.
+ * NO LEADING FRAGMENT IS SPLIT OFF, and it is worth saying why, because the
+ * shape of the code invites the opposite conclusion. mem_to_chunkid()
+ * (heap.c:157-161) is (mem - chunk_header_bytes(h) - base) / CHUNK_UNIT: it
+ * subtracts the 4-byte header BEFORE dividing. With an 8-aligned base that
+ * gives (8*(c0+1) - 4) / 8 = (8*c0 + 4) / 8 = c0, so the
+ * `if (c > c0) { split_chunks(...); free_list_add(...); }` at heap.c:364-367
+ * never fires. The eight extra bytes are the chunk header plus four bytes of
+ * internal alignment slack INSIDE the one allocated chunk, not a stranded
+ * prefix in bucket 0. (Fix re-review P1: an earlier version of this comment
+ * claimed the prefix was split and freed. It is not, and the arithmetic
+ * above is the check to re-run.)
+ *
+ * The SUFFIX split at heap.c:369-372 does run, because alloc_chunk() hands
+ * back the whole remaining free region, and it is lossless: it returns the
+ * remainder to the free list and leaves the used chunk at exactly padded_sz.
+ *
+ * So the model is exact rather than an upper bound. It must not be
+ * "simplified" to roundup(bytes + 4, 8) by a later reader who prices only
+ * the header: the alignment slack is real and the heap really does lose
+ * roundup(bytes, 8) + 8 per allocation.
  *
  * Small-heap-ness (the 4-byte header) is the same derived property the
  * endpoint heap asserts; the two BUILD_ASSERTs there cover this heap too,

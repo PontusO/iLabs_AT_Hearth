@@ -180,26 +180,50 @@ static_assert(kServiceableEndpoints <= MT_COMP_MAX_ENDPOINTS,
  *     it to emAfReadOrWriteAttribute(..., write=true) as the SOURCE
  *     buffer. It is never written through, and the whole branch sits
  *     inside `if (!am->IsExternal())` (attribute-storage.cpp:1320), which
- *     every attribute this port declares fails, and fails SYNTACTICALLY:
- *     this file declares zero hand-written metadata rows, every row comes
- *     from DECLARE_DYNAMIC_ATTRIBUTE() or from the cluster-revision row
- *     that ..._LIST_END() appends, and both macros OR in
- *     ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) unconditionally
- *     (attribute-storage.h:57-59 and :74-78). There is no route to a
- *     non-EXTERNAL attribute here short of writing a row by hand.
+ *     every attribute row in this file fails today.
  *   - That same defaults path already runs against the const ZAP tables in
  *     .rodata for the two fixed endpoints, and not incidentally: of the
  *     412 generated attribute rows in this build, 154 are non-EXTERNAL and
- *     126 of those carry a real default (ZAP_SIMPLE_DEFAULT or
- *     ZAP_MIN_MAX_DEFAULTS_INDEX), so every boot executes those four casts
- *     against read-only memory 126 times without faulting. That is
- *     empirical proof, not an argument.
+ *     124 of those carry a real default (107 ZAP_SIMPLE_DEFAULT plus 17
+ *     ZAP_MIN_MAX_DEFAULTS_INDEX; there are 19 MIN_MAX rows in all, two of
+ *     them EXTERNAL and so not on this path), so every boot executes those
+ *     four casts against read-only memory 124 times without faulting. That
+ *     is empirical proof, not an argument.
  *
- * So: if a future round writes a metadata row here by hand without the
- * EXTERNAL flag, or hands one of these tables to something that wants to
- * mutate it, these macros stop being safe and that table goes back to
- * DECLARE_DYNAMIC_*. The DataVersion storage (s_dyn's per-endpoint
- * versions) is written by CHIP and is deliberately NOT const.
+ * THE STANDING CONDITION, AND IT IS A DISCIPLINE RATHER THAN A GUARANTEE.
+ * Read this part twice before adding an attribute row here.
+ *
+ * EVERY attribute row in every table in this file must carry
+ * ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE). Most of them get it for free:
+ * DECLARE_DYNAMIC_ATTRIBUTE() ORs it in unconditionally
+ * (attribute-storage.h:73-77, the OR at :76) and so does the
+ * cluster-revision row that ..._LIST_END() appends (:57-59). But the
+ * macros do NOT enforce it, because this file also contains TWO
+ * hand-rolled EmberAfAttributeMetadata rows that bypass them: the
+ * BatPercentRemaining MIN_MAX entries in powerSourceAttrs (below, look for
+ * "Hand-rolled MIN_MAX entry") and in rechargeableBatteryPowerSourceAttrs.
+ * Both spell EXTERNAL_STORAGE out by hand, and both MUST keep it.
+ *
+ * Those two rows are exactly the dangerous shape: each carries a real
+ * defaultValue pointing at kBatPercentRemainingBounds with the MIN_MAX
+ * mask, so a row that lost the EXTERNAL flag would take the
+ * ptrToMinMaxValue arm, the deepest of the four casts, straight into a
+ * const table now living in .rodata. kBatPercentRemainingBounds is itself
+ * constexpr and already read-only, so the write would fault rather than
+ * corrupt, but a boot-time fault on a composed battery endpoint is not a
+ * failure mode worth discovering on a bench.
+ *
+ * So: a future non-EXTERNAL attribute row in a const table is the exact
+ * fault this comment exists to prevent, and nothing in the compiler will
+ * catch it. If one is ever needed, that table goes back to
+ * DECLARE_DYNAMIC_* and out of .rodata. (Fix re-review P2: an earlier
+ * version of this comment claimed the file declares zero hand-written
+ * metadata rows and that the condition therefore held syntactically. It
+ * does not; it holds by discipline over the two rows named above, which is
+ * a materially weaker guarantee and is why it is spelled out here.)
+ *
+ * The DataVersion storage (s_dyn's per-endpoint versions) is written by
+ * CHIP and is deliberately NOT const.
  *
  * The END macros carry no type and are the SDK's, reused unchanged; they
  * are wrapped only so the call sites read symmetrically.
