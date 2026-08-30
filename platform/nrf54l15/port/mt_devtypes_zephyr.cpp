@@ -501,6 +501,35 @@ DECLARE_DYNAMIC_ENDPOINT(onOffPlugInUnitEndpoint, onOffPlugInUnitClusters);
 
 constexpr EmberAfDeviceType kOnOffPlugInUnitTypes[] = { { 0x010A, 4 } };
 
+/* ---- mounted on/off control (0x010F) ----------------------------------
+ *
+ * Catalogue batch 5, a registry row reusing &onOffPlugInUnitEndpoint. The
+ * C6's mounted_on_off_control::add() (esp_matter_endpoint.cpp:1794-1811)
+ * creates Identify with TriggerEffect, Groups, OnOff with the Lighting
+ * feature plus On/Toggle (Off from on_off::create() itself), and
+ * ScenesManagement with CopyScene: the on/off plug-in unit's OnOff shape
+ * exactly (the device library's classification row even marks 0x010F a
+ * superset of 0x010A). On this port that collapses to the same three
+ * clusters the plug declares, and every OnOff seed (FeatureMap 0x01
+ * Lighting, StartUpOnOff null, revision 6) is already in s_seeds.
+ *
+ * Groups and ScenesManagement are mandatoryConform for this device type in
+ * the XML, and are deliberately NOT added: the standing convention argued
+ * on onOffPlugInUnitClusters above (this catalogue serves attribute-only
+ * clusters this build declares, and Groups/Scenes were never added for the
+ * lights or plugs either) covers this type identically.
+ *
+ * One row, one device type, per the port's one-devtype-per-row convention:
+ * the superset relation could justify appending { 0x010F } to the plug's
+ * own EmberAfDeviceType span instead, but no row in this registry declares
+ * two device types and this batch does not start.
+ *
+ * Revision 2 per data_model/1.5/device_types/MountedOnOffControl.xml (the
+ * device-revision authority the temperature sensor fix pinned; the
+ * zap-templates matter-devices.xml still says 1 for this type and is stale
+ * against the 1.5 snapshot). */
+constexpr EmberAfDeviceType kMountedOnOffControlTypes[] = { { 0x010F, 2 } };
+
 /* ---- dimmable plug-in unit (0x010B) -------------------------------------
  *
  * Reuses onOffAttrs/levelAttrs/kOnOffIncoming/kLevelIncoming verbatim:
@@ -522,6 +551,29 @@ DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffI
 DECLARE_DYNAMIC_ENDPOINT(dimmablePlugInUnitEndpoint, dimmablePlugInUnitClusters);
 
 constexpr EmberAfDeviceType kDimmablePlugInUnitTypes[] = { { 0x010B, 5 } };
+
+/* ---- mounted dimmable load control (0x0110) ---------------------------
+ *
+ * Catalogue batch 5, a registry row reusing &dimmablePlugInUnitEndpoint:
+ * the C6's mounted_dimmable_load_control::add() (esp_matter_endpoint.cpp:
+ * 1831-1851) composes the dimmable plug's exact OnOff (Lighting) plus
+ * LevelControl (OnOff|Lighting) set, with the same Groups/ScenesManagement
+ * omission argued on the mounted on/off control above. The device
+ * library's element requirements (Device-Library-Specification.md:
+ * 2080-2087) mandate OnOff/LT, LevelControl/OO, LevelControl/LT and the
+ * CurrentLevel 1..254 / MinLevel 1 / MaxLevel 254 bounds, all of which the
+ * dimmable light's existing seeds already provide.
+ *
+ * B388 check, verified rather than assumed: the LevelControl ServerInit
+ * call site in mt_devtype_create() below keys on the CLUSTER list (it
+ * walks type->ep_type->cluster[] for LevelControl::Id), not on the device
+ * type id, so this row's endpoint gets its Min/MaxLevel cache initialised
+ * exactly as 0x0101/0x010B do and nothing new joins the call site.
+ *
+ * Revision 2 per data_model/1.5/device_types/MountedDimmableLoadControl.xml
+ * (matter-devices.xml's 1 is stale against the snapshot, same note as the
+ * mounted on/off control). */
+constexpr EmberAfDeviceType kMountedDimmableLoadControlTypes[] = { { 0x0110, 2 } };
 
 /* ---- color temperature light (0x010C) and extended color light (0x010D)
  *
@@ -1832,6 +1884,10 @@ const hearth_devtype s_registry[] = {
     { 0x0146, 0, &chimeEndpoint, Span<const EmberAfDeviceType>(kChimeTypes) },
     /* Catalogue batch 5: the standalone remainder. */
     { 0x002D, 0, &fanEndpoint, Span<const EmberAfDeviceType>(kAirPurifierTypes) },
+    { 0x010F, 0, &onOffPlugInUnitEndpoint,
+      Span<const EmberAfDeviceType>(kMountedOnOffControlTypes) },
+    { 0x0110, 0, &dimmablePlugInUnitEndpoint,
+      Span<const EmberAfDeviceType>(kMountedDimmableLoadControlTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -1964,12 +2020,12 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   mode select             0x0027            3      8      576        584
  *   colour temperature lt   0x010C            5     32      532        536
  *   chime                   0x0146            2      4      345        352
- *   dimmable light / plug   0x0101 0x010B     4     20      336        344
+ *   dimmable light/plug/mnt  0x0101 0x010B 0x0110  4  20      336        344
  *   thermostat              0x0301            3     15      252        256
  *   smoke/co alarm          0x0076            3     13      220        224
  *   window covering         0x0202            3     13      220        224
  *   door lock               0x000A            3     12      204        208
- *   on/off light / plug     0x0100 0x010A     3     11      188        192
+ *   on/off light/plug/mount  0x0100 0x010A 0x010F  3  11      188        192
  *   water valve             0x0042            3     11      188        192
  *   fan / air purifier      0x002B 0x002D     3     10      172        176
  *   temp/humidity/pressure/light/flow         3      9      156        160
