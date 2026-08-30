@@ -2051,6 +2051,53 @@ DECLARE_DYNAMIC_ENDPOINT(pumpEndpoint, pumpClusters);
 /* Revision 3 per data_model/1.5/device_types/Pump.xml. */
 constexpr EmberAfDeviceType kPumpTypes[] = { { 0x0303, 3 } };
 
+/* ---- room air conditioner (0x0072) ------------------------------------
+ *
+ * Catalogue batch 5. No new cluster at all: a new CLUSTER LIST combining
+ * the featureless OnOff (racOnOffAttrs above, FeatureMap seeded 0x02
+ * DeadFrontBehavior per the element requirements,
+ * Device-Library-Specification.md:5137) with the existing Thermostat,
+ * Identify and Descriptor. The C6's room_air_conditioner::add()
+ * (esp_matter_endpoint.cpp:1274-1288) creates Identify, OnOff with
+ * dead_front_behavior plus On/Toggle, and Thermostat after an
+ * unconditional `|= cooling` on the feature flags; its thunk
+ * (mk_room_air_conditioner(), mt_devtypes.cpp:429-465) ORs Heating in as
+ * well, because the device library does not restrict the Thermostat to
+ * Cool-only and the host library writes OccupiedHeatingSetpoint
+ * unconditionally. The optional Groups/ScenesManagement/HEPA/
+ * ActivatedCarbon/FanControl are composed on neither platform
+ * (Device-Library-Specification.md:5093-5104; the C6 takes no optionals,
+ * so resource-monitoring stays out of this batch entirely).
+ *
+ * Every Thermostat seed row above is already correct for this device
+ * type, verified rather than assumed: FeatureMap 0x03 Heating|Cooling,
+ * ControlSequenceOfOperation 4 kCoolingAndHeating, SystemMode 0 Off (the
+ * first-write-swallowed cache reasoning on thermostatAttrs), setpoints
+ * 1600/2400 (the C6's cross-layer I1 values) and the 700/3000/1600/3200
+ * limits. So this type adds NO Thermostat rows and no thermostat code;
+ * only the OnOff FeatureMap row keyed 0x0072 (beside the pump's in
+ * s_seeds) is its own.
+ *
+ * Reusing onOffAttrs here instead of racOnOffAttrs would declare the four
+ * Lighting-gated attributes on a FeatureMap 0x02 cluster, the conformance
+ * break the racOnOffAttrs comment names; that is the one trap on this
+ * type. */
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(roomAirConditionerClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kThermostatIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(roomAirConditionerEndpoint, roomAirConditionerClusters);
+
+/* Revision 3 per data_model/1.5/device_types/RoomAirConditioner.xml. */
+constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -2105,6 +2152,8 @@ const hearth_devtype s_registry[] = {
       Span<const EmberAfDeviceType>(kMountedDimmableLoadControlTypes) },
     { 0x000F, 0, &genericSwitchEndpoint, Span<const EmberAfDeviceType>(kGenericSwitchTypes) },
     { 0x0303, 0, &pumpEndpoint, Span<const EmberAfDeviceType>(kPumpTypes) },
+    { 0x0072, 0, &roomAirConditionerEndpoint,
+      Span<const EmberAfDeviceType>(kRoomAirConditionerTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -2238,7 +2287,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   colour temperature lt   0x010C            5     32      532        536
  *   chime                   0x0146            2      4      345        352
  *   dimmable light/plug/mnt  0x0101 0x010B 0x0110  4  20      336        344
- *   pump                    0x0303            4     18      304        312
+ *   pump / room air cond    0x0303 0x0072     4     18      304        312
  *   thermostat              0x0301            3     15      252        256
  *   smoke/co alarm          0x0076            3     13      220        224
  *   window covering         0x0202            3     13      220        224
