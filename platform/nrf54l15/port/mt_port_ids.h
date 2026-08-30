@@ -37,10 +37,17 @@ constexpr uint16_t kCatalogueEndpointId = 240;
  *   - Every compile-time per-endpoint pool inside CHIP, through
  *     CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT, which
  *     src/chip_project_config.h mirrors from this value. ColorControlServer
- *     alone carries eleven arrays sized fixed + dynamic count
- *     (color-control-server.h:293-323); level-control's state table,
- *     BooleanState's server pool and the Thermostat / WindowCovering /
- *     FanControl delegate tables are all sized the same way.
+ *     alone carries THIRTEEN arrays sized fixed + dynamic count, not the
+ *     eleven this comment claimed before memory reclaim round A counted
+ *     them: five under MATTER_DM_PLUGIN_COLOR_CONTROL_SERVER_HSV
+ *     (color-control-server.h:301-306), four under _XY (:310-314), two
+ *     under _TEMP (:318-319) and two unconditional (:322-323), with all
+ *     three plugin variants defined in this build's gen_config.h:614-616.
+ *     264 B per endpoint, so 4,488 B of the 4,496 B
+ *     ColorControlServer::instance symbol is per-endpoint array, measured
+ *     with nm on 2026-08-30. Level-control's state table, BooleanState's
+ *     server pool and the Thermostat / WindowCovering / FanControl delegate
+ *     tables are all sized the same way.
  *
  * 16 rather than 28 is a deliberate trade for an nRF54L15's 256 KB. A host
  * may still DECLARE up to 28 endpoints and the composition still persists
