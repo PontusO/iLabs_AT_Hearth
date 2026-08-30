@@ -3590,8 +3590,11 @@ constexpr EmberAfDeviceType kExtractorHoodTypes[] = { { 0x007A, 1 } };
  *   0x0002, Supported 0x0003 (RefrigeratorAlarm/AttributeIds.h:19-29). Every
  *   one is a plain BITMAP32 and every one is ordinary AT+MTATTR-reachable;
  *   only State's WRITE path is diverted to AT+MTALARM (AT_MT_SPEC.md
- *   2390-2398 forbids writing it with AT+MTATTR, and nothing in the code
- *   enforces that: a raw write would land in the arena and skip Notify).
+ *   2356-2362 says reading all three and writing Mask or Supported works
+ *   over AT+MTATTR like any other attribute, and that only writing State
+ *   goes through AT+MTALARM so the Notify event actually fires; nothing in
+ *   the code enforces that, and a raw write would land in the arena and
+ *   skip the event).
  *
  * RefrigeratorAndTemperatureControlledCabinetMode 0x0052 is a plain
  * mode-base-server alias (zap_cluster_list.json:311-313), already compiled
@@ -3950,15 +3953,20 @@ constexpr hearth_shape kCookSurfaceShapes[] = {
  *   regeneration left IMClusterCommandHandler.cpp byte-identical.
  *
  *   THE TRAP, and it is a copy-paste trap rather than a reasoning one:
- *   MicrowaveOvenMode has NO ChangeToMode command. Every other ModeBase
- *   alias in this file reuses kModeBaseIncoming and kModeBaseOutgoing, and
- *   this one MUST NOT: its incoming and outgoing lists are both nullptr, so
- *   AcceptedCommandList and GeneratedCommandList come out empty. The mode is
- *   selected through MicrowaveOvenControl's SetCookingParameters cookMode
- *   field instead (AT_MT_SPEC.md 1381-1382, 1980-1984; batch 5's audit found
- *   the same). Advertising ChangeToMode here would let a controller invoke a
- *   command microwave-oven-mode-cluster.xml does not define, and the ModeBase
- *   Instance's own CommandHandlerInterface would execute it.
+ *   MicrowaveOvenMode inherits ChangeToMode from ModeBase and then marks it
+ *   disallowConform, along with ChangeToModeResponse
+ *   (data_model/1.5/clusters/Mode_MicrowaveOven.xml, the commands block),
+ *   which is exactly the treatment the oven cavity gives Pause and Resume
+ *   forty lines above; the generated MicrowaveOvenMode/CommandIds.h
+ *   consequently carries kAcceptedCommandsCount 0 and kGeneratedCommandsCount
+ *   0. Every other ModeBase alias in this file reuses kModeBaseIncoming and
+ *   kModeBaseOutgoing, and this one MUST NOT: its incoming and outgoing lists
+ *   are both nullptr, so both lists come out empty. The mode is selected
+ *   through MicrowaveOvenControl's SetCookingParameters cookMode field
+ *   instead (AT_MT_SPEC.md 1381-1382, 1980-1984; batch 5's audit found the
+ *   same). Advertising ChangeToMode here would let a controller invoke a
+ *   command the cluster disallows, and the ModeBase Instance's own
+ *   CommandHandlerInterface would execute it.
  *
  *   Everything else about it is the standard alias: modeBaseAttrs verbatim,
  *   a ModeBase pool slot, a block-resident mt_mb_store_t, and Init()'s
@@ -3989,7 +3997,7 @@ constexpr hearth_shape kCookSurfaceShapes[] = {
  *
  *   CookTime, MaxCookTime and PowerSetting ARE declared, and all three are
  *   Instance-served: Instance::Read() answers CookTime from its own member
- *   and the other two from the delegate (:145-155). The slots exist for
+ *   and the other two from the delegate (:142-157). The slots exist for
  *   AttributeList truthfulness and are seeded to exactly what those sources
  *   serve at boot, the FanControl agreement discipline, so an AT+MTATTR read
  *   answers the same value a controller sees until the first cooking command
@@ -4245,6 +4253,15 @@ constexpr hearth_devtype s_registry[] = {
  * shape map with a hole in it, fails THIS build rather than a boot rebuild
  * on someone's bench.
  *
+ * Fix round N4, the honest scope of that universe: a shape row naming a
+ * parent device type that is NOT in the registry is never enumerated by the
+ * second loop and so is not checked against the policy there. It cannot
+ * matter, because parent_devtype at create time is either 0 or the device
+ * type of a live endpoint, which is by construction a registry id, so such a
+ * row would be unreachable rather than wrong. The per-shape loop above still
+ * checks its variant and its ep_type. Said plainly rather than left implied
+ * by "every shape is accepted".
+ *
  * Which direction is load-bearing, said plainly. "Every shape is accepted"
  * catches a dead shape row, which is confusing but harmless. "Every accepted
  * pair has a shape" catches the dangerous one: a pairing AT+MTEP accepts at
@@ -4265,6 +4282,17 @@ constexpr bool shape_domain_matches_policy()
             if (e.shapes.data()[s].ep_type == nullptr) {
                 return false;
             }
+        }
+        /* Fix round M4, the mirror of the check just above. A row with NO
+         * shape map selects through the ep_type / ep_type_v1 fallback, and
+         * that arm of mt_devtype_create() has no null guard of its own (the
+         * shape arm aborts loudly; the fallback would hand a null list
+         * straight to type_has_cluster() and fault at boot). Asserting it
+         * here turns that into a build failure. ep_type_v1 needs no check:
+         * null is its documented "this row has one variant" value and the
+         * fallback already tests it. */
+        if (e.shapes.empty() && e.ep_type == nullptr) {
+            return false;
         }
         for (uint8_t v = 0; v <= e.max_variant; v++) {
             /* p == kRows is the unparented probe; the rest walk the
@@ -4299,8 +4327,8 @@ constexpr bool shape_domain_matches_policy()
 
 static_assert(shape_domain_matches_policy(),
               "the shape maps and mt_devtype_parent_ok() disagree: a restricted device type "
-              "has no shape map, a shape map has a hole or a duplicate, or a permissive row "
-              "grew a shape map");
+              "has no shape map, a shape map has a hole or a duplicate, a permissive row "
+              "grew a shape map, or a shapeless row has no ep_type to fall back to");
 
 /* ---- the external attribute store ------------------------------------ */
 
@@ -5167,12 +5195,30 @@ static_assert(kCabinetHeaterLevelBlockBytes == 755,
               "the heater cabinet variant 1 block changed size; redo the sizing table rows and "
               "the batch 8 capacity arithmetic");
 
+/* The microwave oven, the batch's other store-bearing candidate worth naming
+ * separately (fix round N3). It loses to the heater cabinet v1 by 225 bytes
+ * and so cannot move kWidestBlockBytes, but its block cost is the divisor in
+ * a capacity claim the README makes out loud, "15 microwave ovens fit and 16
+ * do not", and in kObjMicrowaveEndpointLimit over in mt_matter_zephyr.cpp.
+ * Pinning it here is what stops those three drifting apart: this is the only
+ * translation unit that knows both the block cost and the heap's usable size.
+ * 4 clusters (OperationalState, MicrowaveOvenMode, MicrowaveOvenControl,
+ * Descriptor), 5 + 3 + 5 = 13 slots, one ModeBase store. */
+constexpr size_t kMicrowaveBlockBytes =
+    block_bytes(MT_COUNT(microwaveOvenClusters),
+                (MT_COUNT(microwaveOpStateAttrs) - kOpStateNoSlot) +
+                    (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) + MT_COUNT(mwocAttrs)) +
+    sizeof(mt_mb_store_t);
+static_assert(kMicrowaveBlockBytes == 530,
+              "the microwave oven block changed size; redo the sizing table row, the "
+              "README's 15-of-16 capacity claim and kObjMicrowaveEndpointLimit");
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
           kMax2(kMax2(kModeSelectBlockBytes, kChimeBlockBytes),
                 kMax2(kMax2(kRvcBlockBytes, kDemBlockBytes),
                       kMax2(kMax2(kWaterHeaterBlockBytes, kBatteryStorageBlockBytes),
-                            kCabinetHeaterLevelBlockBytes))));
+                            kMax2(kCabinetHeaterLevelBlockBytes, kMicrowaveBlockBytes)))));
 
 /*
  * Zephyr charges roundup(payload + 4, 8) per allocation on a heap this size,
@@ -5236,6 +5282,17 @@ static_assert(kHeapCostOf(kBatteryStorageBlockBytes) == 856,
 static_assert(kHeapCostOf(kCabinetHeaterLevelBlockBytes) == 760,
               "the heater cabinet variant 1 heap cost moved off the tables' 760; redo the "
               "sizing rows");
+static_assert(kHeapCostOf(kMicrowaveBlockBytes) == 536,
+              "the microwave oven heap cost moved off the tables' 536; redo the sizing rows");
+/* Fix round N3: the README's "15 microwave ovens fit, 16 do not" row and
+ * kObjMicrowaveEndpointLimit in mt_matter_zephyr.cpp both rest on this exact
+ * division, so it is asserted rather than divided by hand in a comment. Both
+ * halves matter: the first is the capacity promise, the second is what makes
+ * 15 the LIMIT rather than merely a number that fits. */
+static_assert(15 * kHeapCostOf(kMicrowaveBlockBytes) <= kHeapUsableBytes &&
+                  16 * kHeapCostOf(kMicrowaveBlockBytes) > kHeapUsableBytes,
+              "the endpoint block heap no longer admits exactly fifteen microwave ovens; "
+              "redo the README capacity row and kObjMicrowaveEndpointLimit");
 
 static_assert(kHeapCostOf(kWidestBlockBytes) * kMinWidestEndpoints <= kHeapUsableBytes,
               "the endpoint heap no longer holds eight of the widest device type; redo the "
@@ -6064,7 +6121,7 @@ const attr_seed s_seeds[] = {
 
     /* RefrigeratorAlarm. Mask 1 and Supported 1 are the C6's config
      * defaults (esp_matter_cluster.h:926-930) and the values AT_MT_SPEC.md
-     * 2400-2402 documents to hosts: bit 0 (DoorOpen) supported and unmasked,
+     * 2364-2366 documents to hosts: bit 0 (DoorOpen) supported and unmasked,
      * every other bit neither. State 0 and FeatureMap 0 are the zero-fill,
      * spelled out anyway for State because it is the attribute this cluster
      * exists for. All three are LIVE arena values, not shadows: the server
@@ -6164,12 +6221,17 @@ const attr_seed s_seeds[] = {
      * FanControl agreement discipline (the mwocAttrs audit note explains why
      * there is no k_instance_served carve-out and why the shadow is expected
      * to go stale after the first cooking command):
-     *   CookTime 30, kDefaultCookTimeSec, the Instance's own mCookTimeSec
-     *     initialiser (microwave-oven-control-server.h:34) and the value
-     *     microwave-oven-control-cluster.xml:50 gives the attribute. The
-     *     audit's estimate said 0; 30 is what the server actually serves
-     *     from the first read onward, and a shadow that disagrees with its
-     *     source on boot would be wrong for no gain.
+     *   CookTime 30, kDefaultCookTimeSec: the constant at
+     *     microwave-oven-control-server.h:34 and the Instance's own
+     *     mCookTimeSec initialiser at :88, which Instance::Read() answers
+     *     CookTime from. The audit's estimate said 0; 30 is what the server
+     *     actually serves from the first read onward, and a shadow that
+     *     disagrees with its source on boot would be wrong for no gain.
+     *     (Fix round M6: an earlier version of this note also claimed the
+     *     cluster XML gives CookTime a default of 30. It does not:
+     *     data_model/1.5/clusters/MicrowaveOvenControl.xml declares CookTime
+     *     with a constraint and no default. The SDK evidence alone carries
+     *     the decision and the XML claim is withdrawn.)
      *   MaxCookTime 86400, HearthMwocDelegate::GetMaxCookTimeSec(), the C6's
      *     same constant and the XML's own maximum.
      *   PowerSetting 100, kDefaultMaxPowerNum and the delegate's
@@ -7017,6 +7079,25 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
             }
             return -1;
         }
+    }
+    /* Fix round M5: this claim is made on the CLUSTER but consumed only
+     * inside the mwoc_delegate arm of the second half, so a future device
+     * type carrying MicrowaveOvenMode WITHOUT MicrowaveOvenControl would take
+     * a pool slot and never construct or Init() its Instance: the cluster
+     * would be declared, unregistered and silent, which is the exact class of
+     * quiet cripple this file alarms on. Unreachable today (only 0x0079
+     * carries either), and alarmed anyway, because mt_matter_mwoc_register()
+     * already carries the alarm for the opposite pairing. */
+    if (type_has_cluster(ep_type, MicrowaveOvenMode::Id) &&
+        !type_has_cluster(ep_type, MicrowaveOvenControl::Id)) {
+        LOG_ERR("devtype 0x%04X carries MicrowaveOvenMode without "
+                "MicrowaveOvenControl; its ModeBase Instance would never be constructed "
+                "and the cluster would answer nothing on the fabric",
+                (unsigned)devtype_id);
+        if (chime_delegate != nullptr) {
+            mt_matter_chime_delegate_unclaim(chime_delegate);
+        }
+        return -1;
     }
     if (type_has_cluster(ep_type, MicrowaveOvenMode::Id)) {
         microwave_mode_delegate = mt_matter_modebase_delegate_alloc(MicrowaveOvenMode::Id);

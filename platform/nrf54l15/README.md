@@ -380,8 +380,9 @@ and meter families. It replaced fourteen fixed pools, and the per-family
 caps those pools carried (`MT_MEAS_MAX` 8, `MT_DEM_MAX` 4, `MT_WHM_MAX` 4,
 `MT_METER_MAX` 2, `kModeBasePoolSlots` 20) are unchanged and are still what
 a composition hits first. 7,088 usable bytes against a worst reachable draw
-of **6,336 B**, which is the maximum over every composition the other two
-walls admit, found by exhaustive search rather than by a greedy fill:
+of **6,928 B**, a margin of 160 B, which is the maximum over every
+composition the other two walls admit, found by exhaustive search rather
+than by a greedy fill:
 
 | Count | Device type | Object bytes | Block bytes |
 |---|---|---|---|
@@ -475,7 +476,7 @@ bucket table) and 16 header slots:
 | 16 cooktops, ovens or extractor hoods | up to 1,792 B | **yes**, table-bound |
 | 15 microwave ovens | 8,040 B | **yes**, one short of 16 |
 | 16 microwave ovens | 8,576 B wanted | **no**, fails at the 16th |
-| 10 Heater cabinets (v1, both stores in-block each) | 7,600 B | **yes**, six short of 16 |
+| 1 oven + 10 Heater cabinets (v1, both stores in-block each) | 7,680 B | **yes**, 11 of the 16 endpoints |
 | 1 oven + 4 Heater cabinets (v0), a four-cavity oven | 2,224 B | **yes**, 5 of the 16 endpoints |
 | 1 cooktop + 4 cook surfaces (v0) | 704 B | **yes**, 5 of the 16 endpoints |
 

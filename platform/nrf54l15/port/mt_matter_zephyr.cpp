@@ -1880,12 +1880,12 @@ static const std::array<SmokeCoAlarmServer::ExpressedStateEnum, SmokeCoAlarmServ
  * (platform/esp32c6/main/main.cpp mt_matter_alarm_set()). mt_at.c's
  * cmd_mtalarm only checks the UNION bound 0..11 before calling this (it
  * cannot know which cluster <ep> carries); this bridge dispatches on the
- * cluster the endpoint actually has. On THIS platform only SmokeCoAlarm
- * exists so far: RefrigeratorAlarm arrives with the composed-appliance
- * types in a later batch, and until then an endpoint carrying neither
- * answers MT_ATTR_ERR_CLUSTER through the single fall-through below, the
- * same code the C6 answers. The dispatch shape is kept so that batch adds
- * a branch rather than restructuring this function.
+ * cluster the endpoint actually has. TWO clusters since catalogue batch 8,
+ * which added the RefrigeratorAlarm branch below rather than restructuring
+ * this function, exactly as the pre-batch-8 version of this comment
+ * predicted it would; an endpoint carrying neither still answers
+ * MT_ATTR_ERR_CLUSTER through the single fall-through at the end, the same
+ * code the C6 answers.
  *
  * Field 0 (ExpressedState) is derived by the server from the other fields
  * and never settable directly; rejected here rather than in mt_at.c because
@@ -2122,6 +2122,16 @@ public:
      * attached via SetInstance(). */
     chip::app::Clusters::OperationalState::Instance *instance() { return GetInstance(); }
 
+    /* Always null, and since catalogue batch 8 something DEPENDS on that
+     * beyond this method. The microwave declares CountdownTime
+     * (MicrowaveOven.xml mandates it on OperationalState) and seeds its arena
+     * slot to the uint32 null sentinel with NO k_instance_served carve-out,
+     * precisely because the seeded null and this answer agree, so an AT
+     * reader gets +MTERR:5 either way. A future round that gives this
+     * delegate a real countdown must add that carve-out in the same commit
+     * or the AT-visible shadow silently goes stale. The full reasoning is at
+     * microwaveOpStateAttrs in mt_devtypes_zephyr.cpp; the note is here
+     * because this is where the invariant would break. */
     chip::app::DataModel::Nullable<uint32_t> GetCountdownTime() override
     {
         return chip::app::DataModel::NullNullable;
@@ -3638,11 +3648,12 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id &&
         cluster != OvenMode::Id && cluster != MicrowaveOvenMode::Id) {
         /* Batch 7a widened the accept set to three of the C6's seven
-         * ModeBase ids, batch 7b to four (WaterHeaterMode; EnergyEvseMode
-         * stays out with its device type, ruling DE408 LM20-tier), batch 8
-         * to five with the refrigerator and cooler cabinet's 0x0052. OvenMode
-         * and MicrowaveOvenMode join it later in the same batch, with the
-         * device types that carry them. */
+         * ModeBase ids, batch 7b to four (WaterHeaterMode), and batch 8 to
+         * SEVEN, which is every one this tier will serve: 0x0052 on the
+         * refrigerator and the cooler cabinet, OvenMode on the heater
+         * cabinet, MicrowaveOvenMode on the microwave, all three named in
+         * the condition above. EnergyEvseMode is the eighth and stays out
+         * with its device type (ruling DE408, LM20 tier). */
         return MT_ATTR_ERR_CLUSTER;
     }
     if (!emberAfContainsServer(ep, cluster)) {
@@ -3666,6 +3677,67 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
             return MT_ATTR_ERR_FAILED;
         }
     }
+
+    /*
+     * THE MICROWAVE'S ONE HOST-REACHABLE WAY TO CRIPPLE ITSELF, refused here
+     * (batch 8 fix round, RULED DE417).
+     *
+     * MicrowaveOvenControl resolves an omitted cookMode by asking this
+     * cluster's Instance for the mode carrying the kNormal tag, and answers
+     * InvalidCommand if there is none (microwave-oven-control-server.cpp:
+     * 277-280). A host feed whose entries all carry EXPLICIT non-zero tags,
+     * none of them kNormal, is accepted verbatim by the substitution loop
+     * below (it only rewrites tag 0), and from that moment every
+     * SetCookingParameters on that endpoint answers InvalidCommand with no
+     * +MTCMD raised, forever and silently. That is precisely the failure the
+     * boot readback in mt_matter_mwoc_register() exists to prevent, and the
+     * readback cannot see this one: it runs once at create, before any
+     * AT+MTMODES could have arrived. The two together close the class, the
+     * readback over the placeholder path and this over the host-fed one.
+     *
+     * A tag of 0 counts as satisfying the rule, because the loop below turns
+     * it into kNormal for this cluster; only a list that is explicitly and
+     * entirely something else is refused.
+     *
+     * THIS IS A FIRMWARE-IMPOSED RULE, NOT A CONFORMANCE CHECK, and the
+     * distinction is deliberate rather than hedging. The pinned tree's
+     * machine-readable model does NOT mandate a Normal-tagged mode:
+     * Mode_MicrowaveOven.xml (revision 2) lists Normal in its ModeTag enum
+     * and constrains nothing about which tags a SupportedModes list must
+     * carry, and no Mode_*.xml in the tree encodes such a mandate for ANY
+     * mode cluster, Mode_RVCRun.xml included, where the cluster spec's prose
+     * certainly does require an Idle-tagged mode. MicrowaveOvenControl.xml's
+     * CookMode field carries default="desc" and <constraint><desc/></constraint>,
+     * which is the XML deferring to prose this tree does not ship. What the
+     * tree DOES contain is the SDK's own behaviour (the InvalidCommand above)
+     * and the SDK's reference microwave, whose two-mode list always carries
+     * Normal (examples/microwave-oven-app/microwave-oven-common/include/
+     * microwave-oven-device.h:254-264). So the rule is this firmware's, taken
+     * because the alternative is a silently dead endpoint, and AT_MT_SPEC.md
+     * says so in those terms.
+     *
+     * A DELIBERATE DIVERGENCE FROM THE C6, which has the identical gap and
+     * accepts such a list (parked as bug B418). Refusing is the better
+     * behaviour and the divergence is host-visible, so it is disclosed rather
+     * than quietly fixed on one platform.
+     */
+    if (cluster == MicrowaveOvenMode::Id) {
+        bool has_normal = false;
+        for (uint8_t i = 0; i < count && !has_normal; i++) {
+            has_normal = (tags[i] == 0) ||
+                         (tags[i] == chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal));
+        }
+        if (!has_normal) {
+            LOG_ERR("AT+MTMODES on endpoint %u cluster 0x%08X refused: no mode carries the "
+                    "kNormal tag (0x%04X), and MicrowaveOvenControl resolves an omitted "
+                    "cookMode through it, so every SetCookingParameters would answer "
+                    "InvalidCommand. Send tag 0 on at least one mode, or kNormal explicitly",
+                    (unsigned)ep, (unsigned)cluster,
+                    (unsigned)chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal));
+            return MT_ATTR_ERR_VALUE;
+        }
+    }
+
     for (uint8_t i = 0; i < count; i++) {
         uint16_t tag = tags[i];
         if (tag == 0) {
@@ -3795,7 +3867,7 @@ static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, boo
  * REFERENCES to two OTHER clusters' live Instances. So the OperationalState
  * Instance and the MicrowaveOvenMode Instance must both exist before this
  * one can be constructed at all, and its handlers dereference both on the
- * very first invoke (microwave-oven-control-server.cpp:250, :277-281).
+ * very first invoke (microwave-oven-control-server.cpp:252, :277-281).
  *
  * WHAT MAKES IT DANGEROUS RATHER THAN MERELY FIDDLY is that every way of
  * getting it wrong is QUIET. A reference bound to storage that has not been
@@ -3839,9 +3911,9 @@ static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, boo
  * WHAT THE SERVER GUARANTEES BEFORE THE HOST EVER SEES A COMMAND, which is
  * why the forwards below carry only legitimate adjudication requests:
  * SetCookingParameters requires the operational state to be kStopped or
- * answers InvalidInState (:250); if startAfterSetting is present it asks the
+ * answers InvalidInState (:252); if startAfterSetting is present it asks the
  * data model provider whether OperationalState's Start is accepted on this
- * endpoint and answers InvalidCommand if not (:252-273, which is why
+ * endpoint and answers InvalidCommand if not (:257-272, which is why
  * kOpStateIncoming keeps Start on the microwave's list); cookTime is
  * range-checked against GetMaxCookTimeSec(); powerSetting is range- and
  * step-checked. AddMoreTime requires the state not be kError and range-checks
@@ -3869,16 +3941,17 @@ public:
     void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
     chip::EndpointId endpoint() const { return m_ep; }
 
-    /* GetInstance() is protected in the base Delegate and const-qualified
-     * here, unlike the OperationalState and ModeBase passthroughs: the base
-     * only offers `const Instance *GetInstance() const`
-     * (microwave-oven-control-server.h:195). SetCookTimeSec() is non-const,
-     * so the cast is needed; it is safe because the object it names is this
-     * delegate's own non-const Instance, constructed below. */
-    chip::app::Clusters::MicrowaveOvenControl::Instance *instance()
-    {
-        return const_cast<chip::app::Clusters::MicrowaveOvenControl::Instance *>(GetInstance());
-    }
+    /* GetInstance() is protected in the base Delegate, exactly as it is on
+     * the OperationalState and ModeBase delegates, and this passthrough is
+     * the same mechanism under a third name. The base offers BOTH overloads,
+     * `const Instance *GetInstance() const` at
+     * microwave-oven-control-server.h:199 and `Instance *GetInstance()` at
+     * :207, and this member is non-const, so overload resolution picks the
+     * non-const one and no cast is needed to reach the non-const
+     * SetCookTimeSec(). (Fix round M1: an earlier version of this comment
+     * claimed the base offered only the const overload, cited a line that is
+     * neither, and carried a const_cast on the strength of it.) */
+    chip::app::Clusters::MicrowaveOvenControl::Instance *instance() { return GetInstance(); }
 
     /*
      * SetCookingParameters: the four-field forward,
@@ -4042,6 +4115,12 @@ extern "C" void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_deleg
      * to. Cannot happen (all three claims aborted the create before anything
      * was spent), so this is the drift alarm for a future edit that adds a
      * claim without adding it to this call. */
+    /* Fix round M5: the CONVERSE of this alarm lives at the
+     * MicrowaveOvenMode claim in mt_devtype_create(), because a device
+     * type carrying MicrowaveOvenMode WITHOUT MicrowaveOvenControl would
+     * never reach this function at all and its Instance would never be
+     * constructed. Both directions are unreachable today and both are
+     * alarmed, this file's convention. */
     if (mwoc_delegate == nullptr || opstate_delegate == nullptr || mode_delegate == nullptr) {
         LOG_ERR("microwave endpoint %u: a delegate is missing (mwoc %p, opstate %p, mode %p); "
                 "no MicrowaveOvenControl cluster will be registered and every cooking command "
@@ -4110,7 +4189,14 @@ extern "C" void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_deleg
      * MicrowaveOvenMode arm answers kNormal, which is the whole reason a
      * freshly composed microwave works before the host has sent
      * AT+MTMODES. Read back rather than trusted, because that arm is one
-     * edit away from being wrong and nothing else would notice. */
+     * edit away from being wrong and nothing else would notice.
+     *
+     * This probe covers the PLACEHOLDER path only, and deliberately: it
+     * runs once at create, before any AT+MTMODES can have arrived, so it
+     * cannot see a host feed that carries no kNormal-tagged mode. That
+     * half is refused outright in mt_matter_modebase_set() (fix round,
+     * RULED DE417). The two together close the class; neither alone
+     * does. */
     uint8_t normal_mode = 0;
     CHIP_ERROR tag_err = mode_inst->GetModeValueByModeTag(
         chip::to_underlying(MwoMode::ModeTag::kNormal), normal_mode);
@@ -6875,7 +6961,12 @@ constexpr size_t kObjRvcEndpointLimit = 9;
 /* Catalogue batch 8: and fifteen microwaves (8,112 / 536), one short of the
  * endpoint count. Named for the RVC's reason: the README quotes the figure
  * in its capacity table, and the assertion below is what keeps that row from
- * drifting out of step with either heap. */
+ * drifting out of step with either heap. Fix round N3: the DIVISION itself
+ * is pinned where the block arithmetic lives, beside kMicrowaveBlockBytes in
+ * mt_devtypes_zephyr.cpp, which asserts that fifteen fit and sixteen do not;
+ * this constant cannot assert it, because the endpoint block heap's usable
+ * size is a constant of that translation unit. The RVC's 9 keeps the older
+ * hand-computed convention. */
 constexpr size_t kObjMicrowaveEndpointLimit = 15;
 
 static_assert(kObjWorstMixBytes <= kObjHeapUsableBytes,
