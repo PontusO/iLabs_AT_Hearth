@@ -50,8 +50,10 @@ void MatterRvcOperationalStatePluginServerInitCallback();
 void MatterValveConfigurationAndControlPluginServerInitCallback();
 void MatterElectricalPowerMeasurementPluginServerInitCallback();
 void MatterElectricalEnergyMeasurementPluginServerInitCallback();
+void MatterWaterHeaterManagementPluginServerInitCallback();
 void MatterDeviceEnergyManagementPluginServerInitCallback();
 void MatterPowerTopologyPluginServerInitCallback();
+void MatterWaterHeaterModePluginServerInitCallback();
 void MatterDeviceEnergyManagementModePluginServerInitCallback();
 void MatterDoorLockPluginServerInitCallback();
 void MatterWindowCoveringPluginServerInitCallback();
@@ -100,8 +102,10 @@ void MatterMeterIdentificationPluginServerInitCallback();
   MatterValveConfigurationAndControlPluginServerInitCallback();                \
   MatterElectricalPowerMeasurementPluginServerInitCallback();                  \
   MatterElectricalEnergyMeasurementPluginServerInitCallback();                 \
+  MatterWaterHeaterManagementPluginServerInitCallback();                       \
   MatterDeviceEnergyManagementPluginServerInitCallback();                      \
   MatterPowerTopologyPluginServerInitCallback();                               \
+  MatterWaterHeaterModePluginServerInitCallback();                             \
   MatterDeviceEnergyManagementModePluginServerInitCallback();                  \
   MatterDoorLockPluginServerInitCallback();                                    \
   MatterWindowCoveringPluginServerInitCallback();                              \

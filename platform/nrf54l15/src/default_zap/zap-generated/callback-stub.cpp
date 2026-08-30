@@ -168,6 +168,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::ValveConfigurationAndControl::Id:
     emberAfValveConfigurationAndControlClusterInitCallback(endpoint);
     break;
+  case app::Clusters::WaterHeaterManagement::Id:
+    emberAfWaterHeaterManagementClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::WaterHeaterMode::Id:
+    emberAfWaterHeaterModeClusterInitCallback(endpoint);
+    break;
   case app::Clusters::WiFiNetworkDiagnostics::Id:
     emberAfWiFiNetworkDiagnosticsClusterInitCallback(endpoint);
     break;
@@ -412,6 +418,16 @@ emberAfThreadNetworkDiagnosticsClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfValveConfigurationAndControlClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfWaterHeaterManagementClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfWaterHeaterModeClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

@@ -78,6 +78,18 @@ extern "C" void mt_matter_eem_register(uint16_t ep);
  * construction. Defined beside the DEM pool in mt_matter_zephyr.cpp. */
 extern "C" void mt_matter_dem_register(void *delegate, uint16_t ep, bool with_pa);
 
+/* Catalogue batch 7b: the WaterHeaterManagement Instance's second half
+ * (construct + soft Init with the variant's feature mask), the DEM
+ * register's exact shape one cluster over. Port-local for the same reason:
+ * the C6 needs no such name because esp-matter's
+ * WaterHeaterManagementDelegateInitCB news the Instance from the
+ * endpoint's FeatureMap at enable time (esp_matter_delegate_callbacks.cpp:
+ * 487-498); here the create path passes the variant's own with_em_tp, the
+ * same predicate seed_slots()'s WHM FeatureMap special case uses, so the
+ * seeded shadow and the Instance mask agree by construction. Defined
+ * beside the WHM pool in mt_matter_zephyr.cpp. */
+extern "C" void mt_matter_whm_register(void *delegate, uint16_t ep, bool with_em_tp);
+
 using namespace chip;
 using namespace chip::app::Clusters;
 
@@ -2803,6 +2815,372 @@ DECLARE_DYNAMIC_ENDPOINT(demReportOnlyEndpoint, demReportOnlyClusters);
 
 constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
 
+/* ---- water heater (0x050F) --------------------------------------------
+ *
+ * Catalogue batch 7b audit (batch7-audit.md section 3.3), every citation
+ * re-verified against the pinned NCS tree while writing. One new cluster,
+ * WaterHeaterManagement (0x0094), plus the fourth ModeBase alias
+ * (WaterHeaterMode 0x009E, mode-base-server per zap_cluster_list.json:367,
+ * no new translation unit), on the C6's mk_water_heater()
+ * (mt_devtypes.cpp:1628-1736, class comment :1531-1627).
+ *
+ * WaterHeaterManagement's three answers: code-driven no, CHI-only YES
+ * (config-data.yaml:81; the batch's zap regeneration left
+ * IMClusterCommandHandler.cpp and CodeDrivenInitShutdown.cpp
+ * byte-identical, sha256-checked; access.h did NOT stay byte-identical,
+ * against the audit 5.5 prediction: it gained Boost and CancelBoost with
+ * the manage invoke privilege the cluster XML really declares,
+ * water-heater-management-cluster.xml:94 and :100, a correct delta the
+ * batch 3 empirical check exists to catch). AAI YES per endpoint: the
+ * Instance derives from both AttributeAccessInterface and
+ * CommandHandlerInterface (water-heater-management-server.h:139-149, ctor
+ * Instance(EndpointId, Delegate &, Feature) whose body sets the delegate's
+ * endpoint); Init() registers CHI then AAI, SOFT on both
+ * (water-heater-management-server.cpp:94-100, no emberAfContainsServer
+ * check, no VerifyOrDie), constructed by the port's own
+ * mt_matter_whm_register() below a successful emberAfSetDynamicEndpoint(),
+ * the DEM handout's shape, pool MT_WHM_MAX (4, core/include/
+ * mt_matter.h:939, the C6 depth per DE407).
+ *
+ * THE ONE INERT REVISION SEED IN THE ENERGY FAMILY: Instance::Read()
+ * serves ClusterRevision ITSELF (water-heater-management-server.cpp:
+ * 146-147, encoding kClusterRevision = 2, :40), the only energy cluster
+ * that does; every other case falls through for NOTHING (the switch covers
+ * all six attributes plus FeatureMap). So the WHM ClusterRevision seed
+ * below is an inert shadow kept equal to that served 2
+ * (WaterHeaterManagement/Metadata.h:20 agrees), the Thermostat
+ * seed-agrees-with-AAI discipline, while EPM/EEM/PTOP/DEM revision seeds
+ * stay LIVE.
+ *
+ * Slots, v0: HeaterTypes, HeatDemand, TankVolume, TankPercentage,
+ * BoostState, FeatureMap, ClusterRevision (7). EstimatedHeatRequired is
+ * energy_mwh (water-heater-management-cluster.xml:78, min 0), declared
+ * true-width 8 B for the AAI gate (DE407 option C), no slot, its own
+ * kQuietNoSlot row, k_instance_served live-read row. v1 drops the
+ * feature-gated pair whole per the cluster XML's gates (TankVolume and
+ * EstimatedHeatRequired mandatory under EM only, :73-82; TankPercentage
+ * under TP only, :83-86; HeaterTypes/HeatDemand/BoostState mandatory
+ * unconditionally, :67-71 and :88-90): 5 slots. All six values are
+ * Instance-served from the HearthWhmDelegate cache (AT+MTMEAS 0x94 is the
+ * write path, AT_MT_SPEC.md 3.25); the enum/bitmap/u16 slots are inert
+ * shadows zero-filled to the delegate defaults (everything 0, BoostState
+ * kInactive = 0, WaterHeaterManagement/Enums.h:32-36).
+ *
+ * THE FEATUREMAP IS THE CATALOGUE'S SECOND VARIANT-DEPENDENT BOOT VALUE
+ * (the DEM special case's exact problem: both variants share devtype
+ * 0x050F, so an s_seeds row cannot split them). Variant 0 is
+ * EnergyManagement|TankPercent = 0x3 (Enums.h:44-48; the value the C6
+ * hand-sets because BOTH esp-matter feature helpers are broken,
+ * mt_devtypes.cpp:1594-1607: energy_management::add() as declared does
+ * not link and tank_percent::get_id() returns the kEnergyManagement bit;
+ * neither helper exists on this port, so the obligation reduces to the
+ * bits themselves, read from CHIP's own enum). Variant 1 is 0 (HeaterTypes
+ * /HeatDemand/BoostState only, which the cluster's own feature conformance
+ * permits: EM and TP are both optionalConform, cluster XML :57-64).
+ * seed_slots()'s WHM special case writes it from d->variant, and the
+ * create path hands the IDENTICAL predicate to mt_matter_whm_register(),
+ * whose Instance mask is what Read() actually answers for FeatureMap
+ * (server.cpp:144-145 encodes mFeature, snapshotted at construction):
+ * seed and Instance agree by construction, single-sourced on the variant.
+ *
+ * Thermostat: REUSES thermostatAttrs whole with a HEATING-ONLY FeatureMap
+ * seed (0x01) keyed to 0x050F below (the seed table's per-devtype keying;
+ * the standalone thermostat and the room air conditioner keep the wildcard
+ * 0x03), per WaterHeater.xml's Thermostat(HEAT) mandate (:75-81; HEAT
+ * alone makes only OccupiedHeatingSetpoint mandatory, the C6 class
+ * comment's own conformance trace). ControlSequenceOfOperation gets a
+ * keyed 0x02 (HeatingOnly) seed: the wildcard 0x04 (CoolingAndHeating)
+ * would advertise cooling this endpoint does not have. DELIBERATE
+ * DIVERGENCE from the C6, which serves esp-matter's inherited config
+ * default 4 on its water heater (esp_matter_cluster.h:415, the thunk does
+ * not override it); the FanModeSequence precedent, noted rather than
+ * copied. DISCLOSED OVER-DECLARATION riding on the reuse (the batch
+ * brief's ruled trade): thermostatAttrs also declares
+ * OccupiedCoolingSetpoint and the four setpoint-limit attributes, three of
+ * which Thermostat.xml gates on COOL; the C6's water heater creates no
+ * cooling attributes at all, so this endpoint's AttributeList is wider
+ * than the C6's and than the letter of HEAT-only conformance. Disclosed
+ * here and in the batch report, not silently inherited. No panic-trap
+ * analogue exists on this port (the C6's VALIDATE_FEATURES_AT_LEAST_ONE
+ * pre-seed, mt_devtypes.cpp:1638-1641, is esp-matter machinery); what
+ * carries over is the conformance conclusion, the 0x01 seed.
+ *
+ * WaterHeaterMode reuses modeBaseAttrs and kModeBaseIncoming/
+ * kModeBaseOutgoing verbatim (every ModeBase alias numbers its elements
+ * identically, the DEMMode note above), one more kStoreWalk row and one
+ * more pool consumer; the batch 5 ModeBase notes apply unchanged,
+ * including the Init() ordering panic and the placeholder-mode-0 policy.
+ * ChangeToMode forwards on cluster 158, already in AT_MT_SPEC.md 3.17's
+ * registration list (the six registrations; only EnergyEvseMode 0x9D is
+ * the list's known gap, and it is out of this batch by ruling DE408).
+ * ClusterRevision 1 LIVE (WaterHeaterMode/Metadata.h:20; the ModeBase AAI
+ * has no revision case). Tag-0 default kManual on every mode
+ * (AT_MT_SPEC.md 3.20's table row; WaterHeaterMode/Enums.h:45).
+ *
+ * Commands: Boost (0x00) and CancelBoost (0x01) in the incoming list; the
+ * server's InvokeCommand dispatches both to the delegate
+ * (water-heater-management-server.cpp:154-169), and access.h carries their
+ * manage privilege (above). NOTHING outgoing: neither command has a
+ * response (the cluster XML), the DE399 truthfulness discipline. The
+ * five-field Boost payload and the CancelBoost in-state guard live in the
+ * delegate (mt_matter_zephyr.cpp, where the guard's SDK-versus-C6 placement
+ * is traced).
+ *
+ * Variant 0 additionally grafts the Electrical Sensor composition on the
+ * SAME endpoint, which WaterHeater.xml:84-95 mandates (composedDeviceTypes:
+ * an Electrical Sensor with EPM and EEM): PTOP + EPM + EEM with the batch
+ * 7a lists verbatim, drawing one EPM and one PTOP slot from the
+ * MT_MEAS_MAX pools, and the span advertises 0x0510 alongside 0x050F, the
+ * C6's exact span (electrical_sensor::add() calls add_device_type(0x0510),
+ * esp_matter_endpoint.cpp:1505-1508, and mk_water_heater() grafts it only
+ * on variant 0, so the C6's variant-1 span is 0x050F ALONE: this port's
+ * first variant-dependent device-type span, carried by the registry's new
+ * device_types_v1 member below). Variant 1 is the SDK-bare build, no
+ * graft, DISCLOSED SUB-CONFORMANT against the mandated composed sensor
+ * (the variant-1 electrical meter precedent; AT_MT_SPEC.md 3.9's 0x050F
+ * row and ARCHITECTURE.md 8.11 carry it on the C6's side).
+ *
+ * No Identify on either variant: WaterHeater.xml marks it optionalConform
+ * (:66-68) and the C6's water_heater::add() creates none.
+ *
+ * Events: BoostStarted and BoostEnded, derived FIRMWARE-SIDE from
+ * BoostState transitions pushed over AT+MTMEAS, with the cached-parameters
+ * lifecycle (core/include/mt_matter.h:865-874, binding); the derivation
+ * state machine and its exhaustive commentary live beside the delegate in
+ * mt_matter_zephyr.cpp. Plus CumulativeEnergyMeasured on v0 (the EEM push
+ * path, batch 7a).
+ *
+ * Block: v0 7 clusters, 29 slots, one 306 B mt_mb_store_t = 798 B payload,
+ * 808 B heap (roundup(798 + 4, 8) = 808, kHeapCostOf); v1 4 clusters, 19
+ * slots, one store = 626 B payload, 632 B heap. Both under the RVC's
+ * 864 B; the floor candidate below is compile-time-derived and asserted.
+ *
+ * Device revision 1 per data_model/1.5/device_types/WaterHeater.xml:60. */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(whmAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeaterTypes::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeatDemand::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::TankVolume::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::EstimatedHeatRequired::Id,
+                              ENERGY_MWH, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::TankPercentage::Id, PERCENT, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::BoostState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+/* Variant 1, the bare cluster: the three unconditionally mandatory values
+ * only (the feature-gate trace in the section comment; FeatureMap 0 may
+ * not advertise what is not declared, the DEM report-only list's rule). */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(whmBareAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeaterTypes::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeatDemand::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::BoostState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kWhmIncoming[] = { WaterHeaterManagement::Commands::Boost::Id,
+                                       WaterHeaterManagement::Commands::CancelBoost::Id,
+                                       kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(waterHeaterClusters)
+DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kThermostatIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(WaterHeaterManagement::Id, whmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kWhmIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(WaterHeaterMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+/* Variant 1, the SDK-bare build: no sensor graft (the disclosure in the
+ * section comment). */
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(waterHeaterBareClusters)
+DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kThermostatIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(WaterHeaterManagement::Id, whmBareAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kWhmIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(WaterHeaterMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(waterHeaterEndpoint, waterHeaterClusters);
+DECLARE_DYNAMIC_ENDPOINT(waterHeaterBareEndpoint, waterHeaterBareClusters);
+
+/* The variant-0 span grafts 0x0510 on the same endpoint (revision 1,
+ * matching the standalone sensor row); variant 1 has no graft and no
+ * second id, the C6's exact behaviour (the section comment). */
+constexpr EmberAfDeviceType kWaterHeaterTypes[] = { { 0x050F, 1 }, { 0x0510, 1 } };
+constexpr EmberAfDeviceType kWaterHeaterBareTypes[] = { { 0x050F, 1 } };
+
+/* ---- battery storage (0x0018) -----------------------------------------
+ *
+ * Catalogue batch 7b audit (batch7-audit.md section 3.6). NO new cluster:
+ * the whole composition is batch 7a machinery (the sensor graft, the DEM
+ * pair, the pools, AT+MTDEMCAP, the PA event protocol) under a THIRD
+ * PowerSource attribute list, on the C6's mk_battery_storage()
+ * (mt_devtypes.cpp:2182-2264, class comment :2137-2181). Only the
+ * registry rows, the spans and this note are new; every create-path arm,
+ * seed special case and carve-out row is keyed on cluster ids these lists
+ * already carry.
+ *
+ * THE RECHG CONFORMANCE FIX, the reason the battery-shaped
+ * powerSourceAttrs above cannot be reused (the audit's risk line; the C6
+ * comment at :2146-2159 records the SDK defect this corrects):
+ * battery_storage::add() sets kBattery alone and then hand-creates four
+ * attributes PowerSourceCluster.xml gates on the RECHG feature, while the
+ * RECHG-MANDATORY BatChargeState is missing entirely. The fix is
+ * Battery|Rechargeable together (Feature 0x2 | 0x4 = 0x6,
+ * PowerSource/Enums.h:280-286, the keyed FeatureMap seed below) AND
+ * declaring the full attribute population that makes it true: the four
+ * RECHG-gated attributes (BatTimeToFullCharge, BatChargingCurrent,
+ * ActiveBatChargeFaults, BatCapacity) plus BatChargeState plus
+ * BatFunctionalWhileCharging, alongside the battery family the existing
+ * list already carries. Declaring the gated four without BatChargeState,
+ * or without the Rechargeable bit, reproduces the exact SDK defect the C6
+ * thunk was written to correct, with no build check to catch it.
+ *
+ * B263 BINDS THE DECLARED WIDTHS (the C6's own note at :2221-2246): the
+ * five uint32 battery attributes are XML-typed int32u with NO <constraint>
+ * element (power-source-cluster.xml:99 BatVoltage, :110 BatTimeRemaining,
+ * :165 BatCapacity, :183 BatTimeToFullCharge, :193 BatChargingCurrent),
+ * so the TYPE IS THE BOUND: all five are declared INT32U size 4, never an
+ * invented narrower size, and ember serves the full uint32 domain the C6
+ * serves. On this port the obligation is only the declared width (there
+ * is no created min/max to widen); a 4 B slot holds all five, so they are
+ * ordinary AT+MTATTR territory, plain slots, NO carve-out rows, no quiet
+ * rows, the audit's "no new AT surface" line. Nullable per the XML:
+ * BatVoltage, BatTimeRemaining, BatTimeToFullCharge and BatChargingCurrent
+ * are isNullable (seeded to the 4-byte unsigned sentinel below);
+ * BatCapacity and BatChargeState are NOT nullable (zero-fill: 0 and
+ * kUnknown = 0, PowerSource/Enums.h:109-115), BatFunctionalWhileCharging
+ * boots false, all matching the C6 config defaults. The two fault lists
+ * (ActiveBatFaults :135, ActiveBatChargeFaults :199) are arrays, declared
+ * metadata-only, no slot, quiet by type; AT+MTATTR answers +MTERR:5 on
+ * either, and they ship empty and host-untouched (AT_MT_SPEC.md 3.9's
+ * 0x0018 row). BatPercentRemaining keeps its real 0..200 bounds through
+ * the same hand-rolled MIN_MAX entry as the battery list.
+ *
+ * Variants: v0 carries the DEM pair (demAttrs + kDemIncoming, the
+ * WITH-PowerAdjustment list: the create path's variant predicate feeds
+ * both seed_slots()'s DEM FeatureMap special case and
+ * mt_matter_dem_register(), and variant 0 IS the PA variant here exactly
+ * as on the standalone 0x050D row, so every DEM obligation of the
+ * inverted iron rule holds unchanged). The triple is OVER-DELIVERY
+ * matching the SDK build (BatteryStorage.xml never requests DEM, the C6
+ * comment :2170-2172); v1 omits it and stays conformant. Both variants
+ * carry the full sensor graft WITH EEM (unlike solar, which spends its
+ * variant on the EEM: the two types' variant bytes mean different things,
+ * AT_MT_SPEC.md 3.9's shared paragraph).
+ *
+ * Spans: v0 advertises 0x0018 (revision 2, BatteryStorage.xml:60) +
+ * 0x0011 + 0x0510 + 0x050D, the C6's exact sequence; v1 drops 0x050D with
+ * the DEM pair (the C6 adds that id inside the variant-0 branch only), the
+ * water heater's device_types_v1 mechanism.
+ *
+ * DISCLOSED XML INCONSISTENCY, flagged not chased (the C6 comment
+ * :2173-2181): BatteryStorage.xml revision 2's summary says "two Power
+ * Source and Electrical Sensor composed devices types" while the body
+ * encodes ONE composed 0x0510 block with duplicated cluster rows and no
+ * Power Source device type at all; this endpoint delivers one sensor and
+ * one power source and discloses the departure on both platforms' terms.
+ *
+ * No Identify (BatteryStorage.xml lists it optional, nothing else); no
+ * tag_list, the port-wide rule.
+ *
+ * Block: v0 7 clusters, 32 slots, one 306 B mt_mb_store_t = 846 B
+ * payload, 856 B heap; v1 5 clusters, 23 slots, no store = 388 B payload,
+ * 392 B heap. The audit's 3.6 table said 31 slots / 830 / 832 for v0: it
+ * under-counted this list by one slot (its "about 14" PowerSource figure
+ * against the real 15 below) and mis-rounded the heap cost; re-derived
+ * here per the batch brief, still under the RVC's 864 B, and the floor
+ * candidate below pins the corrected arithmetic. */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(rechargeableBatteryPowerSourceAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Order::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Description::Id, CHAR_STRING, 61, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatVoltage::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    /* Hand-rolled MIN_MAX entry, shared with the battery list; see the
+     * powerSourceAttrs audit note. */
+    { &kBatPercentRemainingBounds, PowerSource::Attributes::BatPercentRemaining::Id, 1,
+      ZAP_TYPE(INT8U),
+      ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(NULLABLE) |
+          ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) | ZAP_ATTRIBUTE_MASK(READABLE) },
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatTimeRemaining::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatChargeLevel::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatReplacementNeeded::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatReplaceability::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::ActiveBatFaults::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatCapacity::Id, INT32U, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatChargeState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatTimeToFullCharge::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatFunctionalWhileCharging::Id, BOOLEAN, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatChargingCurrent::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::ActiveBatChargeFaults::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::EndpointList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(batteryStorageClusters)
+DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, rechargeableBatteryPowerSourceAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kDemIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+/* Variant 1: the same stack without the over-delivered DEM pair. */
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(batteryStorageNoDemClusters)
+DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, rechargeableBatteryPowerSourceAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(batteryStorageEndpoint, batteryStorageClusters);
+DECLARE_DYNAMIC_ENDPOINT(batteryStorageNoDemEndpoint, batteryStorageNoDemClusters);
+
+/* The v0 span carries the DEM id; v1 drops it with the cluster pair (the
+ * section comment; revisions match the standalone rows: 0x0011 rev 1,
+ * 0x0510 rev 1, 0x050D rev 3). */
+constexpr EmberAfDeviceType kBatteryStorageTypes[] = { { 0x0018, 2 },
+                                                       { 0x0011, 1 },
+                                                       { 0x0510, 1 },
+                                                       { 0x050D, 3 } };
+constexpr EmberAfDeviceType kBatteryStorageNoDemTypes[] = { { 0x0018, 2 },
+                                                            { 0x0011, 1 },
+                                                            { 0x0510, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 /* Catalogue batch 7a added ep_type_v1, the port's rendering of the C6's
@@ -2815,13 +3193,23 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  * original text and gets nullptr for free, and mt_devtype_create()
  * falls back to ep_type whenever ep_type_v1 is null. The device-type
  * span is shared by both variants (the advertised ids and revisions do
- * not change with the cluster set). */
+ * not change with the cluster set) FOR EVERY ROW UP TO BATCH 7A; batch 7b
+ * broke that generalization and added device_types_v1 by the identical
+ * mechanism (LAST member, zero-fill = empty span, create falls back to
+ * device_types): the water heater's variant 0 grafts the Electrical
+ * Sensor and advertises 0x0510 alongside 0x050F while variant 1 does not,
+ * and Battery Storage's variant 1 drops the DEM pair and with it the
+ * 0x050D id, so a shared span would advertise device types those
+ * variants' cluster sets cannot back (the C6 has no such member because
+ * each add_device_type() call sits inside the variant branch that earns
+ * it, mk_water_heater()/mk_battery_storage()). */
 struct hearth_devtype {
     uint32_t id;
     uint8_t max_variant;
     const EmberAfEndpointType *ep_type;
     Span<const EmberAfDeviceType> device_types;
     const EmberAfEndpointType *ep_type_v1;
+    Span<const EmberAfDeviceType> device_types_v1;
 };
 
 const hearth_devtype s_registry[] = {
@@ -2885,6 +3273,14 @@ const hearth_devtype s_registry[] = {
     { 0x0511, 0, &utilityMeterEndpoint,
       Span<const EmberAfDeviceType>(kElectricalUtilityMeterTypes) },
     { 0x050D, 1, &demEndpoint, Span<const EmberAfDeviceType>(kDemTypes), &demReportOnlyEndpoint },
+    /* Catalogue batch 7b: the delegate-served energy pair. The first rows
+     * with a variant-dependent device-type span (device_types_v1, the
+     * struct comment): the water heater's v1 loses the sensor graft and
+     * its 0x0510 id together. */
+    { 0x050F, 1, &waterHeaterEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterTypes),
+      &waterHeaterBareEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterBareTypes) },
+    { 0x0018, 1, &batteryStorageEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageTypes),
+      &batteryStorageNoDemEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageNoDemTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -3017,11 +3413,15 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *
  *   device type                        clusters  slots  payload  heap cost
  *   robotic vacuum cleaner  0x0074            5     14      856        864
+ *   battery storage v0      0x0018            7     32      846        856
+ *   water heater v0         0x050F            7     29      798        808
+ *   water heater v1         0x050F            4     19      626        632
  *   extended colour light   0x010D            5     36      596        600
  *   mode select             0x0027            3      8      576        584
  *   colour temperature lt   0x010C            5     32      532        536
  *   device energy mgmt v0   0x050D            3      9      462        472
  *   device energy mgmt v1   0x050D            3      8      446        456
+ *   battery storage v1      0x0018            5     23      388        392
  *   chime                   0x0146            2      4      345        352
  *   dimmable light/plug/mnt  0x0101 0x010B 0x0110  4  20      336        344
  *   pump / room air cond    0x0303 0x0072     4     18      304        312
@@ -3050,7 +3450,11 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * sat at bare 140/72 before the reclaim round moved their stores in. The
  * RVC's payload is 244 + two 306 B ModeBase stores, catalogue batch 5:
  * the widest type since the reclaim round made stores block-resident,
- * past the extended colour light's 600.)
+ * past the extended colour light's 600. The water heater rows are
+ * 492/320 + one 306 B ModeBase store and the battery storage v0 row is
+ * 540 + one, catalogue batch 7b: the first store-bearing rows to slot
+ * ABOVE the extended colour light without taking the RVC's title, the
+ * battery ten payload bytes shy of it.)
  *
  * HEARTH_EP_HEAP_BYTES is 8192, which leaves 8,112 usable after the
  * heap's own header and bucket table. Against kServiceableEndpoints = 16:
@@ -3086,13 +3490,16 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * Catalogue batch 7a added a THIRD capacity bound beyond the table and
  * this heap: the per-family delegate pools at the C6's own depths (DE407).
  * Every EPM/PowerTopology-bearing endpoint (electrical sensor, electrical
- * meter, heat pump, solar power) draws on the MT_MEAS_MAX (8) pools, DEM
- * endpoints on MT_DEM_MAX (4), utility meters on MT_METER_MAX (2), so an
- * all-energy composition hits a pool wall before either older wall; the
- * exhaustion aborts the create with the pool named, the same
- * stop-at-failure prefix semantics as ever. None of the six energy types
- * approaches the RVC's 864 B block, so the floor assertion below is
- * untouched.
+ * meter, heat pump, solar power; batch 7b adds the variant-0 water heater
+ * and battery storage) draws on the MT_MEAS_MAX (8) pools, DEM endpoints
+ * on MT_DEM_MAX (4), utility meters on MT_METER_MAX (2), water heaters on
+ * MT_WHM_MAX (4), so an all-energy composition hits a pool wall before
+ * either older wall; the exhaustion aborts the create with the pool
+ * named, the same stop-at-failure prefix semantics as ever. None of the
+ * six batch 7a energy types approaches the RVC's 864 B block; batch 7b's
+ * two come closer (808 and 856 B) but still lose, so the floor assertion
+ * below is untouched and both are compile-time candidates rather than
+ * bystanders.
  *
  * The floor is compiler-checked below, so the table above cannot go stale
  * without the build noticing.
@@ -3179,6 +3586,11 @@ constexpr quiet_no_slot_attr kQuietNoSlot[] = {
      * the AT side). */
     { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::AbsMinPower::Id },
     { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::AbsMaxPower::Id },
+    /* WaterHeaterManagement (batch 7b): the one energy_mwh scalar, served
+     * by Instance::Read()'s own case from the HearthWhmDelegate cache
+     * (water-heater-management-server.cpp:128-133; the carve-out serves
+     * the AT side). Declared 8 B in whmAttrs, variant 0 only. */
+    { WaterHeaterManagement::Id, WaterHeaterManagement::Attributes::EstimatedHeatRequired::Id },
 };
 
 bool attr_quiet_no_slot(ClusterId cluster, AttributeId attr)
@@ -3290,6 +3702,9 @@ constexpr store_desc kStoreWalk[] = {
      * ModeBase store row; the walk mechanism is unchanged (the batch 5
      * note above), only membership grows. */
     { DeviceEnergyManagementMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    /* Catalogue batch 7b: the water heater's mode list, the fourth. Same
+     * mechanism, same 306 B shape. */
+    { WaterHeaterMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
 };
 
 constexpr size_t align_up(size_t off, size_t align) { return ((off + align - 1) / align) * align; }
@@ -3524,10 +3939,94 @@ constexpr size_t kDemBlockBytes =
     block_bytes(MT_COUNT(demClusters), MT_COUNT(demAttrs) + MT_COUNT(modeBaseAttrs)) +
     sizeof(mt_mb_store_t);
 
+/*
+ * Catalogue batch 7b: the MT_COUNT over-count convention STOPS at these two
+ * candidates, deliberately. Every earlier candidate tolerated MT_COUNT's
+ * counting of metadata-only members ("only pushes the asserted floor
+ * higher, never lower") because the over-count was a handful of entries.
+ * The two 7b shapes compose epmAttrs and eemAttrs, whose DE407 option-C
+ * declarations are MOSTLY metadata-only (eight of epmAttrs' twelve entries
+ * and three of eemAttrs' five take no slot), so the naive sums would be
+ * 1,006 B for the water heater and about 1,150 B for battery storage:
+ * both spuriously past the RVC's 936 B candidate, and the water heater's
+ * kHeapCostOf x 8 alone would fail the floor assertion below for a block
+ * that in truth costs 808 B. A floor tripped by an arithmetic convention
+ * rather than by real bytes would force a real HEARTH_EP_HEAP_BYTES
+ * decision on false evidence, the exact opposite of what the assertion is
+ * for.
+ *
+ * So these candidates count EXACTLY: MT_COUNT per list minus a NAMED
+ * constant for that list's metadata-only members, each constant carrying
+ * the members it stands for. (Counting through attr_gets_slot() itself at
+ * compile time would be better still, and does not compile: this tree's
+ * DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN declares a plain non-const array,
+ * attribute-storage.h:55, so the lists are not constant expressions.)
+ * Drift-proofing is the equality assert under each candidate, pinning the
+ * whole derivation to the sizing table's payload row: ANY edit to any
+ * involved list moves the sum off the pinned value and fails the build,
+ * so a stale subtraction constant cannot survive a list change silently,
+ * which is exactly the property the MT_COUNT over-count bought the older
+ * candidates.
+ */
+/* Metadata-only (slotless) members per composed list, from the audit
+ * notes at each declaration: epmAttrs has eight (Accuracy plus the seven
+ * DE407 push fields), eemAttrs three (the three structs), whmAttrs one
+ * (EstimatedHeatRequired), modeBaseAttrs one (SupportedModes);
+ * thermostatAttrs and ptopAttrs have none. */
+constexpr size_t kEpmNoSlot      = 8;
+constexpr size_t kEemNoSlot      = 3;
+constexpr size_t kWhmNoSlot      = 1;
+constexpr size_t kModeBaseNoSlot = 1;
+
+/* Water heater v0, the wider variant list (whmAttrs strictly contains
+ * whmBareAttrs and the v1 list drops three whole clusters): 7 clusters,
+ * 11 + 7 + 3 + 2 + 4 + 2 = 29 slots, one ModeBase store. */
+constexpr size_t kWaterHeaterBlockBytes =
+    block_bytes(MT_COUNT(waterHeaterClusters),
+                MT_COUNT(thermostatAttrs) + (MT_COUNT(whmAttrs) - kWhmNoSlot) +
+                    (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) + MT_COUNT(ptopAttrs) +
+                    (MT_COUNT(epmAttrs) - kEpmNoSlot) + (MT_COUNT(eemAttrs) - kEemNoSlot)) +
+    sizeof(mt_mb_store_t);
+/* Payload pinned here (kHeapCostOf is not declared yet at this point in
+ * the file); the 808 B HEAP figure the tables quote is pinned too, below
+ * the kHeapCostOf definition beside the floor assertion (fix round M5),
+ * so a formula change cannot stale the tables silently. */
+static_assert(kWaterHeaterBlockBytes == 798,
+              "the water heater block changed size; redo the sizing table rows and the "
+              "batch 7b capacity arithmetic");
+
+/* More metadata-only counts for the battery candidate: the rechargeable
+ * PowerSource list has four (Description, EndpointList and the two fault
+ * arrays), demAttrs three (PowerAdjustmentCapability and the two power_mw
+ * scalars). */
+constexpr size_t kRechargeablePsNoSlot = 4;
+constexpr size_t kDemNoSlot            = 3;
+
+/* Battery storage v0, the wider variant list (v1 drops the DEM pair
+ * whole): 7 clusters, 15 + 2 + 4 + 2 + 6 + 3 = 32 slots, one ModeBase
+ * store. The catalogue's second-widest block: 846 B payload against the
+ * RVC's real 856 (heap cost 856 against 864), ten bytes shy of the
+ * title. */
+constexpr size_t kBatteryStorageBlockBytes =
+    block_bytes(MT_COUNT(batteryStorageClusters),
+                (MT_COUNT(rechargeableBatteryPowerSourceAttrs) - kRechargeablePsNoSlot) +
+                    MT_COUNT(ptopAttrs) + (MT_COUNT(epmAttrs) - kEpmNoSlot) +
+                    (MT_COUNT(eemAttrs) - kEemNoSlot) + (MT_COUNT(demAttrs) - kDemNoSlot) +
+                    (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot)) +
+    sizeof(mt_mb_store_t);
+/* 846 B payload; the 856 B heap figure is pinned below the kHeapCostOf
+ * definition (fix round M5, the water heater pin's note). The audit's
+ * 3.6 estimate (830/832) under-counted this list by one slot and
+ * mis-rounded, re-derived per the batch brief (the section comment). */
+static_assert(kBatteryStorageBlockBytes == 846,
+              "the battery storage block changed size; redo the sizing table rows and the "
+              "batch 7b capacity arithmetic");
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
           kMax2(kMax2(kModeSelectBlockBytes, kChimeBlockBytes),
-                kMax2(kRvcBlockBytes, kDemBlockBytes)));
+                kMax2(kMax2(kRvcBlockBytes, kDemBlockBytes),
+                      kMax2(kWaterHeaterBlockBytes, kBatteryStorageBlockBytes))));
 
 /*
  * Zephyr charges roundup(payload + 4, 8) per allocation on a heap this size,
@@ -3576,6 +4075,18 @@ constexpr size_t kHeapOverheadBytes = 80;
 constexpr size_t kHeapUsableBytes = HEARTH_EP_HEAP_BYTES - kHeapOverheadBytes;
 
 constexpr size_t kMinWidestEndpoints = 8;
+
+/* Fix round M5: the HEAP figures the in-file sizing table, the README
+ * rows and the capacity arithmetic actually quote for the two batch 7b
+ * shapes, pinned through the same kHeapCostOf the runtime charge model
+ * uses (their PAYLOADS are pinned at the candidates above, where this
+ * function was not yet declared). A change to kHeapCostOf's formula, or
+ * to either block, now fails the build instead of silently staling three
+ * tables. */
+static_assert(kHeapCostOf(kWaterHeaterBlockBytes) == 808,
+              "the water heater heap cost moved off the tables' 808; redo the sizing rows");
+static_assert(kHeapCostOf(kBatteryStorageBlockBytes) == 856,
+              "the battery storage heap cost moved off the tables' 856; redo the sizing rows");
 
 static_assert(kHeapCostOf(kWidestBlockBytes) * kMinWidestEndpoints <= kHeapUsableBytes,
               "the endpoint heap no longer holds eight of the widest device type; redo the "
@@ -3849,6 +4360,22 @@ const attr_seed s_seeds[] = {
     { Thermostat::Id, Thermostat::Attributes::SystemMode::Id, 1, { 0x00 } },
     { Thermostat::Id, Thermostat::Attributes::FeatureMap::Id, 4, { 0x03, 0x00, 0x00, 0x00 } },
     { Thermostat::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x09, 0x00 } },
+    /* Catalogue batch 7b: the water heater's HEATING-ONLY thermostat,
+     * keyed per device type so the Heating|Cooling wildcard rows above
+     * keep winning for the standalone thermostat (0x0301) and the room
+     * air conditioner (0x0072), the ColorControl 0x010C/0x010D mechanism.
+     * 0x1 is Feature::kHeating alone, WaterHeater.xml's Thermostat(HEAT)
+     * mandate (the waterHeaterClusters audit note traces it);
+     * ControlSequenceOfOperation 0x02 is HeatingOnly, because the wildcard
+     * 0x04 (CoolingAndHeating) would advertise cooling this endpoint does
+     * not have (a DELIBERATE divergence from the C6, which serves
+     * esp-matter's inherited config default 4 here; the FanModeSequence
+     * precedent). The setpoint seeds, SystemMode 0 and the revision row
+     * stay shared: same cluster, same AAI answer. */
+    { Thermostat::Id, Thermostat::Attributes::FeatureMap::Id, 4, { 0x01, 0x00, 0x00, 0x00 },
+      0x050F },
+    { Thermostat::Id, Thermostat::Attributes::ControlSequenceOfOperation::Id, 1, { 0x02 },
+      0x050F },
 
     /* FanControl. FeatureMap 0 conforms (FanControl.xml declares every
      * feature optionalConform with no choice group), and FanModeSequence
@@ -4039,6 +4566,28 @@ const attr_seed s_seeds[] = {
       0x0309 },
     { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x01, 0x00, 0x00, 0x00 },
       0x0017 },
+    /* Catalogue batch 7b: battery storage's Battery|Rechargeable
+     * FeatureMap (0x2 | 0x4 = 0x6, PowerSource/Enums.h:280-286), the
+     * RECHG conformance fix's feature half, keyed per device type like
+     * the wired rows above. The four nullable uint32 battery attributes
+     * boot null (4-byte unsigned sentinel; this firmware measures no
+     * battery and only a host AT+MTATTR write can report a reading, the
+     * BatPercentRemaining rule); the rows are wildcard because only the
+     * rechargeable list declares these attributes, so no other type can
+     * match them. BatCapacity 0, BatChargeState 0 (kUnknown) and
+     * BatFunctionalWhileCharging false are the zero-fill matching the C6
+     * config defaults (the rechargeableBatteryPowerSourceAttrs audit
+     * note). */
+    { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x06, 0x00, 0x00, 0x00 },
+      0x0018 },
+    { PowerSource::Id, PowerSource::Attributes::BatVoltage::Id, 4,
+      { 0xFF, 0xFF, 0xFF, 0xFF } }, /* null */
+    { PowerSource::Id, PowerSource::Attributes::BatTimeRemaining::Id, 4,
+      { 0xFF, 0xFF, 0xFF, 0xFF } }, /* null */
+    { PowerSource::Id, PowerSource::Attributes::BatTimeToFullCharge::Id, 4,
+      { 0xFF, 0xFF, 0xFF, 0xFF } }, /* null */
+    { PowerSource::Id, PowerSource::Attributes::BatChargingCurrent::Id, 4,
+      { 0xFF, 0xFF, 0xFF, 0xFF } }, /* null */
 
     /* SmokeCoAlarm. Every state boots at its enum's zero: ExpressedState 0
      * (kNormal), SmokeState/COState/BatteryAlert 0 (kNormal),
@@ -4268,6 +4817,26 @@ const attr_seed s_seeds[] = {
     { DeviceEnergyManagement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x04, 0x00 } },
     { DeviceEnergyManagementMode::Id, Globals::Attributes::ClusterRevision::Id, 2,
       { 0x02, 0x00 } },
+
+    /* ---- catalogue batch 7b: the delegate-served energy pair --------- */
+
+    /* WaterHeaterManagement. THE ONE INERT REVISION SEED IN THE ENERGY
+     * FAMILY: Instance::Read() serves ClusterRevision itself
+     * (water-heater-management-server.cpp:146-147, kClusterRevision = 2 at
+     * :40), so this row is a shadow kept equal to that served value, the
+     * Thermostat discipline; every OTHER energy revision seed is live.
+     * HeaterTypes 0, HeatDemand 0, TankVolume 0, TankPercentage 0 and
+     * BoostState 0 (kInactive) are the zero-fill matching the
+     * HearthWhmDelegate defaults (all Instance-served with carve-out reads
+     * either way). FeatureMap carries NO row: it is the catalogue's second
+     * variant-dependent boot value, written by seed_slots()'s WHM special
+     * case below (the whmAttrs audit note). */
+    { WaterHeaterManagement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x02, 0x00 } },
+    /* WaterHeaterMode. ClusterRevision 1 is LIVE (the ModeBase AAI has no
+     * revision case, the RVC rows' rule on the fourth alias) and is
+     * WaterHeaterMode/Metadata.h:20 in THIS tree. CurrentMode 0 and
+     * FeatureMap 0 are the zero-fill, the DEMMode shape. */
+    { WaterHeaterMode::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -4352,6 +4921,23 @@ void seed_slots(dyn_endpoint *d)
             if (cl.clusterId == DeviceEnergyManagement::Id &&
                 md.attributeId == Globals::Attributes::FeatureMap::Id) {
                 s.data[0] = (d->variant == 0) ? 0x01 : 0x00;
+                continue;
+            }
+
+            /* Catalogue batch 7b: the WHM FeatureMap, the second
+             * variant-dependent boot value (both variants share device
+             * type 0x050F, the DEM case's exact problem). Variant 0 seeds
+             * Feature::kEnergyManagement | Feature::kTankPercent (0x3,
+             * the value the C6 hand-sets around its two broken feature
+             * helpers), variant 1 seeds 0, and the create path hands the
+             * identical variant predicate to mt_matter_whm_register(),
+             * whose Instance mask is what the fabric-side FeatureMap read
+             * actually answers (Read() encodes mFeature, snapshotted at
+             * construction): seed and Instance agree by construction,
+             * single-sourced on the variant. */
+            if (cl.clusterId == WaterHeaterManagement::Id &&
+                md.attributeId == Globals::Attributes::FeatureMap::Id) {
+                s.data[0] = (d->variant == 0) ? 0x03 : 0x00;
                 continue;
             }
 
@@ -4499,7 +5085,7 @@ mt_chime_store_t *mt_dyn_chime_store(EndpointId ep)
 mt_mb_store_t *mt_dyn_mb_store(EndpointId ep, ClusterId cluster)
 {
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
-        cluster != DeviceEnergyManagementMode::Id) {
+        cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id) {
         return nullptr;
     }
     for (auto &d : s_dyn) {
@@ -4863,10 +5449,15 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
 
     /* Catalogue batch 7a: the DEM handout's first half. The alloc takes
-     * the endpoint id up front (core/include/mt_matter.h pins alloc(ep);
-     * s_next_ep_id is exactly the id this create assigns if it succeeds,
-     * and a claim stranded by a later failure is bounded at one per boot,
-     * the standing policy). The DEMMode ModeBase claim is the RVC pair's
+     * the endpoint id per core/include/mt_matter.h's alloc(ep) contract,
+     * and since the batch 7b fix round (review M1) the pool DISCARDS it
+     * until the success-only second half: s_next_ep_id is only the id
+     * this create assigns IF IT SUCCEEDS, and a stamp on a claim
+     * stranded by a later failure would alias the NEXT successful
+     * create's id into the dead delegate (the stranded claim itself
+     * stays bounded at one per boot, the standing policy; the full
+     * reasoning is at the pool). The DEMMode ModeBase claim is the RVC
+     * pair's
      * discipline verbatim, one slot from the shared pool with the cluster
      * id fixed at alloc; its second half's Instance::Init() VerifyOrDies
      * on ordering, so the only acceptable failure is this abort before
@@ -4891,6 +5482,46 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         if (dem_mode_delegate == nullptr) {
             LOG_ERR("devtype 0x%04X: modebase delegate pool exhausted (DEM mode); %u of %u "
                     "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
+    /* Catalogue batch 7b: the water heater handout's first half, the DEM
+     * pair's discipline verbatim: the WHM alloc takes the endpoint id per
+     * the header's alloc(ep) contract (core/include/mt_matter.h:1003) and
+     * discards it until the success-only second half (fix round M1, the
+     * DEM claim's note above and the pool's own comment), the
+     * WaterHeaterMode ModeBase claim is one more slot from the shared pool
+     * with the cluster id fixed at alloc, and its second half's
+     * Instance::Init() VerifyOrDies on ordering, so the only acceptable
+     * failure is this abort before anything is spent. The established
+     * unwind applies (chime unclaimed; a claim stranded by a LATER failure
+     * is bounded at one create per boot, the standing policy). */
+    void *whm_delegate = nullptr;
+    if (type_has_cluster(ep_type, WaterHeaterManagement::Id)) {
+        whm_delegate = mt_matter_whm_delegate_alloc(s_next_ep_id);
+        if (whm_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: WHM delegate pool exhausted (MT_WHM_MAX %u); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)MT_WHM_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    void *wh_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, WaterHeaterMode::Id)) {
+        wh_mode_delegate = mt_matter_modebase_delegate_alloc(WaterHeaterMode::Id);
+        if (wh_mode_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: modebase delegate pool exhausted (water heater mode); "
+                    "%u of %u serviceable endpoints in use",
                     (unsigned)devtype_id, (unsigned)live_endpoints(),
                     (unsigned)kServiceableEndpoints);
             if (chime_delegate != nullptr) {
@@ -5023,6 +5654,11 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         if (type_has_cluster(ep_type, DeviceEnergyManagementMode::Id)) {
             new (region + store_offset(ep_type, DeviceEnergyManagementMode::Id)) mt_mb_store_t();
         }
+        /* Catalogue batch 7b: the water heater's mode list, same
+         * obligation. */
+        if (type_has_cluster(ep_type, WaterHeaterMode::Id)) {
+            new (region + store_offset(ep_type, WaterHeaterMode::Id)) mt_mb_store_t();
+        }
     }
 
     dyn_endpoint &d = s_dyn[index];
@@ -5045,9 +5681,18 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     s_lock_init_ep = kInvalidEndpointId;
     s_lock_init_err = CHIP_NO_ERROR;
 
+    /* Catalogue batch 7b: the variant's own device-type span, the
+     * ep_type_v1 fallback rule's twin (the registry struct comment): a
+     * variant whose cluster set loses a grafted device type must not keep
+     * advertising its id. Rows without a v1 span (everything before 7b)
+     * get the shared one for free via the empty-span fallback. */
+    const Span<const EmberAfDeviceType> &device_types =
+        (variant == 1 && !type->device_types_v1.empty()) ? type->device_types_v1
+                                                         : type->device_types;
+
     CHIP_ERROR err = emberAfSetDynamicEndpoint(
         index, d.ep_id, ep_type, Span<DataVersion>(block_dv(d), n_clusters),
-        type->device_types, (parent_devtype != 0) ? parent_ep_id : kInvalidEndpointId);
+        device_types, (parent_devtype != 0) ? parent_ep_id : kInvalidEndpointId);
     if (err != CHIP_NO_ERROR) {
         /* The header goes back on the free list, the block does not: see the
          * allocate-only note beside K_HEAP_DEFINE. This path returns -1 and
@@ -5283,6 +5928,20 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     if (dem_mode_delegate != nullptr) {
         mt_matter_modebase_delegate_set_endpoint(dem_mode_delegate, d.ep_id);
+    }
+
+    /* Catalogue batch 7b: the water heater second halves, the DEM pair's
+     * shape one cluster over. The WHM register is soft (CHI then AAI, no
+     * contains-server check, water-heater-management-server.cpp:94-100)
+     * and takes the variant's EM|TP predicate, the single source both the
+     * FeatureMap seed and the Instance mask derive from (seed_slots()'s
+     * WHM special case); the ModeBase setter carries the RVC block's panic
+     * warning verbatim. */
+    if (whm_delegate != nullptr) {
+        mt_matter_whm_register(whm_delegate, d.ep_id, variant == 0);
+    }
+    if (wh_mode_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(wh_mode_delegate, d.ep_id);
     }
 
     s_next_ep_id++;

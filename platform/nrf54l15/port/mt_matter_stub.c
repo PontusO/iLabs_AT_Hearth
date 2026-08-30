@@ -115,14 +115,14 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
  * in mt_matter_zephyr.cpp now, on the MT_MEAS_MAX EPM/PowerTopology
  * delegate-plus-Instance pools and the ElectricalEnergyMeasurement push
  * server. mt_matter_meas_set() there still answers MT_ATTR_ERR_CLUSTER for
- * WaterHeaterManagement (0x0094) and EnergyEvse (0x0099), whose device
- * types are batch 7b. */
+ * EnergyEvse (0x0099), whose device type is out of the 256 KB tier by
+ * ruling DE408 (LM20 only). */
 
-void *mt_matter_whm_delegate_alloc(uint16_t ep)
-{
-    (void)ep;
-    return NULL;
-}
+/* mt_matter_whm_delegate_alloc() left this file in catalogue batch 7b,
+ * when the water heater (0x050F) entered the registry: real in
+ * mt_matter_zephyr.cpp now, on the MT_WHM_MAX HearthWhmDelegate-plus-
+ * Instance pool, and mt_matter_meas_set() serves the 0x0094 push family
+ * with the derived Boost events. */
 
 /* The DEM pair (mt_matter_dem_delegate_alloc, mt_matter_demcap_set) left
  * this file in catalogue batch 7a, when the device energy management
