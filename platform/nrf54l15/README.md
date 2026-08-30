@@ -320,6 +320,35 @@ either first:
 Sixteen sensors exhaust the table with the heap barely touched; fourteen
 extended colour lights exhaust the heap with headers to spare.
 
+A third resource exists since memory reclaim round A and is **deliberately
+sized so it can never be the first to run out**: the **cluster-object
+heap**, `HEARTH_OBJ_HEAP_BYTES` (6,528 B), a second
+`K_HEAP_DEFINE(hearth_obj_heap)` holding the per-endpoint CHIP Delegate
+objects and their Instances for the appliance, mode, chime, valve, energy
+and meter families. It replaced fourteen fixed pools, and the per-family
+caps those pools carried (`MT_MEAS_MAX` 8, `MT_DEM_MAX` 4, `MT_WHM_MAX` 4,
+`MT_METER_MAX` 2, `kModeBasePoolSlots` 20) are unchanged and are still what
+a composition hits first. 6,448 usable bytes against a worst reachable draw
+of **6,336 B**, which is the maximum over every composition the other two
+walls admit, found by exhaustive search rather than by a greedy fill:
+
+| Count | Device type | Object bytes | Block bytes |
+|---|---|---|---|
+| 4 | `0x0018` Battery Storage (v0) | 2,336 | 3,424 |
+| 4 | `0x0074` Robotic Vacuum Cleaner | 1,792 | 3,456 |
+| 2 | `0x0511` Electrical Utility Meter | 624 | 256 |
+| 6 | `0x0073` Laundry Washer | 1,584 | 864 |
+| **16** | | **6,336** | **8,000** of 8,112 |
+
+`MT_DEM_MAX` and `MT_METER_MAX` are saturated, the endpoint count is
+saturated and the block heap is 112 B from its own wall. The arithmetic is
+at the end of `port/mt_matter_zephyr.cpp` and a `static_assert` pins it, so
+the claim cannot go stale. Exhaustion, if a future round ever makes it
+possible, is the same loud stop-at-failure prefix as either older wall.
+Note that 6,336 is a function of the block budget: raising
+`HEARTH_EP_HEAP_BYTES` for the LM20 tier admits object-heavier compositions
+and this heap has to be re-derived with it.
+
 ### Per-endpoint cost
 
 Block payload is `4 x clusters + 16 x slots`; Zephyr charges
@@ -477,8 +506,10 @@ chime 80 to **352 B**. The capacity consequence
 is in the table above: an all-mode-select composition serves a
 13-endpoint prefix under the stop-at-failure semantics, observed on the
 bench exactly as computed; 16 chimes still fit. The
-`OperationalState::Instance`, `ChimeServer` and delegate pools stay in
-.bss deliberately (CHIP registration lifetime).
+`OperationalState::Instance`, `ChimeServer` and delegate pools stayed in
+.bss for this round (CHIP registration lifetime); memory reclaim round A
+below moved them to their own heap, which preserves that lifetime exactly
+because nothing on the new heap is ever freed.
 
 Catalogue batch 5 on top of that, pristine builds, 2026-08-30 (`79c97ff`,
 including the fix round):
@@ -543,6 +574,76 @@ both new blocks are compile-time floor candidates and both lose to the
 RVC (856 and 808 B against 864). Free RAM on `ophelia_cpico` is
 **8,724 B**; the Energy EVSE (ruling DE408) and anything after it are
 LM20-tier work.
+
+### Memory reclaim round A (2026-08-30)
+
+Batch 7b left the board at 96.67 percent of RAM with 8,724 B free and the
+composed-appliance catalogue still to come. Round A returns 22,960 B,
+**exactly equal on both arms**, without changing a single AT command, URC,
+error code or seed. Pristine builds, 2026-08-30, including the fix round
+that corrected the cluster-object heap's sizing:
+
+| | Batch 7b (`6c31f09`) | Memory reclaim A |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 253,420 B (96.67%) | **230,460 B (87.91%)** |
+| RAM used, `nrf54l15dk` | 253,644 B (96.76%) | **230,684 B (88.00%)** |
+| RAM free, `ophelia_cpico` | 8,724 B | **31,684 B** |
+| RAM free, `nrf54l15dk` | 8,500 B | **31,460 B** |
+| Flash, `ophelia_cpico` | 870,600 B (63.35%) | **867,712 B (63.14%)** |
+| Flash, `nrf54l15dk` | 878,516 B (60.08%) | **875,608 B (59.88%)** |
+
+(The batch 7b flash column is re-measured at `6c31f09` on 2026-08-30 for
+this round's own before-and-after, and reads 112 B above the batch 7b row
+in the table above it. Same commit, same toolchain; the difference is the
+`ncs_commit.h` generation the batch 7b measurement did not carry. RAM is
+identical to the byte in both measurements, which is what this round is
+about.)
+
+Three items, each measured on its own with `nm -S` and the linked image:
+
+| Item | RAM, `ophelia_cpico` | Flash |
+|---|---|---|
+| The device-type catalogue moves to flash | **-8,736 B** | +4 B |
+| The fourteen Instance and Delegate pools move to a heap | **-7,440 B** | -2,780 B |
+| ZMS lookup cache 512 to 64, Thread children 32 to 16 | **-6,784 B** | -112 B |
+
+1. **The catalogue is `const`.** All 41 device types' cluster lists,
+   attribute lists and endpoint descriptors sat in `.data` purely because
+   CHIP's `DECLARE_DYNAMIC_*` macros declare their arrays without `const`.
+   A port-local `HEARTH_DECLARE_CONST_*` family adds it and nothing else:
+   `datas` -8,740 B and `rodata` +8,740 B exactly, no SDK patch, and the
+   safety argument (nothing in the SDK writes endpoint, cluster or
+   attribute metadata at runtime, and the one const-stripping cast in
+   `emAfLoadAttributeDefaults()` is a source buffer inside a
+   `!IsExternal()` branch this port's attributes never enter) is recorded
+   at the macros in `port/mt_devtypes_zephyr.cpp`.
+2. **The cluster-object heap.** 14,368 B of fixed Delegate and Instance
+   pools became pointer tables into `K_HEAP_DEFINE(hearth_obj_heap)`,
+   6,528 B, allocated during the boot composition rebuild: the third use
+   of the technique the dyn-arena and store reclaim rounds proved. Every
+   depth constant, the allocate-only policy, the
+   construct-after-`emberAfSetDynamicEndpoint()` ordering and the
+   stop-at-failure prefix are unchanged, and the heap is sized above its
+   own worst reachable draw so it can never be the binding wall (see
+   "Endpoint capacity" above).
+3. **Two Kconfig values.** `CONFIG_ZMS_LOOKUP_CACHE_SIZE` 512 to 64
+   (`default_settings_zms.0` 4,192 to 608 B, exactly 448 x 8) and
+   `CONFIG_OPENTHREAD_MAX_CHILDREN` 32 to 16 (`ot::gInstanceRaw` 25,288 to
+   22,088 B, exactly 16 x 200). `CONFIG_MBEDTLS_HEAP_SIZE` and the FTD/MTD
+   choice are untouched, per ruling DE412.
+
+**The Thread router role is a deliberate product choice, now written
+down.** `CONFIG_OPENTHREAD_FTD=y` is stated in `prj.conf` since this
+round. It was already `y` before, but only because `OPENTHREAD_FTD` is
+listed first in a Kconfig `choice` nobody set
+(`zephyr/modules/openthread/Kconfig.thread:42-51`), which made a 9 KB
+decision look like an accident in every config dump. Ruling DE412 keeps
+the router role: this device must remain able to route and to parent
+children. An MTD build would return roughly 9,121 B of `ot::Instance`
+(the child table, router table, address resolver and the MeshCoP leader
+and joiner-router state) plus a 4 KB message-pool floor, and is
+deliberately not taken. `CONFIG_OPENTHREAD_MAX_CHILDREN=16` is the part
+of that cost this round did trim.
 
 ## Dev board wiring
 
