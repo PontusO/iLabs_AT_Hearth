@@ -89,6 +89,9 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Memory reclaim round A: K_HEAP_DEFINE and k_heap_aligned_alloc() for the
+ * cluster-object heap below. */
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
 extern "C" {
@@ -103,6 +106,192 @@ extern "C" {
 #include "mt_port_ids.h"
 
 LOG_MODULE_REGISTER(hearth_matter, LOG_LEVEL_INF);
+
+/*
+ * ===================================================================
+ * The cluster-object heap
+ * ===================================================================
+ *
+ * Fourteen pools in this file used to be fixed arrays, one slot per
+ * endpoint that COULD carry the family: the OperationalState,
+ * RvcOperationalState, ModeBase, Chime, valve, EPM, PowerTopology, WHM,
+ * DEM and MeterIdentification Delegates and the raw storage for their
+ * Instances, 14,368 B of .bss and .data measured at 6c31f09. A realistic
+ * six-endpoint domestic composition uses ZERO of them and the widest
+ * energy composition uses a fraction, so the arrays are the defect the
+ * user's principle names: something dynamic in nature, allocated
+ * statically.
+ *
+ * They are now pointer tables into this heap, allocated during the boot
+ * composition rebuild. It is the third time this port applies the
+ * technique (the dyn-arena round moved the endpoint slot arena, the store
+ * reclaim round the two host-fed stores) and the disciplines carry over
+ * unchanged:
+ *
+ *   - ALLOCATE-ONLY. Nothing is ever freed. CHIP Instance and Delegate
+ *     objects register endpoint-scoped CommandHandlerInterfaces and
+ *     AttributeAccessInterfaces whose lifetime is the stack's, and this
+ *     platform has no teardown path: AT+MTEP edits apply by reboot, which
+ *     resets the heap wholesale. Placement-new into heap memory that is
+ *     never freed preserves the old .bss lifetime exactly.
+ *   - The DEPTH CONSTANTS STAY, and keep their meaning. kServiceableEndpoints,
+ *     kModeBasePoolSlots, MT_MEAS_MAX, MT_DEM_MAX, MT_WHM_MAX and
+ *     MT_METER_MAX are still each family's acceptance cap and are still
+ *     checked first in every alloc; the heap is only what makes a slot
+ *     cheap. Nothing about which compositions are admitted changes.
+ *   - FAILURE is the established stop-at-failure prefix. A heap that
+ *     cannot serve an alloc returns nullptr exactly as an exhausted pool
+ *     did, mt_devtype_create() logs the wall and returns -1, and the
+ *     endpoints created before it stay live as a prefix with unchanged
+ *     ids (AT_MT_SPEC.md 501-506). The heap is sized so this cannot
+ *     happen for any composition the other walls admit; see the
+ *     arithmetic at the end of this file.
+ *   - The construct-after-emberAfSetDynamicEndpoint() ordering is
+ *     untouched. Only WHERE the delegate and the Instance's storage live
+ *     changes; WHEN each is constructed does not. In particular the
+ *     ModeBase Instance::Init() VerifyOrDie hazard is unchanged, and the
+ *     block is allocated in the *_delegate_alloc() half, before anything
+ *     is spent, so a heap shortfall aborts at the same point a pool
+ *     shortfall always did.
+ *   - The kInvalidEndpointId sentinel discipline the 7b fix round
+ *     introduced for the two id-at-alloc pools (DEM, WHM) is unchanged:
+ *     the alloc still stamps the sentinel and the real id still lands in
+ *     the success-only second half.
+ *
+ * A block holds the Delegate first and, where the family has one, the raw
+ * storage for its Instance immediately after at the Instance's own
+ * alignment. One allocation per (endpoint, family) pair rather than two,
+ * so the delegate pointer the AT bridge already carries is enough to find
+ * the Instance storage; the layout is the endpoint block heap's
+ * store_walk() idiom at a smaller scale.
+ *
+ * mt_matter_chime_delegate_unclaim() hands back the SLOT, not the block:
+ * the allocate-only policy has no free. That is bounded at one stranded
+ * block per boot, because the rebuild stops at the failure that provoked
+ * the unclaim and nothing retries within a boot, the same bound the
+ * stranded-claim policy already carries for every other pool.
+ */
+/* Stepped out of the anonymous namespace for the reason the endpoint heap
+ * documents: K_HEAP_DEFINE emits a STRUCT_SECTION_ITERABLE that Zephyr's
+ * static-heap init walks at boot, and that machinery expects a
+ * section-placed object with external linkage. */
+K_HEAP_DEFINE(hearth_obj_heap, HEARTH_OBJ_HEAP_BYTES);
+
+namespace {
+
+/*
+ * What one 8-aligned allocation of `bytes` really costs this heap.
+ *
+ * sys_heap chunks are CHUNK_UNIT (8) aligned and carry a 4-byte header at
+ * the front, so an ordinary payload starts at 8k+4 and can never be
+ * 8-aligned. sys_heap_aligned_alloc() (heap.c:309-353) handles that by
+ * pushing the payload forward to 8k+8 and letting the chunk cover
+ * [8k, roundup(8k+8+bytes, 8)), so the chunk is roundup(bytes, 8) + 8
+ * bytes wide. There is no leading or trailing fragment to split off, so
+ * the model is exact rather than an upper bound.
+ *
+ * Small-heap-ness (the 4-byte header) is the same derived property the
+ * endpoint heap asserts; the two BUILD_ASSERTs there cover this heap too,
+ * and the chunk-count bound below keeps this heap on the same side of it.
+ */
+constexpr size_t kObjCostOf(size_t bytes) { return ((bytes + 7) / 8) * 8 + 8; }
+
+/*
+ * Usable bytes, not the gross define, the endpoint heap's rule. For this
+ * heap sys_heap_init() (heap.c:525-580) spends:
+ *
+ *    4  the end-marker chunk header       heap_footer_bytes(), small heap
+ *    4  rounding 6396 down to a CHUNK_UNIT boundary
+ *   72  chunk 0, holding struct z_heap: 28 bytes plus ten buckets x 4,
+ *       so 68 rounded up to 9 chunks
+ *
+ * Ten buckets because bucket_idx() (heap.h:261-265) is
+ * 31 - clz(heap_sz - min_chunk_size + 1) + 1 and this heap is 799 chunks,
+ * which lands in the same [512, 1023] band as the 8 KB endpoint heap. The
+ * BUILD_ASSERT keeps it there.
+ */
+BUILD_ASSERT(HEARTH_OBJ_HEAP_BYTES / 8 >= 512 && HEARTH_OBJ_HEAP_BYTES / 8 <= 1023,
+             "the object heap left the ten-bucket band kObjHeapOverheadBytes is derived for");
+constexpr size_t kObjHeapOverheadBytes = 80;
+constexpr size_t kObjHeapUsableBytes   = HEARTH_OBJ_HEAP_BYTES - kObjHeapOverheadBytes;
+
+/* Chunk-rounded bytes handed out so far, the endpoint heap's s_ep_heap_used
+ * shape: handed out plus free reconciles against kObjHeapUsableBytes
+ * exactly, so a capacity log can print both on one line. */
+size_t s_obj_heap_used;
+
+/*
+ * The one allocation primitive. Always 8-aligned, so no caller has to think
+ * about it, and always zeroed, so a heap-resident object starts from the
+ * same all-zero state its .bss or .data predecessor did before its
+ * constructor ran.
+ */
+void *obj_heap_alloc(size_t bytes)
+{
+    void *p = k_heap_aligned_alloc(&hearth_obj_heap, 8, bytes, K_NO_WAIT);
+    if (p == nullptr) {
+        LOG_ERR("cluster-object heap exhausted: %zu B wanted, %zu of %zu usable B used",
+                bytes, s_obj_heap_used, kObjHeapUsableBytes);
+        return nullptr;
+    }
+    memset(p, 0, bytes);
+    s_obj_heap_used += kObjCostOf(bytes);
+    return p;
+}
+
+/* Offset of the Instance's raw storage inside a delegate block. */
+template <typename D, typename I>
+constexpr size_t obj_inst_offset()
+{
+    return ((sizeof(D) + alignof(I) - 1) / alignof(I)) * alignof(I);
+}
+
+template <typename D, typename I>
+constexpr size_t obj_pair_bytes()
+{
+    return obj_inst_offset<D, I>() + sizeof(I);
+}
+
+/* A delegate with the raw storage for its Instance behind it. The delegate
+ * is constructed here (default-constructed, as the old array elements
+ * were); the Instance is placement-constructed later by the family's
+ * set_endpoint half, which is where its create-time arguments are known. */
+template <typename D, typename I>
+D *obj_pair_new()
+{
+    static_assert(alignof(D) <= 8 && alignof(I) <= 8,
+                  "the cluster-object heap guarantees 8-byte alignment only");
+    void *p = obj_heap_alloc(obj_pair_bytes<D, I>());
+    return (p == nullptr) ? nullptr : new (p) D();
+}
+
+/* The Instance storage inside the block this delegate starts. */
+template <typename D, typename I>
+uint8_t *obj_inst_storage(D *d)
+{
+    return reinterpret_cast<uint8_t *>(d) + obj_inst_offset<D, I>();
+}
+
+/* A delegate with no Instance beside it (the valve, whose cluster server is
+ * a free-function singleton). */
+template <typename D>
+D *obj_new()
+{
+    static_assert(alignof(D) <= 8, "the cluster-object heap guarantees 8-byte alignment only");
+    void *p = obj_heap_alloc(sizeof(D));
+    return (p == nullptr) ? nullptr : new (p) D();
+}
+
+/* Raw storage for an Instance that has no delegate at all (the
+ * MeterIdentification pool). */
+template <typename I>
+uint8_t *obj_inst_new()
+{
+    static_assert(alignof(I) <= 8, "the cluster-object heap guarantees 8-byte alignment only");
+    return static_cast<uint8_t *>(obj_heap_alloc(sizeof(I)));
+}
+
+} /* namespace */
 
 using chip::DeviceLayer::ConnectivityMgr;
 using chip::DeviceLayer::ThreadStackMgr;
@@ -1397,10 +1586,11 @@ private:
 
 /*
  * Pool of delegate objects, handed out in composition order by
- * mt_devtype_create() (mt_devtypes_zephyr.cpp). Static rather than heap:
- * the composition rebuild runs once at boot and these must outlive the
- * device, so a fixed array is both simpler and cheaper than a block per
- * object.
+ * mt_devtype_create() (mt_devtypes_zephyr.cpp). Memory reclaim round A:
+ * the pool is a table of POINTERS and the objects themselves come from the
+ * cluster-object heap, so a composition with no water valve pays four
+ * bytes per unused slot instead of a whole delegate. The heap block is
+ * never freed; see the heap's own comment for the standing policy.
  *
  * Sized kServiceableEndpoints, not MT_COMP_MAX_ENDPOINTS. mt_matter.h's
  * contract names the latter because it was written for the C6, which
@@ -1411,7 +1601,11 @@ private:
  * the contract specifies is unchanged: nullptr, and the caller aborts the
  * boot rebuild.
  */
-static HearthValveDelegate s_valve_delegates[kServiceableEndpoints];
+/* A count, not a table: nothing ever looks a valve delegate up again. The
+ * cluster server keeps the pointer itself (SetDefaultDelegate below) and
+ * the AT+MTVALVE bridge goes through the server, so the only thing this
+ * pool has to do is enforce the cap. The families that ARE looked up by
+ * endpoint keep their pointer tables. */
 static size_t s_valve_delegate_next;
 
 extern "C" void *mt_matter_valve_delegate_alloc(void)
@@ -1419,7 +1613,12 @@ extern "C" void *mt_matter_valve_delegate_alloc(void)
     if (s_valve_delegate_next >= kServiceableEndpoints) {
         return nullptr;
     }
-    return &s_valve_delegates[s_valve_delegate_next++];
+    HearthValveDelegate *d = obj_new<HearthValveDelegate>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_valve_delegate_next++;
+    return d;
 }
 
 /*
@@ -1839,20 +2038,20 @@ private:
  * The delegate pool, kServiceableEndpoints deep like the valve's (a
  * seventeenth endpoint of ANY type fails its create before it could ask
  * for a delegate; mt_matter.h's MT_COMP_MAX_ENDPOINTS sizing is the C6's,
- * which serves all 28). The INSTANCE pool beside it is raw aligned
- * storage: OperationalState::Instance has no default constructor (it
- * takes the delegate and the endpoint id, neither known until create
- * time), so each slot is placement-constructed exactly once in
+ * which serves all 28). Memory reclaim round A: the pool is a table of
+ * POINTERS into the cluster-object heap, and the Instance's raw storage
+ * sits BEHIND the delegate in the same heap block rather than in a
+ * parallel .bss array. OperationalState::Instance has no default
+ * constructor (it takes the delegate and the endpoint id, neither known
+ * until create time), so it is placement-constructed exactly once in
  * mt_matter_opstate_delegate_set_endpoint() and never destroyed, the
  * allocate-only policy the valve pool and the endpoint block heap already
- * follow: pools are handed out monotonically by the one boot rebuild and a
- * reboot resets them wholesale, so no slot is ever re-constructed over a
- * live Instance and no explicit destructor call is needed (or made; see
- * the opStateAttrs audit note for what ~Instance() would do).
+ * follow: blocks are handed out monotonically by the one boot rebuild and
+ * a reboot resets the heap wholesale, so no block is ever re-constructed
+ * over a live Instance and no explicit destructor call is needed (or made;
+ * see the opStateAttrs audit note for what ~Instance() would do).
  */
-static HearthOpStateDelegate s_opstate_delegates[kServiceableEndpoints];
-alignas(chip::app::Clusters::OperationalState::Instance) static uint8_t
-    s_opstate_instances[kServiceableEndpoints][sizeof(chip::app::Clusters::OperationalState::Instance)];
+static HearthOpStateDelegate *s_opstate_delegates[kServiceableEndpoints];
 static size_t s_opstate_delegate_next;
 
 extern "C" void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id)
@@ -1860,16 +2059,21 @@ extern "C" void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id)
     if (s_opstate_delegate_next >= kServiceableEndpoints) {
         return nullptr;
     }
-    HearthOpStateDelegate *d = &s_opstate_delegates[s_opstate_delegate_next++];
+    HearthOpStateDelegate *d =
+        obj_pair_new<HearthOpStateDelegate, chip::app::Clusters::OperationalState::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
     d->set_cluster(cluster_id);
+    s_opstate_delegates[s_opstate_delegate_next++] = d;
     return d;
 }
 
 /*
  * The second half of the handout, and on this platform it is where the
- * Instance is born: constructed into the slot's raw storage (the pool
- * index is recovered from the delegate pointer, the two pools being
- * parallel) and Init()ed, which registers the endpoint-scoped
+ * Instance is born: constructed into the raw storage behind the delegate
+ * in its own heap block (memory reclaim round A; the delegate pointer IS
+ * the block) and Init()ed, which registers the endpoint-scoped
  * CommandHandlerInterface and AttributeAccessInterface. Must run below a
  * successful emberAfSetDynamicEndpoint(): Init() opens with an
  * emberAfContainsServer() check and bails otherwise
@@ -1888,9 +2092,10 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
 {
     auto *d = static_cast<HearthOpStateDelegate *>(delegate);
     d->set_endpoint(ep);
-    size_t idx = (size_t)(d - s_opstate_delegates);
-    auto *inst = new (s_opstate_instances[idx])
-        chip::app::Clusters::OperationalState::Instance(d, ep);
+    auto *inst =
+        new (obj_inst_storage<HearthOpStateDelegate,
+                              chip::app::Clusters::OperationalState::Instance>(d))
+            chip::app::Clusters::OperationalState::Instance(d, ep);
     CHIP_ERROR err = inst->Init();
     if (err != CHIP_NO_ERROR) {
         LOG_ERR("opstate Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
@@ -1933,9 +2138,10 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
             return MT_ATTR_ERR_VALUE;
         }
         OpState::Instance *inst = nullptr;
-        for (auto &d : s_opstate_delegates) {
-            if (d.endpoint() == ep && d.cluster() == OpState::Id) {
-                inst = d.instance();
+        for (size_t i = 0; i < s_opstate_delegate_next; i++) {
+            HearthOpStateDelegate *d = s_opstate_delegates[i];
+            if (d->endpoint() == ep && d->cluster() == OpState::Id) {
+                inst = d->instance();
                 break;
             }
         }
@@ -1997,9 +2203,10 @@ static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, b
         *is_unsigned = true;
     }
     OpState::Instance *inst = nullptr;
-    for (auto &d : s_opstate_delegates) {
-        if (d.endpoint() == ep && d.cluster() == OpState::Id) {
-            inst = d.instance();
+    for (size_t i = 0; i < s_opstate_delegate_next; i++) {
+        HearthOpStateDelegate *d = s_opstate_delegates[i];
+        if (d->endpoint() == ep && d->cluster() == OpState::Id) {
+            inst = d->instance();
             break;
         }
     }
@@ -2296,15 +2503,13 @@ private:
     chip::EndpointId m_ep = chip::kInvalidEndpointId;
 };
 
-/* Delegate pool plus raw storage for the non-default-constructible
- * ChimeServer, parallel arrays indexed together, the OperationalState
- * pools' exact shape and the same construct-once, never-destroy policy
- * (chime's ~ChimeServer would unregister both interfaces,
- * chime-server.cpp:49-57, and no teardown path exists on this
- * platform). */
-static HearthChimeDelegate s_chime_delegates[kServiceableEndpoints];
-alignas(chip::app::Clusters::ChimeServer) static uint8_t
-    s_chime_servers[kServiceableEndpoints][sizeof(chip::app::Clusters::ChimeServer)];
+/* Delegate pool with the raw storage for the non-default-constructible
+ * ChimeServer behind each delegate in its own cluster-object heap block,
+ * the OperationalState pools' exact shape since memory reclaim round A and
+ * the same construct-once, never-destroy policy (chime's ~ChimeServer
+ * would unregister both interfaces, chime-server.cpp:49-57, and no
+ * teardown path exists on this platform). */
+static HearthChimeDelegate *s_chime_delegates[kServiceableEndpoints];
 static size_t s_chime_delegate_next;
 
 extern "C" void *mt_matter_chime_delegate_alloc(void)
@@ -2312,7 +2517,13 @@ extern "C" void *mt_matter_chime_delegate_alloc(void)
     if (s_chime_delegate_next >= kServiceableEndpoints) {
         return nullptr;
     }
-    return &s_chime_delegates[s_chime_delegate_next++];
+    HearthChimeDelegate *d =
+        obj_pair_new<HearthChimeDelegate, chip::app::Clusters::ChimeServer>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_chime_delegates[s_chime_delegate_next++] = d;
+    return d;
 }
 
 /*
@@ -2328,8 +2539,9 @@ extern "C" void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t e
 {
     auto *d = static_cast<HearthChimeDelegate *>(delegate);
     d->set_endpoint(ep);
-    size_t idx = (size_t)(d - s_chime_delegates);
-    auto *srv = new (s_chime_servers[idx]) chip::app::Clusters::ChimeServer(ep, *d);
+    auto *srv =
+        new (obj_inst_storage<HearthChimeDelegate, chip::app::Clusters::ChimeServer>(d))
+            chip::app::Clusters::ChimeServer(ep, *d);
     CHIP_ERROR err = srv->Init();
     if (err != CHIP_NO_ERROR) {
         LOG_ERR("ChimeServer::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
@@ -2356,12 +2568,19 @@ extern "C" void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t e
  * round): the pair contract there is unchanged, and the one caller
  * declares this port-local extension itself (mt_devtypes_zephyr.cpp,
  * beside the chime handout).
+ *
+ * Memory reclaim round A: what comes back is the SLOT, not the heap block.
+ * The cluster-object heap is allocate-only and has no free, so the
+ * unclaimed delegate's block stays out. That is bounded at one stranded
+ * block per boot for the same reason the stranded-CLAIM policy is bounded
+ * at one: the rebuild stops at the failure that provoked the unclaim and
+ * nothing retries within a boot.
  */
 extern "C" void mt_matter_chime_delegate_unclaim(void *delegate)
 {
     if (s_chime_delegate_next > 0 &&
-        delegate == &s_chime_delegates[s_chime_delegate_next - 1]) {
-        s_chime_delegate_next--;
+        delegate == s_chime_delegates[s_chime_delegate_next - 1]) {
+        s_chime_delegates[--s_chime_delegate_next] = nullptr;
         return;
     }
     LOG_ERR("chime delegate unclaim ignored: not the most recent claim");
@@ -2443,9 +2662,10 @@ extern "C" int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value)
     }
 
     chip::app::Clusters::ChimeServer *srv = nullptr;
-    for (auto &d : s_chime_delegates) {
-        if (d.endpoint() == ep) {
-            srv = d.server();
+    for (size_t i = 0; i < s_chime_delegate_next; i++) {
+        HearthChimeDelegate *d = s_chime_delegates[i];
+        if (d->endpoint() == ep) {
+            srv = d->server();
             break;
         }
     }
@@ -2483,9 +2703,10 @@ static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, boo
         *is_unsigned = true;
     }
     chip::app::Clusters::ChimeServer *srv = nullptr;
-    for (auto &d : s_chime_delegates) {
-        if (d.endpoint() == ep) {
-            srv = d.server();
+    for (size_t i = 0; i < s_chime_delegate_next; i++) {
+        HearthChimeDelegate *d = s_chime_delegates[i];
+        if (d->endpoint() == ep) {
+            srv = d->server();
             break;
         }
     }
@@ -2518,9 +2739,10 @@ static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val)
 {
     using chip::Protocols::InteractionModel::Status;
     chip::app::Clusters::ChimeServer *srv = nullptr;
-    for (auto &d : s_chime_delegates) {
-        if (d.endpoint() == ep) {
-            srv = d.server();
+    for (size_t i = 0; i < s_chime_delegate_next; i++) {
+        HearthChimeDelegate *d = s_chime_delegates[i];
+        if (d->endpoint() == ep) {
+            srv = d->server();
             break;
         }
     }
@@ -2851,9 +3073,12 @@ private:
  * be the fifth consumer and is out by ruling DE408 (LM20 tier). */
 constexpr size_t kModeBasePoolSlots = 20;
 
-static HearthModeBaseDelegate s_mb_delegates[kModeBasePoolSlots];
-alignas(chip::app::Clusters::ModeBase::Instance) static uint8_t
-    s_mb_instances[kModeBasePoolSlots][sizeof(chip::app::Clusters::ModeBase::Instance)];
+/* Memory reclaim round A: a table of pointers into the cluster-object
+ * heap, each block holding the delegate with the raw storage for its
+ * ModeBase Instance behind it. kModeBasePoolSlots is unchanged and is
+ * still checked first, so the acceptance cap DE404 argued for is exactly
+ * what it was. */
+static HearthModeBaseDelegate *s_mb_delegates[kModeBasePoolSlots];
 static size_t s_mb_delegate_next;
 
 extern "C" void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
@@ -2861,8 +3086,13 @@ extern "C" void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
     if (s_mb_delegate_next >= kModeBasePoolSlots) {
         return nullptr;
     }
-    HearthModeBaseDelegate *d = &s_mb_delegates[s_mb_delegate_next++];
+    HearthModeBaseDelegate *d =
+        obj_pair_new<HearthModeBaseDelegate, chip::app::Clusters::ModeBase::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
     d->set_cluster(cluster_id);
+    s_mb_delegates[s_mb_delegate_next++] = d;
     return d;
 }
 
@@ -2895,9 +3125,9 @@ extern "C" void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_
 {
     auto *d = static_cast<HearthModeBaseDelegate *>(delegate);
     d->set_endpoint(ep);
-    size_t idx = (size_t)(d - s_mb_delegates);
-    auto *inst = new (s_mb_instances[idx])
-        chip::app::Clusters::ModeBase::Instance(d, ep, d->cluster(), 0);
+    auto *inst =
+        new (obj_inst_storage<HearthModeBaseDelegate, chip::app::Clusters::ModeBase::Instance>(d))
+            chip::app::Clusters::ModeBase::Instance(d, ep, d->cluster(), 0);
     CHIP_ERROR err = inst->Init();
     if (err != CHIP_NO_ERROR) {
         LOG_ERR("ModeBase Instance::Init failed for endpoint %u cluster 0x%08X: "
@@ -3016,9 +3246,10 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
      * a host feed still reaches subscriptions even in the
      * cannot-happen-once-rebuilt state. */
     ModeBase::Instance *inst = nullptr;
-    for (auto &d : s_mb_delegates) {
-        if (d.endpoint() == ep && d.cluster() == cluster) {
-            inst = d.instance();
+    for (size_t i = 0; i < s_mb_delegate_next; i++) {
+        HearthModeBaseDelegate *d = s_mb_delegates[i];
+        if (d->endpoint() == ep && d->cluster() == cluster) {
+            inst = d->instance();
             break;
         }
     }
@@ -3058,9 +3289,10 @@ static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, boo
     if (is_unsigned) {
         *is_unsigned = true;
     }
-    for (auto &d : s_mb_delegates) {
-        if (d.endpoint() == ep && d.cluster() == cluster) {
-            chip::app::Clusters::ModeBase::Instance *inst = d.instance();
+    for (size_t i = 0; i < s_mb_delegate_next; i++) {
+        HearthModeBaseDelegate *d = s_mb_delegates[i];
+        if (d->endpoint() == ep && d->cluster() == cluster) {
+            chip::app::Clusters::ModeBase::Instance *inst = d->instance();
             if (inst == nullptr) {
                 break;
             }
@@ -3197,13 +3429,12 @@ private:
  * kServiceableEndpoints deep like the trio's (the heap admits only nine
  * RVC endpoints, but a slot here is 260-odd bytes against the ModeBase
  * pool's DE404 argument for departing from 16; not worth a second special
- * sizing). Raw aligned storage for the non-default-constructible
- * Instance, placement-constructed once, never destroyed: the standing
- * pool policy. */
-static HearthRvcOpStateDelegate s_rvc_opstate_delegates[kServiceableEndpoints];
-alignas(chip::app::Clusters::RvcOperationalState::Instance) static uint8_t
-    s_rvc_opstate_instances[kServiceableEndpoints]
-                           [sizeof(chip::app::Clusters::RvcOperationalState::Instance)];
+ * sizing). Memory reclaim round A: the pool is a table of POINTERS into
+ * the cluster-object heap, and the raw storage for the
+ * non-default-constructible Instance sits behind the delegate in the same
+ * block, placement-constructed once and never destroyed: the standing pool
+ * policy. */
+static HearthRvcOpStateDelegate *s_rvc_opstate_delegates[kServiceableEndpoints];
 static size_t s_rvc_opstate_delegate_next;
 
 extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
@@ -3211,7 +3442,14 @@ extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
     if (s_rvc_opstate_delegate_next >= kServiceableEndpoints) {
         return nullptr;
     }
-    return &s_rvc_opstate_delegates[s_rvc_opstate_delegate_next++];
+    HearthRvcOpStateDelegate *d =
+        obj_pair_new<HearthRvcOpStateDelegate,
+                     chip::app::Clusters::RvcOperationalState::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_rvc_opstate_delegates[s_rvc_opstate_delegate_next++] = d;
+    return d;
 }
 
 /*
@@ -3225,9 +3463,10 @@ extern "C" void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint
 {
     auto *d = static_cast<HearthRvcOpStateDelegate *>(delegate);
     d->set_endpoint(ep);
-    size_t idx = (size_t)(d - s_rvc_opstate_delegates);
-    auto *inst = new (s_rvc_opstate_instances[idx])
-        chip::app::Clusters::RvcOperationalState::Instance(d, ep);
+    auto *inst =
+        new (obj_inst_storage<HearthRvcOpStateDelegate,
+                              chip::app::Clusters::RvcOperationalState::Instance>(d))
+            chip::app::Clusters::RvcOperationalState::Instance(d, ep);
     CHIP_ERROR err = inst->Init();
     if (err != CHIP_NO_ERROR) {
         LOG_ERR("RvcOperationalState Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
@@ -3240,9 +3479,10 @@ extern "C" void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint
  * branch and the DE397 live reader below. */
 static chip::app::Clusters::OperationalState::Instance *mt_rvc_opstate_instance(uint16_t ep)
 {
-    for (auto &d : s_rvc_opstate_delegates) {
-        if (d.endpoint() == ep) {
-            return d.instance();
+    for (size_t i = 0; i < s_rvc_opstate_delegate_next; i++) {
+        HearthRvcOpStateDelegate *d = s_rvc_opstate_delegates[i];
+        if (d->endpoint() == ep) {
+            return d->instance();
         }
     }
     return nullptr;
@@ -3536,28 +3776,33 @@ private:
  * exceeds any host this firmware targets. Exhaustion aborts the create
  * before anything is spent (mt_devtype_create()'s two-halves rule).
  *
- * Each pool pairs the delegates with raw aligned Instance storage: the
- * four-argument Instance ctor needs create-time values, so the Instances
- * are placement-constructed exactly once per slot in
- * mt_matter_meas_delegate_set_endpoint() and never destroyed (no teardown
- * path on this platform; AT+MTEP edits apply by reboot), the standing
- * allocate-only pool policy.
+ * Each pool is a table of POINTERS into the cluster-object heap since
+ * memory reclaim round A, one block per delegate with the raw storage for
+ * its Instance behind it: the four-argument Instance ctor needs create-time
+ * values, so the Instances are placement-constructed exactly once per block
+ * in mt_matter_meas_delegate_set_endpoint() and never destroyed (no
+ * teardown path on this platform; AT+MTEP edits apply by reboot), the
+ * standing allocate-only pool policy. MT_MEAS_MAX is unchanged and is still
+ * checked first.
  */
-static HearthEpmDelegate  s_meas_epm_delegates[MT_MEAS_MAX];
+static HearthEpmDelegate  *s_meas_epm_delegates[MT_MEAS_MAX];
 static size_t             s_meas_epm_next;
-alignas(chip::app::Clusters::ElectricalPowerMeasurement::Instance) static uint8_t
-    s_meas_epm_instances[MT_MEAS_MAX][sizeof(chip::app::Clusters::ElectricalPowerMeasurement::Instance)];
-static HearthPtopDelegate s_meas_ptop_delegates[MT_MEAS_MAX];
+static HearthPtopDelegate *s_meas_ptop_delegates[MT_MEAS_MAX];
 static size_t             s_meas_ptop_next;
-alignas(chip::app::Clusters::PowerTopology::Instance) static uint8_t
-    s_meas_ptop_instances[MT_MEAS_MAX][sizeof(chip::app::Clusters::PowerTopology::Instance)];
 
 extern "C" void *mt_matter_epm_delegate_alloc(void)
 {
     if (s_meas_epm_next >= MT_MEAS_MAX) {
         return nullptr;
     }
-    return &s_meas_epm_delegates[s_meas_epm_next++];
+    HearthEpmDelegate *d =
+        obj_pair_new<HearthEpmDelegate,
+                     chip::app::Clusters::ElectricalPowerMeasurement::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_meas_epm_delegates[s_meas_epm_next++] = d;
+    return d;
 }
 
 extern "C" void *mt_matter_ptop_delegate_alloc(void)
@@ -3565,7 +3810,13 @@ extern "C" void *mt_matter_ptop_delegate_alloc(void)
     if (s_meas_ptop_next >= MT_MEAS_MAX) {
         return nullptr;
     }
-    return &s_meas_ptop_delegates[s_meas_ptop_next++];
+    HearthPtopDelegate *d =
+        obj_pair_new<HearthPtopDelegate, chip::app::Clusters::PowerTopology::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_meas_ptop_delegates[s_meas_ptop_next++] = d;
+    return d;
 }
 
 /*
@@ -3591,11 +3842,13 @@ extern "C" void *mt_matter_ptop_delegate_alloc(void)
 extern "C" void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep)
 {
     using namespace chip::app::Clusters;
-    for (auto &d : s_meas_epm_delegates) {
-        if (&d == delegate) {
-            size_t idx = (size_t)(&d - s_meas_epm_delegates);
-            auto *inst = new (s_meas_epm_instances[idx]) ElectricalPowerMeasurement::Instance(
-                ep, d,
+    for (size_t i = 0; i < s_meas_epm_next; i++) {
+        HearthEpmDelegate *d = s_meas_epm_delegates[i];
+        if (d == delegate) {
+            auto *inst = new (obj_inst_storage<HearthEpmDelegate,
+                                               ElectricalPowerMeasurement::Instance>(d))
+                ElectricalPowerMeasurement::Instance(
+                ep, *d,
                 chip::BitMask<ElectricalPowerMeasurement::Feature>(
                     ElectricalPowerMeasurement::Feature::kAlternatingCurrent),
                 chip::BitMask<ElectricalPowerMeasurement::OptionalAttributes>(
@@ -3614,12 +3867,14 @@ extern "C" void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep
             return;
         }
     }
-    for (auto &d : s_meas_ptop_delegates) {
-        if (&d == delegate) {
-            d.set_endpoint(ep);
-            size_t idx = (size_t)(&d - s_meas_ptop_delegates);
-            auto *inst = new (s_meas_ptop_instances[idx]) PowerTopology::Instance(
-                ep, d, chip::BitMask<PowerTopology::Feature>(PowerTopology::Feature::kNodeTopology),
+    for (size_t i = 0; i < s_meas_ptop_next; i++) {
+        HearthPtopDelegate *d = s_meas_ptop_delegates[i];
+        if (d == delegate) {
+            d->set_endpoint(ep);
+            auto *inst =
+                new (obj_inst_storage<HearthPtopDelegate, PowerTopology::Instance>(d))
+                    PowerTopology::Instance(
+                ep, *d, chip::BitMask<PowerTopology::Feature>(PowerTopology::Feature::kNodeTopology),
                 chip::BitMask<PowerTopology::OptionalAttributes>());
             CHIP_ERROR err = inst->Init();
             if (err != CHIP_NO_ERROR) {
@@ -3638,8 +3893,8 @@ extern "C" void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep
 static HearthEpmDelegate *meas_epm_for(chip::EndpointId ep)
 {
     for (size_t i = 0; i < s_meas_epm_next; i++) {
-        if (s_meas_epm_delegates[i].endpoint() == ep) {
-            return &s_meas_epm_delegates[i];
+        if (s_meas_epm_delegates[i]->endpoint() == ep) {
+            return s_meas_epm_delegates[i];
         }
     }
     return nullptr;
@@ -4013,15 +4268,20 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
  */
 namespace {
 
+/* Memory reclaim round A: the raw Instance storage is no longer a .bss
+ * array. mt_meter_reserve() takes it from the cluster-object heap at CLAIM
+ * time and parks the pointer here, so a heap shortfall fails the claim and
+ * aborts the create like an exhausted pool, rather than surfacing in
+ * mt_meter_register_all()'s post-rebuild scan where nothing could abort
+ * anything. */
 struct mt_meter_entry {
     bool used;
     uint16_t ep;
     chip::app::Clusters::MeterIdentification::Instance *instance;
+    uint8_t *storage;
 };
 
 mt_meter_entry s_meter[MT_METER_MAX];
-alignas(chip::app::Clusters::MeterIdentification::Instance) uint8_t
-    s_meter_storage[MT_METER_MAX][sizeof(chip::app::Clusters::MeterIdentification::Instance)];
 uint16_t s_meter_reserved;
 
 chip::app::Clusters::MeterIdentification::Instance *mt_meter_find(uint16_t ep)
@@ -4052,6 +4312,11 @@ extern "C" bool mt_meter_reserve(void)
     if (s_meter_reserved >= MT_METER_MAX) {
         return false;
     }
+    uint8_t *raw = obj_inst_new<chip::app::Clusters::MeterIdentification::Instance>();
+    if (raw == nullptr) {
+        return false;
+    }
+    s_meter[s_meter_reserved].storage = raw;
     s_meter_reserved++;
     return true;
 }
@@ -4079,7 +4344,17 @@ extern "C" void mt_meter_register_all(void)
         if (!emberAfContainsServer(ep, chip::app::Clusters::MeterIdentification::Id)) {
             continue;
         }
-        auto *inst = new (s_meter_storage[slot]) Instance(ep, features);
+        /* Memory reclaim round A: every meter-bearing endpoint in this walk
+         * passed mt_meter_reserve(), which allocated this slot's storage,
+         * so a null here is an internal invariant violation rather than a
+         * capacity outcome. Stop rather than fault. */
+        if (s_meter[slot].storage == nullptr) {
+            LOG_ERR("MeterIdentification slot %u has no storage: reserve/scan disagree; "
+                    "endpoint %u will serve nothing",
+                    (unsigned)slot, (unsigned)ep);
+            break;
+        }
+        auto *inst = new (s_meter[slot].storage) Instance(ep, features);
         CHIP_ERROR err = inst->Init();
         if (err != CHIP_NO_ERROR) {
             /* Logged, not aborted: Init() refusing an (endpoint, cluster)
@@ -4672,10 +4947,8 @@ private:
  * fix round M1, the reasoning at the alloc below). Exhaustion aborts the
  * create before anything is spent.
  */
-static HearthDemDelegate s_dem_delegates[MT_DEM_MAX];
+static HearthDemDelegate *s_dem_delegates[MT_DEM_MAX];
 static size_t            s_dem_next;
-alignas(chip::app::Clusters::DeviceEnergyManagement::Instance) static uint8_t
-    s_dem_instances[MT_DEM_MAX][sizeof(chip::app::Clusters::DeviceEnergyManagement::Instance)];
 
 /* Batch 7b fix round M1: the id is NOT stamped at handout any more. The
  * WHM alloc's comment carries the full reasoning, one discipline for
@@ -4693,8 +4966,14 @@ extern "C" void *mt_matter_dem_delegate_alloc(uint16_t ep)
     if (s_dem_next >= MT_DEM_MAX) {
         return nullptr;
     }
-    HearthDemDelegate *d = &s_dem_delegates[s_dem_next++];
+    HearthDemDelegate *d =
+        obj_pair_new<HearthDemDelegate,
+                     chip::app::Clusters::DeviceEnergyManagement::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
     d->SetEndpointId(chip::kInvalidEndpointId);
+    s_dem_delegates[s_dem_next++] = d;
     return d;
 }
 
@@ -4703,8 +4982,8 @@ extern "C" void *mt_matter_dem_delegate_alloc(uint16_t ep)
 static HearthDemDelegate *dem_for(chip::EndpointId ep)
 {
     for (size_t i = 0; i < s_dem_next; i++) {
-        if (s_dem_delegates[i].endpoint() == ep) {
-            return &s_dem_delegates[i];
+        if (s_dem_delegates[i]->endpoint() == ep) {
+            return s_dem_delegates[i];
         }
     }
     return nullptr;
@@ -4726,8 +5005,7 @@ extern "C" void mt_matter_dem_register(void *delegate, uint16_t ep, bool with_pa
     using namespace chip::app::Clusters::DeviceEnergyManagement;
     auto *d = static_cast<HearthDemDelegate *>(delegate);
     d->set_with_pa(with_pa);
-    size_t idx = (size_t)(d - s_dem_delegates);
-    auto *inst = new (s_dem_instances[idx])
+    auto *inst = new (obj_inst_storage<HearthDemDelegate, Instance>(d))
         Instance(ep, *d, with_pa ? Feature::kPowerAdjustment : static_cast<Feature>(0));
     CHIP_ERROR err = inst->Init();
     if (err != CHIP_NO_ERROR) {
@@ -5266,10 +5544,8 @@ private:
  * never destroyed (~Instance() would Shutdown() cleanly, but this
  * platform has no teardown path, the standing allocate-only policy).
  */
-static HearthWhmDelegate s_whm_delegates[MT_WHM_MAX];
+static HearthWhmDelegate *s_whm_delegates[MT_WHM_MAX];
 static size_t            s_whm_next;
-alignas(chip::app::Clusters::WaterHeaterManagement::Instance) static uint8_t
-    s_whm_instances[MT_WHM_MAX][sizeof(chip::app::Clusters::WaterHeaterManagement::Instance)];
 
 /* Fix round M1, one discipline for both id-at-alloc pools (this one and
  * the DEM's): the id passed per the header's alloc(ep) contract is
@@ -5294,8 +5570,14 @@ extern "C" void *mt_matter_whm_delegate_alloc(uint16_t ep)
     if (s_whm_next >= MT_WHM_MAX) {
         return nullptr;
     }
-    HearthWhmDelegate *d = &s_whm_delegates[s_whm_next++];
+    HearthWhmDelegate *d =
+        obj_pair_new<HearthWhmDelegate,
+                     chip::app::Clusters::WaterHeaterManagement::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
     d->SetEndpointId(chip::kInvalidEndpointId);
+    s_whm_delegates[s_whm_next++] = d;
     return d;
 }
 
@@ -5304,8 +5586,8 @@ extern "C" void *mt_matter_whm_delegate_alloc(uint16_t ep)
 static HearthWhmDelegate *whm_for(chip::EndpointId ep)
 {
     for (size_t i = 0; i < s_whm_next; i++) {
-        if (s_whm_delegates[i].endpoint() == ep) {
-            return &s_whm_delegates[i];
+        if (s_whm_delegates[i]->endpoint() == ep) {
+            return s_whm_delegates[i];
         }
     }
     return nullptr;
@@ -5332,8 +5614,8 @@ extern "C" void mt_matter_whm_register(void *delegate, uint16_t ep, bool with_em
                                   chip::to_underlying(Feature::kTankPercent))
                                : 0;
     d->set_features(mask);
-    size_t idx = (size_t)(d - s_whm_delegates);
-    auto *inst = new (s_whm_instances[idx]) Instance(ep, *d, static_cast<Feature>(mask));
+    auto *inst = new (obj_inst_storage<HearthWhmDelegate, Instance>(d))
+        Instance(ep, *d, static_cast<Feature>(mask));
     CHIP_ERROR err = inst->Init();
     if (err != CHIP_NO_ERROR) {
         LOG_ERR("WHM Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
@@ -5538,3 +5820,153 @@ static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
     *out = v;
     return MT_ATTR_OK;
 }
+
+/*
+ * ===================================================================
+ * The cluster-object heap: sizing, and the compile-time floor
+ * ===================================================================
+ *
+ * Placed at the end of the file because every constant below is a sizeof()
+ * of a class declared above it. The endpoint block heap's sizing table
+ * (mt_devtypes_zephyr.cpp, beside K_HEAP_DEFINE(hearth_ep_heap)) is the
+ * model this follows: a table, an explicit worst case, and a static_assert
+ * so the table cannot go stale without the build noticing.
+ *
+ * COST PER BLOCK. One 8-aligned allocation per (endpoint, family) pair,
+ * charged kObjCostOf(payload) = roundup(payload, 8) + 8. The payload is the
+ * delegate followed by the raw Instance storage at the Instance's own
+ * alignment (obj_pair_bytes()), or a lone object where the family has only
+ * one:
+ *
+ *   family                  delegate  Instance  payload   heap cost
+ *   OperationalState              16       240      256         264
+ *   RvcOperationalState           12       248      264         272
+ *   DeviceEnergyManagement       240        40      280         288
+ *   MeterIdentification            -       304      304         312
+ *   ElectricalPowerMeasurement   120        28      148         160
+ *   WaterHeaterManagement         48        40       88          96
+ *   ModeBase                      16        64       80          88
+ *   Chime                         12        40       56          64
+ *   PowerTopology                  8        28       36          48
+ *   water valve                    8         -        8          16
+ *
+ * (Sizes measured with nm on the 6c31f09 build; the constants below are
+ * sizeof()s, so the table is documentation and the arithmetic is not.)
+ *
+ * COST PER DEVICE TYPE is the sum over the families its cluster list draws
+ * on, from mt_devtype_create()'s claim block:
+ *
+ *   battery storage v0       DEM + ModeBase + EPM + PowerTopology     584
+ *   RVC                      RvcOpState + 2 x ModeBase                448
+ *   water heater v0          WHM + ModeBase + EPM + PowerTopology     392
+ *   device energy mgmt v0/v1 DEM + ModeBase                           376
+ *   electrical meter         MeterIdentification                      312
+ *   washer / dishwasher / dryer   OperationalState                    264
+ *   electrical sensor v0     EPM + PowerTopology                      208
+ *   water heater v1          WHM + ModeBase                           184
+ *   electrical sensor v1     EPM                                      160
+ *   chime                    Chime                                     64
+ *   water valve              valve delegate                            16
+ *   every other catalogue type                                          0
+ *
+ * THE WORST COMPOSITION, and why this heap can never be the binding wall.
+ * The draw is maximised subject to the three walls that already exist:
+ * sixteen endpoints (kServiceableEndpoints), 8,112 usable bytes of endpoint
+ * block heap, and the per-family caps (MT_MEAS_MAX 8, MT_DEM_MAX 4,
+ * MT_WHM_MAX 4, MT_METER_MAX 2, kModeBasePoolSlots 20). Sorting by object
+ * bytes per endpoint and filling until a wall bites gives
+ *
+ *   4 x battery storage v0   2,336 B   (DEM 4/4, EPM 4/8, PTOP 4/8, MB 4)
+ *   4 x water heater v0      1,568 B   (WHM 4/4, EPM 8/8, PTOP 8/8, MB 8)
+ *   2 x electrical meter       624 B   (METER 2/2)
+ *   6 x washing machine      1,584 B   (OperationalState 6/16)
+ *   ------------------------------------------------------------------
+ *   16 endpoints             6,112 B   block heap 7,744 of 8,112 B
+ *
+ * and no substitution beats it: with the five capped families saturated the
+ * only remaining types are the washer trio (264 B for 144 B of block), the
+ * RVC (448 B for 864 B of block) and the chime, and washers win on both
+ * remaining budgets. 6,112 B is therefore the true maximum over EVERY
+ * composition the existing walls admit, not an upper bound.
+ *
+ * HEARTH_OBJ_HEAP_BYTES is 6400, which leaves 6,320 usable. The assertions
+ * below pin that against the worst mix and against the two uniform
+ * compositions worth naming separately, so a future delegate or Instance
+ * that grows fails the build here rather than a bench run later:
+ *
+ *   worst mixed composition   6,112   fits, 208 B spare
+ *   16 x washing machine      4,224   fits
+ *   9 x RVC (the block heap's own limit for that type)   4,032   fits
+ *
+ * This is a deliberately different trade from the endpoint block heap's.
+ * That heap is sized BELOW its own worst case (16 extended colour lights
+ * would want 9,600 B) because the RAM is worth more elsewhere and the
+ * capacity consequence is documented in the README. This heap is sized
+ * ABOVE its worst case, at a cost of 288 B over the tightest fit, because
+ * it is NEW: a heap that could bite first would silently move a capacity
+ * boundary the README already states, and memory reclaim round A is
+ * purely additive on behaviour by construction. If a later round wants
+ * those bytes, 4,608 still covers every UNIFORM composition (the 16-washer
+ * row above) and only shortens heavy mixed-energy compositions; that is a
+ * capacity decision, and it needs the README's table rewritten with it.
+ */
+namespace {
+
+constexpr size_t kObjOpState  = kObjCostOf(
+    obj_pair_bytes<HearthOpStateDelegate, chip::app::Clusters::OperationalState::Instance>());
+constexpr size_t kObjRvcOpState = kObjCostOf(
+    obj_pair_bytes<HearthRvcOpStateDelegate,
+                   chip::app::Clusters::RvcOperationalState::Instance>());
+constexpr size_t kObjModeBase = kObjCostOf(
+    obj_pair_bytes<HearthModeBaseDelegate, chip::app::Clusters::ModeBase::Instance>());
+constexpr size_t kObjChime = kObjCostOf(
+    obj_pair_bytes<HearthChimeDelegate, chip::app::Clusters::ChimeServer>());
+constexpr size_t kObjEpm = kObjCostOf(
+    obj_pair_bytes<HearthEpmDelegate,
+                   chip::app::Clusters::ElectricalPowerMeasurement::Instance>());
+constexpr size_t kObjPtop = kObjCostOf(
+    obj_pair_bytes<HearthPtopDelegate, chip::app::Clusters::PowerTopology::Instance>());
+constexpr size_t kObjDem = kObjCostOf(
+    obj_pair_bytes<HearthDemDelegate,
+                   chip::app::Clusters::DeviceEnergyManagement::Instance>());
+constexpr size_t kObjWhm = kObjCostOf(
+    obj_pair_bytes<HearthWhmDelegate,
+                   chip::app::Clusters::WaterHeaterManagement::Instance>());
+constexpr size_t kObjMeter =
+    kObjCostOf(sizeof(chip::app::Clusters::MeterIdentification::Instance));
+constexpr size_t kObjValve = kObjCostOf(sizeof(HearthValveDelegate));
+
+/* Per device type, from mt_devtype_create()'s claim block. */
+constexpr size_t kObjPerBatteryStorageV0 = kObjDem + kObjModeBase + kObjEpm + kObjPtop;
+constexpr size_t kObjPerRvc              = kObjRvcOpState + 2 * kObjModeBase;
+constexpr size_t kObjPerWaterHeaterV0    = kObjWhm + kObjModeBase + kObjEpm + kObjPtop;
+constexpr size_t kObjPerElectricalMeter  = kObjMeter;
+constexpr size_t kObjPerWasherTrio       = kObjOpState;
+
+/* The 16-endpoint mix that maximises the draw, derived in the comment
+ * above. Every count is the family cap it saturates. */
+constexpr size_t kObjWorstMixBytes = 4 * kObjPerBatteryStorageV0 +
+                                     4 * kObjPerWaterHeaterV0 +
+                                     2 * kObjPerElectricalMeter +
+                                     6 * kObjPerWasherTrio;
+
+/* The endpoint block heap admits nine RVCs (8,112 usable / 864 per block);
+ * named here so the RVC row cannot drift out of step with that heap. */
+constexpr size_t kObjRvcEndpointLimit = 9;
+
+static_assert(kObjWorstMixBytes <= kObjHeapUsableBytes,
+              "the cluster-object heap no longer covers the worst composition the other walls "
+              "admit; raise HEARTH_OBJ_HEAP_BYTES or redo the sizing table above");
+static_assert(kObjPerWasherTrio * kServiceableEndpoints <= kObjHeapUsableBytes,
+              "the cluster-object heap no longer holds sixteen appliance-trio endpoints; raise "
+              "HEARTH_OBJ_HEAP_BYTES");
+static_assert(kObjPerRvc * kObjRvcEndpointLimit <= kObjHeapUsableBytes,
+              "the cluster-object heap no longer holds the nine RVC endpoints the endpoint "
+              "block heap admits; raise HEARTH_OBJ_HEAP_BYTES");
+
+/* Pinned so a delegate or Instance that changes size fails the build here
+ * and forces the table above to be re-read, rather than silently moving the
+ * worst case. */
+static_assert(kObjWorstMixBytes == 6112, "the worst-composition arithmetic moved off 6,112 B");
+
+} /* namespace */

@@ -76,3 +76,29 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * Raised together with kServiceableEndpoints for the LM20 tier.
  */
 #define HEARTH_EP_HEAP_BYTES 8192
+
+/*
+ * Bytes reserved for the cluster-object heap (mt_matter_zephyr.cpp's
+ * K_HEAP_DEFINE(hearth_obj_heap)). It holds the per-endpoint CHIP Delegate
+ * objects and the raw storage for their Instances: the fourteen pools that
+ * used to be fixed .bss and .data arrays, one slot per endpoint that COULD
+ * carry the family, whatever the host actually composed.
+ *
+ * A separate heap from hearth_ep_heap deliberately. The endpoint block heap
+ * hands out 4-byte-aligned blocks (k_heap_alloc routes through
+ * sys_heap_noalign_alloc) and its static_asserts exist to keep anything
+ * wider out; HearthDemDelegate holds a uint64_t and would break that
+ * guarantee. This heap allocates through k_heap_aligned_alloc() at 8 bytes
+ * throughout, so alignment is a property of the heap rather than of each
+ * caller.
+ *
+ * Sized so it can NEVER be the binding wall: every composition the existing
+ * walls (kServiceableEndpoints, HEARTH_EP_HEAP_BYTES and the per-family
+ * MT_*_MAX caps) already admit fits. The arithmetic, including the mixed
+ * composition that maximises the draw, sits beside the heap definition in
+ * mt_matter_zephyr.cpp and is pinned by a static_assert there, so this
+ * number cannot go stale silently.
+ *
+ * Raised together with kServiceableEndpoints for the LM20 tier.
+ */
+#define HEARTH_OBJ_HEAP_BYTES 6400
