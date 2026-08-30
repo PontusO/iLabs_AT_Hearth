@@ -3015,6 +3015,8 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *
  *   device type                        clusters  slots  payload  heap cost
  *   robotic vacuum cleaner  0x0074            5     14      856        864
+ *   device energy mgmt v0   0x050D            3      9      462        464
+ *   device energy mgmt v1   0x050D            3      8      446        448
  *   extended colour light   0x010D            5     36      596        600
  *   mode select             0x0027            3      8      576        584
  *   colour temperature lt   0x010C            5     32      532        536
@@ -3030,6 +3032,13 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   fan / air purifier      0x002B 0x002D     3     10      172        176
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
+ *   heat pump / solar v0    0x0309 0x0017     5     13      228        232
+ *   solar power v1          0x0017            4     11      192        200
+ *   electrical sensor v0    0x0510            4      8      144        152
+ *   electrical sensor v1    0x0510            3      6      108        112
+ *   electrical meter v0     0x0514            3      6      108        112
+ *   electrical meter v1     0x0514            2      4       72         80
+ *   electrical utility mtr  0x0511            3      7      124        128
  *   washer/dish/dryer 0x0073 0x0075 0x007C    3      8      140        144
  *   generic switch          0x000F            3      8      140        144
  *   power source            0x0011            2      8      136        144
@@ -3071,6 +3080,17 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * failure in mt_devtype_create() rather than a silent truncation, and the
  * README's "Endpoint capacity" section tells an integrator the numbers up
  * front.
+ *
+ * Catalogue batch 7a added a THIRD capacity bound beyond the table and
+ * this heap: the per-family delegate pools at the C6's own depths (DE407).
+ * Every EPM/PowerTopology-bearing endpoint (electrical sensor, electrical
+ * meter, heat pump, solar power) draws on the MT_MEAS_MAX (8) pools, DEM
+ * endpoints on MT_DEM_MAX (4), utility meters on MT_METER_MAX (2), so an
+ * all-energy composition hits a pool wall before either older wall; the
+ * exhaustion aborts the create with the pool named, the same
+ * stop-at-failure prefix semantics as ever. None of the six energy types
+ * approaches the RVC's 864 B block, so the floor assertion below is
+ * untouched.
  *
  * The floor is compiler-checked below, so the table above cannot go stale
  * without the build noticing.
@@ -3151,6 +3171,12 @@ constexpr quiet_no_slot_attr kQuietNoSlot[] = {
     { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::RMSCurrent::Id },
     { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Frequency::Id },
     { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::PowerFactor::Id },
+    /* DeviceEnergyManagement: the two power_mw scalars, served by
+     * Instance::Read()'s own cases from the HearthDemDelegate cache
+     * (device-energy-management-server.cpp:70-73; the carve-out serves
+     * the AT side). */
+    { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::AbsMinPower::Id },
+    { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::AbsMaxPower::Id },
 };
 
 bool attr_quiet_no_slot(ClusterId cluster, AttributeId attr)
