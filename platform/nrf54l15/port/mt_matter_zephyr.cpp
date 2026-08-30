@@ -655,7 +655,12 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
 
     /* DE397: the Instance-served attributes answer the live object, not
      * the arena; see the carve-out comment above attr_locate(). Batch 5
-     * turned the two-way ternary into a per-cluster dispatch. */
+     * turned the two-way ternary into a per-cluster dispatch. Every
+     * cluster in k_instance_served has its own explicit arm, and default:
+     * fails loudly (batch 5 fix round, review Minor 2): a future table
+     * row whose case someone forgets would otherwise be silently answered
+     * by whichever reader default routed to, and a bare ERROR at the
+     * bench is the drift alarm this arm exists to be. */
     if (instance_attr_served(cluster, attr)) {
         switch (cluster) {
         case chip::app::Clusters::OperationalState::Id:
@@ -665,8 +670,10 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::RvcOperationalState::Id:
             return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
-        default:
+        case chip::app::Clusters::Chime::Id:
             return mt_chime_attr_read_live(ep, attr, out, is_unsigned);
+        default:
+            return MT_ATTR_ERR_FAILED;
         }
     }
 
@@ -1759,15 +1766,18 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
  * AT+MTOPSTATE bridge. mt_at.c's cmd_mtopstate has already rejected
  * anything outside the UNION of every opstate cluster family's legal set
  * (and 3, kError, outright) before this is called; this bridge narrows to
- * the one family this catalogue serves, the base cluster's {0 Stopped,
- * 1 Running, 2 Paused}. A union-legal RVC state (0x40..0x42) on a washer
- * answers MT_ATTR_ERR_VALUE here, exactly as the C6's base branch does;
- * the RVC and oven-cavity branches arrive with their device types in later
- * batches. SetOperationalState() enforces the same rule independently
- * (operational-state-server.cpp:101-107, kError or an unsupported state
- * answers CHIP_ERROR_INVALID_ARGUMENT), so a state that slipped both
- * checks would still map to MT_ATTR_ERR_FAILED rather than being silently
- * accepted.
+ * the legal set of the cluster ep actually carries, two branches since
+ * catalogue batch 5: the base cluster's {0 Stopped, 1 Running, 2 Paused}
+ * for the washer/dishwasher/dryer trio, and RvcOperationalState's widened
+ * {0, 1, 2, 0x40 kSeekingCharger, 0x41 kCharging, 0x42 kDocked} for the
+ * RVC. A union-legal RVC state (0x40..0x42) on a washer answers
+ * MT_ATTR_ERR_VALUE in the base branch, exactly as the C6's does; the
+ * oven-cavity branch arrives with its device type in the
+ * composed-appliance batch. SetOperationalState() enforces each cluster's
+ * rule independently (operational-state-server.cpp:101-107, kError or an
+ * unsupported state answers CHIP_ERROR_INVALID_ARGUMENT), so a state that
+ * slipped both checks would still map to MT_ATTR_ERR_FAILED rather than
+ * being silently accepted.
  *
  * Called from the AT parser thread, so the StackLock IS taken, unlike the
  * delegate hooks above.
@@ -2806,16 +2816,43 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
     }
     slot->count = count;
 
-    MatterReportingAttributeChangeCallback(ep, cluster,
-                                           ModeBase::Attributes::SupportedModes::Id);
-
+    /* One Instance lookup serves both tail steps (batch 5 fix round,
+     * review Minor 3): the dirty-mark goes through the SDK's own
+     * Instance::ReportSupportedModesChange(), the method the delegate
+     * contract says the device SHALL call (mode-base-server.h:109, the
+     * SHALL at :203/:215/:233; its body is exactly the raw
+     * MatterReportingAttributeChangeCallback this bridge used to make,
+     * mode-base-server.cpp:241-244, so the wire is unchanged and a future
+     * SDK revision that adds bookkeeping there is picked up for free).
+     * The raw callback survives only in the defensive no-Instance arm, so
+     * a host feed still reaches subscriptions even in the
+     * cannot-happen-once-rebuilt state. */
+    ModeBase::Instance *inst = nullptr;
     for (auto &d : s_mb_delegates) {
         if (d.endpoint() == ep && d.cluster() == cluster) {
-            ModeBase::Instance *inst = d.instance();
-            if (inst != nullptr && !inst->IsSupportedMode(inst->GetCurrentMode())) {
-                inst->UpdateCurrentMode(slot->entries[0].mode);
-            }
+            inst = d.instance();
             break;
+        }
+    }
+    if (inst == nullptr) {
+        MatterReportingAttributeChangeCallback(ep, cluster,
+                                               ModeBase::Attributes::SupportedModes::Id);
+        return MT_ATTR_OK;
+    }
+    inst->ReportSupportedModesChange();
+
+    if (!inst->IsSupportedMode(inst->GetCurrentMode())) {
+        /* The clamp target is entries[0].mode, stored two loops above, so
+         * UpdateCurrentMode()'s ConstraintError arm (an unsupported mode)
+         * is unreachable here; checked and logged anyway rather than
+         * discarded, this file's convention for SDK returns (batch 5 fix
+         * round, review Minor 4). */
+        Status st = inst->UpdateCurrentMode(slot->entries[0].mode);
+        if (st != Status::Success) {
+            LOG_ERR("modebase CurrentMode clamp to %u failed on endpoint %u cluster 0x%08X "
+                    "(status 0x%02X)",
+                    (unsigned)slot->entries[0].mode, (unsigned)ep, (unsigned)cluster,
+                    (unsigned)chip::to_underlying(st));
         }
     }
     return MT_ATTR_OK;

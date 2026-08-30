@@ -1897,11 +1897,24 @@ constexpr EmberAfDeviceType kChimeTypes[] = { { 0x0146, 1 } };
  * the richer momentary features (MSR, MSL, MSM) are not advertised and
  * their five events are never emitted on either platform.
  *
- * No writable attribute anywhere on this device type (AT_MT_SPEC.md
- * 462-467): NumberOfPositions and CurrentPosition are read-only over AT
- * and over the fabric, and CurrentPosition is NOT updated by the event
- * path on either platform (SwitchServer::OnInitialPress only calls
- * LogEvent). The command that drives the type is AT+MTSWITCH. */
+ * The writability split, stated precisely (batch 5 fix round, review
+ * I2, which caught this note over-claiming "read-only over AT"):
+ * NumberOfPositions and CurrentPosition carry no WRITABLE mask below, so
+ * a CONTROLLER'S IM write is refused; that is the read-only the device
+ * library means and what AT_MT_SPEC.md 462-467 describes. A LOCAL
+ * AT+MTATTR write, however, reaches ember and lands in the arena: this
+ * port's generic write bridge deliberately has no IsWritable() gate (the
+ * argued delta at mt_matter_zephyr.cpp:779 and :805-822, where a gate
+ * would break the bench-mandated MeasuredValue write), and that is C6
+ * parity, not a gap: esp-matter's set_val() skips its WRITABLE-less
+ * refusal for a plain, not-managed-internally attribute, which both
+ * create_number_of_positions() and create_current_position() produce. So
+ * "no writable attribute" here means no attribute a host has any REASON
+ * to write (the type is an event emitter; a host that pokes
+ * CurrentPosition is talking to itself) and none a controller CAN write.
+ * CurrentPosition is NOT updated by the event path on either platform
+ * (SwitchServer::OnInitialPress only calls LogEvent). The command that
+ * drives the type is AT+MTSWITCH. */
 DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(switchAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(Switch::Attributes::NumberOfPositions::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(Switch::Attributes::CurrentPosition::Id, INT8U, 1, 0),
@@ -2201,7 +2214,7 @@ constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
  *   Attribute split: Instance::Read() (operational-state-server.cpp:
  *   335-408) serves everything except FeatureMap, which falls through to
  *   ember (live seed 0); ClusterRevision is answered by the AAI as the
- *   BASE cluster's kRevision constant (:407), so unlike the ModeBase pair
+ *   BASE cluster's kRevision constant (:408-409), so unlike the ModeBase pair
  *   the revision seed here is INERT; both constants are 1 in this tree
  *   (OperationalState/Metadata.h:20, RvcOperationalState/Metadata.h:20)
  *   and the seed is written 1 anyway for truthful arena metadata. The
@@ -2424,12 +2437,15 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * ---- sizing -----------------------------------------------------------
  *
  * Block payload is 4 * clusterCount + 16 * slots, plus the type-conditional
- * store for the two types that carry one (store reclaim round): mode
- * select's mt_mode_store_t is 436 B (a count byte, 8 x 34 B mode/label
- * entries, padding to the structs' 4-byte alignment, 8 x 20 B
- * ModeOptionStruct) and chime's mt_chime_store_t is 273 B (a count byte,
- * 8 x 34 B id/name entries); both sizeofs are asserted beside
- * store_bytes() so these rows cannot go stale silently. Zephyr's sys_heap
+ * trailing store(s) for the three types that carry any: mode select's
+ * mt_mode_store_t is 436 B (a count byte, 8 x 34 B mode/label entries,
+ * padding to the structs' 4-byte alignment, 8 x 20 B ModeOptionStruct)
+ * and chime's mt_chime_store_t is 273 B (a count byte, 8 x 34 B id/name
+ * entries), both from the store reclaim round; the RVC carries TWO
+ * 306 B mt_mb_store_t (catalogue batch 5, one per ModeBase cluster,
+ * a count byte plus 8 x 38 B mode/tag/label entries). All three sizeofs
+ * are asserted beside store_bytes() so these rows cannot go stale
+ * silently. Zephyr's sys_heap
  * adds a 4-byte chunk header for a heap this size (heap.h
  * chunk_header_bytes(), small heap because 8192/8 = 1024 chunks is far
  * below the 0x7fff big-heap threshold) and rounds the total up to
@@ -3491,7 +3507,7 @@ const attr_seed s_seeds[] = {
      * unlike the ModeBase pair's: the Instance's AAI answers
      * ClusterRevision itself, hardcoded to the BASE cluster's
      * OperationalState::kRevision constant even on the derived cluster
-     * (operational-state-server.cpp:407); both constants are 1 in this
+     * (operational-state-server.cpp:408-409); both constants are 1 in this
      * tree (OperationalState/Metadata.h:20, RvcOperationalState/
      * Metadata.h:20), so there is no observable divergence, and the seed
      * is written 1 anyway so the arena's metadata stays truthful. */
