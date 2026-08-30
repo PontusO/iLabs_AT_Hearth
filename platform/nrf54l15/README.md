@@ -799,12 +799,43 @@ alignment. Flash rises 980 B.
    | | `ophelia_cpico` | `nrf54l15dk` |
    |---|---|---|
    | Arena (`_end` to the end of SRAM) | 46,572 B | 46,348 B |
-   | With a host staging session live | 40,964 B | 40,740 B |
-   | With both sessions live (needs the EVSE) | 35,356 B | 35,132 B |
+   | With a host staging session live | about 40.9 KB | about 40.7 KB |
+   | With both sessions live (needs the EVSE) | about 35.2 KB | about 35.0 KB |
+
+   The arena figure is exact, being a linker span. The two below it are
+   deliberately approximate: they are that span less the payload, and a
+   `sys_heap` also spends a chunk header and a rounding-up per live block,
+   which is on the order of 150 to 200 bytes across two blocks and is not
+   worth pretending to know to the byte from a static measurement. Read them
+   as "about 35 KB with everything open", which is the number that matters.
+
+   **Nothing else drawing on this arena is a standing condition, not an
+   enforced one.** It was checked at the disassembly level: the only callers
+   of the unwrapped libc `malloc` and `free` in the image are the hook's two
+   functions. But only `malloc`, `calloc`, `realloc` and `free` are wrapped,
+   so `aligned_alloc`, `memalign`, `posix_memalign`, `reallocarray`,
+   `strdup` and `strndup` all reach this arena directly, and a future caller
+   of any of them becomes a silent second tenant that no build gate would
+   notice. `port/hearth_port_zephyr.c` carries the full note beside the
+   implementation.
 
    `hearth_port.h` states what any implementation of the hook must satisfy,
    and the C6 backs it with its ordinary allocator, where the general
    internal heap has around 106 KB free at a one-endpoint composition.
+
+   **What this changed on the C6, stated because it is a shipped platform.**
+   The fabric staging buffer is committed at composition time there rather
+   than allocated per forward, which is what keeps `SetTargets`' answers on
+   the Matter wire exactly what they were. The cost is that the failure
+   moved rather than disappeared: a composition declaring an EVSE now takes
+   **5,608 bytes of the C6's heap permanently**, from the boot rebuild until
+   the next reboot, and a composition that cannot get them fails at
+   `mt_matter_evse_reserve()` like any other exhausted pool. Against about
+   106 KB free at one endpoint and about 47 KB at twenty-eight that is
+   affordable, and a composition with no EVSE pays nothing where it used to
+   pay 5,608 bytes on every image. It is still a change, and the C6's
+   standing heap figures should be re-measured with and without an EVSE
+   before they are quoted again.
 
 2. **The EEM measurement table, via an SDK patch.** `gMeasurements` in
    connectedhomeip's `ElectricalEnergyMeasurementCluster.cpp` is indexed by
@@ -845,7 +876,8 @@ LM20 tier and this round does not change that. What it changes is the price
 of asking. The 11,216 B of row machinery is no longer standing cost on a
 platform that never stages a row, and the two buffers the EVSE needs, host
 staging and fabric staging live at once, now come out of a 46,572 B arena
-rather than out of `.bss`: 35,356 B still free with both of them open. The
+rather than out of `.bss`: about 35.2 KB still free with both of them open,
+allowing for the heap's own per-block bookkeeping. The
 earlier claim that there is "no row-transfer tax to pay first" was wrong in
 an important way and is withdrawn. There is a tax, it is 11,216 B, and it is
 now paid out of the pool with the most room in it rather than reserved on

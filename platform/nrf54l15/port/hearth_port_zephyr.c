@@ -67,6 +67,34 @@ void hearth_os_restart(void)         { sys_reboot(SYS_REBOOT_WARM); }
  *   The dependency fails loudly if it ever stops holding. Without --wrap,
  *   __real_malloc is an undefined symbol and the link fails; the #error
  *   below turns that into a readable message at compile time instead.
+ *
+ * ---- A STANDING CONDITION, TRUE TODAY AND ENFORCED BY NOTHING ----
+ *
+ * "Nothing else in the image draws on this arena" is a fact about today's
+ * link, not a property the build maintains. It was checked at the
+ * disassembly level for round B's fix review: the only callers of the
+ * unwrapped libc malloc and free anywhere in the image are the two
+ * functions below. Nothing keeps that true.
+ *
+ * The wrap set is exactly malloc, calloc, realloc and free, plus their
+ * _malloc_r / _calloc_r / _realloc_r / _free_r reentrant forms
+ * (SysHeapMalloc.cpp's WRAP block, and the --wrap flags on the app link).
+ * Everything ELSE the common-libc allocator exports reaches THIS arena
+ * without passing through CHIP at all: aligned_alloc, memalign,
+ * posix_memalign, reallocarray, strdup and strndup. A future caller of any
+ * of them, in this application or in a Zephyr subsystem linked into it,
+ * silently becomes a second tenant of the staging arena, and the arithmetic
+ * in ../README.md's round B section quietly stops describing the memory it
+ * claims to describe.
+ *
+ * Nothing in the compiler, the linker or the build gates catches that. The
+ * call succeeds, the firmware works, and the only symptom is a staging
+ * allocation that fails on a loaded device one day. So it is written down
+ * where a person changing this file will read it: if the image ever needs
+ * one of those functions, either wrap it too, or size and measure this
+ * arena as a shared resource rather than a dedicated one. Checking means
+ * reading the map or the disassembly, not grepping the sources, because the
+ * names can arrive through a library.
  */
 #ifndef CONFIG_CHIP_MALLOC_SYS_HEAP_OVERRIDE
 #error "hearth_stage_alloc() takes the libc arena through __real_malloc, which exists \

@@ -37,7 +37,12 @@ void hearth_os_restart(void);
  *   - The block must NOT come from memory the SDK's own stack allocates
  *     from, and must not be contended by it. Staging must never be able to
  *     starve commissioning, and commissioning must never be able to fail a
- *     stage.
+ *     stage. An implementation that satisfies this by picking a pool
+ *     nothing else happens to use owes the next reader a note saying so,
+ *     and saying what would break it: "nothing else uses it" is a fact
+ *     about one link, not a property a build maintains, and no compiler
+ *     will notice when it stops being true. hearth_port_zephyr.c carries
+ *     the worked example.
  *   - Blocks are a few kilobytes each (one mt_row_stage_t, currently about
  *     5.6 KB) and at most two are live at once.
  *   - Alignment must suit any scalar, int64_t included.
