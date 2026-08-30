@@ -731,78 +731,126 @@ and joiner-router state) plus a 4 KB message-pool floor, and is
 deliberately not taken. `CONFIG_OPENTHREAD_MAX_CHILDREN=16` is the part
 of that cost this round did trim.
 
-### Memory reclaim round B (2026-08-30)
+### Memory reclaim round B (2026-08-31)
 
-Round B is the cross-cutting half: one item in the SHARED `core/`, which
-the ESP32-C6 firmware compiles too, and one in the SDK, which needed a
-patch mechanism this project did not have. It returns 17,648 B on
-`ophelia_cpico` and 17,640 B on `nrf54l15dk` and, like round A, changes no
-AT command, URC, error code or seed. Pristine builds, 2026-08-30:
+Round B is the cross-cutting half: one item in the SHARED `core/`, which the
+ESP32-C6 firmware compiles too, and one in the SDK, which needed a patch
+mechanism on this arm. It returns 15,632 B on `ophelia_cpico` and 15,624 B on
+`nrf54l15dk` and, like round A, changes no AT command, URC, error code or
+seed. Pristine builds, 2026-08-31:
 
 | | Batch 8 (`abe72e7`) | Memory reclaim B |
 |---|---|---|
-| RAM used, `ophelia_cpico` | 231,204 B (88.20%) | **213,556 B (81.47%)** |
-| RAM used, `nrf54l15dk` | 231,420 B (88.28%) | **213,780 B (81.55%)** |
-| RAM free, `ophelia_cpico` | 30,940 B | **48,588 B** |
-| RAM free, `nrf54l15dk` | 30,724 B | **48,364 B** |
-| Flash, `ophelia_cpico` | 883,120 B (64.26%) | **883,704 B (64.31%)** |
-| Flash, `nrf54l15dk` | 891,012 B (60.93%) | **891,600 B (60.97%)** |
+| RAM used, `ophelia_cpico` | 231,204 B (88.20%) | **215,572 B (82.23%)** |
+| RAM used, `nrf54l15dk` | 231,420 B (88.28%) | **215,796 B (82.32%)** |
+| RAM free, `ophelia_cpico` | 30,940 B | **46,572 B** |
+| RAM free, `nrf54l15dk` | 30,724 B | **46,348 B** |
+| Flash, `ophelia_cpico` | 883,120 B (64.26%) | **884,100 B (64.34%)** |
+| Flash, `nrf54l15dk` | 891,012 B (60.93%) | **892,004 B (61.00%)** |
 
-(`abe72e7` is round A plus catalogue batch 8, which is why the baseline
-reads 744 B above the round A row in the table above it. Same measurement,
-one merge later.)
+(`abe72e7` is round A plus catalogue batch 8, which is why the baseline reads
+744 B above the round A row in the table above it. Same measurement, one
+merge later.)
 
-Two items, each measured on its own with `nm -S` and the linked image:
+Two items, `.bss` measured per symbol with `nm -S`:
 
-| Item | RAM, `ophelia_cpico` | Flash |
-|---|---|---|
-| The two row stages become session-allocated | **-11,208 B** | +160 B |
-| The EEM measurement table becomes an instance pool | **-6,440 B** | +424 B |
+| Item | `.bss`, `ophelia_cpico` |
+|---|---|
+| The two row stages leave `.bss` | **-11,208 B** |
+| The EEM measurement table becomes an instance pool | **-4,439 B** |
 
-1. **The row stages are allocated per session, not reserved for ever.**
-   `core/mt/mt_at.c` held two `mt_row_stage_t` buffers of 5,608 B each in
-   `.bss`, measured: `s_row_stage` for the host's own `AT+MTROW` sets and
-   `s_row_inbound` for the ones a controller's `SetTargets` brings in. Both
-   are now allocated when a staging session opens and released when it
-   ends, so a build pays for them only while a set is actually staged.
-   **The capacity is unchanged and so is the wire contract**: a host still
-   stages `MT_ROW_MAX_ROWS` rows and still gets every error code
-   `AT_MT_SPEC.md` 3.28 specifies for every input. This is deliberately NOT
-   a compile-time removal of the row family on the platforms whose EVSE is
-   out of tier (ruling DE419): removing it would have made the reclaim
-   conditional on that exclusion and would have had to be undone to take
-   the EVSE back. The mechanism is platform-neutral, with no per-platform
-   `#ifdef` in the four verb handlers, because `core/` is shared: a
-   platform whose host never sends `AT+MTROW` simply never allocates.
-2. **The EEM measurement table, via the first SDK patch.**
-   `gMeasurements` in connectedhomeip's
-   `ElectricalEnergyMeasurementCluster.cpp` is indexed by
-   `emberAfGetClusterServerEndpointIndex()`, so it is declared as long as
-   the whole dynamic endpoint space and charged in full the moment the
-   cluster enters the build: 17 x 496 = 8,432 B measured, whether or not a
-   composition ever declares an energy endpoint. The endpoint-block
-   technique cannot reach it, because the indexing is inside the SDK. The
-   patch caps it at
-   `CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES` (4 here, the
-   `MT_DEM_MAX`/`MT_WHM_MAX` depth) and claims slots by endpoint id:
-   1,984 B plus a 12 B claim table, so 6,436 B of `.bss` by symbol.
+`.bss` falls 15,647 B in total, `datas` rises 20 B and `noinit` does not
+move; the linked RAM span falls 15,632 B, the difference being section
+alignment. Flash rises 980 B.
 
-**The patch mechanism is `west patch`, and it is documented in
-`sdk-patches/README.md`.** Patches live in this repository, not in the
-workspace; two commands apply and remove them; and `CMakeLists.txt` REFUSES
-TO CONFIGURE against an unpatched tree. That refusal is the load-bearing
-part. The patch defaults to stock behaviour when its macro is unset, which
-is what makes it upstreamable and is exactly what makes its absence
-invisible: an unpatched tree compiles, links, boots and works, and quietly
-gives the 6.4 KB back. Read `sdk-patches/README.md` before an SDK bump;
-`west update` does not carry a patch forward.
+1. **The row stages leave `.bss`, and WHICH heap they land in is the whole
+   of item 1.** `core/mt/mt_at.c` held two `mt_row_stage_t` buffers of
+   5,608 B each, measured: `s_row_stage` for the host's own `AT+MTROW` sets
+   and `s_row_inbound` for the ones a controller's `SetTargets` brings in.
+   The host's is now allocated when a staging session opens and released
+   when it ends; the fabric's is committed once, when a composition declares
+   an endpoint whose fabric commands carry rows, which on this platform is
+   never, because the EVSE is LM20-tier (DE408).
+
+   **The capacity and the wire contract are unchanged**: a host still stages
+   `MT_ROW_MAX_ROWS` rows and still gets every error code `AT_MT_SPEC.md`
+   3.28 specifies for every input. This is deliberately NOT a compile-time
+   removal of the row family on the platforms whose EVSE is out of tier
+   (ruling DE419): removing it would have made the reclaim conditional on
+   that exclusion and would have had to be undone to take the EVSE back.
+   The mechanism is platform-neutral, with no per-platform `#ifdef` in the
+   four verb handlers, because `core/` is shared.
+
+   **The memory comes from `hearth_stage_alloc()`, not from `malloc()`, and
+   that is the round's one hard-won lesson.** This application is linked
+   with `--wrap=malloc` because `CONFIG_CHIP_MALLOC_SYS_HEAP_OVERRIDE=y`, so
+   plain `malloc()` resolves to connectedhomeip's own
+   `sHeapMemory[CONFIG_CHIP_MALLOC_SYS_HEAP_SIZE]`, 10,240 B, from which the
+   entire Matter stack allocates. A 5,608 B session taken that way would
+   hold 55% of the stack's working memory for as long as a host left a set
+   staged, and exhaustion there is a commissioning failure. Meanwhile the
+   `.bss` this round frees goes to the libc arena
+   (`CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=-1`, so the arena is every byte of
+   SRAM the image does not statically use), which nothing else in the image
+   draws on, precisely because every other `malloc` is wrapped away. So the
+   port takes the arena by name, through `__real_malloc`, and the round's
+   reclaim and the round's spend are the same memory:
+
+   | | `ophelia_cpico` | `nrf54l15dk` |
+   |---|---|---|
+   | Arena (`_end` to the end of SRAM) | 46,572 B | 46,348 B |
+   | With a host staging session live | 40,964 B | 40,740 B |
+   | With both sessions live (needs the EVSE) | 35,356 B | 35,132 B |
+
+   `hearth_port.h` states what any implementation of the hook must satisfy,
+   and the C6 backs it with its ordinary allocator, where the general
+   internal heap has around 106 KB free at a one-endpoint composition.
+
+2. **The EEM measurement table, via an SDK patch.** `gMeasurements` in
+   connectedhomeip's `ElectricalEnergyMeasurementCluster.cpp` is indexed by
+   `emberAfGetClusterServerEndpointIndex()`, so it is declared as long as the
+   whole dynamic endpoint space and charged in full the moment the cluster
+   enters the build: 17 x 496 = 8,432 B measured, whether or not a
+   composition ever declares an energy endpoint. The endpoint-block technique
+   cannot reach it, because the indexing is inside the SDK. The patch caps it
+   at `CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES` and claims
+   slots by endpoint id: 3,968 B plus a 24 B claim table, so 4,440 B of
+   `.bss` by symbol, against one byte for the port's own reserve counter.
+
+   **The pool is 8 because `MT_MEAS_MAX` is 8.** A pool below this port's own
+   measurement capacity would let a composition be accepted and then not
+   served: past the pool the SDK answers `nullptr`, the port logs and
+   continues, `AT+MTEPAPPLY` still says `OK`, and a controller then gets a
+   Failure on the MANDATORY `Accuracy` attribute of a cluster the endpoint
+   advertises. Before the patch that could not happen. So the pool is sized
+   from capacity, `mt_matter_eem_reserve()` claims a slot before the endpoint
+   is built and stops the rebuild naming the macro (what every other pool
+   here does), and a `static_assert` keeps the two from drifting apart.
+
+**The patch mechanism is `west patch`, documented in
+`sdk-patches/README.md`.** It is not this project's first: the C6 arm has
+carried `platform/esp32c6/sdk-patches` with its own apply script since the
+combined-image round, and this directory copies its layout deliberately.
+Patches live in this repository, not in the workspace; two commands apply and
+remove them; and `CMakeLists.txt` REFUSES TO CONFIGURE against a tree that is
+unpatched or patched at the wrong REVISION. That refusal is the load-bearing
+part, and checking the revision rather than mere presence is the point of it:
+the patch defaults to stock behaviour when its macro is unset, which is what
+makes it upstreamable and is exactly what makes a missing or stale patch
+invisible. Read `sdk-patches/README.md` before an SDK bump; `west update`
+does not carry a patch forward.
 
 **What this means for the EVSE.** Ruling DE408 put the Energy EVSE in the
-LM20 tier and this round does not change that. It does remove the standing
-cost of the row machinery the EVSE needs: the 11,216 B is no longer spent
-on a platform that never stages a row, so bringing the EVSE back to this
-tier is now a question about its Instance, delegate and store cost alone,
-with no row-transfer tax to pay first.
+LM20 tier and this round does not change that. What it changes is the price
+of asking. The 11,216 B of row machinery is no longer standing cost on a
+platform that never stages a row, and the two buffers the EVSE needs, host
+staging and fabric staging live at once, now come out of a 46,572 B arena
+rather than out of `.bss`: 35,356 B still free with both of them open. The
+earlier claim that there is "no row-transfer tax to pay first" was wrong in
+an important way and is withdrawn. There is a tax, it is 11,216 B, and it is
+now paid out of the pool with the most room in it rather than reserved on
+every boot. Bringing the EVSE back is a question about its Instance, delegate
+and store cost, on a platform with 46 KB free.
 
 ## Dev board wiring
 
