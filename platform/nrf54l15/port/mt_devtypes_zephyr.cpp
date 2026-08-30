@@ -3022,6 +3022,165 @@ DECLARE_DYNAMIC_ENDPOINT(waterHeaterBareEndpoint, waterHeaterBareClusters);
 constexpr EmberAfDeviceType kWaterHeaterTypes[] = { { 0x050F, 1 }, { 0x0510, 1 } };
 constexpr EmberAfDeviceType kWaterHeaterBareTypes[] = { { 0x050F, 1 } };
 
+/* ---- battery storage (0x0018) -----------------------------------------
+ *
+ * Catalogue batch 7b audit (batch7-audit.md section 3.6). NO new cluster:
+ * the whole composition is batch 7a machinery (the sensor graft, the DEM
+ * pair, the pools, AT+MTDEMCAP, the PA event protocol) under a THIRD
+ * PowerSource attribute list, on the C6's mk_battery_storage()
+ * (mt_devtypes.cpp:2182-2264, class comment :2137-2181). Only the
+ * registry rows, the spans and this note are new; every create-path arm,
+ * seed special case and carve-out row is keyed on cluster ids these lists
+ * already carry.
+ *
+ * THE RECHG CONFORMANCE FIX, the reason the battery-shaped
+ * powerSourceAttrs above cannot be reused (the audit's risk line; the C6
+ * comment at :2146-2159 records the SDK defect this corrects):
+ * battery_storage::add() sets kBattery alone and then hand-creates four
+ * attributes PowerSourceCluster.xml gates on the RECHG feature, while the
+ * RECHG-MANDATORY BatChargeState is missing entirely. The fix is
+ * Battery|Rechargeable together (Feature 0x2 | 0x4 = 0x6,
+ * PowerSource/Enums.h:280-286, the keyed FeatureMap seed below) AND
+ * declaring the full attribute population that makes it true: the four
+ * RECHG-gated attributes (BatTimeToFullCharge, BatChargingCurrent,
+ * ActiveBatChargeFaults, BatCapacity) plus BatChargeState plus
+ * BatFunctionalWhileCharging, alongside the battery family the existing
+ * list already carries. Declaring the gated four without BatChargeState,
+ * or without the Rechargeable bit, reproduces the exact SDK defect the C6
+ * thunk was written to correct, with no build check to catch it.
+ *
+ * B263 BINDS THE DECLARED WIDTHS (the C6's own note at :2221-2246): the
+ * five uint32 battery attributes are XML-typed int32u with NO <constraint>
+ * element (power-source-cluster.xml:99 BatVoltage, :110 BatTimeRemaining,
+ * :165 BatCapacity, :183 BatTimeToFullCharge, :193 BatChargingCurrent),
+ * so the TYPE IS THE BOUND: all five are declared INT32U size 4, never an
+ * invented narrower size, and ember serves the full uint32 domain the C6
+ * serves. On this port the obligation is only the declared width (there
+ * is no created min/max to widen); a 4 B slot holds all five, so they are
+ * ordinary AT+MTATTR territory, plain slots, NO carve-out rows, no quiet
+ * rows, the audit's "no new AT surface" line. Nullable per the XML:
+ * BatVoltage, BatTimeRemaining, BatTimeToFullCharge and BatChargingCurrent
+ * are isNullable (seeded to the 4-byte unsigned sentinel below);
+ * BatCapacity and BatChargeState are NOT nullable (zero-fill: 0 and
+ * kUnknown = 0, PowerSource/Enums.h:109-115), BatFunctionalWhileCharging
+ * boots false, all matching the C6 config defaults. The two fault lists
+ * (ActiveBatFaults :135, ActiveBatChargeFaults :199) are arrays, declared
+ * metadata-only, no slot, quiet by type; AT+MTATTR answers +MTERR:5 on
+ * either, and they ship empty and host-untouched (AT_MT_SPEC.md 3.9's
+ * 0x0018 row). BatPercentRemaining keeps its real 0..200 bounds through
+ * the same hand-rolled MIN_MAX entry as the battery list.
+ *
+ * Variants: v0 carries the DEM pair (demAttrs + kDemIncoming, the
+ * WITH-PowerAdjustment list: the create path's variant predicate feeds
+ * both seed_slots()'s DEM FeatureMap special case and
+ * mt_matter_dem_register(), and variant 0 IS the PA variant here exactly
+ * as on the standalone 0x050D row, so every DEM obligation of the
+ * inverted iron rule holds unchanged). The triple is OVER-DELIVERY
+ * matching the SDK build (BatteryStorage.xml never requests DEM, the C6
+ * comment :2170-2172); v1 omits it and stays conformant. Both variants
+ * carry the full sensor graft WITH EEM (unlike solar, which spends its
+ * variant on the EEM: the two types' variant bytes mean different things,
+ * AT_MT_SPEC.md 3.9's shared paragraph).
+ *
+ * Spans: v0 advertises 0x0018 (revision 2, BatteryStorage.xml:60) +
+ * 0x0011 + 0x0510 + 0x050D, the C6's exact sequence; v1 drops 0x050D with
+ * the DEM pair (the C6 adds that id inside the variant-0 branch only), the
+ * water heater's device_types_v1 mechanism.
+ *
+ * DISCLOSED XML INCONSISTENCY, flagged not chased (the C6 comment
+ * :2173-2181): BatteryStorage.xml revision 2's summary says "two Power
+ * Source and Electrical Sensor composed devices types" while the body
+ * encodes ONE composed 0x0510 block with duplicated cluster rows and no
+ * Power Source device type at all; this endpoint delivers one sensor and
+ * one power source and discloses the departure on both platforms' terms.
+ *
+ * No Identify (BatteryStorage.xml lists it optional, nothing else); no
+ * tag_list, the port-wide rule.
+ *
+ * Block: v0 7 clusters, 32 slots, one 306 B mt_mb_store_t = 846 B
+ * payload, 856 B heap; v1 5 clusters, 23 slots, no store = 388 B payload,
+ * 392 B heap. The audit's 3.6 table said 31 slots / 830 / 832 for v0: it
+ * under-counted this list by one slot (its "about 14" PowerSource figure
+ * against the real 15 below) and mis-rounded the heap cost; re-derived
+ * here per the batch brief, still under the RVC's 864 B, and the floor
+ * candidate below pins the corrected arithmetic. */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(rechargeableBatteryPowerSourceAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Order::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Description::Id, CHAR_STRING, 61, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatVoltage::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    /* Hand-rolled MIN_MAX entry, shared with the battery list; see the
+     * powerSourceAttrs audit note. */
+    { &kBatPercentRemainingBounds, PowerSource::Attributes::BatPercentRemaining::Id, 1,
+      ZAP_TYPE(INT8U),
+      ZAP_ATTRIBUTE_MASK(MIN_MAX) | ZAP_ATTRIBUTE_MASK(NULLABLE) |
+          ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) | ZAP_ATTRIBUTE_MASK(READABLE) },
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatTimeRemaining::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatChargeLevel::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatReplacementNeeded::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatReplaceability::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::ActiveBatFaults::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatCapacity::Id, INT32U, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatChargeState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatTimeToFullCharge::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatFunctionalWhileCharging::Id, BOOLEAN, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatChargingCurrent::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::ActiveBatChargeFaults::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::EndpointList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(batteryStorageClusters)
+DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, rechargeableBatteryPowerSourceAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kDemIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+/* Variant 1: the same stack without the over-delivered DEM pair. */
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(batteryStorageNoDemClusters)
+DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, rechargeableBatteryPowerSourceAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(batteryStorageEndpoint, batteryStorageClusters);
+DECLARE_DYNAMIC_ENDPOINT(batteryStorageNoDemEndpoint, batteryStorageNoDemClusters);
+
+/* The v0 span carries the DEM id; v1 drops it with the cluster pair (the
+ * section comment; revisions match the standalone rows: 0x0011 rev 1,
+ * 0x0510 rev 1, 0x050D rev 3). */
+constexpr EmberAfDeviceType kBatteryStorageTypes[] = { { 0x0018, 2 },
+                                                       { 0x0011, 1 },
+                                                       { 0x0510, 1 },
+                                                       { 0x050D, 3 } };
+constexpr EmberAfDeviceType kBatteryStorageNoDemTypes[] = { { 0x0018, 2 },
+                                                            { 0x0011, 1 },
+                                                            { 0x0510, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 /* Catalogue batch 7a added ep_type_v1, the port's rendering of the C6's
@@ -3120,6 +3279,8 @@ const hearth_devtype s_registry[] = {
      * its 0x0510 id together. */
     { 0x050F, 1, &waterHeaterEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterTypes),
       &waterHeaterBareEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterBareTypes) },
+    { 0x0018, 1, &batteryStorageEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageTypes),
+      &batteryStorageNoDemEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageNoDemTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -3252,6 +3413,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *
  *   device type                        clusters  slots  payload  heap cost
  *   robotic vacuum cleaner  0x0074            5     14      856        864
+ *   battery storage v0      0x0018            7     32      846        856
  *   water heater v0         0x050F            7     29      798        808
  *   water heater v1         0x050F            4     19      626        632
  *   extended colour light   0x010D            5     36      596        600
@@ -3259,6 +3421,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   colour temperature lt   0x010C            5     32      532        536
  *   device energy mgmt v0   0x050D            3      9      462        472
  *   device energy mgmt v1   0x050D            3      8      446        456
+ *   battery storage v1      0x0018            5     23      388        392
  *   chime                   0x0146            2      4      345        352
  *   dimmable light/plug/mnt  0x0101 0x010B 0x0110  4  20      336        344
  *   pump / room air cond    0x0303 0x0072     4     18      304        312
@@ -3288,9 +3451,10 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * RVC's payload is 244 + two 306 B ModeBase stores, catalogue batch 5:
  * the widest type since the reclaim round made stores block-resident,
  * past the extended colour light's 600. The water heater rows are
- * 492/320 + one 306 B ModeBase store, catalogue batch 7b, the first
- * store-bearing rows to slot ABOVE the extended colour light without
- * taking the RVC's title.)
+ * 492/320 + one 306 B ModeBase store and the battery storage v0 row is
+ * 540 + one, catalogue batch 7b: the first store-bearing rows to slot
+ * ABOVE the extended colour light without taking the RVC's title, the
+ * battery ten payload bytes shy of it.)
  *
  * HEARTH_EP_HEAP_BYTES is 8192, which leaves 8,112 usable after the
  * heap's own header and bucket table. Against kServiceableEndpoints = 16:
@@ -3829,10 +3993,37 @@ static_assert(kWaterHeaterBlockBytes == 798,
               "the water heater block changed size; redo the sizing table rows and the "
               "batch 7b capacity arithmetic");
 
+/* More metadata-only counts for the battery candidate: the rechargeable
+ * PowerSource list has four (Description, EndpointList and the two fault
+ * arrays), demAttrs three (PowerAdjustmentCapability and the two power_mw
+ * scalars). */
+constexpr size_t kRechargeablePsNoSlot = 4;
+constexpr size_t kDemNoSlot            = 3;
+
+/* Battery storage v0, the wider variant list (v1 drops the DEM pair
+ * whole): 7 clusters, 15 + 2 + 4 + 2 + 6 + 3 = 32 slots, one ModeBase
+ * store. The catalogue's second-widest block: 846 B payload against the
+ * RVC's real 856 (heap cost 856 against 864), ten bytes shy of the
+ * title. */
+constexpr size_t kBatteryStorageBlockBytes =
+    block_bytes(MT_COUNT(batteryStorageClusters),
+                (MT_COUNT(rechargeableBatteryPowerSourceAttrs) - kRechargeablePsNoSlot) +
+                    MT_COUNT(ptopAttrs) + (MT_COUNT(epmAttrs) - kEpmNoSlot) +
+                    (MT_COUNT(eemAttrs) - kEemNoSlot) + (MT_COUNT(demAttrs) - kDemNoSlot) +
+                    (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot)) +
+    sizeof(mt_mb_store_t);
+/* 846 B payload is 856 B heap cost, the sizing table's row; the audit's
+ * 3.6 estimate (830/832) under-counted this list by one slot and
+ * mis-rounded, re-derived per the batch brief (the section comment). */
+static_assert(kBatteryStorageBlockBytes == 846,
+              "the battery storage block changed size; redo the sizing table rows and the "
+              "batch 7b capacity arithmetic");
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
           kMax2(kMax2(kModeSelectBlockBytes, kChimeBlockBytes),
-                kMax2(kMax2(kRvcBlockBytes, kDemBlockBytes), kWaterHeaterBlockBytes)));
+                kMax2(kMax2(kRvcBlockBytes, kDemBlockBytes),
+                      kMax2(kWaterHeaterBlockBytes, kBatteryStorageBlockBytes))));
 
 /*
  * Zephyr charges roundup(payload + 4, 8) per allocation on a heap this size,
@@ -4360,6 +4551,28 @@ const attr_seed s_seeds[] = {
       0x0309 },
     { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x01, 0x00, 0x00, 0x00 },
       0x0017 },
+    /* Catalogue batch 7b: battery storage's Battery|Rechargeable
+     * FeatureMap (0x2 | 0x4 = 0x6, PowerSource/Enums.h:280-286), the
+     * RECHG conformance fix's feature half, keyed per device type like
+     * the wired rows above. The four nullable uint32 battery attributes
+     * boot null (4-byte unsigned sentinel; this firmware measures no
+     * battery and only a host AT+MTATTR write can report a reading, the
+     * BatPercentRemaining rule); the rows are wildcard because only the
+     * rechargeable list declares these attributes, so no other type can
+     * match them. BatCapacity 0, BatChargeState 0 (kUnknown) and
+     * BatFunctionalWhileCharging false are the zero-fill matching the C6
+     * config defaults (the rechargeableBatteryPowerSourceAttrs audit
+     * note). */
+    { PowerSource::Id, PowerSource::Attributes::FeatureMap::Id, 4, { 0x06, 0x00, 0x00, 0x00 },
+      0x0018 },
+    { PowerSource::Id, PowerSource::Attributes::BatVoltage::Id, 4,
+      { 0xFF, 0xFF, 0xFF, 0xFF } }, /* null */
+    { PowerSource::Id, PowerSource::Attributes::BatTimeRemaining::Id, 4,
+      { 0xFF, 0xFF, 0xFF, 0xFF } }, /* null */
+    { PowerSource::Id, PowerSource::Attributes::BatTimeToFullCharge::Id, 4,
+      { 0xFF, 0xFF, 0xFF, 0xFF } }, /* null */
+    { PowerSource::Id, PowerSource::Attributes::BatChargingCurrent::Id, 4,
+      { 0xFF, 0xFF, 0xFF, 0xFF } }, /* null */
 
     /* SmokeCoAlarm. Every state boots at its enum's zero: ExpressedState 0
      * (kNormal), SmokeState/COState/BatteryAlert 0 (kNormal),
