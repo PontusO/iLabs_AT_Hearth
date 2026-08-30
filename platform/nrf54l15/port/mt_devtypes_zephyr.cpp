@@ -68,6 +68,16 @@ extern "C" void mt_matter_chime_delegate_unclaim(void *delegate);
  * measurement pools in mt_matter_zephyr.cpp. */
 extern "C" void mt_matter_eem_register(uint16_t ep);
 
+/* Catalogue batch 7a: the DEM Instance's second half (construct + soft
+ * Init with the variant's feature mask). Port-local for the same reason
+ * as the two above: the C6 needs no such name because esp-matter's
+ * DeviceEnergyManagementDelegateInitCB news the Instance from the
+ * endpoint's FeatureMap at enable time; here the create path passes the
+ * variant's own with_pa, the same predicate seed_slots()'s DEM FeatureMap
+ * special case uses, so the seeded shadow and the Instance mask agree by
+ * construction. Defined beside the DEM pool in mt_matter_zephyr.cpp. */
+extern "C" void mt_matter_dem_register(void *delegate, uint16_t ep, bool with_pa);
+
 using namespace chip;
 using namespace chip::app::Clusters;
 
@@ -2655,6 +2665,142 @@ DECLARE_DYNAMIC_ENDPOINT(utilityMeterEndpoint, utilityMeterClusters);
 
 constexpr EmberAfDeviceType kElectricalUtilityMeterTypes[] = { { 0x0511, 1 } };
 
+/* ---- device energy management (0x050D) --------------------------------
+ *
+ * Catalogue batch 7a audit section 3.7. DeviceEnergyManagement (0x0098)
+ * plus DeviceEnergyManagementMode (0x009F, a ModeBase alias riding the
+ * batch 5 mode-base-server frame: no new translation unit, one more
+ * kStoreWalk row, one more pool consumer) plus Descriptor. No Identify and
+ * no tag_list, SDK parity (the C6's mk_dem(), mt_devtypes.cpp:2287-2304).
+ * The XML classifies it a utility device type stackable on any endpoint;
+ * this row is the standalone declaration.
+ *
+ * DeviceEnergyManagement's three answers: code-driven no, CHI-only YES
+ * (config-data.yaml:41: its eight commands have no generated dispatch;
+ * the byte-identical IMClusterCommandHandler check covered it), AAI YES
+ * per endpoint (Instance derives from both AttributeAccessInterface and
+ * CommandHandlerInterface, device-energy-management-server.h:207-217;
+ * Init() registers CHI then AAI, SOFT on both,
+ * device-energy-management-server.cpp:40-47). Instance::Read() serves the
+ * six delegate scalars, the two structs and FeatureMap and falls through
+ * to ember for the rest (:60-105), so only ClusterRevision's seed is
+ * live.
+ *
+ * THE IRON RULE, INVERTED (the C6's mt_add_dem_triple() comment,
+ * mt_devtypes.cpp:1974-2025, and ARCHITECTURE.md 8.12, restated verbatim
+ * in reasoning as the batch brief directs). On the C6, DEM feature bits
+ * are set ONLY via feature::power_adjustment::add(), never by writing
+ * FeatureMap, because that one call is what creates
+ * PowerAdjustmentCapability and OptOutState, both PA commands and both PA
+ * events alongside the bit; a hand-set bit would advertise conformance
+ * with no ember entry behind it, and a missing entry means an invoke
+ * returns NO status at all on that platform. On this port there is no
+ * feature::add(): FeatureMap seeds and command lists are written by hand,
+ * so the rule inverts into a declaration obligation. SEEDING THE
+ * POWERADJUSTMENT BIT ON VARIANT 0 OBLIGES, all four together:
+ *   - declaring PowerAdjustmentCapability (STRUCT, metadata-only,
+ *     Instance-served, feature-gated in Read());
+ *   - declaring OptOutState (enum8; its slot is an inert shadow, the
+ *     Instance serves it, the carve-out reads it live);
+ *   - both PA commands in the INCOMING list (kDemIncoming below; the
+ *     Instance's CHI handles the invokes and its
+ *     RetrieveAcceptedCommands derives the advertised list from its own
+ *     feature mask, device-energy-management-server.cpp:110-127, so the
+ *     declared list and the mask must agree);
+ *   - NOTHING in the outgoing list: neither PA command has a response
+ *     (the cluster XML), the DE399 truthfulness discipline.
+ * Getting it half right advertises commands with no capability behind
+ * them and turns every AT+MTDEMCAP into +MTERR:4, with no build check to
+ * catch it: the variant-0 list below is the four together, the variant-1
+ * list is NONE of them (report-only ESA, FeatureMap 0, conformant: the
+ * XML's five-feature min-1 choice applies only under the ControllableESA
+ * condition, which variant 1 does not declare).
+ *
+ * The FeatureMap seed itself is the one variant-dependent boot value in
+ * the catalogue, written by seed_slots()'s DEM special case from
+ * d->variant (the AirQuality not-a-literal precedent) because s_seeds
+ * rows key on device type and both variants share 0x050D; the same
+ * variant predicate feeds mt_matter_dem_register()'s Instance mask, so
+ * shadow and Instance agree by construction.
+ *
+ * DEMMode reuses modeBaseAttrs and kModeBaseIncoming/kModeBaseOutgoing
+ * verbatim: every ModeBase alias numbers SupportedModes 0, CurrentMode 1,
+ * ChangeToMode 0 and ChangeToModeResponse 1 identically (the generated
+ * per-cluster headers), and the batch 5 audit notes on modeBaseAttrs
+ * apply unchanged, the sharp one included: ModeBase Instance::Init()
+ * VerifyOrDies on ordering (mode-base-server.cpp:77) and reads the
+ * delegate's index 0 first (:74), so the DEMMode store construction below
+ * and the strictly-after-create set_endpoint are both load-bearing.
+ * ClusterRevision 2 (DeviceEnergyManagementMode/Metadata.h:20, LIVE, the
+ * ModeBase no-default-arm rule); tag-0 default kNoOptimization
+ * (AT_MT_SPEC.md 3.20's table row).
+ *
+ * Slots: v0 = ESAType, ESACanGenerate, ESAState, OptOutState, FeatureMap,
+ * ClusterRevision (6) + DEMMode 3; v1 drops OptOutState (5 + 3). The two
+ * power_mw attributes are DE407 metadata-only declarations (quiet-table
+ * rows), Instance-served, carve-out read. Block: v0 3 clusters, 9 slots,
+ * 306 B store = 464 B heap; v1 448 B. Far under the RVC's 864 B widest.
+ *
+ * ESAState's shadow seeds kOnline (1), the delegate's default and the
+ * spec's pre-first-push answer (3.25); ESAType/ESACanGenerate/OptOutState
+ * zero-fill to match the delegate defaults. ClusterRevision 4 is
+ * DeviceEnergyManagement/Metadata.h:20 in THIS tree.
+ *
+ * Device revision 3 per data_model/1.5/device_types/
+ * DeviceEnergyManagement.xml. */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(demAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESACanGenerate::Id, BOOLEAN, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMinPower::Id, POWER_MW, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMaxPower::Id, POWER_MW, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::PowerAdjustmentCapability::Id,
+                              STRUCT, 0, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::OptOutState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+/* Variant 1, the report-only ESA: no PA-gated attributes (the iron rule's
+ * other half: FeatureMap 0 may not advertise what is not declared). */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(demReportOnlyAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESACanGenerate::Id, BOOLEAN, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMinPower::Id, POWER_MW, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMaxPower::Id, POWER_MW, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kDemIncoming[] = { DeviceEnergyManagement::Commands::PowerAdjustRequest::Id,
+                                       DeviceEnergyManagement::Commands::CancelPowerAdjustRequest::Id,
+                                       kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(demClusters)
+DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kDemIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(demReportOnlyClusters)
+DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demReportOnlyAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(demEndpoint, demClusters);
+DECLARE_DYNAMIC_ENDPOINT(demReportOnlyEndpoint, demReportOnlyClusters);
+
+constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 /* Catalogue batch 7a added ep_type_v1, the port's rendering of the C6's
@@ -2736,6 +2882,7 @@ const hearth_devtype s_registry[] = {
       &wiredElectricalSensorPowerOnlyEndpoint },
     { 0x0511, 0, &utilityMeterEndpoint,
       Span<const EmberAfDeviceType>(kElectricalUtilityMeterTypes) },
+    { 0x050D, 1, &demEndpoint, Span<const EmberAfDeviceType>(kDemTypes), &demReportOnlyEndpoint },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -3111,6 +3258,10 @@ constexpr store_desc kStoreWalk[] = {
      * the order taste, so the mechanism extends without change. */
     { RvcRunMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
     { RvcCleanMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    /* Catalogue batch 7a: the DEM device type's mode list, the third
+     * ModeBase store row; the walk mechanism is unchanged (the batch 5
+     * note above), only membership grows. */
+    { DeviceEnergyManagementMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
 };
 
 constexpr size_t align_up(size_t off, size_t align) { return ((off + align - 1) / align) * align; }
@@ -4056,6 +4207,23 @@ const attr_seed s_seeds[] = {
     { MeterIdentification::Id, MeterIdentification::Attributes::FeatureMap::Id, 4,
       { 0x01, 0x00, 0x00, 0x00 } },
     { MeterIdentification::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* DeviceEnergyManagement. ESAState's shadow seeds kOnline (1), the
+     * delegate default and the spec's pre-first-push answer
+     * (AT_MT_SPEC.md 3.25); ESAType 0 (kEvse), ESACanGenerate false and
+     * OptOutState 0 (kNoOptOut) are the zero-fill matching the delegate
+     * defaults, all Instance-served with carve-out reads either way.
+     * FeatureMap carries NO row: it is the catalogue's one
+     * variant-dependent boot value, written by seed_slots()'s special
+     * case below (the demAttrs audit note). ClusterRevision 4 is LIVE
+     * (Instance::Read() falls through for it) and is
+     * DeviceEnergyManagement/Metadata.h:20 in THIS tree. The DEMMode
+     * revision is LIVE too (the ModeBase no-default-arm rule the RVC rows
+     * above document): DeviceEnergyManagementMode/Metadata.h:20 says 2. */
+    { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::ESAState::Id, 1, { 0x01 } },
+    { DeviceEnergyManagement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x04, 0x00 } },
+    { DeviceEnergyManagementMode::Id, Globals::Attributes::ClusterRevision::Id, 2,
+      { 0x02, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -4125,6 +4293,21 @@ void seed_slots(dyn_endpoint *d)
                 for (uint8_t b = 0; b < s.size && b < sizeof(s.data); b++) {
                     s.data[b] = (uint8_t)(mask >> (8 * b));
                 }
+                continue;
+            }
+
+            /* Catalogue batch 7a: the DEM FeatureMap, the catalogue's one
+             * VARIANT-dependent boot value (both variants share device
+             * type 0x050D, so an s_seeds row cannot split them). Variant 0
+             * seeds Feature::kPowerAdjustment (0x1), variant 1 seeds 0,
+             * and the create path hands the identical variant predicate to
+             * mt_matter_dem_register(), whose Instance mask is what the
+             * fabric-side FeatureMap read actually answers: seed and
+             * Instance agree by construction, the AirQuality discipline
+             * with the variant as the shared source. */
+            if (cl.clusterId == DeviceEnergyManagement::Id &&
+                md.attributeId == Globals::Attributes::FeatureMap::Id) {
+                s.data[0] = (d->variant == 0) ? 0x01 : 0x00;
                 continue;
             }
 
@@ -4271,7 +4454,8 @@ mt_chime_store_t *mt_dyn_chime_store(EndpointId ep)
  * non-ModeBase id) answers nullptr, the callers' defensive arm. */
 mt_mb_store_t *mt_dyn_mb_store(EndpointId ep, ClusterId cluster)
 {
-    if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id) {
+    if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
+        cluster != DeviceEnergyManagementMode::Id) {
         return nullptr;
     }
     for (auto &d : s_dyn) {
@@ -4634,6 +4818,44 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 7a: the DEM handout's first half. The alloc takes
+     * the endpoint id up front (core/include/mt_matter.h pins alloc(ep);
+     * s_next_ep_id is exactly the id this create assigns if it succeeds,
+     * and a claim stranded by a later failure is bounded at one per boot,
+     * the standing policy). The DEMMode ModeBase claim is the RVC pair's
+     * discipline verbatim, one slot from the shared pool with the cluster
+     * id fixed at alloc; its second half's Instance::Init() VerifyOrDies
+     * on ordering, so the only acceptable failure is this abort before
+     * anything is spent. */
+    void *dem_delegate = nullptr;
+    if (type_has_cluster(ep_type, DeviceEnergyManagement::Id)) {
+        dem_delegate = mt_matter_dem_delegate_alloc(s_next_ep_id);
+        if (dem_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: DEM delegate pool exhausted (MT_DEM_MAX %u); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)MT_DEM_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    void *dem_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, DeviceEnergyManagementMode::Id)) {
+        dem_mode_delegate = mt_matter_modebase_delegate_alloc(DeviceEnergyManagementMode::Id);
+        if (dem_mode_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: modebase delegate pool exhausted (DEM mode); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     void *valve_delegate = nullptr;
     if (type_has_cluster(ep_type, ValveConfigurationAndControl::Id)) {
         valve_delegate = mt_matter_valve_delegate_alloc();
@@ -4750,6 +4972,12 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
         if (type_has_cluster(ep_type, RvcCleanMode::Id)) {
             new (region + store_offset(ep_type, RvcCleanMode::Id)) mt_mb_store_t();
+        }
+        /* Catalogue batch 7a: the DEM mode list, same before-the-endpoint
+         * ordering obligation as the RVC pair (the ModeBase Init reads
+         * index 0 as its first act). */
+        if (type_has_cluster(ep_type, DeviceEnergyManagementMode::Id)) {
+            new (region + store_offset(ep_type, DeviceEnergyManagementMode::Id)) mt_mb_store_t();
         }
     }
 
@@ -4998,6 +5226,19 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     if (type_has_cluster(ep_type, ElectricalEnergyMeasurement::Id)) {
         mt_matter_eem_register(d.ep_id);
+    }
+
+    /* Catalogue batch 7a: the DEM second halves. The ModeBase setter
+     * carries the RVC block's panic warning verbatim (Init() VerifyOrDies
+     * above a successful create); the DEM register is soft (CHI then AAI,
+     * no contains-server check) and takes the variant's PA predicate, the
+     * single source both the FeatureMap seed and the Instance mask derive
+     * from (seed_slots()'s special case). */
+    if (dem_delegate != nullptr) {
+        mt_matter_dem_register(dem_delegate, d.ep_id, variant == 0);
+    }
+    if (dem_mode_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(dem_mode_delegate, d.ep_id);
     }
 
     s_next_ep_id++;

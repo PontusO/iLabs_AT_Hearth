@@ -124,20 +124,10 @@ void *mt_matter_whm_delegate_alloc(uint16_t ep)
     return NULL;
 }
 
-void *mt_matter_dem_delegate_alloc(uint16_t ep)
-{
-    (void)ep;
-    return NULL;
-}
-
-int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *quads)
-{
-    (void)ep;
-    (void)cause;
-    (void)n;
-    (void)quads;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* The DEM pair (mt_matter_dem_delegate_alloc, mt_matter_demcap_set) left
+ * this file in catalogue batch 7a, when the device energy management
+ * device type (0x050D) entered the registry: real in mt_matter_zephyr.cpp
+ * now, on the MT_DEM_MAX HearthDemDelegate-plus-Instance pool. */
 
 int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
 {
