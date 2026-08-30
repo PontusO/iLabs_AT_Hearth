@@ -3437,6 +3437,95 @@ HEARTH_DECLARE_CONST_ENDPOINT(extractorHoodEndpoint, extractorHoodClusters);
 
 constexpr EmberAfDeviceType kExtractorHoodTypes[] = { { 0x007A, 1 } };
 
+/* ---- refrigerator (0x0070) ---------------------------------------------
+ *
+ * Catalogue batch 8 audit, RefrigeratorAlarm (0x0057) and
+ * RefrigeratorAndTemperatureControlledCabinetMode (0x0052).
+ *
+ * RefrigeratorAlarm 0x0057:
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; the regeneration left CodeDrivenInitShutdown.cpp
+ *   byte-identical). NOT CommandHandlerInterface-only either
+ *   (config-data.yaml:21-88), and harmlessly so: the cluster declares no
+ *   commands at all, matching RefrigeratorAlarm.xml's disallowConform on
+ *   ModifyEnabledAlarms and this tree's own CommandIds.h, which declares
+ *   none. The regeneration left IMClusterCommandHandler.cpp byte-identical.
+ *
+ *   NO Instance, NO Delegate, NO per-endpoint object of any kind. This is
+ *   the batch's one genuinely free cluster: RefrigeratorAlarmServer is a
+ *   process-global singleton (`static RefrigeratorAlarmServer instance`,
+ *   refrigerator-alarm-server.h:53) reached through Instance(), and it reads
+ *   and writes the three attributes through the generated Accessors, which
+ *   on a dynamic endpoint resolve straight into this file's arena through
+ *   the external-storage callbacks. 1 byte of .bss for the whole device.
+ *
+ *   ServerInit? None: MatterRefrigeratorAlarmPluginServerInitCallback() is
+ *   an empty body (refrigerator-alarm-server.cpp:198). No ordering hazard of
+ *   any kind, which is why this device type has nothing at all in
+ *   mt_devtype_create()'s claim block except its ModeBase slot.
+ *
+ *   Events: Notify (0x0000). Emitted by SetStateValue() itself, which writes
+ *   the State attribute and then LogEvent()s the transition in one call
+ *   (refrigerator-alarm-server.cpp:115-149) - the "one call, both effects"
+ *   shape AT_MT_SPEC.md 2276-2278 describes, and the reason AT+MTALARM
+ *   rather than AT+MTATTR is the write path for State. The dynamic
+ *   endpoint's empty eventList makes EventList read empty without blocking
+ *   emission, the generic switch precedent.
+ *
+ *   Note there is no attribute 0x0001: the ids are Mask 0x0000, State
+ *   0x0002, Supported 0x0003 (RefrigeratorAlarm/AttributeIds.h:19-29). Every
+ *   one is a plain BITMAP32 and every one is ordinary AT+MTATTR-reachable;
+ *   only State's WRITE path is diverted to AT+MTALARM (AT_MT_SPEC.md
+ *   2390-2398 forbids writing it with AT+MTATTR, and nothing in the code
+ *   enforces that: a raw write would land in the arena and skip Notify).
+ *
+ * RefrigeratorAndTemperatureControlledCabinetMode 0x0052 is a plain
+ * mode-base-server alias (zap_cluster_list.json:311-313), already compiled
+ * since batch 5, so modeBaseAttrs and kModeBaseIncoming/kModeBaseOutgoing
+ * are reused verbatim: every ModeBase alias numbers ChangeToMode 0x00 and
+ * ChangeToModeResponse 0x01 in its own generated CommandIds.h. Its
+ * VerifyOrDie-on-ordering Init() is batch 5's already-domesticated hazard.
+ *
+ * The C6's own quirk check on this device type came back CLEAN and is worth
+ * carrying, because so few in this catalogue did: refrigerator_and_tcc_mode::
+ * create() wires create_change_to_mode() and create_change_to_mode_response()
+ * unconditionally (esp_matter_cluster.cpp:2934-2937), unlike the
+ * OperationalState and SmokeCoAlarm creates that famously did not, and
+ * refrigerator_alarm::create() has no command section at all (:2869-2898),
+ * which is what conformance wants.
+ *
+ * Identify is hand-added on the C6 (mk_refrigerator(), mt_devtypes.cpp:
+ * 1005-1008) because refrigerator::config_t carries no identify field;
+ * declared here, same result.
+ *
+ * Revision 2 per data_model/1.5/device_types/Refrigerator.xml. Composing a
+ * Temperature Controlled Cabinet under this endpoint is legal and gives that
+ * cabinet the Cooler cluster set (the parenting policy above); a lone
+ * refrigerator row is sub-conformant against Refrigerator.xml:66-72's
+ * mandatory 0x0071 child, the oven's disclosed hole exactly. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(refrigeratorAlarmAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(RefrigeratorAlarm::Attributes::Mask::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(RefrigeratorAlarm::Attributes::State::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(RefrigeratorAlarm::Attributes::Supported::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(RefrigeratorAlarm::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(refrigeratorClusters)
+DECLARE_DYNAMIC_CLUSTER(RefrigeratorAndTemperatureControlledCabinetMode::Id, modeBaseAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(RefrigeratorAlarm::Id, refrigeratorAlarmAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(refrigeratorEndpoint, refrigeratorClusters);
+
+constexpr EmberAfDeviceType kRefrigeratorTypes[] = { { 0x0070, 2 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 /* Catalogue batch 7a added ep_type_v1, the port's rendering of the C6's
@@ -3652,6 +3741,8 @@ constexpr hearth_devtype s_registry[] = {
     { kDtCooktop, 0, &cooktopEndpoint, Span<const EmberAfDeviceType>(kCooktopTypes) },
     { kDtOven, 0, &ovenEndpoint, Span<const EmberAfDeviceType>(kOvenTypes) },
     { 0x007A, 0, &extractorHoodEndpoint, Span<const EmberAfDeviceType>(kExtractorHoodTypes) },
+    { kDtRefrigerator, 0, &refrigeratorEndpoint,
+      Span<const EmberAfDeviceType>(kRefrigeratorTypes) },
 };
 
 /*
@@ -3868,6 +3959,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   extended colour light   0x010D            5     36      596        600
  *   mode select             0x0027            3      8      576        584
  *   colour temperature lt   0x010C            5     32      532        536
+ *   refrigerator            0x0070            4     12      514        520
  *   device energy mgmt v0   0x050D            3      9      462        472
  *   device energy mgmt v1   0x050D            3      8      446        456
  *   battery storage v1      0x0018            5     23      388        392
@@ -4157,6 +4249,9 @@ constexpr store_desc kStoreWalk[] = {
     /* Catalogue batch 7b: the water heater's mode list, the fourth. Same
      * mechanism, same 306 B shape. */
     { WaterHeaterMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    /* Catalogue batch 8: the refrigerator's mode list, the fifth. */
+    { RefrigeratorAndTemperatureControlledCabinetMode::Id, sizeof(mt_mb_store_t),
+      alignof(mt_mb_store_t) },
 };
 
 constexpr size_t align_up(size_t off, size_t align) { return ((off + align - 1) / align) * align; }
@@ -5366,6 +5461,34 @@ const attr_seed s_seeds[] = {
      * incoming command list (the cooktop audit note). ClusterRevision rides
      * the shared OnOff row (6) and OnOff itself is the zero-fill false. */
     { OnOff::Id, OnOff::Attributes::FeatureMap::Id, 4, { 0x04, 0x00, 0x00, 0x00 }, kDtCooktop },
+
+    /* RefrigeratorAlarm. Mask 1 and Supported 1 are the C6's config
+     * defaults (esp_matter_cluster.h:926-930) and the values AT_MT_SPEC.md
+     * 2400-2402 documents to hosts: bit 0 (DoorOpen) supported and unmasked,
+     * every other bit neither. State 0 and FeatureMap 0 are the zero-fill,
+     * spelled out anyway for State because it is the attribute this cluster
+     * exists for. All three are LIVE arena values, not shadows: the server
+     * is a singleton that reads and writes them through the generated
+     * Accessors, so nothing intercepts them. ClusterRevision 1 is
+     * RefrigeratorAlarm/Metadata.h:20 in THIS tree. */
+    { RefrigeratorAlarm::Id, RefrigeratorAlarm::Attributes::Mask::Id, 4,
+      { 0x01, 0x00, 0x00, 0x00 } },
+    { RefrigeratorAlarm::Id, RefrigeratorAlarm::Attributes::State::Id, 4,
+      { 0x00, 0x00, 0x00, 0x00 } },
+    { RefrigeratorAlarm::Id, RefrigeratorAlarm::Attributes::Supported::Id, 4,
+      { 0x01, 0x00, 0x00, 0x00 } },
+    { RefrigeratorAlarm::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* RefrigeratorAndTemperatureControlledCabinetMode. ClusterRevision 2 is
+     * LIVE (the ModeBase AAI has no revision case, the RVC rows' standing
+     * rule) and is this tree's own Metadata.h:20. It DIVERGES from the C6,
+     * which says 3 (esp_matter_cluster_revisions.h:270-272); the port's
+     * convention is this tree's own kRevision and has been since batch 2, so
+     * 2 is right here and the divergence is disclosable rather than a bug.
+     * CurrentMode 0 and FeatureMap 0 are the zero-fill, the DEMMode
+     * shape. */
+    { RefrigeratorAndTemperatureControlledCabinetMode::Id,
+      Globals::Attributes::ClusterRevision::Id, 2, { 0x02, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -5603,7 +5726,8 @@ mt_chime_store_t *mt_dyn_chime_store(EndpointId ep)
 mt_mb_store_t *mt_dyn_mb_store(EndpointId ep, ClusterId cluster)
 {
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
-        cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id) {
+        cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id &&
+        cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id) {
         return nullptr;
     }
     for (auto &d : s_dyn) {
@@ -6088,6 +6212,28 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 8: the refrigerator's ModeBase claim, and from the
+     * cabinet commit the cooler cabinet's too. One more slot from the shared
+     * pool with the cluster id fixed at alloc, the RVC pair's discipline
+     * verbatim; RefrigeratorAlarm needs nothing here at all (a process
+     * singleton with no per-endpoint object and an empty plugin init, the
+     * refrigeratorAlarmAttrs audit note). */
+    void *fridge_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, RefrigeratorAndTemperatureControlledCabinetMode::Id)) {
+        fridge_mode_delegate =
+            mt_matter_modebase_delegate_alloc(RefrigeratorAndTemperatureControlledCabinetMode::Id);
+        if (fridge_mode_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: modebase delegate pool exhausted (refrigerator/cabinet "
+                    "mode); %u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     void *valve_delegate = nullptr;
     if (type_has_cluster(ep_type, ValveConfigurationAndControl::Id)) {
         valve_delegate = mt_matter_valve_delegate_alloc();
@@ -6215,6 +6361,13 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
          * obligation. */
         if (type_has_cluster(ep_type, WaterHeaterMode::Id)) {
             new (region + store_offset(ep_type, WaterHeaterMode::Id)) mt_mb_store_t();
+        }
+        /* Catalogue batch 8: the refrigerator's (and, from the cabinet
+         * commit, the cooler cabinet's) mode list, same obligation. */
+        if (type_has_cluster(ep_type, RefrigeratorAndTemperatureControlledCabinetMode::Id)) {
+            new (region + store_offset(ep_type,
+                                       RefrigeratorAndTemperatureControlledCabinetMode::Id))
+                mt_mb_store_t();
         }
     }
 
@@ -6499,6 +6652,13 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     if (wh_mode_delegate != nullptr) {
         mt_matter_modebase_delegate_set_endpoint(wh_mode_delegate, d.ep_id);
+    }
+
+    /* Catalogue batch 8: the refrigerator/cooler-cabinet mode's second half,
+     * carrying the RVC block's panic warning verbatim (Init() VerifyOrDies
+     * unless it runs below a successful emberAfSetDynamicEndpoint()). */
+    if (fridge_mode_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(fridge_mode_delegate, d.ep_id);
     }
 
     s_next_ep_id++;

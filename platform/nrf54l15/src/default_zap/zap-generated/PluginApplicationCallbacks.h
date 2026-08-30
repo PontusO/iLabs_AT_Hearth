@@ -41,8 +41,10 @@ void MatterOperationalCredentialsPluginServerInitCallback();
 void MatterGroupKeyManagementPluginServerInitCallback();
 void MatterBooleanStatePluginServerInitCallback();
 void MatterModeSelectPluginServerInitCallback();
+void MatterRefrigeratorAndTemperatureControlledCabinetModePluginServerInitCallback();
 void MatterRvcRunModePluginServerInitCallback();
 void MatterRvcCleanModePluginServerInitCallback();
+void MatterRefrigeratorAlarmPluginServerInitCallback();
 void MatterAirQualityPluginServerInitCallback();
 void MatterSmokeCoAlarmPluginServerInitCallback();
 void MatterOperationalStatePluginServerInitCallback();
@@ -70,54 +72,56 @@ void MatterOccupancySensingPluginServerInitCallback();
 void MatterChimePluginServerInitCallback();
 void MatterMeterIdentificationPluginServerInitCallback();
 
-#define MATTER_PLUGINS_INIT                                                    \
-  MatterIdentifyPluginServerInitCallback();                                    \
-  MatterGroupsPluginServerInitCallback();                                      \
-  MatterOnOffPluginServerInitCallback();                                       \
-  MatterLevelControlPluginServerInitCallback();                                \
-  MatterDescriptorPluginServerInitCallback();                                  \
-  MatterAccessControlPluginServerInitCallback();                               \
-  MatterBasicInformationPluginServerInitCallback();                            \
-  MatterOtaSoftwareUpdateRequestorPluginServerInitCallback();                  \
-  MatterPowerSourcePluginServerInitCallback();                                 \
-  MatterGeneralCommissioningPluginServerInitCallback();                        \
-  MatterNetworkCommissioningPluginServerInitCallback();                        \
-  MatterDiagnosticLogsPluginServerInitCallback();                              \
-  MatterGeneralDiagnosticsPluginServerInitCallback();                          \
-  MatterSoftwareDiagnosticsPluginServerInitCallback();                         \
-  MatterThreadNetworkDiagnosticsPluginServerInitCallback();                    \
-  MatterWiFiNetworkDiagnosticsPluginServerInitCallback();                      \
-  MatterSwitchPluginServerInitCallback();                                      \
-  MatterAdministratorCommissioningPluginServerInitCallback();                  \
-  MatterOperationalCredentialsPluginServerInitCallback();                      \
-  MatterGroupKeyManagementPluginServerInitCallback();                          \
-  MatterBooleanStatePluginServerInitCallback();                                \
-  MatterModeSelectPluginServerInitCallback();                                  \
-  MatterRvcRunModePluginServerInitCallback();                                  \
-  MatterRvcCleanModePluginServerInitCallback();                                \
-  MatterAirQualityPluginServerInitCallback();                                  \
-  MatterSmokeCoAlarmPluginServerInitCallback();                                \
-  MatterOperationalStatePluginServerInitCallback();                            \
-  MatterRvcOperationalStatePluginServerInitCallback();                         \
-  MatterValveConfigurationAndControlPluginServerInitCallback();                \
-  MatterElectricalPowerMeasurementPluginServerInitCallback();                  \
-  MatterElectricalEnergyMeasurementPluginServerInitCallback();                 \
-  MatterWaterHeaterManagementPluginServerInitCallback();                       \
-  MatterDeviceEnergyManagementPluginServerInitCallback();                      \
-  MatterPowerTopologyPluginServerInitCallback();                               \
-  MatterWaterHeaterModePluginServerInitCallback();                             \
-  MatterDeviceEnergyManagementModePluginServerInitCallback();                  \
-  MatterDoorLockPluginServerInitCallback();                                    \
-  MatterWindowCoveringPluginServerInitCallback();                              \
-  MatterPumpConfigurationAndControlPluginServerInitCallback();                 \
-  MatterThermostatPluginServerInitCallback();                                  \
-  MatterFanControlPluginServerInitCallback();                                  \
-  MatterColorControlPluginServerInitCallback();                                \
-  MatterIlluminanceMeasurementPluginServerInitCallback();                      \
-  MatterTemperatureMeasurementPluginServerInitCallback();                      \
-  MatterPressureMeasurementPluginServerInitCallback();                         \
-  MatterFlowMeasurementPluginServerInitCallback();                             \
-  MatterRelativeHumidityMeasurementPluginServerInitCallback();                 \
-  MatterOccupancySensingPluginServerInitCallback();                            \
-  MatterChimePluginServerInitCallback();                                       \
+#define MATTER_PLUGINS_INIT                                                        \
+  MatterIdentifyPluginServerInitCallback();                                        \
+  MatterGroupsPluginServerInitCallback();                                          \
+  MatterOnOffPluginServerInitCallback();                                           \
+  MatterLevelControlPluginServerInitCallback();                                    \
+  MatterDescriptorPluginServerInitCallback();                                      \
+  MatterAccessControlPluginServerInitCallback();                                   \
+  MatterBasicInformationPluginServerInitCallback();                                \
+  MatterOtaSoftwareUpdateRequestorPluginServerInitCallback();                      \
+  MatterPowerSourcePluginServerInitCallback();                                     \
+  MatterGeneralCommissioningPluginServerInitCallback();                            \
+  MatterNetworkCommissioningPluginServerInitCallback();                            \
+  MatterDiagnosticLogsPluginServerInitCallback();                                  \
+  MatterGeneralDiagnosticsPluginServerInitCallback();                              \
+  MatterSoftwareDiagnosticsPluginServerInitCallback();                             \
+  MatterThreadNetworkDiagnosticsPluginServerInitCallback();                        \
+  MatterWiFiNetworkDiagnosticsPluginServerInitCallback();                          \
+  MatterSwitchPluginServerInitCallback();                                          \
+  MatterAdministratorCommissioningPluginServerInitCallback();                      \
+  MatterOperationalCredentialsPluginServerInitCallback();                          \
+  MatterGroupKeyManagementPluginServerInitCallback();                              \
+  MatterBooleanStatePluginServerInitCallback();                                    \
+  MatterModeSelectPluginServerInitCallback();                                      \
+  MatterRefrigeratorAndTemperatureControlledCabinetModePluginServerInitCallback(); \
+  MatterRvcRunModePluginServerInitCallback();                                      \
+  MatterRvcCleanModePluginServerInitCallback();                                    \
+  MatterRefrigeratorAlarmPluginServerInitCallback();                               \
+  MatterAirQualityPluginServerInitCallback();                                      \
+  MatterSmokeCoAlarmPluginServerInitCallback();                                    \
+  MatterOperationalStatePluginServerInitCallback();                                \
+  MatterRvcOperationalStatePluginServerInitCallback();                             \
+  MatterValveConfigurationAndControlPluginServerInitCallback();                    \
+  MatterElectricalPowerMeasurementPluginServerInitCallback();                      \
+  MatterElectricalEnergyMeasurementPluginServerInitCallback();                     \
+  MatterWaterHeaterManagementPluginServerInitCallback();                           \
+  MatterDeviceEnergyManagementPluginServerInitCallback();                          \
+  MatterPowerTopologyPluginServerInitCallback();                                   \
+  MatterWaterHeaterModePluginServerInitCallback();                                 \
+  MatterDeviceEnergyManagementModePluginServerInitCallback();                      \
+  MatterDoorLockPluginServerInitCallback();                                        \
+  MatterWindowCoveringPluginServerInitCallback();                                  \
+  MatterPumpConfigurationAndControlPluginServerInitCallback();                     \
+  MatterThermostatPluginServerInitCallback();                                      \
+  MatterFanControlPluginServerInitCallback();                                      \
+  MatterColorControlPluginServerInitCallback();                                    \
+  MatterIlluminanceMeasurementPluginServerInitCallback();                          \
+  MatterTemperatureMeasurementPluginServerInitCallback();                          \
+  MatterPressureMeasurementPluginServerInitCallback();                             \
+  MatterFlowMeasurementPluginServerInitCallback();                                 \
+  MatterRelativeHumidityMeasurementPluginServerInitCallback();                     \
+  MatterOccupancySensingPluginServerInitCallback();                                \
+  MatterChimePluginServerInitCallback();                                           \
   MatterMeterIdentificationPluginServerInitCallback();

@@ -62,6 +62,11 @@
 /* Catalogue batch 7b: WaterHeaterManagement::Instance and Delegate, both
  * interface bases, the DEM shape (batch7-audit.md 2.2). */
 #include <app/clusters/water-heater-management-server/water-heater-management-server.h>
+/* Catalogue batch 8: RefrigeratorAlarmServer, the batch's one process-global
+ * singleton with no Instance, no Delegate and no per-endpoint object at all.
+ * AT+MTALARM's second cluster arm reaches it; nothing else in this file
+ * does. */
+#include <app/clusters/refrigerator-alarm-server/refrigerator-alarm-server.h>
 #include <app/EventLogging.h>
 #include <app/reporting/reporting.h>
 
@@ -924,6 +929,21 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::WaterHeaterManagement::Attributes::BoostState::Id },
     { chip::app::Clusters::WaterHeaterMode::Id,
       chip::app::Clusters::WaterHeaterMode::Attributes::CurrentMode::Id },
+    /* RefrigeratorAndTemperatureControlledCabinetMode (batch 8): the RVC
+     * ModeBase pair's rule on the fifth alias, read live from the pool and
+     * refused +MTERR:11 on write. Its ClusterRevision stays out for the same
+     * reason every ModeBase alias's does (the AAI has no revision case, so
+     * the arena seed is the live answer). RefrigeratorAlarm needs no rows at
+     * all, and that is the interesting half: Mask, State and Supported are
+     * plain arena integers that the singleton server itself reads and writes
+     * through the generated Accessors, so an AT+MTATTR read of any of them
+     * already answers exactly what a controller sees. Only State's WRITE
+     * path is diverted, and it is diverted to a different COMMAND
+     * (AT+MTALARM) rather than to a carve-out row here, because what the
+     * diversion buys is the Notify event, not a different value. */
+    { chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id,
+      chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Attributes::
+          CurrentMode::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -1034,6 +1054,7 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         case chip::app::Clusters::RvcCleanMode::Id:
         case chip::app::Clusters::DeviceEnergyManagementMode::Id:
         case chip::app::Clusters::WaterHeaterMode::Id:
+        case chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id:
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::RvcOperationalState::Id:
             return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
@@ -1955,8 +1976,61 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
         return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
     }
 
-    /* RefrigeratorAlarm is not in this platform's catalogue yet; when the
-     * composed-appliance batch brings it, its branch lands here. */
+    /*
+     * Catalogue batch 8: the second cluster arm the pre-batch comment
+     * promised, and it is a different shape from the one above rather than
+     * a tenth case in the same switch.
+     *
+     * <field> is not an attribute selector here, it is an alarm BIT NUMBER
+     * (AT_MT_SPEC.md 2312-2317): 0 is DoorOpen, the only bit the Matter spec
+     * defines in any revision through 1.5.1, and 1..7 exist only because the
+     * union bound mt_at.c enforces is 0..11 and this bridge has to narrow it
+     * somewhere. Bits 8..11 are legal for SmokeCoAlarm and out of range
+     * here.
+     *
+     * The Supported check is what makes an in-range but undefined bit
+     * answer +MTERR:1 rather than quietly setting a bit no controller can
+     * interpret. It reads the endpoint's OWN Supported attribute rather than
+     * a compiled-in mask, so a future host-configurable Supported (there is
+     * no AT path for it today; the seed is bit 0) narrows this check with
+     * it.
+     *
+     * ONE CALL, BOTH EFFECTS: SetStateValue() writes State and emits Notify
+     * itself (refrigerator-alarm-server.cpp:115-149), which is the whole
+     * reason AT+MTATTR is not the write path for State. Read-modify-write of
+     * the current State rather than a bare assignment, because <field> names
+     * one bit and the other bits must survive; GetStateValue() answers from
+     * the same arena slot the write lands in.
+     */
+    if (emberAfContainsServer(ep, RefrigeratorAlarm::Id)) {
+        if (field > 7 || value > 1) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        RefrigeratorAlarmServer &srv = RefrigeratorAlarmServer::Instance();
+        const chip::BitMask<RefrigeratorAlarm::AlarmBitmap> bit(
+            static_cast<uint32_t>(1u) << field);
+
+        chip::BitMask<RefrigeratorAlarm::AlarmBitmap> supported;
+        if (srv.GetSupportedValue(ep, &supported) != Status::Success) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        if (!supported.HasAll(bit)) {
+            return MT_ATTR_ERR_VALUE;
+        }
+
+        chip::BitMask<RefrigeratorAlarm::AlarmBitmap> state;
+        if (srv.GetStateValue(ep, &state) != Status::Success) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        if (value != 0) {
+            state.Set(bit);
+        } else {
+            state.Clear(bit);
+        }
+        return (srv.SetStateValue(ep, state) == Status::Success) ? MT_ATTR_OK
+                                                                 : MT_ATTR_ERR_FAILED;
+    }
+
     return MT_ATTR_ERR_CLUSTER;
 }
 /* ---- laundry washer / dishwasher / laundry dryer (OperationalState) ----
@@ -3068,6 +3142,18 @@ private:
              * reasoning the spec row records). */
             return chip::to_underlying(WaterHeaterMode::ModeTag::kManual);
         }
+        if (m_cluster == RefrigeratorAndTemperatureControlledCabinetMode::Id) {
+            /* Batch 8: kAuto on every mode, the AT_MT_SPEC.md 3.20 table
+             * row. Worth pointing at, because it is the one arm here whose
+             * substituted tag VALUE is itself 0: kAuto is a ModeBase COMMON
+             * tag (0x0000), not a cluster-specific one in the 0x4000 range
+             * like every other arm in this function. The substitution is
+             * still real and still the right answer; it just happens to be
+             * a no-op on the wire, and a reader who assumes every default
+             * tag is 0x4000-something will misread this line. */
+            return chip::to_underlying(
+                RefrigeratorAndTemperatureControlledCabinetMode::ModeTag::kAuto);
+        }
         return chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
     }
 
@@ -3231,11 +3317,14 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         return MT_ATTR_ERR_ENDPOINT;
     }
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
-        cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id) {
+        cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id &&
+        cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id) {
         /* Batch 7a widened the accept set to three of the C6's seven
          * ModeBase ids, batch 7b to four (WaterHeaterMode; EnergyEvseMode
-         * stays out with its device type, ruling DE408 LM20-tier); the
-         * appliance modes arrive with the composed-appliance batch. */
+         * stays out with its device type, ruling DE408 LM20-tier), batch 8
+         * to five with the refrigerator and cooler cabinet's 0x0052. OvenMode
+         * and MicrowaveOvenMode join it later in the same batch, with the
+         * device types that carry them. */
         return MT_ATTR_ERR_CLUSTER;
     }
     if (!emberAfContainsServer(ep, cluster)) {
@@ -3274,6 +3363,14 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                  * placeholder_tag() arm's reasoning; the AT_MT_SPEC.md
                  * 3.20 table row). */
                 tag = chip::to_underlying(WaterHeaterMode::ModeTag::kManual);
+            } else if (cluster == RefrigeratorAndTemperatureControlledCabinetMode::Id) {
+                /* Batch 8: kAuto on every mode, first or not. The one
+                 * substitution in this loop whose result is itself 0 (a
+                 * ModeBase COMMON tag, not a 0x4000-range cluster-specific
+                 * one), so it is a no-op on the wire; see placeholder_tag()'s
+                 * matching arm. */
+                tag = chip::to_underlying(
+                    RefrigeratorAndTemperatureControlledCabinetMode::ModeTag::kAuto);
             } else {
                 tag = chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
             }

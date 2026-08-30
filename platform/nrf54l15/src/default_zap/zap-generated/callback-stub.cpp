@@ -144,6 +144,13 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::RvcRunMode::Id:
     emberAfRvcRunModeClusterInitCallback(endpoint);
     break;
+  case app::Clusters::RefrigeratorAlarm::Id:
+    emberAfRefrigeratorAlarmClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id:
+    emberAfRefrigeratorAndTemperatureControlledCabinetModeClusterInitCallback(
+        endpoint);
+    break;
   case app::Clusters::RelativeHumidityMeasurement::Id:
     emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
     break;
@@ -378,6 +385,17 @@ emberAfRvcOperationalStateClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfRvcRunModeClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfRefrigeratorAlarmClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfRefrigeratorAndTemperatureControlledCabinetModeClusterInitCallback(
+    EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
