@@ -135,6 +135,76 @@ static_assert(CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT == kServiceableEndpoints
 static_assert(kServiceableEndpoints <= MT_COMP_MAX_ENDPOINTS,
               "serviceable capacity cannot exceed the composition the AT contract accepts");
 
+/*
+ * HEARTH_DECLARE_CONST_*: the SDK's DECLARE_DYNAMIC_* macros with const
+ * added, and nothing else changed.
+ *
+ * WHY THEY EXIST. CHIP declares the dynamic-endpoint metadata arrays
+ * without const:
+ *
+ *   attribute-storage.h:44  #define DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(n) \
+ *                               EmberAfCluster n[] = {
+ *   attribute-storage.h:55  #define DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(n) \
+ *                               EmberAfAttributeMetadata n[] = {
+ *   attribute-storage.h:41  #define DECLARE_DYNAMIC_ENDPOINT(n, cl) \
+ *                               EmberAfEndpointType n = { cl, ... }
+ *
+ * so this port's whole 41-device-type catalogue landed in .data: resident
+ * in RAM at all times whatever the host composed, and paid for twice,
+ * since .data also carries an initialiser image in flash. Measured 8,740 B
+ * of RAM across 120 symbols (41 cluster lists, 38 attribute lists, 41
+ * endpoint descriptors) on 2026-08-30 at 6c31f09. The ZAP-generated
+ * equivalents for the two fixed endpoints are already const and sit in
+ * .rodata, so this is a declaration accident, not a requirement.
+ *
+ * WHAT MUST STAY TRUE FOR THEM TO BE SAFE. Nothing may write to endpoint,
+ * cluster or attribute metadata at runtime. The type chain already says
+ * so, and the SDK was searched to confirm it (memory reclaim round A,
+ * 2026-08-30, against ~/ncs/v3.3.4/modules/lib/matter):
+ *
+ *   - emberAfSetDynamicEndpoint() takes const EmberAfEndpointType *
+ *     (attribute-storage.h:277); EmberAfDefinedEndpoint::endpointType is
+ *     const EmberAfEndpointType * (af-types.h:221);
+ *     EmberAfEndpointType::cluster is const EmberAfCluster *
+ *     (af-types.h:170); EmberAfCluster::attributes is
+ *     const EmberAfAttributeMetadata * (af-types.h:88). The command,
+ *     event and function lists on EmberAfCluster are const too. The chain
+ *     is const-correct end to end, so this needs no SDK patch and is not
+ *     a workaround for one.
+ *   - grep for const_cast on any of these types across all of matter/src:
+ *     zero hits. grep for a C-style cast to a non-const metadata pointer
+ *     type: zero hits.
+ *   - The only const-stripping cast that touches metadata at all is in
+ *     emAfLoadAttributeDefaults() (attribute-storage.cpp:1340, 1346,
+ *     1353, 1358), which casts &am->defaultValue to uint8_t * and hands
+ *     it to emAfReadOrWriteAttribute(..., write=true) as the SOURCE
+ *     buffer. It is never written through, and the whole branch sits
+ *     inside `if (!am->IsExternal())`, which every attribute this port
+ *     declares fails: the catalogue is EXTERNAL storage throughout. That
+ *     same path already runs against the const ZAP tables in .rodata for
+ *     the two fixed endpoints, which is independent evidence that it only
+ *     reads.
+ *
+ * So: if a future round declares a non-EXTERNAL attribute here, or hands
+ * one of these tables to something that wants to mutate it, these macros
+ * stop being safe and that table goes back to DECLARE_DYNAMIC_*. The
+ * DataVersion storage (s_dyn's per-endpoint versions) is written by CHIP
+ * and is deliberately NOT const.
+ *
+ * The END macros carry no type and are the SDK's, reused unchanged; they
+ * are wrapped only so the call sites read symmetrically.
+ */
+#define HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(attrListName)                                    \
+    const EmberAfAttributeMetadata attrListName[] = {
+#define HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END() DECLARE_DYNAMIC_ATTRIBUTE_LIST_END()
+
+#define HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(clusterListName)                                   \
+    const EmberAfCluster clusterListName[] = {
+#define HEARTH_DECLARE_CONST_CLUSTER_LIST_END DECLARE_DYNAMIC_CLUSTER_LIST_END
+
+#define HEARTH_DECLARE_CONST_ENDPOINT(endpointName, clusterList)                                   \
+    const EmberAfEndpointType endpointName = { clusterList, MATTER_ARRAY_SIZE(clusterList), 0 }
+
 namespace {
 
 /* ---- shared cluster building blocks ---------------------------------- */
@@ -154,8 +224,8 @@ namespace {
  * A 254-byte ARRAY declaration therefore failed the check and made every
  * single endpoint creation return CHIP_ERROR_NO_MEMORY.
  */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(descriptorAttrs)
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(descriptorAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 /* Identify's attributes DO reach the external store below: unlike
  * Descriptor, MatterIdentifyClusterInitCallback (identify-server/
@@ -170,12 +240,12 @@ DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
  * ThreadNetworkDiagnostics). Advertising Identify in AcceptedCommandList
  * would be a lie. Per-endpoint IdentifyCluster instances are a later
  * round's work. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(identifyAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(identifyAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(Identify::Attributes::IdentifyTime::Id, INT16U, 2,
                           ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(Identify::Attributes::IdentifyType::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(Identify::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 /* One metadata array per cluster, shared by every endpoint type that
  * carries that cluster: EmberAfCluster holds a const pointer to it and
@@ -184,7 +254,7 @@ DECLARE_DYNAMIC_ATTRIBUTE(Identify::Attributes::IdentifyTime::Id, INT16U, 2,
 
 /* ---- on/off light (0x0100) ------------------------------------------- */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(onOffAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(onOffAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::OnOff::Id, BOOLEAN, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::GlobalSceneControl::Id, BOOLEAN, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::OnTime::Id, INT16U, 2, ZAP_ATTRIBUTE_MASK(WRITABLE)),
@@ -193,26 +263,26 @@ DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::OnOff::Id, BOOLEAN, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::StartUpOnOff::Id, ENUM8, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kOnOffIncoming[] = { OnOff::Commands::Off::Id, OnOff::Commands::On::Id,
                                          OnOff::Commands::Toggle::Id, kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(onOffLightClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(onOffLightClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(onOffLightEndpoint, onOffLightClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(onOffLightEndpoint, onOffLightClusters);
 
 constexpr EmberAfDeviceType kOnOffLightTypes[] = { { 0x0100, 3 } };
 
 /* ---- dimmable light (0x0101) ----------------------------------------- */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(levelAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(levelAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::CurrentLevel::Id, INT8U, 1,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::RemainingTime::Id, INT16U, 2, 0),
@@ -225,7 +295,7 @@ DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::CurrentLevel::Id, INT8U, 1,
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::StartUpCurrentLevel::Id, INT8U, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kLevelIncoming[] = {
     LevelControl::Commands::MoveToLevel::Id,          LevelControl::Commands::Move::Id,
@@ -235,7 +305,7 @@ constexpr CommandId kLevelIncoming[] = {
     kInvalidCommandId
 };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(dimmableLightClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(dimmableLightClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
                             nullptr),
@@ -243,15 +313,15 @@ DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffI
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(dimmableLightEndpoint, dimmableLightClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(dimmableLightEndpoint, dimmableLightClusters);
 
 constexpr EmberAfDeviceType kDimmableLightTypes[] = { { 0x0101, 3 } };
 
 /* ---- temperature sensor (0x0302) ------------------------------------- */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(tempAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(tempAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MeasuredValue::Id, INT16S, 2,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MinMeasuredValue::Id, INT16S, 2,
@@ -259,18 +329,18 @@ DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MeasuredValue::Id,
     DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::MaxMeasuredValue::Id, INT16S, 2,
                               ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(TemperatureMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(temperatureSensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(temperatureSensorClusters)
 DECLARE_DYNAMIC_CLUSTER(TemperatureMeasurement::Id, tempAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(temperatureSensorEndpoint, temperatureSensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(temperatureSensorEndpoint, temperatureSensorClusters);
 
 /* Fix round 2, M1: data_model/1.5/device_types/TemperatureSensor.xml
  * revision is 3, not 2 -- a milestone-round mistake predating this batch,
@@ -311,10 +381,10 @@ constexpr EmberAfDeviceType kTemperatureSensorTypes[] = { { 0x0302, 3 } };
  * besides Descriptor is a plain ember external-storage cluster with no
  * such split.
  */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(booleanStateAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(booleanStateAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(BooleanState::Attributes::StateValue::Id, BOOLEAN, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(BooleanState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 /* Fix round 2, M2: Contact/Rain/Water Freeze/Water Leak all compose to the
  * exact same cluster set (BooleanState + Identify + Descriptor, mandatory
@@ -325,16 +395,16 @@ DECLARE_DYNAMIC_ATTRIBUTE(BooleanState::Attributes::StateValue::Id, BOOLEAN, 1, 
  * whole composition, not just one cluster, is identical across these four.
  * Only the EmberAfDeviceType (id, revision) differs per device type, and
  * that is what s_registry keys off. */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(booleanStateSensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(booleanStateSensorClusters)
 DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(booleanStateSensorEndpoint, booleanStateSensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(booleanStateSensorEndpoint, booleanStateSensorClusters);
 
 constexpr EmberAfDeviceType kContactSensorTypes[] = { { 0x0015, 2 } };
 constexpr EmberAfDeviceType kRainSensorTypes[] = { { 0x0044, 1 } };
@@ -379,30 +449,30 @@ constexpr EmberAfDeviceType kWaterLeakDetectorTypes[] = { { 0x0043, 1 } };
  * cluster are plain ember external storage, exactly like every other
  * sensor in this file.
  */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(occupancyAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(occupancyAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::Occupancy::Id, BITMAP8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::OccupancySensorType::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::OccupancySensorTypeBitmap::Id, BITMAP8, 1,
                               0),
     DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(occupancySensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(occupancySensorClusters)
 DECLARE_DYNAMIC_CLUSTER(OccupancySensing::Id, occupancyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(occupancySensorEndpoint, occupancySensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(occupancySensorEndpoint, occupancySensorClusters);
 
 constexpr EmberAfDeviceType kOccupancySensorTypes[] = { { 0x0107, 4 } };
 
 /* ---- humidity sensor (0x0307) ------------------------------------------ */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(humidityAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(humidityAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, INT16U, 2,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MinMeasuredValue::Id, INT16U, 2,
@@ -410,24 +480,24 @@ DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MeasuredValue
     DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MaxMeasuredValue::Id, INT16U, 2,
                               ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(humiditySensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(humiditySensorClusters)
 DECLARE_DYNAMIC_CLUSTER(RelativeHumidityMeasurement::Id, humidityAttrs, ZAP_CLUSTER_MASK(SERVER),
                         nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(humiditySensorEndpoint, humiditySensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(humiditySensorEndpoint, humiditySensorClusters);
 
 constexpr EmberAfDeviceType kHumiditySensorTypes[] = { { 0x0307, 2 } };
 
 /* ---- pressure sensor (0x0305) ------------------------------------------ */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(pressureAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(pressureAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MeasuredValue::Id, INT16S, 2,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MinMeasuredValue::Id, INT16S, 2,
@@ -435,18 +505,18 @@ DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MeasuredValue::Id, IN
     DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MaxMeasuredValue::Id, INT16S, 2,
                               ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(pressureSensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(pressureSensorClusters)
 DECLARE_DYNAMIC_CLUSTER(PressureMeasurement::Id, pressureAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(pressureSensorEndpoint, pressureSensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(pressureSensorEndpoint, pressureSensorClusters);
 
 constexpr EmberAfDeviceType kPressureSensorTypes[] = { { 0x0305, 2 } };
 
@@ -459,7 +529,7 @@ constexpr EmberAfDeviceType kPressureSensorTypes[] = { { 0x0305, 2 } };
  * the temperature/pressure seeds use. Same attr_null_sentinel() convention
  * (mt_matter_zephyr.cpp), different type -> different sentinel bytes. */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(illuminanceAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(illuminanceAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MeasuredValue::Id, INT16U, 2,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MinMeasuredValue::Id, INT16U, 2,
@@ -467,24 +537,24 @@ DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MeasuredValue::Id,
     DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MaxMeasuredValue::Id, INT16U, 2,
                               ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(lightSensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(lightSensorClusters)
 DECLARE_DYNAMIC_CLUSTER(IlluminanceMeasurement::Id, illuminanceAttrs, ZAP_CLUSTER_MASK(SERVER),
                         nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(lightSensorEndpoint, lightSensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(lightSensorEndpoint, lightSensorClusters);
 
 constexpr EmberAfDeviceType kLightSensorTypes[] = { { 0x0106, 3 } };
 
 /* ---- flow sensor (0x0306) ----------------------------------------------- */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(flowAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(flowAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MeasuredValue::Id, INT16U, 2,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MinMeasuredValue::Id, INT16U, 2,
@@ -492,17 +562,17 @@ DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MeasuredValue::Id, INT16U
     DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MaxMeasuredValue::Id, INT16U, 2,
                               ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(flowSensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(flowSensorClusters)
 DECLARE_DYNAMIC_CLUSTER(FlowMeasurement::Id, flowAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(flowSensorEndpoint, flowSensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(flowSensorEndpoint, flowSensorClusters);
 
 constexpr EmberAfDeviceType kFlowSensorTypes[] = { { 0x0306, 2 } };
 
@@ -520,15 +590,15 @@ constexpr EmberAfDeviceType kFlowSensorTypes[] = { { 0x0306, 2 } };
  * for the same reason the milestone on/off light above leaves them out:
  * this catalogue serves attribute-only clusters this build declares, and
  * Groups/Scenes were never added for the lights either. */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(onOffPlugInUnitClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(onOffPlugInUnitClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(onOffPlugInUnitEndpoint, onOffPlugInUnitClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(onOffPlugInUnitEndpoint, onOffPlugInUnitClusters);
 
 constexpr EmberAfDeviceType kOnOffPlugInUnitTypes[] = { { 0x010A, 4 } };
 
@@ -569,7 +639,7 @@ constexpr EmberAfDeviceType kMountedOnOffControlTypes[] = { { 0x010F, 2 } };
  * cluster list and its seeds (FeatureMap 0x01 for OnOff, 0x03 for
  * LevelControl) are the same as the dimmable light above; see that
  * device type's seed rows in s_seeds, none of which are duplicated here. */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(dimmablePlugInUnitClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(dimmablePlugInUnitClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
                             nullptr),
@@ -577,9 +647,9 @@ DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffI
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(dimmablePlugInUnitEndpoint, dimmablePlugInUnitClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(dimmablePlugInUnitEndpoint, dimmablePlugInUnitClusters);
 
 constexpr EmberAfDeviceType kDimmablePlugInUnitTypes[] = { { 0x010B, 5 } };
 
@@ -669,7 +739,7 @@ constexpr EmberAfDeviceType kMountedDimmableLoadControlTypes[] = { { 0x0110, 2 }
  * are declared because the cluster XML binds them, the same OccupancySensing
  * lesson as batch 1. RemainingTime is optional and stays out. */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(colorTempAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(colorTempAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTemperatureMireds::Id, INT16U, 2, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTempPhysicalMinMireds::Id, INT16U, 2, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTempPhysicalMaxMireds::Id, INT16U, 2, 0),
@@ -685,12 +755,12 @@ DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::ColorTemperatureMireds::Id, 
     DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::Options::Id, BITMAP8, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 /* The extended light's list is colorTempAttrs plus the HS and XY quartet.
  * Spelled out rather than composed: DECLARE_DYNAMIC_ATTRIBUTE_LIST_* builds a
  * plain array and there is no concatenation macro. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(extendedColorAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(extendedColorAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CurrentHue::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CurrentSaturation::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CurrentX::Id, INT16U, 2, 0),
@@ -710,7 +780,7 @@ DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::CurrentHue::Id, INT8U, 1, 0)
     DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::Options::Id, BITMAP8, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(ColorControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 /*
  * These two lists are the FULL mandatory command set for the feature map
@@ -776,7 +846,7 @@ constexpr CommandId kExtendedColorIncoming[] = {
     kInvalidCommandId
 };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(colorTemperatureLightClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(colorTemperatureLightClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
                             nullptr),
@@ -786,13 +856,13 @@ DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffI
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(colorTemperatureLightEndpoint, colorTemperatureLightClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(colorTemperatureLightEndpoint, colorTemperatureLightClusters);
 
 constexpr EmberAfDeviceType kColorTemperatureLightTypes[] = { { 0x010C, 4 } };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(extendedColorLightClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(extendedColorLightClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
                             nullptr),
@@ -802,9 +872,9 @@ DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffI
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(extendedColorLightEndpoint, extendedColorLightClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(extendedColorLightEndpoint, extendedColorLightClusters);
 
 constexpr EmberAfDeviceType kExtendedColorLightTypes[] = { { 0x010D, 4 } };
 
@@ -864,7 +934,7 @@ constexpr EmberAfDeviceType kExtendedColorLightTypes[] = { { 0x010D, 4 } };
  * esp-matter's 2000/2600 (cross-layer finding I1: the host library caches
  * upstream's boot values, and a first write matching the cache is swallowed
  * before it reaches the wire). */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(thermostatAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(thermostatAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::LocalTemperature::Id, TEMPERATURE, 2,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::OccupiedCoolingSetpoint::Id, TEMPERATURE, 2,
@@ -884,21 +954,21 @@ DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::LocalTemperature::Id, TEMPERAT
     DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::SystemMode::Id, ENUM8, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(Thermostat::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kThermostatIncoming[] = { Thermostat::Commands::SetpointRaiseLower::Id,
                                               kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(thermostatClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(thermostatClusters)
 DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
                         kThermostatIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(thermostatEndpoint, thermostatClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(thermostatEndpoint, thermostatClusters);
 
 constexpr EmberAfDeviceType kThermostatTypes[] = { { 0x0301, 4 } };
 
@@ -940,7 +1010,7 @@ constexpr EmberAfDeviceType kThermostatTypes[] = { { 0x0301, 4 } };
  * controller's IM; what does not happen is FanMode=Off zeroing PercentSetting
  * by itself. The host owns that coupling, which is the co-processor model
  * everywhere else in this file. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(fanControlAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(fanControlAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::FanMode::Id, ENUM8, 1,
                           ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::FanModeSequence::Id, ENUM8, 1, 0),
@@ -948,17 +1018,17 @@ DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::FanMode::Id, ENUM8, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::PercentCurrent::Id, PERCENT, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(FanControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(fanClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(fanClusters)
 DECLARE_DYNAMIC_CLUSTER(FanControl::Id, fanControlAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(fanEndpoint, fanClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(fanEndpoint, fanClusters);
 
 constexpr EmberAfDeviceType kFanTypes[] = { { 0x002B, 4 } };
 
@@ -1028,7 +1098,7 @@ constexpr EmberAfDeviceType kAirPurifierTypes[] = { { 0x002D, 2 } };
  * has default="desc" in the XML, GetMotionLockStatus() (:585) reads it, and
  * describing a position-aware, operational covering is the truthful answer
  * for what this endpoint presents. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(windowCoveringAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(windowCoveringAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::Type::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::ConfigStatus::Id, BITMAP8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::OperationalStatus::Id, BITMAP8, 1, 0),
@@ -1040,7 +1110,7 @@ DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::Type::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::Mode::Id, BITMAP8, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(WindowCovering::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kWindowCoveringIncoming[] = { WindowCovering::Commands::UpOrOpen::Id,
                                                   WindowCovering::Commands::DownOrClose::Id,
@@ -1048,16 +1118,16 @@ constexpr CommandId kWindowCoveringIncoming[] = { WindowCovering::Commands::UpOr
                                                   WindowCovering::Commands::GoToLiftPercentage::Id,
                                                   kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(windowCoveringClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(windowCoveringClusters)
 DECLARE_DYNAMIC_CLUSTER(WindowCovering::Id, windowCoveringAttrs, ZAP_CLUSTER_MASK(SERVER),
                         kWindowCoveringIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(windowCoveringEndpoint, windowCoveringClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(windowCoveringEndpoint, windowCoveringClusters);
 
 constexpr EmberAfDeviceType kWindowCoveringTypes[] = { { 0x0202, 5 } };
 
@@ -1092,20 +1162,20 @@ constexpr EmberAfDeviceType kWindowCoveringTypes[] = { { 0x0202, 5 } };
  * BitMask<Feature> cannot drift apart. On this platform that function was a
  * stub returning 0 until this batch; it now lives in mt_matter_zephyr.cpp
  * with the real bits. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(airQualityAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(airQualityAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(AirQuality::Attributes::AirQuality::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(AirQuality::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(airQualitySensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(airQualitySensorClusters)
 DECLARE_DYNAMIC_CLUSTER(AirQuality::Id, airQualityAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(airQualitySensorEndpoint, airQualitySensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(airQualitySensorEndpoint, airQualitySensorClusters);
 
 constexpr EmberAfDeviceType kAirQualitySensorTypes[] = { { 0x002C, 1 } };
 
@@ -1189,7 +1259,7 @@ constexpr EmberAfDeviceType kAirQualitySensorTypes[] = { { 0x002C, 1 } };
  * list. UnlockWithTimeout and UnboltDoor are not declared, so their
  * handlers are unreachable and the extra hooks they would need stay
  * unwritten. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(doorLockAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(doorLockAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::LockState::Id, ENUM8, 1,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::LockType::Id, ENUM8, 1, 0),
@@ -1200,22 +1270,22 @@ DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::LockState::Id, ENUM8, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::SupportedOperatingModes::Id, BITMAP16, 2, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kDoorLockIncoming[] = { DoorLock::Commands::LockDoor::Id,
                                             DoorLock::Commands::UnlockDoor::Id,
                                             kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(doorLockClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(doorLockClusters)
 DECLARE_DYNAMIC_CLUSTER(DoorLock::Id, doorLockAttrs, ZAP_CLUSTER_MASK(SERVER), kDoorLockIncoming,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(doorLockEndpoint, doorLockClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(doorLockEndpoint, doorLockClusters);
 
 constexpr EmberAfDeviceType kDoorLockTypes[] = { { 0x000A, 3 } };
 
@@ -1313,7 +1383,7 @@ constexpr EmberAfDeviceType kDoorLockTypes[] = { { 0x000A, 3 } };
  * in the platform README so a host author knows a 129/1 forward may be
  * server-initiated; the AT_MT_SPEC amendment and the bench case are the
  * controller's. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(valveAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(valveAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::OpenDuration::Id, ELAPSED_S, 4,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::DefaultOpenDuration::Id,
@@ -1327,22 +1397,22 @@ DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::OpenDuration
                               ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::FeatureMap::Id, BITMAP32, 4,
                               0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kWaterValveIncoming[] = { ValveConfigurationAndControl::Commands::Open::Id,
                                               ValveConfigurationAndControl::Commands::Close::Id,
                                               kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(waterValveClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(waterValveClusters)
 DECLARE_DYNAMIC_CLUSTER(ValveConfigurationAndControl::Id, valveAttrs, ZAP_CLUSTER_MASK(SERVER),
                         kWaterValveIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(waterValveEndpoint, waterValveClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(waterValveEndpoint, waterValveClusters);
 
 constexpr EmberAfDeviceType kWaterValveTypes[] = { { 0x0042, 1 } };
 
@@ -1424,7 +1494,7 @@ constexpr EmberAfAttributeMinMaxValue kBatPercentRemainingBounds = {
     (uint16_t)0x00, (uint16_t)0xC8 /* 0..200, half-percent units */
 };
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(powerSourceAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(powerSourceAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Order::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Description::Id, CHAR_STRING, 61, 0),
@@ -1439,16 +1509,16 @@ DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::BatReplaceability::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::EndpointList::Id, ARRAY, 0, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(powerSourceClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(powerSourceClusters)
 DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, powerSourceAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(powerSourceEndpoint, powerSourceClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(powerSourceEndpoint, powerSourceClusters);
 
 constexpr EmberAfDeviceType kPowerSourceTypes[] = { { 0x0011, 1 } };
 
@@ -1507,7 +1577,7 @@ constexpr EmberAfDeviceType kPowerSourceTypes[] = { { 0x0011, 1 } };
  * write to one of those fields passes its range check and then fails
  * with a bare ERROR because the setter's underlying attribute write
  * fails, the identical behaviour on both platforms. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(smokeCoAlarmAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(smokeCoAlarmAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::ExpressedState::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::SmokeState::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::COState::Id, ENUM8, 1, 0),
@@ -1516,21 +1586,21 @@ DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::ExpressedState::Id, ENUM8, 1
     DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::HardwareFaultAlert::Id, BOOLEAN, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::EndOfServiceAlert::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(SmokeCoAlarm::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kSmokeCoAlarmIncoming[] = { SmokeCoAlarm::Commands::SelfTestRequest::Id,
                                                 kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(smokeCoAlarmClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(smokeCoAlarmClusters)
 DECLARE_DYNAMIC_CLUSTER(SmokeCoAlarm::Id, smokeCoAlarmAttrs, ZAP_CLUSTER_MASK(SERVER),
                         kSmokeCoAlarmIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(smokeCoAlarmEndpoint, smokeCoAlarmClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(smokeCoAlarmEndpoint, smokeCoAlarmClusters);
 
 constexpr EmberAfDeviceType kSmokeCoAlarmTypes[] = { { 0x0076, 1 } };
 
@@ -1631,7 +1701,7 @@ constexpr EmberAfDeviceType kSmokeCoAlarmTypes[] = { { 0x0076, 1 } };
  * kUnableToCompleteOperation, and why the delegate never calls
  * SetOperationalState on allow) is on HearthOpStateDelegate in
  * mt_matter_zephyr.cpp. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(opStateAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(opStateAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::PhaseList::Id, ARRAY, 0,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::CurrentPhase::Id, INT8U, 1,
@@ -1640,7 +1710,7 @@ DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::PhaseList::Id, ARRAY, 0,
     DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalState::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalError::Id, STRUCT, 0, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kOpStateIncoming[] = { OperationalState::Commands::Pause::Id,
                                            OperationalState::Commands::Stop::Id,
@@ -1664,16 +1734,16 @@ constexpr CommandId kOpStateOutgoing[] = {
     OperationalState::Commands::OperationalCommandResponse::Id, kInvalidCommandId
 };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(applianceOpStateClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(applianceOpStateClusters)
 DECLARE_DYNAMIC_CLUSTER(OperationalState::Id, opStateAttrs, ZAP_CLUSTER_MASK(SERVER),
                         kOpStateIncoming, kOpStateOutgoing),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(applianceOpStateEndpoint, applianceOpStateClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(applianceOpStateEndpoint, applianceOpStateClusters);
 
 constexpr EmberAfDeviceType kLaundryWasherTypes[] = { { 0x0073, 2 } };
 constexpr EmberAfDeviceType kDishwasherTypes[] = { { 0x0075, 2 } };
@@ -1741,28 +1811,28 @@ constexpr EmberAfDeviceType kLaundryDryerTypes[] = { { 0x007C, 2 } };
  * writes CurrentMode itself (emberAfModeSelectClusterChangeToModeCallback,
  * :284-311), which lands in this arena and reaches the host as an
  * ordinary +MTATTR URC, the C6's documented contract for this type. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(modeSelectAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(modeSelectAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::Description::Id, CHAR_STRING, 65, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::StandardNamespace::Id, ENUM16, 2,
                               ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::SupportedModes::Id, ARRAY, 0, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::CurrentMode::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(ModeSelect::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kModeSelectIncoming[] = { ModeSelect::Commands::ChangeToMode::Id,
                                               kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(modeSelectClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(modeSelectClusters)
 DECLARE_DYNAMIC_CLUSTER(ModeSelect::Id, modeSelectAttrs, ZAP_CLUSTER_MASK(SERVER),
                         kModeSelectIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(modeSelectEndpoint, modeSelectClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(modeSelectEndpoint, modeSelectClusters);
 
 constexpr EmberAfDeviceType kModeSelectTypes[] = { { 0x0027, 1 } };
 
@@ -1846,24 +1916,24 @@ constexpr EmberAfDeviceType kModeSelectTypes[] = { { 0x0027, 1 } };
  * <event> in chime-cluster.xml at all). Enabled false answers Success
  * with NO delegate call (:266-271), so no +MTCMD is raised then, same
  * as the C6. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(chimeAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(chimeAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::InstalledChimeSounds::Id, ARRAY, 0, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::SelectedChime::Id, INT8U, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::Enabled::Id, BOOLEAN, 1,
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kChimeIncoming[] = { Chime::Commands::PlayChimeSound::Id, kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(chimeClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(chimeClusters)
 DECLARE_DYNAMIC_CLUSTER(Chime::Id, chimeAttrs, ZAP_CLUSTER_MASK(SERVER), kChimeIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(chimeEndpoint, chimeClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(chimeEndpoint, chimeClusters);
 
 constexpr EmberAfDeviceType kChimeTypes[] = { { 0x0146, 1 } };
 
@@ -1946,21 +2016,21 @@ constexpr EmberAfDeviceType kChimeTypes[] = { { 0x0146, 1 } };
  * CurrentPosition is NOT updated by the event path on either platform
  * (SwitchServer::OnInitialPress only calls LogEvent). The command that
  * drives the type is AT+MTSWITCH. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(switchAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(switchAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(Switch::Attributes::NumberOfPositions::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(Switch::Attributes::CurrentPosition::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(Switch::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(genericSwitchClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(genericSwitchClusters)
 DECLARE_DYNAMIC_CLUSTER(Switch::Id, switchAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(genericSwitchEndpoint, genericSwitchClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(genericSwitchEndpoint, genericSwitchClusters);
 
 /* Revision 3 per data_model/1.5/device_types/GenericSwitch.xml. */
 constexpr EmberAfDeviceType kGenericSwitchTypes[] = { { 0x000F, 3 } };
@@ -1989,10 +2059,10 @@ constexpr EmberAfDeviceType kGenericSwitchTypes[] = { { 0x000F, 3 } };
  * (0x01, the Lighting types'). Named for the RAC because that type is the
  * reason the list exists; the pump lands first in the build order and
  * shares it. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(racOnOffAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(racOnOffAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::OnOff::Id, BOOLEAN, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 /* ---- pump (0x0303) ----------------------------------------------------
  *
@@ -2056,7 +2126,7 @@ DECLARE_DYNAMIC_ATTRIBUTE(OnOff::Attributes::OnOff::Id, BOOLEAN, 1, 0),
  * under this feature map. Eleven slots; the optional PumpStatus and
  * ControlMode are not created, matching the C6. Eight events are declared
  * in the XML, all optional, none emitted by either platform. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(pumpAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(pumpAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::MaxPressure::Id, INT16S, 2,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::MaxSpeed::Id, INT16U, 2,
@@ -2077,9 +2147,9 @@ DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::MaxPressure::
                               ZAP_ATTRIBUTE_MASK(WRITABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(PumpConfigurationAndControl::Attributes::FeatureMap::Id, BITMAP32, 4,
                               0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(pumpClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(pumpClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(PumpConfigurationAndControl::Id, pumpAttrs, ZAP_CLUSTER_MASK(SERVER),
@@ -2088,9 +2158,9 @@ DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnO
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(pumpEndpoint, pumpClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(pumpEndpoint, pumpClusters);
 
 /* Revision 3 per data_model/1.5/device_types/Pump.xml. */
 constexpr EmberAfDeviceType kPumpTypes[] = { { 0x0303, 3 } };
@@ -2126,7 +2196,7 @@ constexpr EmberAfDeviceType kPumpTypes[] = { { 0x0303, 3 } };
  * Lighting-gated attributes on a FeatureMap 0x02 cluster, the conformance
  * break the racOnOffAttrs comment names; that is the one trap on this
  * type. */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(roomAirConditionerClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(roomAirConditionerClusters)
 DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
@@ -2135,9 +2205,9 @@ DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnO
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(roomAirConditionerEndpoint, roomAirConditionerClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(roomAirConditionerEndpoint, roomAirConditionerClusters);
 
 /* Revision 3 per data_model/1.5/device_types/RoomAirConditioner.xml. */
 constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
@@ -2263,11 +2333,11 @@ constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
  *   empty regardless.
  *
  * Revision 4 per data_model/1.5/device_types/RoboticVacuumCleaner.xml. */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(modeBaseAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(modeBaseAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(RvcRunMode::Attributes::SupportedModes::Id, ARRAY, 0, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(RvcRunMode::Attributes::CurrentMode::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(RvcRunMode::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kModeBaseIncoming[] = { RvcRunMode::Commands::ChangeToMode::Id,
                                             kInvalidCommandId };
@@ -2279,7 +2349,7 @@ constexpr CommandId kRvcOpStateIncoming[] = { RvcOperationalState::Commands::Pau
                                               RvcOperationalState::Commands::GoHome::Id,
                                               kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(rvcClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(rvcClusters)
 DECLARE_DYNAMIC_CLUSTER(RvcRunMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming,
                         kModeBaseOutgoing),
     DECLARE_DYNAMIC_CLUSTER(RvcCleanMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
@@ -2290,9 +2360,9 @@ DECLARE_DYNAMIC_CLUSTER(RvcRunMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(rvcEndpoint, rvcClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(rvcEndpoint, rvcClusters);
 
 constexpr EmberAfDeviceType kRvcTypes[] = { { 0x0074, 4 } };
 
@@ -2397,7 +2467,7 @@ constexpr EmberAfDeviceType kRvcTypes[] = { { 0x0074, 4 } };
  * Device revisions: both 1 per data_model/1.5/device_types/
  * ElectricalSensor.xml / ElectricalMeter.xml (the pinned authority). */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(epmAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(epmAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(ElectricalPowerMeasurement::Attributes::PowerMode::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(ElectricalPowerMeasurement::Attributes::NumberOfMeasurementTypes::Id,
                               INT8U, 1, 0),
@@ -2418,9 +2488,9 @@ DECLARE_DYNAMIC_ATTRIBUTE(ElectricalPowerMeasurement::Attributes::PowerMode::Id,
                               ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(ElectricalPowerMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4,
                               0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(eemAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(eemAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(ElectricalEnergyMeasurement::Attributes::Accuracy::Id, STRUCT, 0, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported::Id,
                               STRUCT, 0, ZAP_ATTRIBUTE_MASK(NULLABLE)),
@@ -2428,13 +2498,13 @@ DECLARE_DYNAMIC_ATTRIBUTE(ElectricalEnergyMeasurement::Attributes::Accuracy::Id,
                               STRUCT, 0, ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(ElectricalEnergyMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4,
                               0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(ptopAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(ptopAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(PowerTopology::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(electricalSensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(electricalSensorClusters)
 DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
                             nullptr, nullptr),
@@ -2442,39 +2512,39 @@ DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), 
                             nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
 /* Variant 1, power only: the same list minus the energy cluster. */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(electricalSensorPowerOnlyClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(electricalSensorPowerOnlyClusters)
 DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
                             nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(electricalMeterClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(electricalMeterClusters)
 DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
                         nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
                             nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
 /* Variant 1, the disclosed sub-conformant power-only meter (the section
  * comment above): EPM and Descriptor alone. */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(electricalMeterPowerOnlyClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(electricalMeterPowerOnlyClusters)
 DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
                         nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(electricalSensorEndpoint, electricalSensorClusters);
-DECLARE_DYNAMIC_ENDPOINT(electricalSensorPowerOnlyEndpoint, electricalSensorPowerOnlyClusters);
-DECLARE_DYNAMIC_ENDPOINT(electricalMeterEndpoint, electricalMeterClusters);
-DECLARE_DYNAMIC_ENDPOINT(electricalMeterPowerOnlyEndpoint, electricalMeterPowerOnlyClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(electricalSensorEndpoint, electricalSensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(electricalSensorPowerOnlyEndpoint, electricalSensorPowerOnlyClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(electricalMeterEndpoint, electricalMeterClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(electricalMeterPowerOnlyEndpoint, electricalMeterPowerOnlyClusters);
 
 constexpr EmberAfDeviceType kElectricalSensorTypes[] = { { 0x0510, 1 } };
 constexpr EmberAfDeviceType kElectricalMeterTypes[] = { { 0x0514, 1 } };
@@ -2537,19 +2607,19 @@ constexpr EmberAfDeviceType kElectricalMeterTypes[] = { { 0x0514, 1 } };
  * Device revisions: both 1 per data_model/1.5/device_types/HeatPump.xml /
  * SolarPower.xml. */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(wiredPowerSourceAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(wiredPowerSourceAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Order::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Description::Id, CHAR_STRING, 61, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::WiredCurrentType::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::EndpointList::Id, ARRAY, 0, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 /* One cluster list serves the heat pump and the variant-0 solar (the
  * booleanStateSensorClusters sharing principle: the whole composition is
  * identical, only the EmberAfDeviceType span differs per row). */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(wiredElectricalSensorClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(wiredElectricalSensorClusters)
 DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, wiredPowerSourceAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
@@ -2560,10 +2630,10 @@ DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, wiredPowerSourceAttrs, ZAP_CLUSTER_MASK
                             nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
 /* Solar variant 1: the same stack without the energy cluster. */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(wiredElectricalSensorPowerOnlyClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(wiredElectricalSensorPowerOnlyClusters)
 DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, wiredPowerSourceAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
@@ -2572,10 +2642,10 @@ DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, wiredPowerSourceAttrs, ZAP_CLUSTER_MASK
                             nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(wiredElectricalSensorEndpoint, wiredElectricalSensorClusters);
-DECLARE_DYNAMIC_ENDPOINT(wiredElectricalSensorPowerOnlyEndpoint,
+HEARTH_DECLARE_CONST_ENDPOINT(wiredElectricalSensorEndpoint, wiredElectricalSensorClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(wiredElectricalSensorPowerOnlyEndpoint,
                          wiredElectricalSensorPowerOnlyClusters);
 
 /* The same-endpoint grafts: three device types per span, the C6's
@@ -2651,7 +2721,7 @@ constexpr EmberAfDeviceType kSolarPowerTypes[] = { { 0x0017, 1 }, { 0x0011, 1 },
  * (AT_MT_SPEC.md 3.29). One variant. Device revision 1 per
  * data_model/1.5/device_types/ElectricalUtilityMeter.xml. */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(meterIdAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(meterIdAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::MeterType::Id, ENUM8, 1,
                           ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::PointOfDelivery::Id, CHAR_STRING,
@@ -2663,18 +2733,18 @@ DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::MeterType::Id, ENUM8,
     DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::PowerThreshold::Id, STRUCT, 0,
                               ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(utilityMeterClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(utilityMeterClusters)
 DECLARE_DYNAMIC_CLUSTER(MeterIdentification::Id, meterIdAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                         nullptr),
     DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(utilityMeterEndpoint, utilityMeterClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(utilityMeterEndpoint, utilityMeterClusters);
 
 constexpr EmberAfDeviceType kElectricalUtilityMeterTypes[] = { { 0x0511, 1 } };
 
@@ -2763,7 +2833,7 @@ constexpr EmberAfDeviceType kElectricalUtilityMeterTypes[] = { { 0x0511, 1 } };
  * Device revision 3 per data_model/1.5/device_types/
  * DeviceEnergyManagement.xml. */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(demAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(demAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAType::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESACanGenerate::Id, BOOLEAN, 1,
                               0),
@@ -2774,11 +2844,11 @@ DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAType::Id, ENUM8
                               STRUCT, 0, ZAP_ATTRIBUTE_MASK(NULLABLE)),
     DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::OptOutState::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 /* Variant 1, the report-only ESA: no PA-gated attributes (the iron rule's
  * other half: FeatureMap 0 may not advertise what is not declared). */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(demReportOnlyAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(demReportOnlyAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAType::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESACanGenerate::Id, BOOLEAN, 1,
                               0),
@@ -2786,32 +2856,32 @@ DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAType::Id, ENUM8
     DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMinPower::Id, POWER_MW, 8, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMaxPower::Id, POWER_MW, 8, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kDemIncoming[] = { DeviceEnergyManagement::Commands::PowerAdjustRequest::Id,
                                        DeviceEnergyManagement::Commands::CancelPowerAdjustRequest::Id,
                                        kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(demClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(demClusters)
 DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demAttrs, ZAP_CLUSTER_MASK(SERVER),
                         kDemIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
                             ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(demReportOnlyClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(demReportOnlyClusters)
 DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demReportOnlyAttrs, ZAP_CLUSTER_MASK(SERVER),
                         nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
                             ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(demEndpoint, demClusters);
-DECLARE_DYNAMIC_ENDPOINT(demReportOnlyEndpoint, demReportOnlyClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(demEndpoint, demClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(demReportOnlyEndpoint, demReportOnlyClusters);
 
 constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
 
@@ -2957,7 +3027,7 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  *
  * Device revision 1 per data_model/1.5/device_types/WaterHeater.xml:60. */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(whmAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(whmAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeaterTypes::Id, BITMAP8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeatDemand::Id, BITMAP8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::TankVolume::Id, INT16U, 2, 0),
@@ -2967,23 +3037,23 @@ DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeaterTypes::Id, BI
                               0),
     DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::BoostState::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 /* Variant 1, the bare cluster: the three unconditionally mandatory values
  * only (the feature-gate trace in the section comment; FeatureMap 0 may
  * not advertise what is not declared, the DEM report-only list's rule). */
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(whmBareAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(whmBareAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeaterTypes::Id, BITMAP8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeatDemand::Id, BITMAP8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::BoostState::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
 constexpr CommandId kWhmIncoming[] = { WaterHeaterManagement::Commands::Boost::Id,
                                        WaterHeaterManagement::Commands::CancelBoost::Id,
                                        kInvalidCommandId };
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(waterHeaterClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(waterHeaterClusters)
 DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
                         kThermostatIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(WaterHeaterManagement::Id, whmAttrs, ZAP_CLUSTER_MASK(SERVER),
@@ -2998,11 +3068,11 @@ DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER
                             nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
 /* Variant 1, the SDK-bare build: no sensor graft (the disclosure in the
  * section comment). */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(waterHeaterBareClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(waterHeaterBareClusters)
 DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
                         kThermostatIncoming, nullptr),
     DECLARE_DYNAMIC_CLUSTER(WaterHeaterManagement::Id, whmBareAttrs, ZAP_CLUSTER_MASK(SERVER),
@@ -3011,10 +3081,10 @@ DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER
                             kModeBaseIncoming, kModeBaseOutgoing),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(waterHeaterEndpoint, waterHeaterClusters);
-DECLARE_DYNAMIC_ENDPOINT(waterHeaterBareEndpoint, waterHeaterBareClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(waterHeaterEndpoint, waterHeaterClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(waterHeaterBareEndpoint, waterHeaterBareClusters);
 
 /* The variant-0 span grafts 0x0510 on the same endpoint (revision 1,
  * matching the standalone sensor row); variant 1 has no graft and no
@@ -3105,7 +3175,7 @@ constexpr EmberAfDeviceType kWaterHeaterBareTypes[] = { { 0x050F, 1 } };
  * here per the batch brief, still under the RVC's 864 B, and the floor
  * candidate below pins the corrected arithmetic. */
 
-DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(rechargeableBatteryPowerSourceAttrs)
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(rechargeableBatteryPowerSourceAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Order::Id, INT8U, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Description::Id, CHAR_STRING, 61, 0),
@@ -3134,9 +3204,9 @@ DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::ActiveBatChargeFaults::Id, ARRAY, 0, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::EndpointList::Id, ARRAY, 0, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
-    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
 
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(batteryStorageClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(batteryStorageClusters)
 DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, rechargeableBatteryPowerSourceAttrs,
                         ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
@@ -3151,10 +3221,10 @@ DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, rechargeableBatteryPowerSourceAttrs,
                             ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
 /* Variant 1: the same stack without the over-delivered DEM pair. */
-DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(batteryStorageNoDemClusters)
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(batteryStorageNoDemClusters)
 DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, rechargeableBatteryPowerSourceAttrs,
                         ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
@@ -3165,10 +3235,10 @@ DECLARE_DYNAMIC_CLUSTER(PowerSource::Id, rechargeableBatteryPowerSourceAttrs,
                             nullptr, nullptr),
     DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
                             nullptr),
-    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
 
-DECLARE_DYNAMIC_ENDPOINT(batteryStorageEndpoint, batteryStorageClusters);
-DECLARE_DYNAMIC_ENDPOINT(batteryStorageNoDemEndpoint, batteryStorageNoDemClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(batteryStorageEndpoint, batteryStorageClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(batteryStorageNoDemEndpoint, batteryStorageNoDemClusters);
 
 /* The v0 span carries the DEM id; v1 drops it with the cluster pair (the
  * section comment; revisions match the standalone rows: 0x0011 rev 1,
@@ -3958,9 +4028,11 @@ constexpr size_t kDemBlockBytes =
  * So these candidates count EXACTLY: MT_COUNT per list minus a NAMED
  * constant for that list's metadata-only members, each constant carrying
  * the members it stands for. (Counting through attr_gets_slot() itself at
- * compile time would be better still, and does not compile: this tree's
- * DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN declares a plain non-const array,
- * attribute-storage.h:55, so the lists are not constant expressions.)
+ * compile time would be better still, and does not compile: the lists are
+ * const but not constexpr, and a const object of class type is not usable
+ * in a constant expression, so attr_gets_slot() cannot read one at compile
+ * time. Memory reclaim round A moved them from .data to .rodata with
+ * HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN; that does not change this.)
  * Drift-proofing is the equality assert under each candidate, pinning the
  * whole derivation to the sizing table's payload row: ANY edit to any
  * involved list moves the sum off the pinned value and fails the build,
