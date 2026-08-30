@@ -54,11 +54,9 @@
 
 #include "mt_matter.h"
 
-int mt_matter_switch_click(uint16_t ep)
-{
-    (void)ep;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* mt_matter_switch_click() left this file in catalogue batch 5, when the
+ * generic switch (0x000F) entered the registry: real in
+ * mt_matter_zephyr.cpp now, on the stateless SwitchServer singleton. */
 
 int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count)
 {

@@ -1836,6 +1836,91 @@ DECLARE_DYNAMIC_ENDPOINT(chimeEndpoint, chimeClusters);
 
 constexpr EmberAfDeviceType kChimeTypes[] = { { 0x0146, 1 } };
 
+/* ---- generic switch (0x000F) ------------------------------------------
+ *
+ * Catalogue batch 5 audit, Switch (0x003B). The port's first EVENT
+ * EMITTER: this device type exists to raise Switch events at controllers,
+ * not to serve writable state.
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; regenerating hearth.zap with the cluster on ep240 left
+ *   CodeDrivenInitShutdown.cpp byte-identical, the batch 3 method). Not
+ *   CommandHandlerInterface-only either (config-data.yaml:21-88), which is
+ *   harmless: switch-cluster.xml declares NO commands at all (:83-151 is
+ *   attributes and events only), so no generated dispatch case exists or
+ *   is needed, and the same regeneration left IMClusterCommandHandler.cpp
+ *   byte-identical too.
+ *
+ *   Delegate or plain ember? Plain ember plus a STATELESS singleton.
+ *   SwitchServer is `static SwitchServer instance` (switch-server.h:82,
+ *   defined switch-server.cpp:41) with no data members and no per-endpoint
+ *   state: all seven On* methods take an EndpointId and do nothing but
+ *   build the event struct and LogEvent() it. No delegate, no AAI, no
+ *   Init(), no pool, nothing to hand out at create time. The declared
+ *   value attributes are ordinary ember external storage against this
+ *   arena.
+ *
+ *   ServerInit? None. MatterSwitchPluginServerInitCallback and its
+ *   Shutdown twin are empty bodies (switch-server.cpp:154-155), no
+ *   emberAfSwitchCluster*InitCallback exists, and the XML says
+ *   <server init="false" tick="false"> (switch-cluster.xml:31). Does NOT
+ *   join the B388 call site.
+ *
+ *   Event emission, the load-bearing part. The server never self-emits:
+ *   mt_matter_switch_click() (mt_matter_zephyr.cpp) calls
+ *   SwitchServer::Instance().OnInitialPress(ep, 1), whose whole body is
+ *   LogEvent(event, endpoint, eventNumber) (switch-server.cpp:66-78). On a
+ *   dynamic endpoint DECLARE_DYNAMIC_CLUSTER leaves eventList/eventCount
+ *   zero (attribute-storage.h:48-51 supplies only eight initializers), so
+ *   the EventList global attribute reads EMPTY on this endpoint; that does
+ *   NOT block emission, which never consults it. The event's read
+ *   privilege resolves through CodegenDataModelProvider::EventInfo(),
+ *   which falls back to RequiredPrivilege::ForReadEvent(path) when no
+ *   registered cluster object claims the path
+ *   (CodegenDataModelProvider.cpp:249-257); this build's generated
+ *   access.h carries event privilege overrides only for Access Control
+ *   (access.h:284-300, byte-identical through this batch's regeneration),
+ *   so InitialPress defaults to kView and no access.h change is needed.
+ *   InitialPress is priority="info" (switch-cluster.xml:98) and lands in
+ *   the info event buffer the image already allocates. Argued on the
+ *   source end to end; the bench proof (a subscribed controller receiving
+ *   InitialPress from a dynamic endpoint) is the controller's, recorded in
+ *   the batch report.
+ *
+ * FeatureMap 0x02 is MomentarySwitch (Switch/Enums.h:35): the composed
+ * appendix mandates MS for this device type
+ * (Device-Library-Specification.md:8075), it matches the C6 thunk's
+ * explicit choice (mk_generic_switch(), mt_devtypes.cpp:257-270, where a
+ * feature_flags of 0 would assert in esp-matter's VALIDATE_FEATURES_
+ * EXACT_ONE), and it is what makes the InitialPress event conformant.
+ * MultiPressMax is MSM-gated (switch-cluster.xml:85-89) and not declared;
+ * the richer momentary features (MSR, MSL, MSM) are not advertised and
+ * their five events are never emitted on either platform.
+ *
+ * No writable attribute anywhere on this device type (AT_MT_SPEC.md
+ * 462-467): NumberOfPositions and CurrentPosition are read-only over AT
+ * and over the fabric, and CurrentPosition is NOT updated by the event
+ * path on either platform (SwitchServer::OnInitialPress only calls
+ * LogEvent). The command that drives the type is AT+MTSWITCH. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(switchAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(Switch::Attributes::NumberOfPositions::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(Switch::Attributes::CurrentPosition::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(Switch::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(genericSwitchClusters)
+DECLARE_DYNAMIC_CLUSTER(Switch::Id, switchAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(genericSwitchEndpoint, genericSwitchClusters);
+
+/* Revision 3 per data_model/1.5/device_types/GenericSwitch.xml. */
+constexpr EmberAfDeviceType kGenericSwitchTypes[] = { { 0x000F, 3 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -1888,6 +1973,7 @@ const hearth_devtype s_registry[] = {
       Span<const EmberAfDeviceType>(kMountedOnOffControlTypes) },
     { 0x0110, 0, &dimmablePlugInUnitEndpoint,
       Span<const EmberAfDeviceType>(kMountedDimmableLoadControlTypes) },
+    { 0x000F, 0, &genericSwitchEndpoint, Span<const EmberAfDeviceType>(kGenericSwitchTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -2031,6 +2117,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
  *   washer/dish/dryer 0x0073 0x0075 0x007C    3      8      140        144
+ *   generic switch          0x000F            3      8      140        144
  *   power source            0x0011            2      8      136        144
  *   boolean-state sensors, air quality        3      7      124        128
  *
@@ -2325,7 +2412,7 @@ constexpr size_t kSensorSlots =
                 kMax2(MT_COUNT(flowAttrs), MT_COUNT(airQualityAttrs))));
 constexpr size_t kActuatorSlots =
     kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)),
-                MT_COUNT(windowCoveringAttrs)),
+                kMax2(MT_COUNT(windowCoveringAttrs), MT_COUNT(switchAttrs))),
           kMax2(kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)),
                 kMax2(MT_COUNT(smokeCoAlarmAttrs),
                       kMax2(MT_COUNT(opStateAttrs), MT_COUNT(modeSelectAttrs)))));
@@ -2945,6 +3032,20 @@ const attr_seed s_seeds[] = {
     { Chime::Id, Chime::Attributes::Enabled::Id, 1, { 0x01 } },
     { Chime::Id, Chime::Attributes::FeatureMap::Id, 4, { 0x00, 0x00, 0x00, 0x00 } },
     { Chime::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* ---- catalogue batch 5 ------------------------------------------- */
+
+    /* Switch. NumberOfPositions 2 is the cluster's own declared default
+     * and minimum (switch-cluster.xml:83, min="2") and esp-matter's config
+     * default, so the C6 boots the same pair; CurrentPosition 0 is the
+     * zero-fill and carries no row. FeatureMap 0x02 is MomentarySwitch
+     * (Switch/Enums.h:35; see the switchAttrs audit note for why exactly
+     * that bit). Revision 2 is Switch/Metadata.h:20 kRevision in THIS
+     * tree, the batch 3 rule (the tree the build consumes, not the
+     * sibling platform's pins). */
+    { Switch::Id, Switch::Attributes::NumberOfPositions::Id, 1, { 0x02 } },
+    { Switch::Id, Switch::Attributes::FeatureMap::Id, 4, { 0x02, 0x00, 0x00, 0x00 } },
+    { Switch::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x02, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()

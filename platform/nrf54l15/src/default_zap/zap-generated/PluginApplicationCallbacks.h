@@ -35,6 +35,7 @@ void MatterGeneralDiagnosticsPluginServerInitCallback();
 void MatterSoftwareDiagnosticsPluginServerInitCallback();
 void MatterThreadNetworkDiagnosticsPluginServerInitCallback();
 void MatterWiFiNetworkDiagnosticsPluginServerInitCallback();
+void MatterSwitchPluginServerInitCallback();
 void MatterAdministratorCommissioningPluginServerInitCallback();
 void MatterOperationalCredentialsPluginServerInitCallback();
 void MatterGroupKeyManagementPluginServerInitCallback();
@@ -74,6 +75,7 @@ void MatterChimePluginServerInitCallback();
   MatterSoftwareDiagnosticsPluginServerInitCallback();                         \
   MatterThreadNetworkDiagnosticsPluginServerInitCallback();                    \
   MatterWiFiNetworkDiagnosticsPluginServerInitCallback();                      \
+  MatterSwitchPluginServerInitCallback();                                      \
   MatterAdministratorCommissioningPluginServerInitCallback();                  \
   MatterOperationalCredentialsPluginServerInitCallback();                      \
   MatterGroupKeyManagementPluginServerInitCallback();                          \

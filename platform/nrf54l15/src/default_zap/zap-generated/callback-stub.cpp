@@ -123,6 +123,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::SoftwareDiagnostics::Id:
     emberAfSoftwareDiagnosticsClusterInitCallback(endpoint);
     break;
+  case app::Clusters::Switch::Id:
+    emberAfSwitchClusterInitCallback(endpoint);
+    break;
   case app::Clusters::TemperatureMeasurement::Id:
     emberAfTemperatureMeasurementClusterInitCallback(endpoint);
     break;
@@ -304,6 +307,11 @@ emberAfSmokeCoAlarmClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfSoftwareDiagnosticsClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfSwitchClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
