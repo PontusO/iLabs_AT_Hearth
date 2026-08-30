@@ -23,9 +23,40 @@ Dishwasher, `0x007C` Laundry Dryer, `0x0076` Smoke/CO Alarm, `0x0146`
 Chime; and catalogue batch 5 (the standalone remainder): `0x002D` Air
 Purifier, `0x010F` Mounted On/Off Control, `0x0110` Mounted Dimmable Load
 Control, `0x000F` Generic Switch, `0x0303` Pump, `0x0072` Room Air
-Conditioner, `0x0074` Robotic Vacuum Cleaner. **Thirty-six device
+Conditioner, `0x0074` Robotic Vacuum Cleaner; and catalogue batch 7a (the
+energy foundation): `0x0510` Electrical Sensor, `0x0514` Electrical
+Meter, `0x0309` Heat Pump, `0x0017` Solar Power, `0x0511` Electrical
+Utility Meter, `0x050D` Device Energy Management. **Forty-two device
 types.** Anything else answers `+MTERR:6`
 until the catalogue grows toward C6 parity.
+
+Batch 7a boundaries worth knowing before a bench session:
+
+- The electrical sensor and meter are the first VARIANT-carrying types on
+  this platform: variant `0` is power + energy, variant `1` power only
+  (each variant is its own declared cluster list; there is no runtime
+  teardown). The meter's variant `1` and solar power's variant `1` are
+  disclosed sub-conformances, restated at their declarations.
+- Every measurement value is `Instance`-served from the host's `AT+MTMEAS`
+  push store (`0x0090`/`0x0091`; `0x0098` for DEM): `AT+MTATTR` reads
+  answer the live store through the carve-out, writes answer `+MTERR:11`,
+  and no `+MTATTR` URC ever fires for them. The EEM struct attributes,
+  the meter's strings and `PowerThreshold` answer `+MTERR:5`.
+- The energy types are the first whose capacity is POOL-bound rather than
+  table- or heap-bound: the EPM/PowerTopology pools serve 8
+  measurement-bearing endpoints per composition (`MT_MEAS_MAX`, shared by
+  sensors, meters, heat pumps and solar), DEM serves 4 (`MT_DEM_MAX`),
+  utility meters 2 (`MT_METER_MAX`), the C6's own depths (ruling DE407).
+  Exhaustion aborts the boot rebuild at the offending endpoint with the
+  pool named, the standing stop-at-failure prefix semantics.
+- On an accepted `PowerAdjustRequest` the firmware owns the ESAState
+  transition and both PA events; a null `AT+MTDEMCAP` capability means a
+  controller's `PowerAdjustRequest` answers `ConstraintError` without the
+  host ever seeing a `+MTCMD`.
+- `AT+MTMETERID` is the only write path to the meter identity and has no
+  read-back verb; the meter endpoint is not conformant against the
+  superset's TimeSyncCond (no Time Synchronization on endpoint 0),
+  disclosed on both platforms.
 
 Batch 2 takes on fewer cluster features than the specs allow, but never
 fewer commands than a feature it does take on requires. The boundaries are
@@ -275,6 +306,11 @@ Block payload is `4 x clusters + 16 x slots`; Zephyr charges
 | `0x0042` Water Valve | 3 | 11 | 192 B |
 | `0x002B` / `0x002D` Fan, Air Purifier | 3 | 10 | 176 B |
 | `0x000F` Generic Switch | 3 | 8 | 144 B |
+| `0x050D` Device Energy Management (v0; 462 B payload incl. one 306 B mode store) | 3 | 9 | 464 B |
+| `0x0309` / `0x0017` Heat Pump, Solar Power (v0) | 5 | 13 | 232 B |
+| `0x0510` Electrical Sensor (v0) | 4 | 8 | 152 B |
+| `0x0514` Electrical Meter (v0) | 3 | 6 | 112 B |
+| `0x0511` Electrical Utility Meter | 3 | 7 | 128 B |
 | `0x0302` `0x0307` `0x0305` `0x0106` `0x0306` `0x0107` sensors | 3 | 9 | 160 B |
 | `0x0015` `0x0044` `0x0041` `0x0043` `0x002C` boolean-state, air quality | 3 | 7 | 128 B |
 
