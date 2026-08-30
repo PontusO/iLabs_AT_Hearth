@@ -26,9 +26,13 @@ Control, `0x000F` Generic Switch, `0x0303` Pump, `0x0072` Room Air
 Conditioner, `0x0074` Robotic Vacuum Cleaner; and catalogue batch 7a (the
 energy foundation): `0x0510` Electrical Sensor, `0x0514` Electrical
 Meter, `0x0309` Heat Pump, `0x0017` Solar Power, `0x0511` Electrical
-Utility Meter, `0x050D` Device Energy Management. **Forty-two device
-types.** Anything else answers `+MTERR:6`
-until the catalogue grows toward C6 parity.
+Utility Meter, `0x050D` Device Energy Management; and catalogue batch 7b
+(the delegate-served energy pair): `0x050F` Water Heater, `0x0018`
+Battery Storage. **Forty-four device types.** Anything else answers
+`+MTERR:6` until the catalogue grows toward C6 parity; the Energy EVSE
+(`0x050C`) is deliberately out of the 256 KB tier by ruling DE408 (its
+delegate store and block size are LM20-tier costs, batch 7 audit 5.2
+and 5.4).
 
 Batch 7a boundaries worth knowing before a bench session:
 
@@ -57,6 +61,35 @@ Batch 7a boundaries worth knowing before a bench session:
   read-back verb; the meter endpoint is not conformant against the
   superset's TimeSyncCond (no Time Synchronization on endpoint 0),
   disclosed on both platforms.
+
+Batch 7b boundaries on top of those:
+
+- The water heater's `Boost` verdict and its `BoostState` are two
+  different moments ("the host decided" versus "the host actually did
+  it"): an allowed `Boost` caches its parameters and moves nothing; the
+  `AT+MTMEAS` `0x0094` `BoostState` push is what transitions the served
+  state and derives `BoostStarted` (carrying the cached parameters,
+  consumed on emission, duration 0 when there is none) and `BoostEnded`.
+  `CancelBoost` while already Inactive answers Success without waking the
+  host and emits nothing.
+- `AT+MTMEAS` `0x0094` pushes to the feature-gated fields (TankVolume,
+  EstimatedHeatRequired, TankPercentage) answer `+MTERR:3` on the bare
+  variant 1, which carries neither feature. The water heater's Thermostat
+  reuses the standalone list under a heating-only FeatureMap, so its
+  cooling setpoints are declared but disclosed over-declarations (the C6
+  creates none).
+- Battery storage adds no AT surface at all: its nine battery attributes
+  are ordinary `AT+MTATTR` integers over the full `uint32` domain (B263;
+  the two fault lists answer `+MTERR:5`), and variant 0's DEM pair is the
+  batch 7a machinery whole, `AT+MTDEMCAP` included.
+- Two more pool bounds: water heaters draw on `MT_WHM_MAX` (4); battery
+  storage draws on the measurement pools and, on variant 0, `MT_DEM_MAX`,
+  so four DEM-bearing endpoints is the composition's total across battery
+  storage and standalone DEM rows.
+- The two types are the registry's first with a VARIANT-DEPENDENT
+  device-type span: the water heater's variant 1 loses the sensor graft
+  and its `0x0510` id together, battery storage's variant 1 the DEM pair
+  and `0x050D`.
 
 Batch 2 takes on fewer cluster features than the specs allow, but never
 fewer commands than a feature it does take on requires. The boundaries are
@@ -295,9 +328,13 @@ Block payload is `4 x clusters + 16 x slots`; Zephyr charges
 | Device type | Clusters | Slots | Heap cost |
 |---|---|---|---|
 | `0x0074` Robotic Vacuum Cleaner (244 B payload + two 306 B mode stores) | 5 | 14 | 864 B |
+| `0x0018` Battery Storage (v0; 540 B payload + one 306 B mode store) | 7 | 32 | 856 B |
+| `0x050F` Water Heater (v0; 492 B payload + one 306 B mode store) | 7 | 29 | 808 B |
+| `0x050F` Water Heater (v1; 320 B payload + one 306 B mode store) | 4 | 19 | 632 B |
 | `0x010D` Extended Colour Light | 5 | 36 | 600 B |
 | `0x010C` Colour Temperature Light | 5 | 32 | 536 B |
 | `0x050D` Device Energy Management (v0; 462 B payload incl. one 306 B mode store) | 3 | 9 | 472 B |
+| `0x0018` Battery Storage (v1, no DEM pair, no store) | 5 | 23 | 392 B |
 | `0x0101` / `0x010B` / `0x0110` Dimmable Light, Dimmable Plug, Mounted Dimmable Load Control | 4 | 20 | 344 B |
 | `0x0303` / `0x0072` Pump, Room Air Conditioner | 4 | 18 | 312 B |
 | `0x0301` Thermostat | 3 | 15 | 256 B |
@@ -478,9 +515,34 @@ cluster enters `hearth.zap`, composition or not, indexed from inside the
 SDK and therefore not reclaimable by the endpoint-heap technique. The
 rest is the measurement, DEM and meter pools at the C6's own depths
 (8/4/2 per ruling DE407, never 16) plus metadata for six new clusters.
-Free RAM is 10,332 B: batch 7b (Water Heater, Battery Storage, Energy
-EVSE) starts from here, and its sizing levers, including the nRF54LM20
-tier, are recorded in the batch 7 audit.
+Free RAM was 10,332 B at the batch 7a merge; batch 7b below starts from
+here, and the remaining sizing levers, including the nRF54LM20 tier, are
+recorded in the batch 7 audit.
+
+Catalogue batch 7b on top of that, pristine builds, 2026-08-30:
+
+| | Batch 7a | Batch 7b (water heater, battery storage) |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 251,812 B (96.06%) | **253,420 B (96.67%)** |
+| RAM used, `nrf54l15dk` | 252,036 B (96.14%) | **253,644 B (96.76%)** |
+| Flash, `ophelia_cpico` | 864,232 B (62.89%) | **870,488 B (63.34%)** |
+| Flash, `nrf54l15dk` | 872,144 B (59.64%) | **878,388 B (60.07%)** |
+
+RAM `+1,608 B`, exactly equal on both arms, read from the linked image
+with `nm -S`: the `MT_WHM_MAX` pool (356 B: 4 x 48 B `HearthWhmDelegate`
+plus 4 x 40 B Instance raw storage plus the counter), the water heater's
+declared cluster/attribute lists and endpoint structs (568 B of `.data`),
+battery storage's (676 B, the 19-entry rechargeable Power Source list
+included), and ep240 static storage for the two new clusters. No new SDK
+static table this time (WaterHeaterManagement keeps no `gMeasurements`
+analogue) and no new pool beyond `MT_WHM_MAX`: battery storage reuses the
+batch 7a pools whole. Flash `+6,256 B` is the water-heater-management
+server translation unit plus the port's own code; WaterHeaterMode rides
+the already-compiled mode-base server. `HEARTH_EP_HEAP_BYTES` unchanged:
+both new blocks are compile-time floor candidates and both lose to the
+RVC (856 and 808 B against 864). Free RAM on `ophelia_cpico` is
+**8,724 B**; the Energy EVSE (ruling DE408) and anything after it are
+LM20-tier work.
 
 ## Dev board wiring
 
