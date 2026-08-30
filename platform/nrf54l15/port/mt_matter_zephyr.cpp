@@ -67,6 +67,10 @@
  * AT+MTALARM's second cluster arm reaches it; nothing else in this file
  * does. */
 #include <app/clusters/refrigerator-alarm-server/refrigerator-alarm-server.h>
+/* Catalogue batch 8: the TemperatureControl iterator delegate interface and
+ * its free-function SetInstance(), the SDK's "the app must supply it" hole
+ * that no SDK code fills. */
+#include <app/clusters/temperature-control-server/supported-temperature-levels-manager.h>
 #include <app/EventLogging.h>
 #include <app/reporting/reporting.h>
 
@@ -2933,6 +2937,151 @@ extern "C" int mt_matter_switch_click(uint16_t ep)
         return MT_ATTR_ERR_CLUSTER;
     }
     chip::app::Clusters::SwitchServer::Instance().OnInitialPress(ep, 1);
+    return MT_ATTR_OK;
+}
+
+/* ---- temperature levels (TemperatureControl 0x0056) --------------------
+ *
+ * Catalogue batch 8. The SupportedTemperatureLevels list a
+ * TemperatureLevel-variant cabinet or cook surface publishes, fed by
+ * AT+MTTEMPLEVELS (AT_MT_SPEC.md 3.16) and read back by the SDK's own
+ * wildcard AttributeAccessInterface.
+ *
+ * ONE process-global iterator delegate for the whole device, not a pool, and
+ * that is the SDK's shape rather than a choice: the cluster keeps a single
+ * `SupportedTemperatureLevelsIteratorDelegate *sInstance` behind
+ * free-function GetInstance()/SetInstance()
+ * (temperature-control-server.cpp:37, :56-66), and dispatches per endpoint
+ * by calling Reset(endpoint) on it before every iteration
+ * (:82, :195). So the object below is stateless between calls except for
+ * the endpoint and index the base class's Reset() sets, and it answers out
+ * of whichever endpoint's block-resident store mEndpoint names. The mode
+ * select manager above has the identical shape for the identical reason.
+ *
+ * SetInstance() has NO CALLER anywhere in the SDK: the port must register
+ * this itself, exactly as the C6 does (main.cpp:1829). Registration is
+ * idempotent (a bare pointer store), so mt_matter_temp_levels_register()
+ * below is safe to call once per TemperatureControl-bearing endpoint from
+ * the create path, and it is called for BOTH variants deliberately: a
+ * TemperatureNumber endpoint never reaches the iterator, but registering
+ * only on the level variant would make the registration depend on
+ * composition order in a way nothing else here does.
+ *
+ * The store lives in the endpoint's own heap block (mt_temp_levels_store_t,
+ * mt_dyn_store.h), so only endpoints that actually carry the level variant
+ * pay its 273 B. The C6's equivalent is a 28-slot .bss array of about
+ * 7,728 B that every composition pays; that array is the single largest
+ * thing this batch declined to transplant.
+ */
+class HearthTempLevelsDelegate
+    : public chip::app::Clusters::TemperatureControl::SupportedTemperatureLevelsIteratorDelegate
+{
+public:
+    /* Both overrides run on the CHIP task under the stack lock (the AAI read
+     * and the SetTemperature callback are both stack-thread work), so they
+     * take no lock of their own, the standing hook discipline. */
+    uint8_t Size() override
+    {
+        mt_temp_levels_store_t *store = mt_dyn_temp_levels_store(mEndpoint);
+        return (store == nullptr) ? 0 : store->count;
+    }
+
+    CHIP_ERROR Next(chip::MutableCharSpan &item) override
+    {
+        mt_temp_levels_store_t *store = mt_dyn_temp_levels_store(mEndpoint);
+        if (store == nullptr || mIndex >= store->count) {
+            /* Any non-CHIP_NO_ERROR ends the AAI's encode loop
+             * (temperature-control-server.cpp:85-90); NOT_FOUND is the same
+             * code the SDK's own sample manager answers past its end. */
+            return CHIP_ERROR_NOT_FOUND;
+        }
+        CHIP_ERROR err = chip::CopyCharSpanToMutableCharSpan(
+            chip::CharSpan::fromCharString(store->labels[mIndex]), item);
+        if (err == CHIP_NO_ERROR) {
+            mIndex++;
+        }
+        return err;
+    }
+};
+
+static HearthTempLevelsDelegate s_temp_levels_delegate;
+
+/* The create path's one-liner, port-local for the reason every register in
+ * this file is (core/include/mt_matter.h is read-only and names no such
+ * function; the C6 needs no equivalent because it registers once at boot
+ * from its own main). Called for any TemperatureControl-bearing endpoint,
+ * after the endpoint is live for tidiness rather than necessity: this
+ * registration resolves no endpoint index and could legally run at any
+ * point. */
+extern "C" void mt_matter_temp_levels_register(void)
+{
+    chip::app::Clusters::TemperatureControl::SetInstance(&s_temp_levels_delegate);
+}
+
+/*
+ * AT+MTTEMPLEVELS (AT_MT_SPEC.md 3.16). Grammar, count and label content are
+ * enforced by cmd_mttemplevels() in mt_at.c before this is called; the
+ * bounds re-checked here are defensive, the AT+MTMODES bridge's discipline.
+ *
+ * The error division is the header's (core/include/mt_matter.h:247-251) and
+ * needs BOTH lookups, because this port can be in a state no earlier command
+ * could reach: the endpoint carries TemperatureControl and still has no
+ * label store, because the store belongs to the cluster's TemperatureLevel
+ * VARIANT. emberAfContainsServer() answers the cluster question
+ * (MT_ATTR_ERR_CLUSTER, +MTERR:3) and mt_dyn_temp_levels_store() answers the
+ * variant question (MT_ATTR_ERR_ATTRIBUTE, +MTERR:4). On the C6 the second
+ * question is asked of esp-matter's attribute::get() instead
+ * (main.cpp:1846-1852); here it is asked of the declared list, through the
+ * same predicate the store walk and the create-path construction use.
+ *
+ * Full replacement per call, never a merge, and not persisted: the store
+ * starts empty every boot and the host re-sends, the standing contract for
+ * host-fed state. Ends with the dirty mark, which is the ONLY way a
+ * subscribed controller learns the list changed, since SupportedTemperatureLevels
+ * is served by an AAI and never passes through
+ * MatterPostAttributeChangeCallback(): no +MTATTR URC fires for it either,
+ * and there is no AT+MTATTR path to it at all (AT_MT_SPEC.md 1249-1251).
+ */
+extern "C" int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count)
+{
+    namespace TemperatureControl = chip::app::Clusters::TemperatureControl;
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, TemperatureControl::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    mt_temp_levels_store_t *store = mt_dyn_temp_levels_store(ep);
+    if (store == nullptr) {
+        /* The cluster is there and the store is not: a TemperatureNumber
+         * variant. The one arm of this function that is a normal answer
+         * rather than a defensive one. */
+        return MT_ATTR_ERR_ATTRIBUTE;
+    }
+    if (labels == nullptr || count < 1 || count > MT_TEMP_LEVEL_MAX_COUNT) {
+        return MT_ATTR_ERR_FAILED;
+    }
+    /* Every label validated before any entry is overwritten, the AT+MTMODES
+     * fix-round shape. Strictly optional here (the iterator copies per call
+     * and caches no span, so a half-written list could not publish stale
+     * bytes) and kept anyway so the host-fed bridges reason identically. */
+    for (uint8_t i = 0; i < count; i++) {
+        if (labels[i] == nullptr) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        size_t len = strlen(labels[i]);
+        if (len < 1 || len > MT_TEMP_LEVEL_MAX_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+    }
+    for (uint8_t i = 0; i < count; i++) {
+        memcpy(store->labels[i], labels[i], strlen(labels[i]) + 1);
+    }
+    store->count = count;
+
+    MatterReportingAttributeChangeCallback(
+        ep, TemperatureControl::Id, TemperatureControl::Attributes::SupportedTemperatureLevels::Id);
     return MT_ATTR_OK;
 }
 

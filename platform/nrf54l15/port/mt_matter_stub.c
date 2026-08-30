@@ -58,13 +58,11 @@
  * generic switch (0x000F) entered the registry: real in
  * mt_matter_zephyr.cpp now, on the stateless SwitchServer singleton. */
 
-int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count)
-{
-    (void)ep;
-    (void)labels;
-    (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* mt_matter_temp_levels_set() left this file in catalogue batch 8, when the
+ * temperature controlled cabinet (0x0071) and cook surface (0x0077) entered
+ * the registry: real in mt_matter_zephyr.cpp now, on the one process-global
+ * SupportedTemperatureLevelsIteratorDelegate and a block-resident label
+ * store per TemperatureLevel-variant endpoint. */
 
 /* mt_matter_mode_select_manager() and mt_matter_modes_set() left this file
  * in catalogue batch 4, when the mode select (0x0027) entered the

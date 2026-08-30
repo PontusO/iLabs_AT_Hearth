@@ -44,6 +44,7 @@ void MatterModeSelectPluginServerInitCallback();
 void MatterRefrigeratorAndTemperatureControlledCabinetModePluginServerInitCallback();
 void MatterRvcRunModePluginServerInitCallback();
 void MatterRvcCleanModePluginServerInitCallback();
+void MatterTemperatureControlPluginServerInitCallback();
 void MatterRefrigeratorAlarmPluginServerInitCallback();
 void MatterAirQualityPluginServerInitCallback();
 void MatterSmokeCoAlarmPluginServerInitCallback();
@@ -98,6 +99,7 @@ void MatterMeterIdentificationPluginServerInitCallback();
   MatterRefrigeratorAndTemperatureControlledCabinetModePluginServerInitCallback(); \
   MatterRvcRunModePluginServerInitCallback();                                      \
   MatterRvcCleanModePluginServerInitCallback();                                    \
+  MatterTemperatureControlPluginServerInitCallback();                              \
   MatterRefrigeratorAlarmPluginServerInitCallback();                               \
   MatterAirQualityPluginServerInitCallback();                                      \
   MatterSmokeCoAlarmPluginServerInitCallback();                                    \

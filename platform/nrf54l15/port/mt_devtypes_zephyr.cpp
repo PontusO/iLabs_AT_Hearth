@@ -90,6 +90,15 @@ extern "C" void mt_matter_dem_register(void *delegate, uint16_t ep, bool with_pa
  * beside the WHM pool in mt_matter_zephyr.cpp. */
 extern "C" void mt_matter_whm_register(void *delegate, uint16_t ep, bool with_em_tp);
 
+/* Catalogue batch 8: the ONE process-global TemperatureControl iterator
+ * delegate, handed to the SDK's free-function SetInstance(), which has no
+ * caller anywhere in the SDK itself. Port-local for the reason the three
+ * registers above are; the mode select manager is the same shape one
+ * cluster over (a single global the SDK dispatches per endpoint), and it
+ * differs only in taking no arguments, because this delegate learns its
+ * endpoint from the SDK's own Reset() before every iteration. */
+extern "C" void mt_matter_temp_levels_register(void);
+
 using namespace chip;
 using namespace chip::app::Clusters;
 
@@ -3301,6 +3310,105 @@ constexpr uint32_t kDtCookSurface           = 0x0077;
 constexpr uint32_t kDtCooktop               = 0x0078;
 constexpr uint32_t kDtOven                  = 0x007B;
 
+/*
+ * ---- the parenting policy, encoding one of two ------------------------
+ *
+ * Catalogue batch 8. Until this batch mt_devtype_parent_ok() was a
+ * `return true` stub, because no device type in s_registry required a parent
+ * or restricted which device type could parent it. Two now do
+ * (AT_MT_SPEC.md 367-379), and this constexpr predicate is where the rule
+ * lives; the extern "C" entry point the AT layer calls is a one-line
+ * forwarder further down.
+ *
+ * It is constexpr for one reason: the SAME policy is encoded a second time,
+ * as the per-row shape maps below, and the two can disagree. That hazard is
+ * exactly the one ARCHITECTURE.md:1350-1364 records the C6 rejecting when it
+ * declined to give the cabinet a variant bit ("a second encoding of a fact
+ * the tree already carries, able to disagree with it"). Here the second
+ * encoding is unavoidable (the cluster set has to come from somewhere) so it
+ * is made CHECKABLE instead: shape_domain_matches_policy() below evaluates
+ * this function over the whole registry at compile time and fails the build
+ * on any disagreement in either direction.
+ *
+ * variant is a parameter of the contract (core/include/mt_devtypes.h) and is
+ * deliberately unused: neither rule depends on it today. It stays in the
+ * signature, and in the compile-time check's enumeration, so a future rule
+ * that DOES depend on it needs no plumbing.
+ */
+constexpr bool parent_policy_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
+{
+    (void)variant;
+    /* Cook Surface: legal ONLY under a Cooktop. The unparented form is
+     * rejected by the same expression, since no device type id is 0 and
+     * parent_devtype 0 is how the AT layer spells "no parent"
+     * (core/mt/mt_at.c:1903-1905). This is the catalogue's only device type
+     * that REQUIRES a parent; the C6's rule is mt_devtypes.cpp:2767-2772 and
+     * carries the identical one-expression note. */
+    if (devtype_id == kDtCookSurface) {
+        return parent_devtype == kDtCooktop;
+    }
+    /* Temperature Controlled Cabinet: legal unparented (the standalone rows
+     * earlier compositions declared keep working), or under a Refrigerator
+     * or an Oven and nothing else. Those two are the appliances that give a
+     * child cabinet a coherent conditional cluster set (Cooler, Heater); a
+     * third parent would be a cabinet with no defined set at all, which is
+     * why the policy refuses rather than falling back to the bare shape.
+     * The C6's rule is mt_devtypes.cpp:2773-2783.
+     *
+     * AT THIS COMMIT the parented halves are NOT yet accepted, and the arm
+     * is deliberately narrower than AT_MT_SPEC.md 367-372 for exactly one
+     * commit. The Cooler and Heater cluster sets land in the next one, and
+     * this predicate must never accept a pairing whose cluster set does not
+     * exist: shape_domain_matches_policy() would fail the build if it did,
+     * which is the check working rather than getting in the way. Widen this
+     * expression and the shape map together. */
+    if (devtype_id == kDtTempControlledCabinet) {
+        return parent_devtype == 0;
+    }
+    /* Everything else is permissive, including the unparented form: PartsList
+     * simply reflects whatever the host declares and this firmware holds no
+     * opinion about whether the pairing makes sense (AT_MT_SPEC.md 366-370). */
+    return true;
+}
+
+/*
+ * ---- shape selection, the second encoding ----------------------------
+ *
+ * A shape is one realised cluster set for one (variant, parent devtype)
+ * pair. Rows whose cluster set does not depend on the parent carry no
+ * shapes at all and keep the ep_type / ep_type_v1 pair the struct comment
+ * below describes; only a row the policy RESTRICTS needs a shape map, and
+ * the compile-time check makes that an if-and-only-if rather than a
+ * convention.
+ *
+ * parent_devtype 0 is the unparented shape, the same spelling
+ * mt_devtype_create()'s parent_devtype argument uses (main.cpp passes 0 when
+ * comp.parent[i] is MT_COMP_NO_PARENT).
+ *
+ * WHY NOT A WIDENED ROW FOR ALL 44 EXISTING ROWS. Ruled in the batch brief
+ * (DE416). A Span<const shape> replacing ep_type/ep_type_v1 on every row is
+ * the more general mechanism and remains the right refactor for the day a
+ * SECOND parent-conditional device type appears; landing it in the same
+ * commit as seven new device types, a heap resize, three new SDK translation
+ * units and a zap regeneration would make the whole batch unreviewable. This
+ * member is additive by construction: it is the LAST member, so aggregate
+ * initialization zero-fills it to an empty span for every row that does not
+ * name it, and all 44 pre-batch-8 rows keep their exact original text and
+ * their exact original bytes. That is the same trick batches 7a and 7b each
+ * relied on once (ep_type_v1, device_types_v1) and this is its third use.
+ *
+ * WHY NOT DUPLICATE REGISTRY ROWS keyed by parent: mt_devtype_is_known() and
+ * mt_devtype_variant_ok() are called from core/mt/mt_at.c:1873 and :1885
+ * BEFORE any parent has been parsed, so the registry's primary key has to
+ * stay the bare device type id. Changing it to (id, parent) would have made
+ * AT+MTEP=0x0071 answer +MTERR:6.
+ */
+struct hearth_shape {
+    uint8_t variant;
+    uint32_t parent_devtype;
+    const EmberAfEndpointType *ep_type;
+};
+
 /* ---- cooktop (0x0078) --------------------------------------------------
  *
  * Catalogue batch 8 audit, OnOff with the OffOnly feature.
@@ -3526,6 +3634,214 @@ HEARTH_DECLARE_CONST_ENDPOINT(refrigeratorEndpoint, refrigeratorClusters);
 
 constexpr EmberAfDeviceType kRefrigeratorTypes[] = { { 0x0070, 2 } };
 
+/* ---- TemperatureControl (0x0056), and its two mutually exclusive shapes -
+ *
+ * Catalogue batch 8 audit. One cluster, two declared attribute lists, and
+ * the variant picks which. Shared verbatim by the Temperature Controlled
+ * Cabinet (0x0071) and the Cook Surface (0x0077), which is what forced the
+ * seed table's variant column: the two device types need the SAME
+ * variant-dependent FeatureMap, so no device-type-qualified row could split
+ * them.
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; the regeneration left CodeDrivenInitShutdown.cpp
+ *   byte-identical). NOT CommandHandlerInterface-only either
+ *   (config-data.yaml:21-88), and this time that MATTERS: the cluster
+ *   declares SetTemperature, so regenerating hearth.zap added a
+ *   TemperatureControl case to IMClusterCommandHandler.cpp, the FIRST new
+ *   generated dispatch case since batch 3. Before it, this build dispatched
+ *   only Groups, LevelControl, OtaSoftwareUpdateRequestor, OnOff,
+ *   SmokeCoAlarm, ModeSelect and Thermostat.
+ *
+ *   No Instance and no per-endpoint Delegate. What the SDK keeps is one
+ *   file-scope TemperatureControlAttrAccess constructed
+ *   Optional<EndpointId>::Missing() (temperature-control-server.cpp:40-49),
+ *   i.e. a wildcard AttributeAccessInterface serving
+ *   SupportedTemperatureLevels on every endpoint, and one process-global
+ *   SupportedTemperatureLevelsIteratorDelegate * behind free-function
+ *   GetInstance()/SetInstance() (:37, :56-66). The AAI is registered by
+ *   MatterTemperatureControlPluginServerInitCallback() (:232-235), which is
+ *   emitted into MATTER_PLUGINS_INIT only because the cluster is now in the
+ *   zap; miss that and SupportedTemperatureLevels answers
+ *   UnsupportedAttribute on every cabinet, silently. The iterator delegate
+ *   is the SDK's usual "the app must supply it" hole: SetInstance() has no
+ *   caller anywhere in the SDK, so the port calls it itself, exactly as the
+ *   C6 does (main.cpp:1829).
+ *
+ *   Init()? None by that name, and no VerifyOrDie anywhere in this cluster.
+ *   emberAfTemperatureControlClusterServerInitCallback() is an empty body
+ *   (:230). No ordering hazard at all.
+ *
+ *   Events: none.
+ *
+ * SetTemperature IS NOT A +MTCMD CONSUMER, on either platform, and that is
+ * worth stating loudly because every other adjudicated cluster in this
+ * firmware is. The whole command is handled by the ember callback
+ * (temperature-control-server.cpp:112-224): it range-checks the target
+ * against MinTemperature/MaxTemperature, enforces the Step modulus
+ * (:150-168), then writes TemperatureSetpoint (:169) or
+ * SelectedTemperatureLevel (:186). Those writes land in this port's arena
+ * and DO raise a +MTATTR URC through MatterPostAttributeChangeCallback(). So
+ * a controller changing a cabinet's setpoint reaches the host as an
+ * attribute URC, never as a command forward, and the host has no veto. The
+ * C6 overrides nothing here either.
+ *
+ * THE FEATUREMAP IS FUNCTIONALLY LOAD-BEARING, not descriptive. The callback
+ * reads it back through TemperatureControlHasFeature() to choose its branch
+ * (:117-124, :183), so the seeded value and the declared list must agree or
+ * a healthy endpoint rejects valid commands: with BOTH bits set it answers
+ * Failure outright (:118-123), and on the TemperatureLevel branch a null
+ * iterator delegate answers NotFound (:188-192). The C6 enforces
+ * exactly-one at cluster-create time through VALIDATE_FEATURES_EXACT_ONE;
+ * here the two separate declared lists plus the two variant-qualified seed
+ * rows are what enforce it.
+ *
+ * The Step bit rides variant 0 with TemperatureNumber, and that is the B119
+ * fix carried over rather than rediscovered: Step is its own feature
+ * (esp_matter_feature.cpp:1943-1966), and a TemperatureNumber cabinet
+ * without it answered +MTERR:4 to every host-library begin(). */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(temperatureControlNumberAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::TemperatureSetpoint::Id, INT16S, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::MinTemperature::Id, INT16S, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::MaxTemperature::Id, INT16S, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::Step::Id, INT16S, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+/* SupportedTemperatureLevels is declared ARRAY size 0: metadata-only, so
+ * AttributeList stays truthful while attr_gets_slot() refuses it a slot and
+ * seed_slots() skips it quietly. It is served by the SDK's wildcard AAI out
+ * of this endpoint's block-resident label store, and it doubles as the
+ * kStoreWalk discriminator that tells this list from the number list above
+ * (they share a cluster id). AT+MTATTR has no path to it at all
+ * (AT_MT_SPEC.md 1249-1251); AT+MTTEMPLEVELS is how a host fills it. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(temperatureControlLevelAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::SelectedTemperatureLevel::Id, INT8U, 1,
+                          0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::SupportedTemperatureLevels::Id,
+                              ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+/* SetTemperature is mandatory on both variants (temperature-control-cluster.xml
+ * :83 declares it with no optional attribute) and, unlike every other
+ * incoming list in this file, it is answered entirely inside the SDK: the
+ * generated dispatch case the zap regeneration added calls
+ * emberAfTemperatureControlClusterSetTemperatureCallback(), which validates
+ * and writes an arena attribute. No outgoing list: the command's response is
+ * a plain status, not a response command. */
+constexpr CommandId kTemperatureControlIncoming[] = {
+    TemperatureControl::Commands::SetTemperature::Id, kInvalidCommandId
+};
+
+/* ---- temperature controlled cabinet (0x0071), unparented -----------------
+ *
+ * Catalogue batch 8. The bare cabinet: TemperatureControl and Descriptor and
+ * nothing else, which is exactly what the C6 builds, because
+ * temperature_controlled_cabinet::add() calls add_device_type() then
+ * temperature_control::create() and stops (esp_matter_endpoint.cpp:
+ * 1308-1316), and its config_t is {descriptor, temperature_control} with no
+ * identify field. TemperatureControlledCabinet.xml lists no Identify either,
+ * so there is NO Identify on a cabinet on either platform.
+ *
+ * These are two of the cabinet's six realised shapes. The other four arrive
+ * with the parent-conditional commit; the parenting policy is deliberately
+ * narrowed to the unparented form until they do, so that at every commit the
+ * policy describes what this build can actually serve rather than what the
+ * finished batch will. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetNumberClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlNumberAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetLevelClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlLevelAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetNumberEndpoint, cabinetNumberClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetLevelEndpoint, cabinetLevelClusters);
+
+/* Revision 5 per data_model/1.5/device_types/TemperatureControlledCabinet.xml.
+ * The advertised span does NOT change with the parent, unlike the water
+ * heater's and battery storage's variant spans: a Cooler cabinet and a
+ * Heater cabinet are both 0x0071 revision 5, and the conformance difference
+ * lives in the cluster set alone. */
+constexpr EmberAfDeviceType kCabinetTypes[] = { { 0x0071, 5 } };
+
+constexpr hearth_shape kCabinetShapes[] = {
+    { 0, 0, &cabinetNumberEndpoint },
+    { 1, 0, &cabinetLevelEndpoint },
+};
+
+/* ---- cook surface (0x0077) ---------------------------------------------
+ *
+ * Catalogue batch 8. TemperatureControl (either variant) plus an OffOnly
+ * OnOff plus Descriptor, and no Identify: cook_surface::config_t is
+ * {descriptor, temperature_control} (esp_matter_endpoint.h:832-841) and
+ * CookSurface.xml lists only OnOff, TemperatureControl and
+ * TemperatureMeasurement.
+ *
+ * THE ONLY DEVICE TYPE IN THE CATALOGUE THAT REQUIRES A PARENT. Both shapes
+ * name a Cooktop; the unparented form has no shape at all, which is the
+ * cluster-set half of what mt_devtype_parent_ok() says on the AT+MTEP= line
+ * itself (+MTERR:1, AT_MT_SPEC.md 640-655). It is also the only append this
+ * platform can reject for a reason no earlier nRF test exercises.
+ *
+ * THE C6'S B216 SCRUB IS NOT MIRRORED, AND THAT IS DELIBERATE.
+ * cook_surface::add() OVERWRITES config->temperature_control.feature_flags
+ * with temperature_level before creating the cluster
+ * (esp_matter_endpoint.cpp:1540), so pre-set flags cannot survive; the C6's
+ * thunk therefore destroys the forced TemperatureLevel cluster after
+ * create() and rebuilds it as TemperatureNumber plus Step, for variant 0
+ * only (mt_devtypes.cpp:1305-1321). None of that transfers: this port
+ * declares its lists, so there is nothing to overwrite and nothing to
+ * destroy. What DOES transfer is the reason B216 existed, that the two
+ * variants must be distinguishable on the wire, and the two declared lists
+ * deliver it directly. The regression net that caught B216 (AT+MTATTR on
+ * 0x0056/0x0000 and 0x0003 answering on v0 and +MTERR:4 on v1, and
+ * AT+MTTEMPLEVELS accepted on v1 only) is the right check here too.
+ *
+ * The OffOnly OnOff is the cooktop's list one endpoint down: racOnOffAttrs
+ * with kOnOffOffOnlyIncoming, and the same device-type-qualified 0x04
+ * FeatureMap seed. CookSurface.xml:67-73 makes OnOff optional with OFFONLY
+ * mandatory inside it, so composing it at all is the C6's superset choice
+ * mirrored, not a requirement; AT_MT_SPEC.md 649-655 already tells hosts
+ * that turning a surface on is an AT+MTATTR write of 0x0006/0x0000.
+ *
+ * Revision 2 per data_model/1.5/device_types/CookSurface.xml. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cookSurfaceNumberClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlNumberAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kOnOffOffOnlyIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cookSurfaceLevelClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlLevelAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kOnOffOffOnlyIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(cookSurfaceNumberEndpoint, cookSurfaceNumberClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cookSurfaceLevelEndpoint, cookSurfaceLevelClusters);
+
+constexpr EmberAfDeviceType kCookSurfaceTypes[] = { { 0x0077, 2 } };
+
+constexpr hearth_shape kCookSurfaceShapes[] = {
+    { 0, kDtCooktop, &cookSurfaceNumberEndpoint },
+    { 1, kDtCooktop, &cookSurfaceLevelEndpoint },
+};
+
 /* ---- the registry ---------------------------------------------------- */
 
 /* Catalogue batch 7a added ep_type_v1, the port's rendering of the C6's
@@ -3548,98 +3864,6 @@ constexpr EmberAfDeviceType kRefrigeratorTypes[] = { { 0x0070, 2 } };
  * variants' cluster sets cannot back (the C6 has no such member because
  * each add_device_type() call sits inside the variant branch that earns
  * it, mk_water_heater()/mk_battery_storage()). */
-/*
- * ---- the parenting policy, encoding one of two ------------------------
- *
- * Catalogue batch 8. Until this batch mt_devtype_parent_ok() was a
- * `return true` stub, because no device type in s_registry required a parent
- * or restricted which device type could parent it. Two now do
- * (AT_MT_SPEC.md 367-379), and this constexpr predicate is where the rule
- * lives; the extern "C" entry point the AT layer calls is a one-line
- * forwarder further down.
- *
- * It is constexpr for one reason: the SAME policy is encoded a second time,
- * as the per-row shape maps below, and the two can disagree. That hazard is
- * exactly the one ARCHITECTURE.md:1350-1364 records the C6 rejecting when it
- * declined to give the cabinet a variant bit ("a second encoding of a fact
- * the tree already carries, able to disagree with it"). Here the second
- * encoding is unavoidable (the cluster set has to come from somewhere) so it
- * is made CHECKABLE instead: shape_domain_matches_policy() below evaluates
- * this function over the whole registry at compile time and fails the build
- * on any disagreement in either direction.
- *
- * variant is a parameter of the contract (core/include/mt_devtypes.h) and is
- * deliberately unused: neither rule depends on it today. It stays in the
- * signature, and in the compile-time check's enumeration, so a future rule
- * that DOES depend on it needs no plumbing.
- */
-constexpr bool parent_policy_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
-{
-    (void)variant;
-    /* Cook Surface: legal ONLY under a Cooktop. The unparented form is
-     * rejected by the same expression, since no device type id is 0 and
-     * parent_devtype 0 is how the AT layer spells "no parent"
-     * (core/mt/mt_at.c:1903-1905). This is the catalogue's only device type
-     * that REQUIRES a parent; the C6's rule is mt_devtypes.cpp:2767-2772 and
-     * carries the identical one-expression note. */
-    if (devtype_id == kDtCookSurface) {
-        return parent_devtype == kDtCooktop;
-    }
-    /* Temperature Controlled Cabinet: legal unparented (the standalone rows
-     * earlier compositions declared keep working), or under a Refrigerator
-     * or an Oven and nothing else. Those two are the appliances that give a
-     * child cabinet a coherent conditional cluster set (Cooler, Heater); a
-     * third parent would be a cabinet with no defined set at all, which is
-     * why the policy refuses rather than falling back to the bare shape.
-     * The C6's rule is mt_devtypes.cpp:2773-2783. */
-    if (devtype_id == kDtTempControlledCabinet) {
-        return parent_devtype == 0 || parent_devtype == kDtRefrigerator ||
-               parent_devtype == kDtOven;
-    }
-    /* Everything else is permissive, including the unparented form: PartsList
-     * simply reflects whatever the host declares and this firmware holds no
-     * opinion about whether the pairing makes sense (AT_MT_SPEC.md 366-370). */
-    return true;
-}
-
-/*
- * ---- shape selection, the second encoding ----------------------------
- *
- * A shape is one realised cluster set for one (variant, parent devtype)
- * pair. Rows whose cluster set does not depend on the parent carry no
- * shapes at all and keep the ep_type / ep_type_v1 pair the struct comment
- * below describes; only a row the policy RESTRICTS needs a shape map, and
- * the compile-time check makes that an if-and-only-if rather than a
- * convention.
- *
- * parent_devtype 0 is the unparented shape, the same spelling
- * mt_devtype_create()'s parent_devtype argument uses (main.cpp passes 0 when
- * comp.parent[i] is MT_COMP_NO_PARENT).
- *
- * WHY NOT A WIDENED ROW FOR ALL 44 EXISTING ROWS. Ruled in the batch brief
- * (DE416). A Span<const shape> replacing ep_type/ep_type_v1 on every row is
- * the more general mechanism and remains the right refactor for the day a
- * SECOND parent-conditional device type appears; landing it in the same
- * commit as seven new device types, a heap resize, three new SDK translation
- * units and a zap regeneration would make the whole batch unreviewable. This
- * member is additive by construction: it is the LAST member, so aggregate
- * initialization zero-fills it to an empty span for every row that does not
- * name it, and all 44 pre-batch-8 rows keep their exact original text and
- * their exact original bytes. That is the same trick batches 7a and 7b each
- * relied on once (ep_type_v1, device_types_v1) and this is its third use.
- *
- * WHY NOT DUPLICATE REGISTRY ROWS keyed by parent: mt_devtype_is_known() and
- * mt_devtype_variant_ok() are called from core/mt/mt_at.c:1873 and :1885
- * BEFORE any parent has been parsed, so the registry's primary key has to
- * stay the bare device type id. Changing it to (id, parent) would have made
- * AT+MTEP=0x0071 answer +MTERR:6.
- */
-struct hearth_shape {
-    uint8_t variant;
-    uint32_t parent_devtype;
-    const EmberAfEndpointType *ep_type;
-};
-
 struct hearth_devtype {
     uint32_t id;
     uint8_t max_variant;
@@ -3743,6 +3967,14 @@ constexpr hearth_devtype s_registry[] = {
     { 0x007A, 0, &extractorHoodEndpoint, Span<const EmberAfDeviceType>(kExtractorHoodTypes) },
     { kDtRefrigerator, 0, &refrigeratorEndpoint,
       Span<const EmberAfDeviceType>(kRefrigeratorTypes) },
+    /* The registry's first shape-bearing rows. ep_type and ep_type_v1 stay
+     * null on both: a shape map REPLACES that selection rather than
+     * refining it, and leaving them null keeps the two mechanisms from
+     * looking interchangeable at a glance. */
+    { kDtTempControlledCabinet, 1, nullptr, Span<const EmberAfDeviceType>(kCabinetTypes), nullptr,
+      Span<const EmberAfDeviceType>(), Span<const hearth_shape>(kCabinetShapes) },
+    { kDtCookSurface, 1, nullptr, Span<const EmberAfDeviceType>(kCookSurfaceTypes), nullptr,
+      Span<const EmberAfDeviceType>(), Span<const hearth_shape>(kCookSurfaceShapes) },
 };
 
 /*
@@ -3963,8 +4195,10 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   device energy mgmt v0   0x050D            3      9      462        472
  *   device energy mgmt v1   0x050D            3      8      446        456
  *   battery storage v1      0x0018            5     23      388        392
+ *   cook surface v1         0x0077            3      6      381        392
  *   chime                   0x0146            2      4      345        352
  *   dimmable light/plug/mnt  0x0101 0x010B 0x0110  4  20      336        344
+ *   cabinet unparented v1   0x0071            2      3      329        336
  *   pump / room air cond    0x0303 0x0072     4     18      304        312
  *   thermostat              0x0301            3     15      252        256
  *   heat pump / solar v0    0x0309 0x0017     5     13      228        232
@@ -3975,6 +4209,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   on/off light/plug/mount  0x0100 0x010A 0x010F  3  11      188        192
  *   water valve             0x0042            3     11      188        192
  *   fan / air purifier      0x002B 0x002D     3     10      172        176
+ *   cook surface v0         0x0077            3      9      156        160
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
  *   electrical sensor v0    0x0510            4      8      144        152
@@ -3984,6 +4219,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   electrical utility mtr  0x0511            3      7      124        128
  *   boolean-state sensors, air quality        3      7      124        128
  *   electrical sensor v1    0x0510            3      6      108        112
+ *   cabinet unparented v0   0x0071            2      6      104        112
  *   extractor hood          0x007A            2      6      104        112
  *   electrical meter v0     0x0514            3      6      108        112
  *   oven                    0x007B            2      4       72         80
@@ -4226,32 +4462,80 @@ constexpr size_t block_bytes(size_t n_clusters, size_t n_slots)
  * alignof-versus-DataVersion asserts below carry that real constraint,
  * unchanged.
  */
+/*
+ * Catalogue batch 8 widened the key. Until this batch a store's presence was
+ * a question about a CLUSTER: an endpoint carries ModeSelect, therefore it
+ * carries a mode store. TemperatureControl breaks that, and it is the first
+ * store in the file that has to be finer-grained than a cluster id: BOTH
+ * variants of a cabinet and BOTH variants of a cook surface carry
+ * TemperatureControl, and only the TemperatureLevel variant carries a label
+ * store. Keying on the cluster alone would charge every TemperatureNumber
+ * endpoint 273 bytes it never reads, and worse, would make store_offset()
+ * answer a live offset for a store nothing constructed.
+ *
+ * The discriminator is the presence of a declared ATTRIBUTE, and
+ * SupportedTemperatureLevels is exactly the right one: it is the attribute
+ * the store exists to serve, it appears in the TemperatureLevel list and in
+ * no other, and it is metadata-only (an ARRAY, refused a slot), so asking
+ * about it costs a walk of the declared list rather than a second table
+ * anyone could forget to update. kInvalidAttributeId, spelled out on the
+ * five older rows rather than left to a zero-fill, means "cluster presence
+ * alone": attribute id 0 is a real id on most clusters and would have made a
+ * silent sentinel dangerous.
+ */
 struct store_desc {
     ClusterId cluster;
+    AttributeId attr;
     size_t size;
     size_t align;
 };
 
+/* Does this device type declare `attr` on `cluster`? Only asked by the store
+ * walk, and only of metadata-only attributes so far, so it walks the
+ * declared list rather than consulting the block. */
+bool type_has_attr(const EmberAfEndpointType *t, ClusterId cluster, AttributeId attr)
+{
+    for (uint8_t c = 0; c < t->clusterCount; c++) {
+        if (t->cluster[c].clusterId != cluster) {
+            continue;
+        }
+        for (uint16_t a = 0; a < t->cluster[c].attributeCount; a++) {
+            if (t->cluster[c].attributes[a].attributeId == attr) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
 constexpr store_desc kStoreWalk[] = {
-    { ModeSelect::Id, sizeof(mt_mode_store_t), alignof(mt_mode_store_t) },
-    { Chime::Id, sizeof(mt_chime_store_t), alignof(mt_chime_store_t) },
+    { ModeSelect::Id, kInvalidAttributeId, sizeof(mt_mode_store_t), alignof(mt_mode_store_t) },
+    { Chime::Id, kInvalidAttributeId, sizeof(mt_chime_store_t), alignof(mt_chime_store_t) },
     /* Catalogue batch 5: the RVC's two host-fed ModeBase lists. Both rows
      * are PRESENT on one type (0x0074 carries RvcRunMode and RvcCleanMode
      * at once), the first time the walk places two stores in one block;
      * store_walk() already iterates the whole table and align_up() makes
      * the order taste, so the mechanism extends without change. */
-    { RvcRunMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
-    { RvcCleanMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    { RvcRunMode::Id, kInvalidAttributeId, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    { RvcCleanMode::Id, kInvalidAttributeId, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
     /* Catalogue batch 7a: the DEM device type's mode list, the third
      * ModeBase store row; the walk mechanism is unchanged (the batch 5
      * note above), only membership grows. */
-    { DeviceEnergyManagementMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    { DeviceEnergyManagementMode::Id, kInvalidAttributeId, sizeof(mt_mb_store_t),
+      alignof(mt_mb_store_t) },
     /* Catalogue batch 7b: the water heater's mode list, the fourth. Same
      * mechanism, same 306 B shape. */
-    { WaterHeaterMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    { WaterHeaterMode::Id, kInvalidAttributeId, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
     /* Catalogue batch 8: the refrigerator's mode list, the fifth. */
-    { RefrigeratorAndTemperatureControlledCabinetMode::Id, sizeof(mt_mb_store_t),
-      alignof(mt_mb_store_t) },
+    { RefrigeratorAndTemperatureControlledCabinetMode::Id, kInvalidAttributeId,
+      sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    /* Catalogue batch 8: the temperature-level label store, and the ONLY row
+     * with an attribute discriminator (the struct comment). Present on a
+     * variant-1 cabinet or cook surface, absent on their variant-0 forms,
+     * which carry the same cluster id. */
+    { TemperatureControl::Id, TemperatureControl::Attributes::SupportedTemperatureLevels::Id,
+      sizeof(mt_temp_levels_store_t), alignof(mt_temp_levels_store_t) },
 };
 
 constexpr size_t align_up(size_t off, size_t align) { return ((off + align - 1) / align) * align; }
@@ -4265,6 +4549,13 @@ size_t store_walk(const EmberAfEndpointType *t, ClusterId stop_at)
     size_t off = 0;
     for (auto &s : kStoreWalk) {
         if (!type_has_cluster(t, s.cluster)) {
+            continue;
+        }
+        /* Catalogue batch 8: the finer key. A row naming an attribute is
+         * present only when the declared list carries that attribute too;
+         * kInvalidAttributeId is every older row's "cluster presence
+         * alone". */
+        if (s.attr != kInvalidAttributeId && !type_has_attr(t, s.cluster, s.attr)) {
             continue;
         }
         off = align_up(off, s.align);
@@ -4296,6 +4587,9 @@ static_assert(sizeof(mt_chime_store_t) == 273,
               "mt_chime_store_t changed size; redo the sizing table's chime row");
 static_assert(sizeof(mt_mb_store_t) == 306,
               "mt_mb_store_t changed size; redo the sizing table's rvc row");
+static_assert(sizeof(mt_temp_levels_store_t) == 273,
+              "mt_temp_levels_store_t changed size; redo the sizing table's cabinet and cook "
+              "surface variant-1 rows");
 
 /* The trailing store begins at 4 * clusterCount + 16 * n_slots, a multiple
  * of 4, and a k_heap block is 4-byte aligned (the layout note beside
@@ -4307,6 +4601,8 @@ static_assert(alignof(mt_chime_store_t) <= alignof(DataVersion),
               "mt_chime_store_t must not out-align the block's store offset");
 static_assert(alignof(mt_mb_store_t) <= alignof(DataVersion),
               "mt_mb_store_t must not out-align the block's store offset");
+static_assert(alignof(mt_temp_levels_store_t) <= alignof(DataVersion),
+              "mt_temp_levels_store_t must not out-align the block's store offset");
 
 /*
  * The header table. Four fields plus the two counts the block walk needs;
@@ -4571,11 +4867,60 @@ static_assert(kBatteryStorageBlockBytes == 846,
               "the battery storage block changed size; redo the sizing table rows and the "
               "batch 7b capacity arithmetic");
 
+/*
+ * Catalogue batch 8. Seven new device types and thirteen new realised block
+ * shapes, and ONE new candidate, which needs its argument made rather than
+ * assumed: the store-reclaim round's rule is that every store-bearing type
+ * is its own candidate, and eight of the thirteen carry a store.
+ *
+ * The cook surface variant 1 (381 B), the unparented cabinet variant 1
+ * (329), the refrigerator (514), the microwave (530) and the cooler and
+ * heater cabinets in every combination are ALL strict subsets of the heater
+ * cabinet variant 1 in both dimensions that matter: it has the most clusters
+ * (4), the most slots of any TemperatureLevel shape, and it is the only
+ * shape in the batch that carries BOTH new store types at once (a ModeBase
+ * store and a label store). So growing either store, or any list either
+ * candidate composes, moves THIS candidate's pinned value and fails the
+ * build, which is exactly the drift-proofing the per-type rule buys, without
+ * eight near-identical constants that would each have to be kept honest.
+ *
+ * Exact counting, the batch-7b convention rather than the older MT_COUNT
+ * over-count: these lists are small enough that over-counting would not have
+ * tripped the floor, but the convention is the newer one and mixing them
+ * across neighbouring candidates is how a reader stops trusting either.
+ * Metadata-only members, from each declaration's own audit note:
+ * temperatureControlLevelAttrs has one (SupportedTemperatureLevels, the
+ * ARRAY that doubles as the store discriminator), opStateAttrs three
+ * (PhaseList and OperationalStateList, both ARRAY, and OperationalError, a
+ * STRUCT), modeBaseAttrs one (SupportedModes, already named above).
+ *
+ * The candidate is declared here, in the batch that introduces the shapes,
+ * and the heater cabinet's own cluster list arrives with the
+ * parent-conditional commit; until then it is computed from the level
+ * list, the ModeBase list and the opstate list directly, which is the same
+ * arithmetic that list will produce.
+ */
+constexpr size_t kTcLevelNoSlot = 1;
+constexpr size_t kOpStateNoSlot = 3;
+
+/* Cabinet, Heater, variant 1: 4 clusters (TemperatureControl, OvenMode,
+ * OvenCavityOperationalState, Descriptor), 3 + 3 + 4 = 10 slots, one
+ * ModeBase store and one label store. */
+constexpr size_t kCabinetHeaterLevelBlockBytes =
+    block_bytes(4, (MT_COUNT(temperatureControlLevelAttrs) - kTcLevelNoSlot) +
+                       (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) +
+                       (MT_COUNT(opStateAttrs) - kOpStateNoSlot)) +
+    sizeof(mt_mb_store_t) + sizeof(mt_temp_levels_store_t);
+static_assert(kCabinetHeaterLevelBlockBytes == 755,
+              "the heater cabinet variant 1 block changed size; redo the sizing table rows and "
+              "the batch 8 capacity arithmetic");
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
           kMax2(kMax2(kModeSelectBlockBytes, kChimeBlockBytes),
                 kMax2(kMax2(kRvcBlockBytes, kDemBlockBytes),
-                      kMax2(kWaterHeaterBlockBytes, kBatteryStorageBlockBytes))));
+                      kMax2(kMax2(kWaterHeaterBlockBytes, kBatteryStorageBlockBytes),
+                            kCabinetHeaterLevelBlockBytes))));
 
 /*
  * Zephyr charges roundup(payload + 4, 8) per allocation on a heap this size,
@@ -4636,6 +4981,9 @@ static_assert(kHeapCostOf(kWaterHeaterBlockBytes) == 808,
               "the water heater heap cost moved off the tables' 808; redo the sizing rows");
 static_assert(kHeapCostOf(kBatteryStorageBlockBytes) == 856,
               "the battery storage heap cost moved off the tables' 856; redo the sizing rows");
+static_assert(kHeapCostOf(kCabinetHeaterLevelBlockBytes) == 760,
+              "the heater cabinet variant 1 heap cost moved off the tables' 760; redo the "
+              "sizing rows");
 
 static_assert(kHeapCostOf(kWidestBlockBytes) * kMinWidestEndpoints <= kHeapUsableBytes,
               "the endpoint heap no longer holds eight of the widest device type; redo the "
@@ -5489,6 +5837,45 @@ const attr_seed s_seeds[] = {
      * shape. */
     { RefrigeratorAndTemperatureControlledCabinetMode::Id,
       Globals::Attributes::ClusterRevision::Id, 2, { 0x02, 0x00 } },
+
+    /* Cook surface's OnOff FeatureMap: kOffOnly again, the cooktop's row one
+     * endpoint down, and the second consumer of that device-type
+     * qualifier. */
+    { OnOff::Id, OnOff::Attributes::FeatureMap::Id, 4, { 0x04, 0x00, 0x00, 0x00 },
+      kDtCookSurface },
+
+    /* TemperatureControl, and the reason attr_seed grew a variant column.
+     * The FeatureMap rows are variant-qualified and device-type-WILDCARD,
+     * because 0x0071 and 0x0077 need the identical pair of values: variant 0
+     * is kTemperatureNumber | kTemperatureStep (0x05) and variant 1 is
+     * kTemperatureLevel (0x02), from TemperatureControl::Feature
+     * (Enums.h:34-36). Getting one of these wrong does not merely misreport
+     * a capability, it makes SetTemperature answer Failure or InvalidCommand
+     * on a healthy endpoint (the temperatureControl*Attrs audit note).
+     *
+     * The four number-variant values are esp-matter's own feature-config
+     * defaults (esp_matter_feature.h:970-975, :997-1001) so the two
+     * platforms boot a cabinet identically: setpoint 1, min 0, max 10, step
+     * 1, all INT16S little-endian. SelectedTemperatureLevel 1 is the
+     * level-variant default (esp_matter_feature.h:985-988). ClusterRevision
+     * 1 is TemperatureControl/Metadata.h:20 in THIS tree and esp-matter
+     * agrees for once (esp_matter_cluster_revisions.h:262-264). Every one of
+     * these is a LIVE arena value: this cluster has no Instance, and its one
+     * AAI serves SupportedTemperatureLevels alone. */
+    { TemperatureControl::Id, TemperatureControl::Attributes::FeatureMap::Id, 4,
+      { 0x05, 0x00, 0x00, 0x00 }, 0, seed_variant(0) },
+    { TemperatureControl::Id, TemperatureControl::Attributes::FeatureMap::Id, 4,
+      { 0x02, 0x00, 0x00, 0x00 }, 0, seed_variant(1) },
+    { TemperatureControl::Id, TemperatureControl::Attributes::TemperatureSetpoint::Id, 2,
+      { 0x01, 0x00 } },
+    { TemperatureControl::Id, TemperatureControl::Attributes::MinTemperature::Id, 2,
+      { 0x00, 0x00 } },
+    { TemperatureControl::Id, TemperatureControl::Attributes::MaxTemperature::Id, 2,
+      { 0x0A, 0x00 } },
+    { TemperatureControl::Id, TemperatureControl::Attributes::Step::Id, 2, { 0x01, 0x00 } },
+    { TemperatureControl::Id, TemperatureControl::Attributes::SelectedTemperatureLevel::Id, 1,
+      { 0x01 } },
+    { TemperatureControl::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -5741,6 +6128,33 @@ mt_mb_store_t *mt_dyn_mb_store(EndpointId ep, ClusterId cluster)
             static_cast<uint8_t *>(d.block) +
             block_bytes(d.ep_type->clusterCount, d.slot_capacity) +
             store_offset(d.ep_type, cluster));
+    }
+    return nullptr;
+}
+
+/* Catalogue batch 8: the label store. The one accessor whose presence test
+ * is not "does the type carry the cluster" but "does the type declare
+ * SupportedTemperatureLevels", the same question store_walk() and the
+ * create-path construction ask, because both variants of both carrying
+ * device types have the cluster and only one variant has the store. A
+ * TemperatureNumber cabinet therefore answers nullptr here with its
+ * TemperatureControl cluster fully live, which is exactly the state
+ * AT+MTTEMPLEVELS renders as +MTERR:4 (the header's contract). */
+mt_temp_levels_store_t *mt_dyn_temp_levels_store(EndpointId ep)
+{
+    for (auto &d : s_dyn) {
+        if (!d.used || d.ep_id != ep) {
+            continue;
+        }
+        if (!type_has_cluster(d.ep_type, TemperatureControl::Id) ||
+            !type_has_attr(d.ep_type, TemperatureControl::Id,
+                           TemperatureControl::Attributes::SupportedTemperatureLevels::Id)) {
+            return nullptr;
+        }
+        return reinterpret_cast<mt_temp_levels_store_t *>(
+            static_cast<uint8_t *>(d.block) +
+            block_bytes(d.ep_type->clusterCount, d.slot_capacity) +
+            store_offset(d.ep_type, TemperatureControl::Id));
     }
     return nullptr;
 }
@@ -6369,6 +6783,22 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
                                        RefrigeratorAndTemperatureControlledCabinetMode::Id))
                 mt_mb_store_t();
         }
+        /* Catalogue batch 8: the temperature-level label store, the first
+         * store whose presence is finer than a cluster id (the kStoreWalk
+         * struct comment). The condition below must be the SAME question
+         * store_walk() asks, or the writer and the readers would disagree
+         * about whether this block has one; asking type_has_attr() here,
+         * exactly as the walk does, is what keeps them tied. Unlike the
+         * ModeBase stores there is no Init() waiting on it, but it must
+         * still be constructed before the endpoint is served, because the
+         * SDK's wildcard AAI is already registered and a controller could
+         * read SupportedTemperatureLevels the moment the endpoint enables. */
+        if (type_has_cluster(ep_type, TemperatureControl::Id) &&
+            type_has_attr(ep_type, TemperatureControl::Id,
+                          TemperatureControl::Attributes::SupportedTemperatureLevels::Id)) {
+            new (region + store_offset(ep_type, TemperatureControl::Id))
+                mt_temp_levels_store_t();
+        }
     }
 
     dyn_endpoint &d = s_dyn[index];
@@ -6659,6 +7089,18 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * unless it runs below a successful emberAfSetDynamicEndpoint()). */
     if (fridge_mode_delegate != nullptr) {
         mt_matter_modebase_delegate_set_endpoint(fridge_mode_delegate, d.ep_id);
+    }
+
+    /* Catalogue batch 8: hand the SDK the one global TemperatureControl
+     * iterator delegate. Idempotent (a bare pointer store), takes no
+     * endpoint, and has no ordering requirement of its own; it sits here
+     * with the other second halves so every registration this file owns is
+     * in one place. Registered for BOTH variants: a TemperatureNumber
+     * endpoint never reaches the iterator, and making the registration
+     * conditional on the level variant would make it depend on composition
+     * order for no gain. */
+    if (type_has_cluster(ep_type, TemperatureControl::Id)) {
+        mt_matter_temp_levels_register();
     }
 
     s_next_ep_id++;
