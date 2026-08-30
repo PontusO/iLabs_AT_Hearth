@@ -125,6 +125,42 @@ struct mt_chime_store_t {
 };
 
 /*
+ * Catalogue batch 5: the ModeBase store, one per (endpoint, cluster) on
+ * the RVC's two mode clusters (RvcRunMode and RvcCleanMode both live on
+ * one endpoint, so an RVC block carries TWO of these back to back; the
+ * store walk keys each by its cluster id). The AT+MTMODES cluster-aware
+ * form feeds it; HearthModeBaseDelegate (mt_matter_zephyr.cpp) reads it
+ * back. Same shape as the C6's mt_mb_entry_t (main.cpp) minus the pool
+ * bookkeeping: mode, the spec-mandated per-mode tag, label.
+ *
+ * Deliberately NO ModeOptionStruct half, unlike mt_mode_store_t above:
+ * ModeBase's delegate contract COPIES on every read
+ * (GetModeLabelByIndex fills a caller-supplied MutableCharSpan,
+ * GetModeTagsByIndex a caller-supplied List, mode-base-server.h:205,
+ * :235), so no CharSpan ever aliases these bytes and the whole
+ * span-lifetime apparatus that makes the mode select store 436 B does not
+ * apply. sizeof is 306 (1 count + pad + 8 x 38), asserted beside the
+ * sizing table in mt_devtypes_zephyr.cpp.
+ *
+ * count 0 means the host has not fed a list, and unlike every other
+ * host-fed store that state still ANSWERS: the placeholder-mode-0 policy
+ * (delegate index 0 reads mode 0 / the cluster's tag-0 default / "Mode0")
+ * exists because ModeBase::Instance::Init() reads index 0 before the host
+ * could possibly have fed anything. See the delegate in
+ * mt_matter_zephyr.cpp.
+ */
+struct mt_mb_entry_t {
+    uint8_t mode;
+    uint16_t tag;
+    char label[MT_MB_MAX_LABEL_LEN + 1];
+};
+
+struct mt_mb_store_t {
+    uint8_t count;
+    mt_mb_entry_t entries[MT_MB_MAX_COUNT];
+};
+
+/*
  * Locate ep's mode store / chime store through its block. Returns nullptr
  * when ep is not a live dynamic endpoint OR its device type carries no
  * such store (no ModeSelect / Chime cluster in its declared cluster list):
@@ -138,3 +174,9 @@ struct mt_chime_store_t {
  */
 mt_mode_store_t *mt_dyn_mode_store(chip::EndpointId ep);
 mt_chime_store_t *mt_dyn_chime_store(chip::EndpointId ep);
+
+/* The ModeBase store accessor is keyed by (endpoint, CLUSTER), because one
+ * RVC endpoint carries two of these stores; cluster must be RvcRunMode::Id
+ * or RvcCleanMode::Id. Same nullptr and locking contract as the two
+ * accessors above. */
+mt_mb_store_t *mt_dyn_mb_store(chip::EndpointId ep, chip::ClusterId cluster);

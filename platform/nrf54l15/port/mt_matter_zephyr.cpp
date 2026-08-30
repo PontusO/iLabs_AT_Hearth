@@ -29,6 +29,14 @@
 #include <app/clusters/mode-select-server/supported-modes-manager.h>
 /* Catalogue batch 4: the per-endpoint ChimeServer and its delegate. */
 #include <app/clusters/chime-server/chime-server.h>
+/* Catalogue batch 5: the stateless Switch event singleton for the generic
+ * switch's AT+MTSWITCH bridge. */
+#include <app/clusters/switch-server/switch-server.h>
+/* Catalogue batch 5: the ModeBase Instance-plus-Delegate machinery for the
+ * RVC's two mode clusters (RvcRunMode, RvcCleanMode share one server). The
+ * RvcOperationalState Instance/Delegate come from operational-state-server.h
+ * above, already included for the appliance trio. */
+#include <app/clusters/mode-base-server/mode-base-server.h>
 #include <app/reporting/reporting.h>
 
 #include <array>
@@ -534,6 +542,27 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
     { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::SelectedChime::Id },
     { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::Enabled::Id },
+    /* Catalogue batch 5, the RVC's four. The two ModeBase CurrentModes
+     * and both RvcOperationalState scalars are Instance-served (their
+     * ember slots are inert shadows); reads answer the live pools below,
+     * writes are refused with +MTERR:11 like the base opstate pair: on
+     * the C6 all four are MANAGED_INTERNALLY without WRITABLE
+     * (esp_matter_attribute.cpp:3865 for ModeBase CurrentMode,
+     * :2417-2440 for the opstate pair the derived cluster reuses), so its
+     * set_val() answers ESP_ERR_NOT_SUPPORTED and the DE270 mapping
+     * renders the identical +MTERR:11. ChangeToMode and AT+MTOPSTATE are
+     * the write paths. Note the ModeBase CLUSTER REVISION is deliberately
+     * NOT here: ModeBase's AAI has no default arm, so revision reads
+     * genuinely fall through to the arena and the generic path serves
+     * them live (the seed rows in mt_devtypes_zephyr.cpp). */
+    { chip::app::Clusters::RvcRunMode::Id,
+      chip::app::Clusters::RvcRunMode::Attributes::CurrentMode::Id },
+    { chip::app::Clusters::RvcCleanMode::Id,
+      chip::app::Clusters::RvcCleanMode::Attributes::CurrentMode::Id },
+    { chip::app::Clusters::RvcOperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
+    { chip::app::Clusters::RvcOperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -546,11 +575,18 @@ static bool instance_attr_served(uint32_t cluster, uint32_t attr)
     return false;
 }
 
-/* Defined in the OperationalState and chime sections below, beside the
- * pools they read. Both run under the caller's StackLock. */
+/* Defined in the OperationalState, chime, ModeBase and RVC opstate
+ * sections below, beside the pools they read. All run under the caller's
+ * StackLock. */
 static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
+static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, bool *is_unsigned);
+static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out,
+                                         bool *is_unsigned);
+/* The RVC opstate pool's Instance lookup (defined beside the pool below),
+ * shared by mt_matter_opstate_set()'s RVC branch and the live reader. */
+static chip::app::Clusters::OperationalState::Instance *mt_rvc_opstate_instance(uint16_t ep);
 
 /*
  * Locate an attribute's metadata, splitting endpoint/cluster/attribute
@@ -617,12 +653,28 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         return r;
     }
 
-    /* DE397: the four Instance-served attributes answer the live object,
-     * not the arena; see the carve-out comment above attr_locate(). */
+    /* DE397: the Instance-served attributes answer the live object, not
+     * the arena; see the carve-out comment above attr_locate(). Batch 5
+     * turned the two-way ternary into a per-cluster dispatch. Every
+     * cluster in k_instance_served has its own explicit arm, and default:
+     * fails loudly (batch 5 fix round, review Minor 2): a future table
+     * row whose case someone forgets would otherwise be silently answered
+     * by whichever reader default routed to, and a bare ERROR at the
+     * bench is the drift alarm this arm exists to be. */
     if (instance_attr_served(cluster, attr)) {
-        return (cluster == chip::app::Clusters::OperationalState::Id)
-                   ? mt_opstate_attr_read_live(ep, attr, out, is_unsigned)
-                   : mt_chime_attr_read_live(ep, attr, out, is_unsigned);
+        switch (cluster) {
+        case chip::app::Clusters::OperationalState::Id:
+            return mt_opstate_attr_read_live(ep, attr, out, is_unsigned);
+        case chip::app::Clusters::RvcRunMode::Id:
+        case chip::app::Clusters::RvcCleanMode::Id:
+            return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
+        case chip::app::Clusters::RvcOperationalState::Id:
+            return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
+        case chip::app::Clusters::Chime::Id:
+            return mt_chime_attr_read_live(ep, attr, out, is_unsigned);
+        default:
+            return MT_ATTR_ERR_FAILED;
+        }
     }
 
     bool unsigned_type;
@@ -695,7 +747,11 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
      * the C6's set_val_via_write_attribute() branch in this port's terms.
      * Full traced evidence in the carve-out comment above attr_locate(). */
     if (instance_attr_served(cluster, attr)) {
-        if (cluster == chip::app::Clusters::OperationalState::Id) {
+        if (cluster != chip::app::Clusters::Chime::Id) {
+            /* The opstate pair (batch 4) and the RVC's four (batch 5):
+             * +MTERR:11, mirroring the C6's MANAGED_INTERNALLY-without-
+             * WRITABLE refusal for all six. ChangeToMode, AT+MTOPSTATE
+             * and AT+MTMODES are the write paths. */
             return MT_ATTR_ERR_READONLY;
         }
         return mt_chime_attr_write_live(ep, attr, val);
@@ -1710,15 +1766,18 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
  * AT+MTOPSTATE bridge. mt_at.c's cmd_mtopstate has already rejected
  * anything outside the UNION of every opstate cluster family's legal set
  * (and 3, kError, outright) before this is called; this bridge narrows to
- * the one family this catalogue serves, the base cluster's {0 Stopped,
- * 1 Running, 2 Paused}. A union-legal RVC state (0x40..0x42) on a washer
- * answers MT_ATTR_ERR_VALUE here, exactly as the C6's base branch does;
- * the RVC and oven-cavity branches arrive with their device types in later
- * batches. SetOperationalState() enforces the same rule independently
- * (operational-state-server.cpp:101-107, kError or an unsupported state
- * answers CHIP_ERROR_INVALID_ARGUMENT), so a state that slipped both
- * checks would still map to MT_ATTR_ERR_FAILED rather than being silently
- * accepted.
+ * the legal set of the cluster ep actually carries, two branches since
+ * catalogue batch 5: the base cluster's {0 Stopped, 1 Running, 2 Paused}
+ * for the washer/dishwasher/dryer trio, and RvcOperationalState's widened
+ * {0, 1, 2, 0x40 kSeekingCharger, 0x41 kCharging, 0x42 kDocked} for the
+ * RVC. A union-legal RVC state (0x40..0x42) on a washer answers
+ * MT_ATTR_ERR_VALUE in the base branch, exactly as the C6's does; the
+ * oven-cavity branch arrives with its device type in the
+ * composed-appliance batch. SetOperationalState() enforces each cluster's
+ * rule independently (operational-state-server.cpp:101-107, kError or an
+ * unsupported state answers CHIP_ERROR_INVALID_ARGUMENT), so a state that
+ * slipped both checks would still map to MT_ATTR_ERR_FAILED rather than
+ * being silently accepted.
  *
  * Called from the AT parser thread, so the StackLock IS taken, unlike the
  * delegate hooks above.
@@ -1726,31 +1785,61 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
 extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
 {
     namespace OpState = chip::app::Clusters::OperationalState;
+    namespace RvcOpState = chip::app::Clusters::RvcOperationalState;
     chip::DeviceLayer::StackLock lock;
     if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
         return MT_ATTR_ERR_ENDPOINT;
     }
-    if (!emberAfContainsServer(ep, OpState::Id)) {
-        return MT_ATTR_ERR_CLUSTER;
-    }
-    if (state > 2) {
-        return MT_ATTR_ERR_VALUE;
+
+    if (emberAfContainsServer(ep, OpState::Id)) {
+        if (state > 2) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        OpState::Instance *inst = nullptr;
+        for (auto &d : s_opstate_delegates) {
+            if (d.endpoint() == ep && d.cluster() == OpState::Id) {
+                inst = d.instance();
+                break;
+            }
+        }
+        if (inst == nullptr) {
+            /* Cannot happen once the boot rebuild has run: every endpoint
+             * carrying the cluster got its pair in mt_devtype_create().
+             * Defensive, the C6's same arm. */
+            return MT_ATTR_ERR_FAILED;
+        }
+        return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK
+                                                                   : MT_ATTR_ERR_FAILED;
     }
 
-    OpState::Instance *inst = nullptr;
-    for (auto &d : s_opstate_delegates) {
-        if (d.endpoint() == ep && d.cluster() == OpState::Id) {
-            inst = d.instance();
-            break;
+    /* Catalogue batch 5: the RVC branch the pre-batch comment promised.
+     * The derived cluster's state space widens to {0, 1, 2, 0x40
+     * kSeekingCharger, 0x41 kCharging, 0x42 kDocked} (RvcOperationalState/
+     * Enums.h:67-69); mt_at.c's union check has already admitted these,
+     * and this is where a union-legal value lands on the RIGHT cluster
+     * (0x40 on a washer still answers MT_ATTR_ERR_VALUE in the base
+     * branch above, mirroring the C6's mt_matter_opstate_set() branch
+     * order exactly). SetOperationalState() enforces the same set
+     * independently through IsSupportedOperationalState(), so a state
+     * that slipped both checks maps to MT_ATTR_ERR_FAILED rather than
+     * being silently accepted. The Instance is reached through the RVC's
+     * own delegate pool below, keyed by endpoint alone (one
+     * RvcOperationalState per RVC endpoint), returned upcast to the base
+     * Instance the way the base GetInstance() passthrough hands it over. */
+    if (emberAfContainsServer(ep, RvcOpState::Id)) {
+        if (!(state <= 2 || state == 0x40 || state == 0x41 || state == 0x42)) {
+            return MT_ATTR_ERR_VALUE;
         }
+        OpState::Instance *inst = mt_rvc_opstate_instance(ep);
+        if (inst == nullptr) {
+            /* Cannot happen once the boot rebuild has run; defensive. */
+            return MT_ATTR_ERR_FAILED;
+        }
+        return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK
+                                                                   : MT_ATTR_ERR_FAILED;
     }
-    if (inst == nullptr) {
-        /* Cannot happen once the boot rebuild has run: every endpoint
-         * carrying the cluster got its pair in mt_devtype_create().
-         * Defensive, the C6's same arm. */
-        return MT_ATTR_ERR_FAILED;
-    }
-    return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+
+    return MT_ATTR_ERR_CLUSTER;
 }
 
 /*
@@ -2315,4 +2404,688 @@ static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val)
         st = srv->SetEnabled(val != 0);
     }
     return (st == Status::Success) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+}
+
+/* ============ catalogue batch 5: the standalone remainder ================
+ *
+ * The generic switch (0x000F) lands here first; the RVC's ModeBase and
+ * RvcOperationalState machinery follows in its own commit. Same file
+ * discipline as batches 3 and 4: SDK hooks on the CHIP task take no
+ * StackLock, AT bridges from the parser thread always do.
+ */
+
+/* ---- generic switch (0x000F) ------------------------------------------ */
+
+/*
+ * AT+MTSWITCH bridge (AT_MT_SPEC.md 3.15): emit the Switch cluster's
+ * InitialPress event at position 1, the upstream arduino-esp32 class's
+ * click(). mt_at.c's cmd_mtswitch has already rejected any action other
+ * than 0 with +MTERR:1, so this bridge only ever emits InitialPress.
+ *
+ * The StackLock is load-bearing, not just uniformity: EventLogging.h says
+ * "The consumer has to either lock the Matter stack lock or queue the
+ * event to the Matter event queue when using LogEvent. This function is
+ * not safe to call outside of the main Matter processing context", and
+ * OnInitialPress() is a bare LogEvent() passthrough
+ * (switch-server.cpp:66-78). Same quote the C6 cites at its own call site
+ * (platform/esp32c6/main/main.cpp mt_matter_switch_click()).
+ *
+ * The two lookups are attr_locate()'s, for the usual error division.
+ * Unlike the C6's esp-matter helper (send_initial_press, which returns
+ * esp_err_t), this tree's OnInitialPress() returns VOID: a LogEvent
+ * failure is logged by the server and not reported to the caller, so
+ * mt_matter.h's MT_ATTR_ERR_FAILED arm ("the event send itself fails") is
+ * unreachable on this platform and the checks above are the whole failure
+ * surface. Nothing echoes on the AT link; subscribed controllers see the
+ * event. CurrentPosition is deliberately not written (the C6 does not
+ * either; the cluster's event path never touches it).
+ */
+extern "C" int mt_matter_switch_click(uint16_t ep)
+{
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::Switch::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    chip::app::Clusters::SwitchServer::Instance().OnInitialPress(ep, 1);
+    return MT_ATTR_OK;
+}
+
+/* ---- robotic vacuum cleaner: the two ModeBase clusters ----------------
+ *
+ * RvcRunMode (0x0054) and RvcCleanMode (0x0055) are concrete derivations
+ * of the abstract ModeBase cluster, one shared Delegate interface and one
+ * shared Instance class parameterised by cluster id at CONSTRUCTION (the
+ * four-argument ctor, mode-base-server.h:46: delegate, endpoint, cluster,
+ * feature). One delegate OBJECT plus one Instance per (endpoint, cluster)
+ * PAIR: an RVC endpoint carries both clusters at once, so it consumes two
+ * pool slots, unlike every earlier per-endpoint pool in this file.
+ *
+ * THE TWO WAYS THIS MACHINERY KILLS OR SILENTLY CRIPPLES THE DEVICE, and
+ * why the code below is shaped the way it is. Instance::Init()
+ * (mode-base-server.cpp:71-84) does, in order:
+ *
+ *   1. ReturnErrorOnFailure(mDelegate->GetModeValueByIndex(0, mCurrentMode))
+ *      (:74). This runs BEFORE anything else, before any AT+MTMODES could
+ *      possibly have fed a list. If the delegate answers
+ *      PROVIDER_LIST_EXHAUSTED at index 0, Init() returns early and the
+ *      Instance is NEVER REGISTERED: no abort, no log from the SDK, reads
+ *      and ChangeToMode on that cluster simply go unanswered. That is why
+ *      the placeholder-mode-0 policy below is MANDATORY, not a nicety: an
+ *      empty store still answers index 0 with mode 0, the cluster's tag-0
+ *      default and label "Mode0" (mirrored from the C6, main.cpp:
+ *      2429-2470). The port checks Init()'s return and logs loudly
+ *      besides, which the C6's SDK init-callback path cannot (it discards
+ *      the return outright).
+ *
+ *   2. VerifyOrDie(emberAfContainsServer(mEndpointId, mClusterId)) (:77).
+ *      A PANIC, not the soft CHIP_ERROR_INVALID_ARGUMENT bail the
+ *      OperationalState machinery gives the same mistake
+ *      (operational-state-server.cpp:63-70). Constructing and Init()ing a
+ *      ModeBase Instance before emberAfSetDynamicEndpoint() succeeds
+ *      ABORTS THE DEVICE. The construct-and-Init therefore lives only in
+ *      mt_matter_modebase_delegate_set_endpoint(), which
+ *      mt_devtype_create() calls strictly below a successful
+ *      emberAfSetDynamicEndpoint(); nothing else may ever construct one.
+ *
+ * One-delegate-per-Instance is DISCIPLINE here, not an enforced abort:
+ * ModeBase::Delegate::SetInstance() is a plain setter
+ * (`void SetInstance(Instance * aInstance) { mInstance = aInstance; }`,
+ * mode-base-server.h:256), with NO VerifyOrDie. This contradicts the C6's
+ * own comment (main.cpp:2408-2412 claims the identical VerifyOrDie
+ * contract as OperationalState, whose SetInstance really does die,
+ * operational-state-server.h:349-353); verified against this tree and the
+ * C6's citation deliberately NOT copied. A shared delegate would not
+ * abort, it would silently answer through the wrong Instance, which is
+ * worse; the one-pair-per-slot pool below is what keeps the rule.
+ *
+ * Init() also LoadPersistentAttributes() (:79): three KVS reads per
+ * (endpoint, cluster) at every boot, and UpdateCurrentMode() persists on
+ * every controller ChangeToMode (:178). Two ModeBase clusters per RVC
+ * endpoint makes this a second ZMS wear source after the chime's, on the
+ * settings_storage partition already under a sizing watch. Also live but
+ * inert: Init()'s OnOff coupling block compiles here
+ * (MATTER_DM_PLUGIN_ON_OFF_SERVER is defined, OnOff is in hearth.zap) and
+ * is skipped at :132 because no RVC endpoint carries an OnOff server.
+ *
+ * The header defines `static IntrusiveList<Instance>
+ * gModeBaseAliasesInstances` IN THE HEADER (mode-base-server.h:279), so
+ * this translation unit gets a private copy; only the SDK's own
+ * GetModeBaseInstanceList() accessor touches the real one, and this file
+ * must never name the symbol.
+ *
+ * The mode store is block-resident (mt_mb_store_t, mt_dyn_store.h),
+ * reached through mt_dyn_mb_store(ep, cluster): only RVC endpoints pay,
+ * and count 0 is the placeholder state. Unlike mt_mode_store_t there is
+ * no struct/CharSpan half: every ModeBase read COPIES into caller-owned
+ * memory (GetModeLabelByIndex fills a MutableCharSpan, GetModeTagsByIndex
+ * a caller-supplied List, mode-base-server.h:205, :235), so no lifetime
+ * argument is needed beyond the lock.
+ */
+class HearthModeBaseDelegate : public chip::app::Clusters::ModeBase::Delegate
+{
+public:
+    void set_cluster(chip::ClusterId cluster) { m_cluster = cluster; }
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+    chip::ClusterId cluster() const { return m_cluster; }
+
+    /* GetInstance() is protected in the base Delegate; this passthrough
+     * is how mt_matter_modebase_set() clamps CurrentMode and how the
+     * DE397 live reader answers it, the HearthOpStateDelegate mechanism. */
+    chip::app::Clusters::ModeBase::Instance *instance() { return GetInstance(); }
+
+    CHIP_ERROR Init() override { return CHIP_NO_ERROR; }
+
+    CHIP_ERROR GetModeLabelByIndex(uint8_t modeIndex, chip::MutableCharSpan &label) override
+    {
+        mt_mb_store_t *slot = mt_dyn_mb_store(m_ep, m_cluster);
+        if (slot == nullptr || slot->count == 0) {
+            if (modeIndex != 0) {
+                return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+            }
+            /* The placeholder: index 0 must answer (see the section
+             * comment; Instance::Init() reads it before any host list can
+             * exist). Superseded the moment AT+MTMODES stores a real
+             * list; no separate flag, count > 0 simply wins. */
+            return chip::CopyCharSpanToMutableCharSpan(chip::CharSpan::fromCharString("Mode0"),
+                                                       label);
+        }
+        if (modeIndex >= slot->count) {
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        return chip::CopyCharSpanToMutableCharSpan(
+            chip::CharSpan::fromCharString(slot->entries[modeIndex].label), label);
+    }
+
+    CHIP_ERROR GetModeValueByIndex(uint8_t modeIndex, uint8_t &value) override
+    {
+        mt_mb_store_t *slot = mt_dyn_mb_store(m_ep, m_cluster);
+        if (slot == nullptr || slot->count == 0) {
+            if (modeIndex != 0) {
+                return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+            }
+            value = 0;
+            return CHIP_NO_ERROR;
+        }
+        if (modeIndex >= slot->count) {
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        value = slot->entries[modeIndex].mode;
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR GetModeTagsByIndex(
+        uint8_t modeIndex,
+        chip::app::DataModel::List<chip::app::Clusters::detail::Structs::ModeTagStruct::Type> &tags)
+        override
+    {
+        mt_mb_store_t *slot = mt_dyn_mb_store(m_ep, m_cluster);
+        uint16_t tag_value;
+        if (slot == nullptr || slot->count == 0) {
+            if (modeIndex != 0) {
+                return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+            }
+            tag_value = placeholder_tag();
+        } else {
+            if (modeIndex >= slot->count) {
+                return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+            }
+            tag_value = slot->entries[modeIndex].tag;
+        }
+        /* The SDK hands in a buffer sized for its own tag maximum; this
+         * delegate publishes exactly one tag per mode, so size 1 always
+         * fits. Guarded anyway, the C6's defensive shape. */
+        if (tags.size() < 1) {
+            return CHIP_ERROR_INVALID_ARGUMENT;
+        }
+        tags[0].value = tag_value;
+        tags.reduce_size(1);
+        return CHIP_NO_ERROR;
+    }
+
+    /*
+     * ChangeToMode::Id is 0x00 for both RVC mode clusters (each generated
+     * CommandIds.h declares it), so one constant serves both and
+     * m_cluster, fixed at alloc time, is what routes the +MTCMD to the
+     * right wire cluster. The SDK's own pre-check answers UnsupportedMode
+     * before this is ever called (Instance::HandleChangeToMode validates
+     * membership first, mode-base-server.cpp:382-421), and a
+     * same-as-current mode answers success without calling it either
+     * (:406), so only genuine transitions reach the host, and only
+     * kSuccess/kGenericFailure are this function's business. The verdict
+     * IS the wire response: HandleChangeToMode copies response.status
+     * straight out. Runs on the CHIP task (the Instance's own
+     * CommandHandlerInterface; both clusters are CHI-only), no StackLock,
+     * the standing hook discipline.
+     */
+    void HandleChangeToMode(
+        uint8_t NewMode,
+        chip::app::Clusters::ModeBase::Commands::ChangeToModeResponse::Type &response) override
+    {
+        bool allow = mt_cmd_forward_payload(
+            m_ep, m_cluster, chip::app::Clusters::RvcRunMode::Commands::ChangeToMode::Id, NewMode);
+        response.status =
+            chip::to_underlying(allow ? chip::app::Clusters::ModeBase::StatusCode::kSuccess
+                                      : chip::app::Clusters::ModeBase::StatusCode::kGenericFailure);
+    }
+
+private:
+    /* Tag-0 defaults, placeholder case only (index 0 of an unfed store):
+     * RvcRunMode kIdle (0x4000), RvcCleanMode kVacuum (0x4001), the
+     * AT_MT_SPEC.md 3.20 table's exact policy, read from the enums rather
+     * than transcribed. mt_matter_modebase_set() applies the same table
+     * to real host entries at store time. */
+    uint16_t placeholder_tag() const
+    {
+        using namespace chip::app::Clusters;
+        if (m_cluster == RvcRunMode::Id) {
+            return chip::to_underlying(RvcRunMode::ModeTag::kIdle);
+        }
+        return chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
+    }
+
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+    chip::ClusterId m_cluster = chip::kInvalidClusterId;
+};
+
+/*
+ * Pool sizing, RULED (graph DE404): 18 slots, which is 2 x 9, two
+ * ModeBase pairs per RVC endpoint times the NINE RVC endpoints the
+ * endpoint block heap can actually serve (8,112 usable / 864 B per RVC
+ * block; the arithmetic beside K_HEAP_DEFINE in mt_devtypes_zephyr.cpp).
+ * Not kServiceableEndpoints like every other pool here, because this is
+ * the port's first two-objects-per-endpoint pool and 16 would cap the
+ * composition at eight RVCs, one below what the heap allows, while 32
+ * (2 x 16) would reserve Instances for seven endpoints the heap can never
+ * stand up. Exhaustion aborts the create before anything is spent, so a
+ * tenth RVC fails on whichever wall it hits first (this pool or the
+ * heap), loudly either way. MT_MB_MAX_LISTS (16, core) bounds the C6's
+ * flat store, not this pool: on this platform the stores are
+ * block-resident per endpoint and the core constant only shapes the
+ * entry layout (the mt_matter.h staleness note batch 4 already logged).
+ *
+ * The Instance pool is alignas raw storage (the four-argument ctor needs
+ * create-time values), placement-constructed exactly once per slot in
+ * mt_matter_modebase_delegate_set_endpoint() and never destroyed:
+ * ~Instance() would Shutdown() and unregister cleanly
+ * (mode-base-server.cpp:55-69), but this platform has no teardown path
+ * (AT+MTEP edits apply by reboot, which resets every pool wholesale), the
+ * standing allocate-only policy.
+ */
+constexpr size_t kModeBasePoolSlots = 18;
+
+static HearthModeBaseDelegate s_mb_delegates[kModeBasePoolSlots];
+alignas(chip::app::Clusters::ModeBase::Instance) static uint8_t
+    s_mb_instances[kModeBasePoolSlots][sizeof(chip::app::Clusters::ModeBase::Instance)];
+static size_t s_mb_delegate_next;
+
+extern "C" void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
+{
+    if (s_mb_delegate_next >= kModeBasePoolSlots) {
+        return nullptr;
+    }
+    HearthModeBaseDelegate *d = &s_mb_delegates[s_mb_delegate_next++];
+    d->set_cluster(cluster_id);
+    return d;
+}
+
+/*
+ * The second half, and where the ModeBase Instance is BORN. Everything
+ * about the placement of this call is the section comment's two-failure
+ * story: it may only run below a successful emberAfSetDynamicEndpoint()
+ * (Init()'s VerifyOrDie on emberAfContainsServer PANICS otherwise, unlike
+ * every soft-bailing Init this file already hosts), and the endpoint's
+ * block-resident store must already be constructed (Init()'s first act
+ * reads the delegate's index 0, which the placeholder policy answers for
+ * an unfed store). The Instance is constructed with feature 0:
+ * DirectModeChange, the aliases' only feature, is optional and not taken,
+ * matching the FeatureMap 0 arena seed so the AAI's FeatureMap answer and
+ * the inert slot agree.
+ *
+ * Init()'s return is CHECKED and a failure logged loudly, the shape the
+ * opstate handout set: the C6's SDK init path discards it, and the
+ * silent-deregistration failure mode (placeholder missing, index-0 read
+ * fails, Instance never registers, no diagnostic anywhere) is exactly the
+ * kind of quiet cripple this port refuses to ship without a shout. It
+ * does not abort: below a successful create the contains-server check
+ * cannot fail, the placeholder answers index 0 by construction, and the
+ * registry Register() calls fail only on a duplicate registration the
+ * construct-once pool rules out; if it ever fired anyway, the endpoint is
+ * live and correct in every other respect, the standing lesser-evil
+ * argument.
+ */
+extern "C" void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    auto *d = static_cast<HearthModeBaseDelegate *>(delegate);
+    d->set_endpoint(ep);
+    size_t idx = (size_t)(d - s_mb_delegates);
+    auto *inst = new (s_mb_instances[idx])
+        chip::app::Clusters::ModeBase::Instance(d, ep, d->cluster(), 0);
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        LOG_ERR("ModeBase Instance::Init failed for endpoint %u cluster 0x%08X: "
+                "%" CHIP_ERROR_FORMAT
+                "; the cluster is NOT registered and will answer nothing on the fabric",
+                (unsigned)ep, (unsigned)d->cluster(), err.Format());
+    }
+}
+
+/*
+ * AT+MTMODES's cluster-aware form (AT_MT_SPEC.md 3.20). Grammar and
+ * content rules (count bounds, mode uniqueness, tag range, label content)
+ * are enforced by cmd_mtmodes() in mt_at.c; the bounds re-checked here
+ * are defensive. This bridge is the sole place that validates cluster
+ * against the ModeBase ids this build serves, since mt_at.c has no CHIP
+ * header to read them from: on this platform that is RvcRunMode and
+ * RvcCleanMode only, and the other five ModeBase aliases the C6 already
+ * accepts answer MT_ATTR_ERR_CLUSTER here until their device types land
+ * in later batches (the composed-appliance and energy rounds).
+ *
+ * Tag-0 defaults are substituted at STORE time so every read is
+ * branch-free, the C6's policy verbatim (main.cpp:2762-2766): RvcRunMode's
+ * FIRST declared mode gets kIdle and every later one kCleaning (which is
+ * what keeps a host that always writes tag 0 conformant, since a
+ * RvcRunMode list must contain an Idle-tagged mode), RvcCleanMode gets
+ * kVacuum on every mode. A nonzero tag passes through unvalidated beyond
+ * the u16 range check mt_at.c performed; tag semantics are the host's.
+ *
+ * All labels are validated before any entry is overwritten (the fix-round
+ * M5 shape). Strictly optional here, unlike the ModeSelect twin: ModeBase
+ * reads copy per access and cache no spans, so a half-written list could
+ * never publish stale bytes; kept anyway so the two bridges reason
+ * identically.
+ *
+ * Ends with the SupportedModes dirty-mark and the CurrentMode CLAMP: if
+ * the replacement list dropped the mode the Instance currently holds,
+ * UpdateCurrentMode(first entry) through the SDK's own setter, which
+ * persists and reports the change itself when it actually changes. A
+ * clamp reaches the fabric as that report only, never as a +MTATTR URC:
+ * CurrentMode's ember slot is an inert shadow (the k_instance_served
+ * split), and the host that just replaced the list can read the clamped
+ * value back live over AT+MTATTR.
+ */
+extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes,
+                                      const uint16_t *tags, const char *const *labels,
+                                      uint8_t count)
+{
+    using namespace chip::app::Clusters;
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (!emberAfContainsServer(ep, cluster)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1 || count > MT_MB_MAX_COUNT) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_mb_store_t *slot = mt_dyn_mb_store(ep, cluster);
+    if (!slot) {
+        /* Cannot happen: the lookups above proved ep live with this
+         * cluster, and every such endpoint's block carries both stores
+         * from create. Defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(labels[i]);
+        if (len < 1 || len > MT_MB_MAX_LABEL_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+    }
+    for (uint8_t i = 0; i < count; i++) {
+        uint16_t tag = tags[i];
+        if (tag == 0) {
+            if (cluster == RvcRunMode::Id) {
+                tag = chip::to_underlying(i == 0 ? RvcRunMode::ModeTag::kIdle
+                                                 : RvcRunMode::ModeTag::kCleaning);
+            } else {
+                tag = chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
+            }
+        }
+        slot->entries[i].mode = modes[i];
+        slot->entries[i].tag = tag;
+        memcpy(slot->entries[i].label, labels[i], strlen(labels[i]) + 1);
+    }
+    slot->count = count;
+
+    /* One Instance lookup serves both tail steps (batch 5 fix round,
+     * review Minor 3): the dirty-mark goes through the SDK's own
+     * Instance::ReportSupportedModesChange(), the method the delegate
+     * contract says the device SHALL call (mode-base-server.h:109, the
+     * SHALL at :203/:215/:233; its body is exactly the raw
+     * MatterReportingAttributeChangeCallback this bridge used to make,
+     * mode-base-server.cpp:241-244, so the wire is unchanged and a future
+     * SDK revision that adds bookkeeping there is picked up for free).
+     * The raw callback survives only in the defensive no-Instance arm, so
+     * a host feed still reaches subscriptions even in the
+     * cannot-happen-once-rebuilt state. */
+    ModeBase::Instance *inst = nullptr;
+    for (auto &d : s_mb_delegates) {
+        if (d.endpoint() == ep && d.cluster() == cluster) {
+            inst = d.instance();
+            break;
+        }
+    }
+    if (inst == nullptr) {
+        MatterReportingAttributeChangeCallback(ep, cluster,
+                                               ModeBase::Attributes::SupportedModes::Id);
+        return MT_ATTR_OK;
+    }
+    inst->ReportSupportedModesChange();
+
+    if (!inst->IsSupportedMode(inst->GetCurrentMode())) {
+        /* The clamp target is entries[0].mode, stored two loops above, so
+         * UpdateCurrentMode()'s ConstraintError arm (an unsupported mode)
+         * is unreachable here; checked and logged anyway rather than
+         * discarded, this file's convention for SDK returns (batch 5 fix
+         * round, review Minor 4). */
+        Status st = inst->UpdateCurrentMode(slot->entries[0].mode);
+        if (st != Status::Success) {
+            LOG_ERR("modebase CurrentMode clamp to %u failed on endpoint %u cluster 0x%08X "
+                    "(status 0x%02X)",
+                    (unsigned)slot->entries[0].mode, (unsigned)ep, (unsigned)cluster,
+                    (unsigned)chip::to_underlying(st));
+        }
+    }
+    return MT_ATTR_OK;
+}
+
+/*
+ * DE397 live read for the two ModeBase CurrentModes, dispatched from
+ * mt_matter_attr_read() under its StackLock. CurrentMode is unsigned,
+ * never nullable; the Instance's member is the served truth (KVS-restored
+ * at Init, updated by ChangeToMode and the clamp above), the inert arena
+ * seed is not.
+ */
+static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, bool *is_unsigned)
+{
+    if (is_unsigned) {
+        *is_unsigned = true;
+    }
+    for (auto &d : s_mb_delegates) {
+        if (d.endpoint() == ep && d.cluster() == cluster) {
+            chip::app::Clusters::ModeBase::Instance *inst = d.instance();
+            if (inst == nullptr) {
+                break;
+            }
+            *out = inst->GetCurrentMode();
+            return MT_ATTR_OK;
+        }
+    }
+    /* Cannot happen once the boot rebuild has run; defensive. */
+    return MT_ATTR_ERR_FAILED;
+}
+
+/* ---- robotic vacuum cleaner: RvcOperationalState ----------------------
+ *
+ * The derived opstate cluster needs its own Delegate SUBCLASS
+ * (RvcOperationalState::Delegate adds HandleGoHomeCommandCallback and
+ * stubs Start/Stop to kUnknownEnumValue, operational-state-server.h:
+ * 378-406) and therefore its own pool: the base Delegate::SetInstance()
+ * VerifyOrDies when a second Instance shares a delegate
+ * (operational-state-server.h:349-353), so lending trio delegates to RVC
+ * Instances is fatal, and the trio's HearthOpStateDelegate has no GoHome
+ * hook anyway (mt_matter.h:526-528 states the split rule directly).
+ *
+ * No new translation unit: RvcOperationalState::Instance lives in the
+ * already-compiled operational-state-server.cpp (:520-570), constructed
+ * Instance(Delegate*, ep), which forwards RvcOperationalState::Id to the
+ * protected three-argument base ctor. Init() is the base's, and
+ * soft-bails on emberAfContainsServer (operational-state-server.cpp:
+ * 63-70), so this half of the RVC is the trio's ordering story, NOT the
+ * ModeBase panic above.
+ *
+ * Command routing (the reason the metadata list in mt_devtypes_zephyr.cpp
+ * is exactly {Pause, Resume, GoHome}): the base InvokeCommand() switches
+ * on Pause/Resume/Start/Stop unconditionally and sends everything else to
+ * InvokeDerivedClusterCommand(), where GoHome is handled (:296-334,
+ * :534-546). The server-side guards resolve the state cases before any
+ * delegate call (Pause also compatible with kSeekingCharger, Resume with
+ * kCharging/kDocked; GoHome from kCharging/kDocked answers
+ * kCommandInvalidInState and from kSeekingCharger answers success, both
+ * WITHOUT calling the delegate, :522-531 and :548-567), so the three
+ * forwards below only carry genuine adjudication requests. Allow is
+ * kNoError, deny kUnableToCompleteOperation, copied by the SDK straight
+ * into the OperationalCommandResponse: the verdict IS the wire response,
+ * the trio's contract. GoHome forwards payload-less (the command has no
+ * fields), via mt_cmd_forward like its siblings.
+ *
+ * Instance reachability: the base GetInstance() passthrough, the smaller
+ * change against the C6's typed m_instance member (which exists there
+ * only because the C6 writes its own init callback); the pointer is the
+ * identical one, upcast to OperationalState::Instance, and everything
+ * this file calls on it (SetOperationalState, GetCurrentOperationalState,
+ * GetCurrentPhase) is base API.
+ */
+class HearthRvcOpStateDelegate : public chip::app::Clusters::RvcOperationalState::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+
+    chip::app::Clusters::OperationalState::Instance *instance() { return GetInstance(); }
+
+    chip::app::DataModel::Nullable<uint32_t> GetCountdownTime() override
+    {
+        return chip::app::DataModel::NullNullable;
+    }
+
+    /* Seven states in the RVC's own enum: the four base states plus the
+     * three derived-number-space ones AT+MTOPSTATE may set (0x40
+     * kSeekingCharger, 0x41 kCharging, 0x42 kDocked,
+     * RvcOperationalState/Enums.h:67-69), mirroring the C6's list
+     * (main.cpp:3300-3313). kEmptyingDustBin and friends (0x43-0x46)
+     * exist in the enum but are outside the AT contract's union and not
+     * published. kError is listed because the spec requires it even
+     * though AT+MTOPSTATE can never set it directly. */
+    CHIP_ERROR GetOperationalStateAtIndex(
+        size_t index,
+        chip::app::Clusters::OperationalState::GenericOperationalState &operationalState) override
+    {
+        using chip::app::Clusters::RvcOperationalState::OperationalStateEnum;
+        static const OperationalStateEnum states[] = {
+            OperationalStateEnum::kStopped,        OperationalStateEnum::kRunning,
+            OperationalStateEnum::kPaused,         OperationalStateEnum::kError,
+            OperationalStateEnum::kSeekingCharger, OperationalStateEnum::kCharging,
+            OperationalStateEnum::kDocked,
+        };
+        if (index >= (sizeof(states) / sizeof(states[0]))) {
+            return CHIP_ERROR_NOT_FOUND;
+        }
+        operationalState.Set(chip::to_underlying(states[index]));
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR GetOperationalPhaseAtIndex(size_t index,
+                                          chip::MutableCharSpan &operationalPhase) override
+    {
+        /* NOT_FOUND at index 0 makes PhaseList read null, the trio's
+         * convention; this firmware publishes no phases. */
+        (void)index;
+        (void)operationalPhase;
+        return CHIP_ERROR_NOT_FOUND;
+    }
+
+    void HandlePauseStateCallback(
+        chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::RvcOperationalState::Commands::Pause::Id, err);
+    }
+
+    void HandleResumeStateCallback(
+        chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::RvcOperationalState::Commands::Resume::Id, err);
+    }
+
+    void HandleGoHomeCommandCallback(
+        chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::RvcOperationalState::Commands::GoHome::Id, err);
+    }
+
+private:
+    void forward(uint32_t command,
+                 chip::app::Clusters::OperationalState::GenericOperationalError &err)
+    {
+        using chip::app::Clusters::OperationalState::ErrorStateEnum;
+        bool allow = mt_cmd_forward(m_ep, chip::app::Clusters::RvcOperationalState::Id, command);
+        err.Set(chip::to_underlying(allow ? ErrorStateEnum::kNoError
+                                          : ErrorStateEnum::kUnableToCompleteOperation));
+    }
+
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+};
+
+/* One RvcOperationalState per RVC endpoint, so this pool is
+ * kServiceableEndpoints deep like the trio's (the heap admits only nine
+ * RVC endpoints, but a slot here is 260-odd bytes against the ModeBase
+ * pool's DE404 argument for departing from 16; not worth a second special
+ * sizing). Raw aligned storage for the non-default-constructible
+ * Instance, placement-constructed once, never destroyed: the standing
+ * pool policy. */
+static HearthRvcOpStateDelegate s_rvc_opstate_delegates[kServiceableEndpoints];
+alignas(chip::app::Clusters::RvcOperationalState::Instance) static uint8_t
+    s_rvc_opstate_instances[kServiceableEndpoints]
+                           [sizeof(chip::app::Clusters::RvcOperationalState::Instance)];
+static size_t s_rvc_opstate_delegate_next;
+
+extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
+{
+    if (s_rvc_opstate_delegate_next >= kServiceableEndpoints) {
+        return nullptr;
+    }
+    return &s_rvc_opstate_delegates[s_rvc_opstate_delegate_next++];
+}
+
+/*
+ * The second half: constructs the RvcOperationalState::Instance in its
+ * slot and runs Init(), the trio's shape verbatim (Init soft-bails on
+ * emberAfContainsServer, so this belongs below the successful
+ * emberAfSetDynamicEndpoint(); a failure is logged loudly and does not
+ * abort, the unreachable-by-ordering argument).
+ */
+extern "C" void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    auto *d = static_cast<HearthRvcOpStateDelegate *>(delegate);
+    d->set_endpoint(ep);
+    size_t idx = (size_t)(d - s_rvc_opstate_delegates);
+    auto *inst = new (s_rvc_opstate_instances[idx])
+        chip::app::Clusters::RvcOperationalState::Instance(d, ep);
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        LOG_ERR("RvcOperationalState Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
+                "; commands on it will not reach the host and its attributes will not be served",
+                (unsigned)ep, err.Format());
+    }
+}
+
+/* The pool's Instance lookup, shared by mt_matter_opstate_set()'s RVC
+ * branch and the DE397 live reader below. */
+static chip::app::Clusters::OperationalState::Instance *mt_rvc_opstate_instance(uint16_t ep)
+{
+    for (auto &d : s_rvc_opstate_delegates) {
+        if (d.endpoint() == ep) {
+            return d.instance();
+        }
+    }
+    return nullptr;
+}
+
+/*
+ * DE397 live read for the RVC opstate pair, the trio's reader against the
+ * RVC pool: OperationalState answers the live enum (including the
+ * derived-number-space values), CurrentPhase answers +MTERR:5 while null,
+ * which is its steady state here since no phases are published.
+ */
+static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out,
+                                         bool *is_unsigned)
+{
+    namespace OpState = chip::app::Clusters::OperationalState;
+    if (is_unsigned) {
+        *is_unsigned = true;
+    }
+    OpState::Instance *inst = mt_rvc_opstate_instance(ep);
+    if (inst == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (attr == OpState::Attributes::OperationalState::Id) {
+        *out = inst->GetCurrentOperationalState();
+        return MT_ATTR_OK;
+    }
+    chip::app::DataModel::Nullable<uint8_t> phase = inst->GetCurrentPhase();
+    if (phase.IsNull()) {
+        return MT_ATTR_ERR_TYPE;
+    }
+    *out = phase.Value();
+    return MT_ATTR_OK;
 }

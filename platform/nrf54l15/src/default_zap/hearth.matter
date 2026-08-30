@@ -2066,6 +2066,61 @@ cluster WiFiNetworkDiagnostics = 54 {
   command ResetCounts(): DefaultSuccess = 0;
 }
 
+/** This cluster exposes interactions with a switch device, for the purpose of using those interactions by other devices.
+Two types of switch devices are supported: latching switch (e.g. rocker switch) and momentary switch (e.g. push button), distinguished with their feature flags.
+Interactions with the switch device are exposed as attributes (for the latching switch) and as events (for both types of switches). An interested party MAY subscribe to these attributes/events and thus be informed of the interactions, and can perform actions based on this, for example by sending commands to perform an action such as controlling a light or a window shade. */
+cluster Switch = 59 {
+  revision 2;
+
+  bitmap Feature : bitmap32 {
+    kLatchingSwitch = 0x1;
+    kMomentarySwitch = 0x2;
+    kMomentarySwitchRelease = 0x4;
+    kMomentarySwitchLongPress = 0x8;
+    kMomentarySwitchMultiPress = 0x10;
+    kActionSwitch = 0x20;
+  }
+
+  info event SwitchLatched = 0 {
+    int8u newPosition = 0;
+  }
+
+  info event InitialPress = 1 {
+    int8u newPosition = 0;
+  }
+
+  info event LongPress = 2 {
+    int8u newPosition = 0;
+  }
+
+  info event ShortRelease = 3 {
+    int8u previousPosition = 0;
+  }
+
+  info event LongRelease = 4 {
+    int8u previousPosition = 0;
+  }
+
+  info event MultiPressOngoing = 5 {
+    int8u newPosition = 0;
+    int8u currentNumberOfPressesCounted = 1;
+  }
+
+  info event MultiPressComplete = 6 {
+    int8u previousPosition = 0;
+    int8u totalNumberOfPressesCounted = 1;
+  }
+
+  readonly attribute int8u numberOfPositions = 0;
+  readonly attribute int8u currentPosition = 1;
+  readonly attribute optional int8u multiPressMax = 2;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
+}
+
 /** Commands to trigger a Node to allow a new Administrator to commission it. */
 cluster AdministratorCommissioning = 60 {
   revision 1;
@@ -2395,6 +2450,136 @@ cluster ModeSelect = 80 {
   command ChangeToMode(ChangeToModeRequest): DefaultSuccess = 0;
 }
 
+/** Attributes and commands for selecting a mode from a list of supported options. */
+cluster RvcRunMode = 84 {
+  revision 4;
+
+  enum ModeTag : enum16 {
+    kAuto = 0;
+    kQuick = 1;
+    kQuiet = 2;
+    kLowNoise = 3;
+    kLowEnergy = 4;
+    kVacation = 5;
+    kMin = 6;
+    kMax = 7;
+    kNight = 8;
+    kDay = 9;
+    kIdle = 16384;
+    kCleaning = 16385;
+    kMapping = 16386;
+  }
+
+  enum StatusCode : enum8 {
+    kStuck = 65;
+    kDustBinMissing = 66;
+    kDustBinFull = 67;
+    kWaterTankEmpty = 68;
+    kWaterTankMissing = 69;
+    kWaterTankLidOpen = 70;
+    kMopCleaningPadMissing = 71;
+    kBatteryLow = 72;
+  }
+
+  bitmap Feature : bitmap32 {
+    kDirectModeChange = 0x100000;
+  }
+
+  shared struct ModeTagStruct {
+    optional vendor_id mfgCode = 0;
+    enum16 value = 1;
+  }
+
+  shared struct ModeOptionStruct {
+    char_string<64> label = 0;
+    int8u mode = 1;
+    ModeTagStruct modeTags[] = 2;
+  }
+
+  readonly attribute ModeOptionStruct supportedModes[] = 0;
+  readonly attribute int8u currentMode = 1;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
+
+  request struct ChangeToModeRequest {
+    int8u newMode = 0;
+  }
+
+  response struct ChangeToModeResponse = 1 {
+    enum8 status = 0;
+    optional char_string statusText = 1;
+  }
+
+  /** This command is used to change device modes.
+        On receipt of this command the device SHALL respond with a ChangeToModeResponse command. */
+  command ChangeToMode(ChangeToModeRequest): ChangeToModeResponse = 0;
+}
+
+/** Attributes and commands for selecting a mode from a list of supported options. */
+cluster RvcCleanMode = 85 {
+  revision 5;
+
+  enum ModeTag : enum16 {
+    kAuto = 0;
+    kQuick = 1;
+    kQuiet = 2;
+    kLowNoise = 3;
+    kLowEnergy = 4;
+    kVacation = 5;
+    kMin = 6;
+    kMax = 7;
+    kNight = 8;
+    kDay = 9;
+    kDeepClean = 16384;
+    kVacuum = 16385;
+    kMop = 16386;
+    kVacuumThenMop = 16387;
+  }
+
+  enum StatusCode : enum8 {
+    kCleaningInProgress = 64;
+  }
+
+  bitmap Feature : bitmap32 {
+    kDirectModeChange = 0x100000;
+  }
+
+  shared struct ModeTagStruct {
+    optional vendor_id mfgCode = 0;
+    enum16 value = 1;
+  }
+
+  shared struct ModeOptionStruct {
+    char_string<64> label = 0;
+    int8u mode = 1;
+    ModeTagStruct modeTags[] = 2;
+  }
+
+  readonly attribute ModeOptionStruct supportedModes[] = 0;
+  readonly attribute int8u currentMode = 1;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
+
+  request struct ChangeToModeRequest {
+    int8u newMode = 0;
+  }
+
+  response struct ChangeToModeResponse = 1 {
+    enum8 status = 0;
+    optional char_string statusText = 1;
+  }
+
+  /** This command is used to change device modes.
+        On receipt of this command the device SHALL respond with a ChangeToModeResponse command. */
+  command ChangeToMode(ChangeToModeRequest): ChangeToModeResponse = 0;
+}
+
 /** Attributes for reporting air quality classification */
 cluster AirQuality = 91 {
   revision 1;
@@ -2598,6 +2783,91 @@ cluster OperationalState = 96 {
   command Start(): OperationalCommandResponse = 2;
   /** Upon receipt, the device SHALL resume its operation from the point it was at when it received the Pause command, or from the point when it was paused by means outside of this cluster (for example by manual button press). */
   command Resume(): OperationalCommandResponse = 3;
+}
+
+/** This cluster supports remotely monitoring and, where supported, changing the operational state of a Robotic Vacuum. */
+cluster RvcOperationalState = 97 {
+  revision 1;
+
+  enum ErrorStateEnum : enum8 {
+    kNoError = 0;
+    kUnableToStartOrResume = 1;
+    kUnableToCompleteOperation = 2;
+    kCommandInvalidInState = 3;
+    kFailedToFindChargingDock = 64;
+    kStuck = 65;
+    kDustBinMissing = 66;
+    kDustBinFull = 67;
+    kWaterTankEmpty = 68;
+    kWaterTankMissing = 69;
+    kWaterTankLidOpen = 70;
+    kMopCleaningPadMissing = 71;
+    kLowBattery = 72;
+    kCannotReachTargetArea = 73;
+    kDirtyWaterTankFull = 74;
+    kDirtyWaterTankMissing = 75;
+    kWheelsJammed = 76;
+    kBrushJammed = 77;
+    kNavigationSensorObscured = 78;
+  }
+
+  enum OperationalStateEnum : enum8 {
+    kStopped = 0;
+    kRunning = 1;
+    kPaused = 2;
+    kError = 3;
+    kSeekingCharger = 64;
+    kCharging = 65;
+    kDocked = 66;
+    kEmptyingDustBin = 67;
+    kCleaningMop = 68;
+    kFillingWaterTank = 69;
+    kUpdatingMaps = 70;
+  }
+
+  shared struct ErrorStateStruct {
+    enum8 errorStateID = 0;
+    optional char_string<64> errorStateLabel = 1;
+    optional char_string<64> errorStateDetails = 2;
+  }
+
+  shared struct OperationalStateStruct {
+    enum8 operationalStateID = 0;
+    optional char_string<64> operationalStateLabel = 1;
+  }
+
+  critical event OperationalError = 0 {
+    ErrorStateStruct errorState = 0;
+  }
+
+  info event OperationCompletion = 1 {
+    enum8 completionErrorCode = 0;
+    optional nullable elapsed_s totalOperationalTime = 1;
+    optional nullable elapsed_s pausedTime = 2;
+  }
+
+  readonly attribute nullable char_string phaseList[] = 0;
+  readonly attribute nullable int8u currentPhase = 1;
+  readonly attribute optional nullable elapsed_s countdownTime = 2;
+  readonly attribute OperationalStateStruct operationalStateList[] = 3;
+  readonly attribute enum8 operationalState = 4;
+  readonly attribute ErrorStateStruct operationalError = 5;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
+
+  response struct OperationalCommandResponse = 4 {
+    ErrorStateStruct commandResponseState = 0;
+  }
+
+  /** Upon receipt, the device SHALL pause its operation if it is possible based on the current function of the server. */
+  command Pause(): OperationalCommandResponse = 0;
+  /** Upon receipt, the device SHALL resume its operation from the point it was at when it received the Pause command, or from the point when it was paused by means outside of this cluster (for example by manual button press). */
+  command Resume(): OperationalCommandResponse = 3;
+  /** On receipt of this command, the device SHALL start seeking the charging dock, if possible in the current state of the device. */
+  command GoHome(): OperationalCommandResponse = 128;
 }
 
 /** This cluster is used to configure a valve. */
@@ -3466,6 +3736,129 @@ cluster WindowCovering = 258 {
   command GoToTiltValue(GoToTiltValueRequest): DefaultSuccess = 7;
   /** Go to tilt percentage specified */
   command GoToTiltPercentage(GoToTiltPercentageRequest): DefaultSuccess = 8;
+}
+
+/** An interface for configuring and controlling pumps. */
+cluster PumpConfigurationAndControl = 512 {
+  revision 4;
+
+  enum ControlModeEnum : enum8 {
+    kConstantSpeed = 0;
+    kConstantPressure = 1;
+    kProportionalPressure = 2;
+    kConstantFlow = 3;
+    kConstantTemperature = 5;
+    kAutomatic = 7;
+  }
+
+  enum OperationModeEnum : enum8 {
+    kNormal = 0;
+    kMinimum = 1;
+    kMaximum = 2;
+    kLocal = 3;
+  }
+
+  bitmap Feature : bitmap32 {
+    kConstantPressure = 0x1;
+    kCompensatedPressure = 0x2;
+    kConstantFlow = 0x4;
+    kConstantSpeed = 0x8;
+    kConstantTemperature = 0x10;
+    kAutomatic = 0x20;
+    kLocalOperation = 0x40;
+  }
+
+  bitmap PumpStatusBitmap : bitmap16 {
+    kDeviceFault = 0x1;
+    kSupplyFault = 0x2;
+    kSpeedLow = 0x4;
+    kSpeedHigh = 0x8;
+    kLocalOverride = 0x10;
+    kRunning = 0x20;
+    kRemotePressure = 0x40;
+    kRemoteFlow = 0x80;
+    kRemoteTemperature = 0x100;
+  }
+
+  info event SupplyVoltageLow = 0 {
+  }
+
+  info event SupplyVoltageHigh = 1 {
+  }
+
+  info event PowerMissingPhase = 2 {
+  }
+
+  info event SystemPressureLow = 3 {
+  }
+
+  info event SystemPressureHigh = 4 {
+  }
+
+  critical event DryRunning = 5 {
+  }
+
+  info event MotorTemperatureHigh = 6 {
+  }
+
+  critical event PumpMotorFatalFailure = 7 {
+  }
+
+  info event ElectronicTemperatureHigh = 8 {
+  }
+
+  critical event PumpBlocked = 9 {
+  }
+
+  info event SensorFailure = 10 {
+  }
+
+  info event ElectronicNonFatalFailure = 11 {
+  }
+
+  critical event ElectronicFatalFailure = 12 {
+  }
+
+  info event GeneralFault = 13 {
+  }
+
+  info event Leakage = 14 {
+  }
+
+  info event AirDetection = 15 {
+  }
+
+  info event TurbineOperation = 16 {
+  }
+
+  readonly attribute nullable int16s maxPressure = 0;
+  readonly attribute nullable int16u maxSpeed = 1;
+  readonly attribute nullable int16u maxFlow = 2;
+  readonly attribute optional nullable int16s minConstPressure = 3;
+  readonly attribute optional nullable int16s maxConstPressure = 4;
+  readonly attribute optional nullable int16s minCompPressure = 5;
+  readonly attribute optional nullable int16s maxCompPressure = 6;
+  readonly attribute optional nullable int16u minConstSpeed = 7;
+  readonly attribute optional nullable int16u maxConstSpeed = 8;
+  readonly attribute optional nullable int16u minConstFlow = 9;
+  readonly attribute optional nullable int16u maxConstFlow = 10;
+  readonly attribute optional nullable int16s minConstTemp = 11;
+  readonly attribute optional nullable int16s maxConstTemp = 12;
+  readonly attribute optional PumpStatusBitmap pumpStatus = 16;
+  readonly attribute OperationModeEnum effectiveOperationMode = 17;
+  readonly attribute ControlModeEnum effectiveControlMode = 18;
+  readonly attribute nullable int16s capacity = 19;
+  readonly attribute optional nullable int16u speed = 20;
+  attribute access(write: manage) optional nullable int24u lifetimeRunningHours = 21;
+  readonly attribute optional nullable int24u power = 22;
+  attribute access(write: manage) optional nullable int32u lifetimeEnergyConsumed = 23;
+  attribute access(write: manage) OperationModeEnum operationMode = 32;
+  attribute access(write: manage) optional ControlModeEnum controlMode = 33;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
 }
 
 /** An interface for configuring and controlling the functionality of a thermostat. */
@@ -4917,6 +5310,17 @@ endpoint 240 {
     callback attribute clusterRevision;
   }
 
+  server cluster Switch {
+    emits event InitialPress;
+    callback attribute numberOfPositions default = 2;
+    callback attribute currentPosition default = 0;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    ram      attribute featureMap default = 2;
+    ram      attribute clusterRevision default = 2;
+  }
+
   server cluster BooleanState {
     callback attribute stateValue;
     callback attribute generatedCommandList;
@@ -4938,6 +5342,32 @@ endpoint 240 {
     ram      attribute clusterRevision default = 2;
 
     handle command ChangeToMode;
+  }
+
+  server cluster RvcRunMode {
+    callback attribute supportedModes;
+    callback attribute currentMode;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    callback attribute featureMap;
+    ram      attribute clusterRevision default = 4;
+
+    handle command ChangeToMode;
+    handle command ChangeToModeResponse;
+  }
+
+  server cluster RvcCleanMode {
+    callback attribute supportedModes;
+    callback attribute currentMode;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    callback attribute featureMap;
+    ram      attribute clusterRevision default = 5;
+
+    handle command ChangeToMode;
+    handle command ChangeToModeResponse;
   }
 
   server cluster AirQuality {
@@ -4992,6 +5422,26 @@ endpoint 240 {
     handle command Start;
     handle command Resume;
     handle command OperationalCommandResponse;
+  }
+
+  server cluster RvcOperationalState {
+    emits event OperationalError;
+    emits event OperationCompletion;
+    callback attribute phaseList;
+    callback attribute currentPhase;
+    callback attribute operationalStateList;
+    callback attribute operationalState;
+    callback attribute operationalError;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    ram      attribute featureMap default = 0;
+    callback attribute clusterRevision;
+
+    handle command Pause;
+    handle command Resume;
+    handle command OperationalCommandResponse;
+    handle command GoHome;
   }
 
   server cluster ValveConfigurationAndControl {
@@ -5050,6 +5500,23 @@ endpoint 240 {
     handle command DownOrClose;
     handle command StopMotion;
     handle command GoToLiftPercentage;
+  }
+
+  server cluster PumpConfigurationAndControl {
+    callback attribute maxPressure;
+    callback attribute maxSpeed;
+    callback attribute maxFlow;
+    callback attribute minConstSpeed;
+    callback attribute maxConstSpeed;
+    callback attribute effectiveOperationMode;
+    callback attribute effectiveControlMode;
+    callback attribute capacity;
+    callback attribute operationMode default = 0x00;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    ram      attribute featureMap default = 8;
+    ram      attribute clusterRevision default = 4;
   }
 
   server cluster Thermostat {

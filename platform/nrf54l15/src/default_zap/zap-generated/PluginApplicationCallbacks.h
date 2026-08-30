@@ -35,17 +35,22 @@ void MatterGeneralDiagnosticsPluginServerInitCallback();
 void MatterSoftwareDiagnosticsPluginServerInitCallback();
 void MatterThreadNetworkDiagnosticsPluginServerInitCallback();
 void MatterWiFiNetworkDiagnosticsPluginServerInitCallback();
+void MatterSwitchPluginServerInitCallback();
 void MatterAdministratorCommissioningPluginServerInitCallback();
 void MatterOperationalCredentialsPluginServerInitCallback();
 void MatterGroupKeyManagementPluginServerInitCallback();
 void MatterBooleanStatePluginServerInitCallback();
 void MatterModeSelectPluginServerInitCallback();
+void MatterRvcRunModePluginServerInitCallback();
+void MatterRvcCleanModePluginServerInitCallback();
 void MatterAirQualityPluginServerInitCallback();
 void MatterSmokeCoAlarmPluginServerInitCallback();
 void MatterOperationalStatePluginServerInitCallback();
+void MatterRvcOperationalStatePluginServerInitCallback();
 void MatterValveConfigurationAndControlPluginServerInitCallback();
 void MatterDoorLockPluginServerInitCallback();
 void MatterWindowCoveringPluginServerInitCallback();
+void MatterPumpConfigurationAndControlPluginServerInitCallback();
 void MatterThermostatPluginServerInitCallback();
 void MatterFanControlPluginServerInitCallback();
 void MatterColorControlPluginServerInitCallback();
@@ -74,17 +79,22 @@ void MatterChimePluginServerInitCallback();
   MatterSoftwareDiagnosticsPluginServerInitCallback();                         \
   MatterThreadNetworkDiagnosticsPluginServerInitCallback();                    \
   MatterWiFiNetworkDiagnosticsPluginServerInitCallback();                      \
+  MatterSwitchPluginServerInitCallback();                                      \
   MatterAdministratorCommissioningPluginServerInitCallback();                  \
   MatterOperationalCredentialsPluginServerInitCallback();                      \
   MatterGroupKeyManagementPluginServerInitCallback();                          \
   MatterBooleanStatePluginServerInitCallback();                                \
   MatterModeSelectPluginServerInitCallback();                                  \
+  MatterRvcRunModePluginServerInitCallback();                                  \
+  MatterRvcCleanModePluginServerInitCallback();                                \
   MatterAirQualityPluginServerInitCallback();                                  \
   MatterSmokeCoAlarmPluginServerInitCallback();                                \
   MatterOperationalStatePluginServerInitCallback();                            \
+  MatterRvcOperationalStatePluginServerInitCallback();                         \
   MatterValveConfigurationAndControlPluginServerInitCallback();                \
   MatterDoorLockPluginServerInitCallback();                                    \
   MatterWindowCoveringPluginServerInitCallback();                              \
+  MatterPumpConfigurationAndControlPluginServerInitCallback();                 \
   MatterThermostatPluginServerInitCallback();                                  \
   MatterFanControlPluginServerInitCallback();                                  \
   MatterColorControlPluginServerInitCallback();                                \
