@@ -322,18 +322,32 @@ extended colour lights exhaust the heap with headers to spare.
 
 A third resource exists since memory reclaim round A and is **deliberately
 sized so it can never be the first to run out**: the **cluster-object
-heap**, `HEARTH_OBJ_HEAP_BYTES` (6,400 B), a second
+heap**, `HEARTH_OBJ_HEAP_BYTES` (6,528 B), a second
 `K_HEAP_DEFINE(hearth_obj_heap)` holding the per-endpoint CHIP Delegate
 objects and their Instances for the appliance, mode, chime, valve, energy
 and meter families. It replaced fourteen fixed pools, and the per-family
 caps those pools carried (`MT_MEAS_MAX` 8, `MT_DEM_MAX` 4, `MT_WHM_MAX` 4,
 `MT_METER_MAX` 2, `kModeBasePoolSlots` 20) are unchanged and are still what
-a composition hits first. 6,320 usable bytes against a worst reachable draw
-of 6,112 B, from the 16-endpoint mix that saturates every one of those caps
-at once; the arithmetic is at the end of `port/mt_matter_zephyr.cpp` and a
-`static_assert` pins it, so the claim cannot go stale. Exhaustion, if a
-future round ever makes it possible, is the same loud stop-at-failure
-prefix as either older wall.
+a composition hits first. 6,448 usable bytes against a worst reachable draw
+of **6,336 B**, which is the maximum over every composition the other two
+walls admit, found by exhaustive search rather than by a greedy fill:
+
+| Count | Device type | Object bytes | Block bytes |
+|---|---|---|---|
+| 4 | `0x0018` Battery Storage (v0) | 2,336 | 3,424 |
+| 4 | `0x0074` Robotic Vacuum Cleaner | 1,792 | 3,456 |
+| 2 | `0x0511` Electrical Utility Meter | 624 | 256 |
+| 6 | `0x0073` Laundry Washer | 1,584 | 864 |
+| **16** | | **6,336** | **8,000** of 8,112 |
+
+`MT_DEM_MAX` and `MT_METER_MAX` are saturated, the endpoint count is
+saturated and the block heap is 112 B from its own wall. The arithmetic is
+at the end of `port/mt_matter_zephyr.cpp` and a `static_assert` pins it, so
+the claim cannot go stale. Exhaustion, if a future round ever makes it
+possible, is the same loud stop-at-failure prefix as either older wall.
+Note that 6,336 is a function of the block budget: raising
+`HEARTH_EP_HEAP_BYTES` for the LM20 tier admits object-heavier compositions
+and this heap has to be re-derived with it.
 
 ### Per-endpoint cost
 
@@ -564,18 +578,19 @@ LM20-tier work.
 ### Memory reclaim round A (2026-08-30)
 
 Batch 7b left the board at 96.67 percent of RAM with 8,724 B free and the
-composed-appliance catalogue still to come. Round A returns 23,088 B,
+composed-appliance catalogue still to come. Round A returns 22,960 B,
 **exactly equal on both arms**, without changing a single AT command, URC,
-error code or seed. Pristine builds, 2026-08-30:
+error code or seed. Pristine builds, 2026-08-30, including the fix round
+that corrected the cluster-object heap's sizing:
 
 | | Batch 7b (`6c31f09`) | Memory reclaim A |
 |---|---|---|
-| RAM used, `ophelia_cpico` | 253,420 B (96.67%) | **230,332 B (87.86%)** |
-| RAM used, `nrf54l15dk` | 253,644 B (96.76%) | **230,556 B (87.95%)** |
-| RAM free, `ophelia_cpico` | 8,724 B | **31,812 B** |
-| RAM free, `nrf54l15dk` | 8,500 B | **31,588 B** |
-| Flash, `ophelia_cpico` | 870,600 B (63.35%) | **867,620 B (63.14%)** |
-| Flash, `nrf54l15dk` | 878,516 B (60.08%) | **875,516 B (59.87%)** |
+| RAM used, `ophelia_cpico` | 253,420 B (96.67%) | **230,460 B (87.91%)** |
+| RAM used, `nrf54l15dk` | 253,644 B (96.76%) | **230,684 B (88.00%)** |
+| RAM free, `ophelia_cpico` | 8,724 B | **31,684 B** |
+| RAM free, `nrf54l15dk` | 8,500 B | **31,460 B** |
+| Flash, `ophelia_cpico` | 870,600 B (63.35%) | **867,712 B (63.14%)** |
+| Flash, `nrf54l15dk` | 878,516 B (60.08%) | **875,608 B (59.88%)** |
 
 (The batch 7b flash column is re-measured at `6c31f09` on 2026-08-30 for
 this round's own before-and-after, and reads 112 B above the batch 7b row
@@ -589,7 +604,7 @@ Three items, each measured on its own with `nm -S` and the linked image:
 | Item | RAM, `ophelia_cpico` | Flash |
 |---|---|---|
 | The device-type catalogue moves to flash | **-8,736 B** | +4 B |
-| The fourteen Instance and Delegate pools move to a heap | **-7,568 B** | -2,872 B |
+| The fourteen Instance and Delegate pools move to a heap | **-7,440 B** | -2,780 B |
 | ZMS lookup cache 512 to 64, Thread children 32 to 16 | **-6,784 B** | -112 B |
 
 1. **The catalogue is `const`.** All 41 device types' cluster lists,
@@ -604,7 +619,7 @@ Three items, each measured on its own with `nm -S` and the linked image:
    at the macros in `port/mt_devtypes_zephyr.cpp`.
 2. **The cluster-object heap.** 14,368 B of fixed Delegate and Instance
    pools became pointer tables into `K_HEAP_DEFINE(hearth_obj_heap)`,
-   6,400 B, allocated during the boot composition rebuild: the third use
+   6,528 B, allocated during the boot composition rebuild: the third use
    of the technique the dyn-arena and store reclaim rounds proved. Every
    depth constant, the allocate-only policy, the
    construct-after-`emberAfSetDynamicEndpoint()` ordering and the

@@ -183,12 +183,21 @@ namespace {
  * What one 8-aligned allocation of `bytes` really costs this heap.
  *
  * sys_heap chunks are CHUNK_UNIT (8) aligned and carry a 4-byte header at
- * the front, so an ordinary payload starts at 8k+4 and can never be
- * 8-aligned. sys_heap_aligned_alloc() (heap.c:309-353) handles that by
- * pushing the payload forward to 8k+8 and letting the chunk cover
- * [8k, roundup(8k+8+bytes, 8)), so the chunk is roundup(bytes, 8) + 8
- * bytes wide. There is no leading or trailing fragment to split off, so
- * the model is exact rather than an upper bound.
+ * the front, so chunk_mem() always lands at 8k+4 and an ordinary payload
+ * can never be 8-aligned. sys_heap_aligned_alloc() (heap.c:309-353) rounds
+ * that up to 8k+8, which puts the payload in the NEXT chunk: mem_to_chunkid()
+ * returns c0+1, and the allocator then runs
+ * `if (c > c0) { split_chunks(h, c0, c); free_list_add(h, c0); }`.
+ *
+ * So a LEADING FRAGMENT of exactly one 8-byte chunk is split off and freed
+ * on every single allocation. It is unreachable afterwards: it lands in
+ * bucket 0, nothing on this heap ever asks for a payload of four bytes or
+ * fewer, and it cannot coalesce because both its neighbours are in use. The
+ * `+ 8` below is precisely what pays for that stranded prefix, which is why
+ * the model is exact rather than an upper bound and why it must not be
+ * "simplified" to roundup(bytes + 4, 8) by a later reader who sees only the
+ * chunk the caller gets back. There is no TRAILING fragment: the aligned
+ * allocation ends at c0 + padded_sz exactly.
  *
  * Small-heap-ness (the 4-byte header) is the same derived property the
  * endpoint heap asserts; the two BUILD_ASSERTs there cover this heap too,
@@ -201,16 +210,18 @@ constexpr size_t kObjCostOf(size_t bytes) { return ((bytes + 7) / 8) * 8 + 8; }
  * heap sys_heap_init() (heap.c:525-580) spends:
  *
  *    4  the end-marker chunk header       heap_footer_bytes(), small heap
- *    4  rounding 6396 down to a CHUNK_UNIT boundary
+ *    4  rounding 6524 down to a CHUNK_UNIT boundary
  *   72  chunk 0, holding struct z_heap: 28 bytes plus ten buckets x 4,
  *       so 68 rounded up to 9 chunks
  *
  * Ten buckets because bucket_idx() (heap.h:261-265) is
- * 31 - clz(heap_sz - min_chunk_size + 1) + 1 and this heap is 799 chunks,
+ * 31 - clz(heap_sz - min_chunk_size + 1) + 1 and this heap is 815 chunks,
  * which lands in the same [512, 1023] band as the 8 KB endpoint heap. The
- * BUILD_ASSERT keeps it there.
+ * BUILD_ASSERT keeps it there; it is written against heap_sz's own bounds
+ * (gross/8 - 1 <= heap_sz <= gross/8) rather than the gross size, so a heap
+ * one chunk the wrong side of 512 cannot slip through.
  */
-BUILD_ASSERT(HEARTH_OBJ_HEAP_BYTES / 8 >= 512 && HEARTH_OBJ_HEAP_BYTES / 8 <= 1023,
+BUILD_ASSERT((HEARTH_OBJ_HEAP_BYTES - 8) / 8 >= 512 && HEARTH_OBJ_HEAP_BYTES / 8 <= 1023,
              "the object heap left the ten-bucket band kObjHeapOverheadBytes is derived for");
 constexpr size_t kObjHeapOverheadBytes = 80;
 constexpr size_t kObjHeapUsableBytes   = HEARTH_OBJ_HEAP_BYTES - kObjHeapOverheadBytes;
@@ -230,7 +241,14 @@ void *obj_heap_alloc(size_t bytes)
 {
     void *p = k_heap_aligned_alloc(&hearth_obj_heap, 8, bytes, K_NO_WAIT);
     if (p == nullptr) {
-        LOG_ERR("cluster-object heap exhausted: %zu B wanted, %zu of %zu usable B used",
+        /* Fix round M3: the caller's own wall message fires next and names
+         * the family's CAP ("EPM delegate pool exhausted (MT_MEAS_MAX 8)"),
+         * which is NOT what stopped this create if the pool still has free
+         * slots. Say so here rather than leave two log lines contradicting
+         * each other on an integrator's console. */
+        LOG_ERR("cluster-object heap exhausted: %zu B wanted, %zu of %zu usable B used; "
+                "the pool line that follows names that family's CAP, not the wall that "
+                "stopped this create",
                 bytes, s_obj_heap_used, kObjHeapUsableBytes);
         return nullptr;
     }
@@ -265,7 +283,21 @@ D *obj_pair_new()
     return (p == nullptr) ? nullptr : new (p) D();
 }
 
-/* The Instance storage inside the block this delegate starts. */
+/*
+ * The Instance storage inside the block this delegate starts.
+ *
+ * Fix round M4, stated honestly: this is NOT defined behaviour. The
+ * object-representation rule gives a pointer into D's bytes an array bound
+ * of sizeof(D), so stepping past that is out of bounds, not merely outside
+ * the object. It is safe here because neither GCC nor Clang derives an
+ * object bound from a reinterpret_cast of a heap-allocated pointer, and
+ * because it is the same idiom store_walk() already uses load-bearingly for
+ * the endpoint block heap. The judgement, not a claim of correctness: the
+ * alternative is a second 4-byte-per-slot pointer table per family, about
+ * 376 B of .bss, which is worse for the round's purpose. The zero-cost
+ * hardening, if a later round wants it, is to keep the block base from
+ * obj_heap_alloc() and carry it rather than recompute it from the delegate.
+ */
 template <typename D, typename I>
 uint8_t *obj_inst_storage(D *d)
 {
@@ -5854,61 +5886,97 @@ static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  * sizeof()s, so the table is documentation and the arithmetic is not.)
  *
  * COST PER DEVICE TYPE is the sum over the families its cluster list draws
- * on, from mt_devtype_create()'s claim block:
+ * on, from mt_devtype_create()'s claim block. Fix round I1: this table is a
+ * SECOND table and it drifted from the first. It was rebuilt mechanically,
+ * by running mt_devtype_create()'s ten claim predicates over every declared
+ * cluster list reached from s_registry (both variants where max_variant is
+ * 1), which is the only way to keep it honest; four rows were wrong before.
  *
- *   battery storage v0       DEM + ModeBase + EPM + PowerTopology     584
- *   RVC                      RvcOpState + 2 x ModeBase                448
- *   water heater v0          WHM + ModeBase + EPM + PowerTopology     392
- *   device energy mgmt v0/v1 DEM + ModeBase                           376
- *   electrical meter         MeterIdentification                      312
- *   washer / dishwasher / dryer   OperationalState                    264
- *   electrical sensor v0     EPM + PowerTopology                      208
- *   water heater v1          WHM + ModeBase                           184
- *   electrical sensor v1     EPM                                      160
- *   chime                    Chime                                     64
- *   water valve              valve delegate                            16
- *   every other catalogue type                                          0
+ *   obj  device types (registry id, variant)          families claimed
+ *   584  battery storage v0        0x0018 v0          DEM + ModeBase + EPM + PowerTopology
+ *   448  robotic vacuum cleaner    0x0074             RvcOpState + 2 x ModeBase
+ *   392  water heater v0           0x050F v0          WHM + ModeBase + EPM + PowerTopology
+ *   376  device energy mgmt        0x050D v0 and v1   DEM + ModeBase
+ *   312  electrical UTILITY meter  0x0511             MeterIdentification
+ *   264  laundry washer, dishwasher, laundry dryer
+ *                                  0x0073 0x0075 0x007C   OperationalState
+ *   208  electrical sensor         0x0510 v0 and v1   EPM + PowerTopology
+ *        battery storage v1        0x0018 v1
+ *        heat pump                 0x0309
+ *        solar power               0x0017 v0 and v1
+ *   184  water heater v1           0x050F v1          WHM + ModeBase
+ *   160  electrical meter          0x0514 v0 and v1   EPM
+ *    64  chime                     0x0146             Chime
+ *    16  water valve               0x0042             valve delegate
+ *     0  the other thirty catalogue rows
+ *
+ * Mode select (0x0027) is deliberately in the zero row: it takes the ONE
+ * process-global SupportedModesManager, not a per-endpoint object.
+ *
+ * What the four corrected rows were: electrical sensor v1 was listed at 160
+ * (it is 208: electricalSensorPowerOnlyClusters is PowerTopology + EPM +
+ * Descriptor); the 312 row was labelled "electrical meter" when
+ * MeterIdentification appears in exactly one cluster list, utilityMeterClusters,
+ * whose registry row is 0x0511; and battery storage v1, the heat pump and
+ * solar power were all folded into the zero row when each draws 208.
  *
  * THE WORST COMPOSITION, and why this heap can never be the binding wall.
  * The draw is maximised subject to the three walls that already exist:
  * sixteen endpoints (kServiceableEndpoints), 8,112 usable bytes of endpoint
- * block heap, and the per-family caps (MT_MEAS_MAX 8, MT_DEM_MAX 4,
- * MT_WHM_MAX 4, MT_METER_MAX 2, kModeBasePoolSlots 20). Sorting by object
- * bytes per endpoint and filling until a wall bites gives
+ * block heap, and the per-family caps (MT_MEAS_MAX 8 for each of EPM and
+ * PowerTopology, MT_DEM_MAX 4, MT_WHM_MAX 4, MT_METER_MAX 2,
+ * kModeBasePoolSlots 20). The four 16-deep pools (OperationalState,
+ * RvcOperationalState, Chime, valve) can never bind: each endpoint draws at
+ * most one of each and there are at most sixteen endpoints.
  *
- *   4 x battery storage v0   2,336 B   (DEM 4/4, EPM 4/8, PTOP 4/8, MB 4)
- *   4 x water heater v0      1,568 B   (WHM 4/4, EPM 8/8, PTOP 8/8, MB 8)
- *   2 x electrical meter       624 B   (METER 2/2)
- *   6 x washing machine      1,584 B   (OperationalState 6/16)
- *   ------------------------------------------------------------------
- *   16 endpoints             6,112 B   block heap 7,744 of 8,112 B
+ * Fix round C1: this is now an EXHAUSTIVE maximisation over every
+ * admissible multiset of the table's rows, not a greedy fill. The greedy
+ * fill this comment used to carry sorted by object bytes per endpoint and
+ * then filled, which reached for water heaters and never revisited the RVC
+ * as a filler once the DEM and METER caps saturated. Swapping the four
+ * water heaters for four RVCs buys 224 more object bytes and still fits the
+ * block heap, so the greedy answer (6,112 B) was 224 B under the truth and
+ * 16 B under what the heap then held. The maximum is:
  *
- * and no substitution beats it: with the five capped families saturated the
- * only remaining types are the washer trio (264 B for 144 B of block), the
- * RVC (448 B for 864 B of block) and the chime, and washers win on both
- * remaining budgets. 6,112 B is therefore the true maximum over EVERY
- * composition the existing walls admit, not an upper bound.
+ *   4 x battery storage v0   2,336 B   block 3,424   DEM 4/4, EPM 4/8, PTOP 4/8, MB 4
+ *   4 x robotic vacuum       1,792 B   block 3,456   RvcOpState 4/16, MB 12/20
+ *   2 x utility meter          624 B   block   256   METER 2/2
+ *   6 x laundry washer       1,584 B   block   864   OperationalState 6/16
+ *   ---------------------------------------------------------------------
+ *   16 endpoints             6,336 B   block 8,000 of 8,112 B
  *
- * HEARTH_OBJ_HEAP_BYTES is 6400, which leaves 6,320 usable. The assertions
+ * Every wall is satisfied and two of them are exactly saturated. The search
+ * was run twice: once with the block-heap constraint dropped entirely,
+ * which gives 7,216 B (4 battery + 6 RVC + 4 water heater + 2 meter, 12,096 B
+ * of block, so the block heap IS load-bearing for the answer), and once with
+ * it, which gives the 6,336 B above. The result does not move for block
+ * budgets up to 8,400 B, nor if battery storage's block cost is taken as 840
+ * rather than the compile-time-pinned 856, so it is not sensitive to the one
+ * block figure that is arguable.
+ *
+ * NOTE FOR THE LM20 TIER: 6,336 is a function of the block budget. Raising
+ * HEARTH_EP_HEAP_BYTES admits object-heavier compositions (9,000 B of block
+ * gives 6,520 B), so this heap must be re-derived and raised whenever that
+ * one is.
+ *
+ * HEARTH_OBJ_HEAP_BYTES is 6528, which leaves 6,448 usable. The assertions
  * below pin that against the worst mix and against the two uniform
  * compositions worth naming separately, so a future delegate or Instance
  * that grows fails the build here rather than a bench run later:
  *
- *   worst mixed composition   6,112   fits, 208 B spare
- *   16 x washing machine      4,224   fits
+ *   worst mixed composition   6,336   fits, 112 B spare
+ *   16 x laundry washer       4,224   fits
  *   9 x RVC (the block heap's own limit for that type)   4,032   fits
  *
  * This is a deliberately different trade from the endpoint block heap's.
  * That heap is sized BELOW its own worst case (16 extended colour lights
  * would want 9,600 B) because the RAM is worth more elsewhere and the
  * capacity consequence is documented in the README. This heap is sized
- * ABOVE its worst case, at a cost of 288 B over the tightest fit, because
+ * ABOVE its worst case, at a cost of 112 B over the tightest fit, because
  * it is NEW: a heap that could bite first would silently move a capacity
- * boundary the README already states, and memory reclaim round A is
- * purely additive on behaviour by construction. If a later round wants
- * those bytes, 4,608 still covers every UNIFORM composition (the 16-washer
- * row above) and only shortens heavy mixed-energy compositions; that is a
- * capacity decision, and it needs the README's table rewritten with it.
+ * boundary the README already states, and memory reclaim round A is purely
+ * additive on behaviour by construction. Ruling DE413 kept that intent when
+ * the number was still 6,112; the number moved, the intent did not.
  */
 namespace {
 
@@ -5936,19 +6004,28 @@ constexpr size_t kObjMeter =
     kObjCostOf(sizeof(chip::app::Clusters::MeterIdentification::Instance));
 constexpr size_t kObjValve = kObjCostOf(sizeof(HearthValveDelegate));
 
-/* Per device type, from mt_devtype_create()'s claim block. */
+/* Per device type, from mt_devtype_create()'s claim block. The five the
+ * worst mix uses, plus the two the standalone assertions need; the full
+ * corrected table is in the comment above. */
 constexpr size_t kObjPerBatteryStorageV0 = kObjDem + kObjModeBase + kObjEpm + kObjPtop;
 constexpr size_t kObjPerRvc              = kObjRvcOpState + 2 * kObjModeBase;
 constexpr size_t kObjPerWaterHeaterV0    = kObjWhm + kObjModeBase + kObjEpm + kObjPtop;
-constexpr size_t kObjPerElectricalMeter  = kObjMeter;
+constexpr size_t kObjPerUtilityMeter     = kObjMeter;
 constexpr size_t kObjPerWasherTrio       = kObjOpState;
 
-/* The 16-endpoint mix that maximises the draw, derived in the comment
- * above. Every count is the family cap it saturates. */
+/* The 16-endpoint mix that maximises the draw, from the exhaustive search
+ * in the comment above. DEM and METER are saturated, the endpoint count is
+ * saturated, and the endpoint block heap is 112 B from its own wall. */
 constexpr size_t kObjWorstMixBytes = 4 * kObjPerBatteryStorageV0 +
-                                     4 * kObjPerWaterHeaterV0 +
-                                     2 * kObjPerElectricalMeter +
+                                     4 * kObjPerRvc +
+                                     2 * kObjPerUtilityMeter +
                                      6 * kObjPerWasherTrio;
+
+/* Not in the worst mix, but its cost feeds the search that found the mix,
+ * so it is pinned here: if the water heater grows, the search has to be
+ * re-run rather than silently left stale. */
+static_assert(kObjPerWaterHeaterV0 == 392,
+              "the water heater's object cost moved; re-run the worst-composition search");
 
 /* The endpoint block heap admits nine RVCs (8,112 usable / 864 per block);
  * named here so the RVC row cannot drift out of step with that heap. */
@@ -5967,6 +6044,6 @@ static_assert(kObjPerRvc * kObjRvcEndpointLimit <= kObjHeapUsableBytes,
 /* Pinned so a delegate or Instance that changes size fails the build here
  * and forces the table above to be re-read, rather than silently moving the
  * worst case. */
-static_assert(kObjWorstMixBytes == 6112, "the worst-composition arithmetic moved off 6,112 B");
+static_assert(kObjWorstMixBytes == 6336, "the worst-composition arithmetic moved off 6,336 B");
 
 } /* namespace */

@@ -101,11 +101,16 @@ constexpr uint16_t kServiceableEndpoints = 16;
  *
  * Sized so it can NEVER be the binding wall: every composition the existing
  * walls (kServiceableEndpoints, HEARTH_EP_HEAP_BYTES and the per-family
- * MT_*_MAX caps) already admit fits. The arithmetic, including the mixed
- * composition that maximises the draw, sits beside the heap definition in
- * mt_matter_zephyr.cpp and is pinned by a static_assert there, so this
- * number cannot go stale silently.
+ * MT_*_MAX caps) already admit fits. The arithmetic sits beside the heap
+ * definition in mt_matter_zephyr.cpp, where the maximising composition is
+ * found by EXHAUSTIVE search over the catalogue rather than by a greedy
+ * fill (the fix round's C1: a greedy fill missed the true maximum by
+ * 224 B), and is pinned by a static_assert there, so this number cannot go
+ * stale silently.
  *
- * Raised together with kServiceableEndpoints for the LM20 tier.
+ * Raised together with kServiceableEndpoints for the LM20 tier. Note it
+ * must be raised whenever HEARTH_EP_HEAP_BYTES is: a bigger block heap
+ * admits object-heavier compositions, and the maximum above is a function
+ * of the block budget.
  */
-#define HEARTH_OBJ_HEAP_BYTES 6400
+#define HEARTH_OBJ_HEAP_BYTES 6528

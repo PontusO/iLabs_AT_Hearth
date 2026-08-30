@@ -166,7 +166,7 @@ static_assert(kServiceableEndpoints <= MT_COMP_MAX_ENDPOINTS,
  *     (attribute-storage.h:277); EmberAfDefinedEndpoint::endpointType is
  *     const EmberAfEndpointType * (af-types.h:221);
  *     EmberAfEndpointType::cluster is const EmberAfCluster *
- *     (af-types.h:170); EmberAfCluster::attributes is
+ *     (af-types.h:182); EmberAfCluster::attributes is
  *     const EmberAfAttributeMetadata * (af-types.h:88). The command,
  *     event and function lists on EmberAfCluster are const too. The chain
  *     is const-correct end to end, so this needs no SDK patch and is not
@@ -179,17 +179,27 @@ static_assert(kServiceableEndpoints <= MT_COMP_MAX_ENDPOINTS,
  *     1353, 1358), which casts &am->defaultValue to uint8_t * and hands
  *     it to emAfReadOrWriteAttribute(..., write=true) as the SOURCE
  *     buffer. It is never written through, and the whole branch sits
- *     inside `if (!am->IsExternal())`, which every attribute this port
- *     declares fails: the catalogue is EXTERNAL storage throughout. That
- *     same path already runs against the const ZAP tables in .rodata for
- *     the two fixed endpoints, which is independent evidence that it only
- *     reads.
+ *     inside `if (!am->IsExternal())` (attribute-storage.cpp:1320), which
+ *     every attribute this port declares fails, and fails SYNTACTICALLY:
+ *     this file declares zero hand-written metadata rows, every row comes
+ *     from DECLARE_DYNAMIC_ATTRIBUTE() or from the cluster-revision row
+ *     that ..._LIST_END() appends, and both macros OR in
+ *     ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE) unconditionally
+ *     (attribute-storage.h:57-59 and :74-78). There is no route to a
+ *     non-EXTERNAL attribute here short of writing a row by hand.
+ *   - That same defaults path already runs against the const ZAP tables in
+ *     .rodata for the two fixed endpoints, and not incidentally: of the
+ *     412 generated attribute rows in this build, 154 are non-EXTERNAL and
+ *     126 of those carry a real default (ZAP_SIMPLE_DEFAULT or
+ *     ZAP_MIN_MAX_DEFAULTS_INDEX), so every boot executes those four casts
+ *     against read-only memory 126 times without faulting. That is
+ *     empirical proof, not an argument.
  *
- * So: if a future round declares a non-EXTERNAL attribute here, or hands
- * one of these tables to something that wants to mutate it, these macros
- * stop being safe and that table goes back to DECLARE_DYNAMIC_*. The
- * DataVersion storage (s_dyn's per-endpoint versions) is written by CHIP
- * and is deliberately NOT const.
+ * So: if a future round writes a metadata row here by hand without the
+ * EXTERNAL flag, or hands one of these tables to something that wants to
+ * mutate it, these macros stop being safe and that table goes back to
+ * DECLARE_DYNAMIC_*. The DataVersion storage (s_dyn's per-endpoint
+ * versions) is written by CHIP and is deliberately NOT const.
  *
  * The END macros carry no type and are the SDK's, reused unchanged; they
  * are wrapped only so the call sites read symmetrically.
