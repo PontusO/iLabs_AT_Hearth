@@ -26,6 +26,12 @@
 #include <platform/CHIPDeviceLayer.h>
 #include <protocols/interaction_model/StatusCode.h>
 
+/* <new> for the placement-new that value-initializes a block's
+ * type-conditional trailing store at create time (store reclaim round):
+ * heap bytes are not zero-initialized the way the old .bss stores were,
+ * and mt_mode_store_t's ModeOptionStruct members make a bare memset the
+ * wrong tool for constructing them. */
+#include <new>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -42,6 +48,16 @@ extern "C" {
 }
 #include "mt_dyn_store.h"
 #include "mt_port_ids.h"
+
+/* Fix round M3: the chime pool's unclaim, the port-local completion of
+ * mt_matter.h's alloc/set_endpoint pair, called on every
+ * mt_devtype_create() failure path between the claim and set_endpoint so
+ * a failed create no longer strands a pool slot. Deliberately declared
+ * HERE and not in core/include/mt_matter.h (read-only this round): this
+ * file is the only caller. Defined beside the pool in
+ * mt_matter_zephyr.cpp, which documents the most-recent-claim-only
+ * contract. */
+extern "C" void mt_matter_chime_delegate_unclaim(void *delegate);
 
 using namespace chip;
 using namespace chip::app::Clusters;
@@ -1821,24 +1837,46 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * the waste the obvious thing to reclaim.
  *
  * Now: a slim static header table (below) plus exactly ONE heap block per
- * created endpoint, holding that endpoint's DataVersion array and its
- * attribute slots, sized for ITS device type:
+ * created endpoint, holding that endpoint's DataVersion array, its
+ * attribute slots and (store reclaim round, below) any host-fed store its
+ * device type carries, sized for ITS device type:
  *
  *     +----------------------------+  <- dyn_endpoint::block
  *     | DataVersion dv[n_clusters] |     4 * clusterCount bytes
  *     +----------------------------+
  *     | attr_slot slots[n_slots]   |     16 * count_slots() bytes
  *     +----------------------------+
+ *     | host-fed store(s), only    |     store_bytes(): mt_mode_store_t
+ *     | for types that carry one   |     (436 B) on a mode select
+ *     +----------------------------+     endpoint, mt_chime_store_t
+ *                                        (273 B) on a chime endpoint,
+ *                                        nothing on every other type
+ *
+ * The trailing region is the STORE RECLAIM round (T398). Catalogue batch 4
+ * put the AT+MTMODES and AT+MTCHIMESOUNDS stores in .bss as 16-deep pools,
+ * 7,040 B and 4,448 B that every composition paid whether or not it
+ * contained a single mode select or chime endpoint (batch 4 concern C1, at
+ * 92.6% RAM). They are per-created-endpoint state, which is exactly what
+ * this heap is for, so each moved into its endpoint's own block: only
+ * compositions that declare those types pay, priced into the sizing table
+ * below. The shapes and the accessors are in mt_dyn_store.h; every other
+ * type's block is unchanged, byte for byte.
  *
  * dv first is what keeps the layout alignment-free. k_heap_alloc() routes
  * through sys_heap_noalign_alloc() (kheap.c:119-129), and a chunk's memory
  * starts one chunk header past an 8-byte-aligned chunk boundary
  * (chunk_mem(), heap.c:24-27), so on this build a block is 4-byte aligned,
- * NOT 8. That is exactly what both halves need and no more: DataVersion is
- * uint32_t and attr_slot's leading members are uint32_t, so both want 4-byte
- * alignment, and an integral number of uint32_t of dv can never leave the
- * slots misaligned. block_dv() and block_slots() are the only two places
- * that know this.
+ * NOT 8. That is exactly what every region needs and no more: DataVersion
+ * is uint32_t and attr_slot's leading members are uint32_t, so both want
+ * 4-byte alignment, and an integral number of uint32_t of dv can never
+ * leave the slots misaligned. The trailing region starts at
+ * 4 * clusterCount + 16 * n_slots, a multiple of 4; store_walk() places
+ * each store within it at an offset rounded up to that store's own
+ * alignof (fix round 2), and neither store type may want more than the 4
+ * the region start guarantees (asserted beside kStoreWalk, so a store
+ * gaining a wider member cannot silently misalign). block_dv(),
+ * block_slots() and store_walk() are the only places that know this
+ * layout.
  *
  * A DEDICATED heap, not the system heap. Three reasons, all of which matter
  * more than the handful of bytes k_heap's own metadata costs:
@@ -1882,15 +1920,24 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *
  * ---- sizing -----------------------------------------------------------
  *
- * Block payload is 4 * clusterCount + 16 * slots. Zephyr's sys_heap adds a
- * 4-byte chunk header for a heap this size (heap.h chunk_header_bytes(),
- * small heap because 8192/8 = 1024 chunks is far below the 0x7fff big-heap
- * threshold) and rounds the total up to CHUNK_UNIT (8 bytes), so the true
- * cost per endpoint is roundup(payload + 4, 8):
+ * Block payload is 4 * clusterCount + 16 * slots, plus the type-conditional
+ * store for the two types that carry one (store reclaim round): mode
+ * select's mt_mode_store_t is 436 B (a count byte, 8 x 34 B mode/label
+ * entries, padding to the structs' 4-byte alignment, 8 x 20 B
+ * ModeOptionStruct) and chime's mt_chime_store_t is 273 B (a count byte,
+ * 8 x 34 B id/name entries); both sizeofs are asserted beside
+ * store_bytes() so these rows cannot go stale silently. Zephyr's sys_heap
+ * adds a 4-byte chunk header for a heap this size (heap.h
+ * chunk_header_bytes(), small heap because 8192/8 = 1024 chunks is far
+ * below the 0x7fff big-heap threshold) and rounds the total up to
+ * CHUNK_UNIT (8 bytes), so the true cost per endpoint is
+ * roundup(payload + 4, 8):
  *
  *   device type                        clusters  slots  payload  heap cost
  *   extended colour light   0x010D            5     36      596        600
+ *   mode select             0x0027            3      8      576        584
  *   colour temperature lt   0x010C            5     32      532        536
+ *   chime                   0x0146            2      4      345        352
  *   dimmable light / plug   0x0101 0x010B     4     20      336        344
  *   thermostat              0x0301            3     15      252        256
  *   smoke/co alarm          0x0076            3     13      220        224
@@ -1902,16 +1949,19 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   temp/humidity/pressure/light/flow         3      9      156        160
  *   occupancy sensor        0x0107            3      9      156        160
  *   washer/dish/dryer 0x0073 0x0075 0x007C    3      8      140        144
- *   mode select             0x0027            3      8      140        144
  *   power source            0x0011            2      8      136        144
  *   boolean-state sensors, air quality        3      7      124        128
- *   chime                   0x0146            2      4       72         80
  *
- * HEARTH_EP_HEAP_BYTES is 8192, which leaves roughly 8,100 usable after the
+ * (Mode select payload is 140 + 436 store, chime 72 + 273 store; both rows
+ * sat at bare 140/72 before the reclaim round moved their stores in.)
+ *
+ * HEARTH_EP_HEAP_BYTES is 8192, which leaves 8,112 usable after the
  * heap's own header and bucket table. Against kServiceableEndpoints = 16:
  *
- *   16 x anything but a colour light   <= 16 x 344 = 5,504    fits
+ *   16 x anything from the dimmable light down  <= 16 x 344 = 5,504   fits
+ *   16 x chime                              16 x 352 = 5,632    fits
  *   16 x colour temperature light           15 fit (8,040)    ONE SHORT
+ *   16 x mode select                        13 fit (7,592)    THREE SHORT
  *   16 x extended colour light              13 fit (7,800)    THREE SHORT
  *   a realistic mixed composition, say
  *     2 extended colour + 2 dimmable +
@@ -1919,10 +1969,15 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *
  * That is the deliberate trade the round was asked for: sizing for 16 of
  * the heaviest type would want 9,600 bytes and buy a composition nobody
- * builds, when the same RAM is worth more elsewhere. A composition that
- * does ask for more gets the loud, specific failure in mt_devtype_create()
- * rather than a silent truncation, and the README's "Endpoint capacity"
- * section tells an integrator the numbers up front.
+ * builds, when the same RAM is worth more elsewhere. The mode select line
+ * is the store reclaim round's deliberate, user-accepted consequence of
+ * the same trade: an all-mode-select composition that fit 16 when the
+ * store was a .bss pool now serves the 13-endpoint prefix under the
+ * stop-at-failure semantics above, and bought the whole build 11.5 KB of
+ * .bss back. A composition that does ask for more gets the loud, specific
+ * failure in mt_devtype_create() rather than a silent truncation, and the
+ * README's "Endpoint capacity" section tells an integrator the numbers up
+ * front.
  *
  * The floor is compiler-checked below, so the table above cannot go stale
  * without the build noticing.
@@ -1937,9 +1992,16 @@ K_HEAP_DEFINE(hearth_ep_heap, HEARTH_EP_HEAP_BYTES);
 
 namespace {
 
-/* Payload bytes handed out so far. k_heap tracks its own occupancy, but
- * this is the number the failure log wants: what the compositions asked
- * for, independent of per-chunk rounding. */
+/* Chunk-rounded bytes handed out so far, kHeapCostOf(want) per block: the
+ * heap's REAL occupancy, not the raw payload sum. Fix round M1: the
+ * payload sum shared every capacity log with the chunk-rounded free_bytes
+ * from sys_heap_runtime_stats_get(), and the two could not be reconciled
+ * on the same line (at the fourteenth mode select the old text read
+ * 7,488 handed out against 520 free, summing to nothing printable). Now
+ * handed-out plus free equals kHeapUsableBytes exactly (13 x 584 = 7,592
+ * plus 520 = 8,112 on the bench's 13-prefix leg), and every log printing
+ * this names the usable figure, not the gross define, as its
+ * denominator. */
 size_t s_ep_heap_used;
 
 /*
@@ -2012,6 +2074,98 @@ constexpr size_t block_bytes(size_t n_clusters, size_t n_slots)
 {
     return sizeof(DataVersion) * n_clusters + sizeof(attr_slot) * n_slots;
 }
+
+/*
+ * The type-conditional trailing stores (store reclaim round): the host-fed
+ * stores mt_dyn_store.h defines, laid out after the block's dv and slot
+ * regions. Membership is asked of the declared cluster list through
+ * type_has_cluster(), the same no-second-table-to-drift rule that
+ * predicate exists for.
+ *
+ * Fix round 2 (re-review of M2): the layout is alignment-correct BY
+ * CONSTRUCTION, not by ordering discipline. Round 1 pinned the
+ * mode-before-chime order with a static_assert that the re-review proved
+ * vacuous (alignof(mt_chime_store_t) is 1, so the modulo held for ANY
+ * mode-store size, a compiled misaligned counterexample included), and an
+ * order that only comments kept safe is exactly the hazard Minor 2 named.
+ * Now store_walk(), the one function both store_bytes() and
+ * store_offset() are, rounds the running offset up to each store's own
+ * alignof before placing it, so the walk order in kStoreWalk is TASTE:
+ * flip it, or grow a store to an odd size, and every store still lands
+ * aligned, only the padding moves. Sizing and placement are the same walk
+ * with a different stop condition, so they can never disagree.
+ *
+ * With the current types every align_up is a no-op (the mode store leads
+ * from the 4-aligned region start and the chime store accepts any
+ * offset), so this round changes no layout byte: every store offset, the
+ * 436 and 273 sizes and the 584/352 cost rows are unchanged.
+ *
+ * What stays load-bearing is the REGION START: it is only ever 4-aligned
+ * (the layout note beside K_HEAP_DEFINE), so align_up can deliver at most
+ * 4-byte alignment in memory whatever it computes. The two
+ * alignof-versus-DataVersion asserts below carry that real constraint,
+ * unchanged.
+ */
+struct store_desc {
+    ClusterId cluster;
+    size_t size;
+    size_t align;
+};
+
+constexpr store_desc kStoreWalk[] = {
+    { ModeSelect::Id, sizeof(mt_mode_store_t), alignof(mt_mode_store_t) },
+    { Chime::Id, sizeof(mt_chime_store_t), alignof(mt_chime_store_t) },
+};
+
+constexpr size_t align_up(size_t off, size_t align) { return ((off + align - 1) / align) * align; }
+
+/* stop_at = a store's cluster id answers that store's aligned offset
+ * within the region (the caller has established the type carries it);
+ * stop_at = kInvalidClusterId (matching no store) walks to the end and
+ * answers the region's total size. */
+size_t store_walk(const EmberAfEndpointType *t, ClusterId stop_at)
+{
+    size_t off = 0;
+    for (auto &s : kStoreWalk) {
+        if (!type_has_cluster(t, s.cluster)) {
+            continue;
+        }
+        off = align_up(off, s.align);
+        if (s.cluster == stop_at) {
+            return off;
+        }
+        off += s.size;
+    }
+    return off;
+}
+
+size_t store_bytes(const EmberAfEndpointType *t)
+{
+    return store_walk(t, kInvalidClusterId);
+}
+
+size_t store_offset(const EmberAfEndpointType *t, ClusterId which)
+{
+    return store_walk(t, which);
+}
+
+/* The sizing table's two store figures, pinned so the table cannot go
+ * stale without the build noticing (the same discipline as the widest-type
+ * floor below); recompute the mode select and chime rows if either
+ * fires. */
+static_assert(sizeof(mt_mode_store_t) == 436,
+              "mt_mode_store_t changed size; redo the sizing table's mode select row");
+static_assert(sizeof(mt_chime_store_t) == 273,
+              "mt_chime_store_t changed size; redo the sizing table's chime row");
+
+/* The trailing store begins at 4 * clusterCount + 16 * n_slots, a multiple
+ * of 4, and a k_heap block is 4-byte aligned (the layout note beside
+ * K_HEAP_DEFINE), so nothing wanting more than DataVersion's alignment may
+ * ever live there. */
+static_assert(alignof(mt_mode_store_t) <= alignof(DataVersion),
+              "mt_mode_store_t must not out-align the block's store offset");
+static_assert(alignof(mt_chime_store_t) <= alignof(DataVersion),
+              "mt_chime_store_t must not out-align the block's store offset");
 
 /*
  * The header table. Four fields plus the two counts the block walk needs;
@@ -2124,7 +2278,29 @@ constexpr size_t kWidestClusterList = kMax2(
           kMax2(kMax2(MT_COUNT(thermostatClusters), MT_COUNT(fanClusters)),
                 kMax2(MT_COUNT(windowCoveringClusters), MT_COUNT(temperatureSensorClusters)))));
 
-constexpr size_t kWidestBlockBytes = block_bytes(kWidestClusterList, kWidestEndpointSlots);
+/*
+ * Store reclaim round: the floor must price the trailing stores too, or a
+ * grown store could quietly out-size the widest colour light and the
+ * assertion below would be guarding the wrong number. The two store-bearing
+ * types are computed as their own candidates, each from its OWN cluster
+ * list and attribute lists plus its store's sizeof, rather than folding
+ * store bytes into the shared cluster/slot maxima (which would charge
+ * every candidate for a store only these two types carry). The MT_COUNT
+ * over-count note above applies here the same way: it only pushes the
+ * asserted floor higher, never lower. The chime candidate repeats
+ * MT_COUNT(chimeAttrs) rather than reusing kNoIdentifySlots on purpose:
+ * that constant is the no-Identify FAMILY maximum (power source included)
+ * and this candidate must price the chime's own count.
+ */
+constexpr size_t kModeSelectBlockBytes =
+    block_bytes(MT_COUNT(modeSelectClusters), kIdentifySlots + MT_COUNT(modeSelectAttrs)) +
+    sizeof(mt_mode_store_t);
+constexpr size_t kChimeBlockBytes =
+    block_bytes(MT_COUNT(chimeClusters), MT_COUNT(chimeAttrs)) + sizeof(mt_chime_store_t);
+
+constexpr size_t kWidestBlockBytes =
+    kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
+          kMax2(kModeSelectBlockBytes, kChimeBlockBytes));
 
 /*
  * Zephyr charges roundup(payload + 4, 8) per allocation on a heap this size,
@@ -2841,6 +3017,53 @@ bool mt_dyn_attr_slot(EndpointId ep, ClusterId cluster, AttributeId attr, uint8_
     return false;
 }
 
+/*
+ * The store accessors (store reclaim round; contract in mt_dyn_store.h).
+ * Same shape as mt_dyn_attr_slot() above: walk the header table for the
+ * live endpoint, then follow its block pointer, under the caller's
+ * StackLock or on the CHIP thread. The type check answers nullptr for an
+ * endpoint whose device type carries no such store, so the AT bridges'
+ * defensive arms and the SDK readers' no-store answers stay exactly what
+ * the exhausted/unclaimed .bss pool used to produce. The offset arithmetic
+ * is the block layout's third knower (the note beside K_HEAP_DEFINE):
+ * stores sit past the dv and slot regions, at the offset store_offset()
+ * answers, the same alignment-correct walk (store_walk, fix round 2) the
+ * create path constructed them through.
+ */
+mt_mode_store_t *mt_dyn_mode_store(EndpointId ep)
+{
+    for (auto &d : s_dyn) {
+        if (!d.used || d.ep_id != ep) {
+            continue;
+        }
+        if (!type_has_cluster(d.type->ep_type, ModeSelect::Id)) {
+            return nullptr;
+        }
+        return reinterpret_cast<mt_mode_store_t *>(
+            static_cast<uint8_t *>(d.block) +
+            block_bytes(d.type->ep_type->clusterCount, d.slot_capacity) +
+            store_offset(d.type->ep_type, ModeSelect::Id));
+    }
+    return nullptr;
+}
+
+mt_chime_store_t *mt_dyn_chime_store(EndpointId ep)
+{
+    for (auto &d : s_dyn) {
+        if (!d.used || d.ep_id != ep) {
+            continue;
+        }
+        if (!type_has_cluster(d.type->ep_type, Chime::Id)) {
+            return nullptr;
+        }
+        return reinterpret_cast<mt_chime_store_t *>(
+            static_cast<uint8_t *>(d.block) +
+            block_bytes(d.type->ep_type->clusterCount, d.slot_capacity) +
+            store_offset(d.type->ep_type, Chime::Id));
+    }
+    return nullptr;
+}
+
 /* ---- mt_devtypes.h --------------------------------------------------- */
 
 extern "C" bool mt_devtype_is_known(uint32_t devtype_id)
@@ -3005,10 +3228,10 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         if (opstate_delegate == nullptr) {
             LOG_ERR("devtype 0x%04X: opstate delegate pool exhausted (%u slots, one per "
                     "serviceable endpoint); %u of %u serviceable endpoints in use, endpoint "
-                    "heap %zu of %u B used; host may declare %u, this build serves %u",
+                    "heap %zu of %zu usable B used; host may declare %u, this build serves %u",
                     (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
                     (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints, s_ep_heap_used,
-                    (unsigned)HEARTH_EP_HEAP_BYTES, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                    kHeapUsableBytes, (unsigned)MT_COMP_MAX_ENDPOINTS,
                     (unsigned)kServiceableEndpoints);
             return -1;
         }
@@ -3035,17 +3258,21 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
 
     /* Catalogue batch 4: the chime's handout, the trio's pattern with a
      * ChimeServer in place of an Instance. Same two halves, same
-     * exhaustion-aborts-before-spending rule. */
+     * exhaustion-aborts-before-spending rule. Fix round M3: unlike the
+     * opstate and valve claims (which keep batch 4's shape), this claim
+     * is handed back through mt_matter_chime_delegate_unclaim() on every
+     * failure path below, so a -1 between here and set_endpoint no
+     * longer strands a pool slot. */
     void *chime_delegate = nullptr;
     if (type_has_cluster(type->ep_type, Chime::Id)) {
         chime_delegate = mt_matter_chime_delegate_alloc();
         if (chime_delegate == nullptr) {
             LOG_ERR("devtype 0x%04X: chime delegate pool exhausted (%u slots, one per "
                     "serviceable endpoint); %u of %u serviceable endpoints in use, endpoint "
-                    "heap %zu of %u B used; host may declare %u, this build serves %u",
+                    "heap %zu of %zu usable B used; host may declare %u, this build serves %u",
                     (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
                     (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints, s_ep_heap_used,
-                    (unsigned)HEARTH_EP_HEAP_BYTES, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                    kHeapUsableBytes, (unsigned)MT_COMP_MAX_ENDPOINTS,
                     (unsigned)kServiceableEndpoints);
             return -1;
         }
@@ -3060,11 +3287,18 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
              * resource ran out and how far away the others were. */
             LOG_ERR("devtype 0x%04X: valve delegate pool exhausted (%u slots, one per "
                     "serviceable endpoint); %u of %u serviceable endpoints in use, endpoint "
-                    "heap %zu of %u B used; host may declare %u, this build serves %u",
+                    "heap %zu of %zu usable B used; host may declare %u, this build serves %u",
                     (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
                     (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints, s_ep_heap_used,
-                    (unsigned)HEARTH_EP_HEAP_BYTES, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                    kHeapUsableBytes, (unsigned)MT_COMP_MAX_ENDPOINTS,
                     (unsigned)kServiceableEndpoints);
+            /* Fix round M3: no catalogue type carries both Valve and
+             * Chime, so chime_delegate is always null here today; the
+             * unwind is written anyway so a future type that did could
+             * not leak. Same on every -1 below. */
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
             return -1;
         }
     }
@@ -3084,17 +3318,25 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     if (index == kServiceableEndpoints) {
         LOG_ERR("devtype 0x%04X: all %u serviceable endpoints in use "
-                "(endpoint heap %zu of %u B used); host may declare %u, this build serves %u",
+                "(endpoint heap %zu of %zu usable B used); host may declare %u, "
+                "this build serves %u",
                 (unsigned)devtype_id, (unsigned)kServiceableEndpoints, s_ep_heap_used,
-                (unsigned)HEARTH_EP_HEAP_BYTES, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                kHeapUsableBytes, (unsigned)MT_COMP_MAX_ENDPOINTS,
                 (unsigned)kServiceableEndpoints);
+        if (chime_delegate != nullptr) {
+            mt_matter_chime_delegate_unclaim(chime_delegate);
+        }
         return -1;
     }
 
-    /* Sized for THIS device type, not for the widest in the catalogue. */
+    /* Sized for THIS device type, not for the widest in the catalogue. The
+     * store bytes (store reclaim round) are zero for every type but mode
+     * select and chime. */
     const uint16_t n_clusters = type->ep_type->clusterCount;
     const uint16_t n_slots = count_slots(type->ep_type);
-    const size_t want = block_bytes(n_clusters, n_slots);
+    const size_t base = block_bytes(n_clusters, n_slots);
+    const size_t store = store_bytes(type->ep_type);
+    const size_t want = base + store;
 
     void *block = k_heap_alloc(&hearth_ep_heap, want, K_NO_WAIT);
     if (block == nullptr) {
@@ -3105,14 +3347,42 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
             free_bytes = st.free_bytes;
         }
 #endif
-        LOG_ERR("devtype 0x%04X: endpoint block of %zu B (%u clusters, %u slots) does not fit; "
-                "%zu of %u B handed out, %zu B free; this is endpoint %u of %u serviceable",
-                (unsigned)devtype_id, want, (unsigned)n_clusters, (unsigned)n_slots,
-                s_ep_heap_used, (unsigned)HEARTH_EP_HEAP_BYTES, free_bytes, (unsigned)(index + 1),
-                (unsigned)kServiceableEndpoints);
+        /* Fix round M1: every figure on this line is chunk-rounded and
+         * shares the usable-bytes denominator, so the bench's 13-prefix
+         * leg reads coherently: cost + handed out + free reconcile
+         * (584 wanted, 7,592 of 8,112 used, 520 free). The raw payload and
+         * its breakdown stay in the parenthesis for the sizing table's
+         * arithmetic. */
+        LOG_ERR("devtype 0x%04X: endpoint block costing %zu B (payload %zu: %u clusters, "
+                "%u slots, %zu store B) does not fit; "
+                "%zu of %zu usable B handed out, %zu B free; this is endpoint %u of %u serviceable",
+                (unsigned)devtype_id, kHeapCostOf(want), want, (unsigned)n_clusters,
+                (unsigned)n_slots, store, s_ep_heap_used, kHeapUsableBytes, free_bytes,
+                (unsigned)(index + 1), (unsigned)kServiceableEndpoints);
+        if (chime_delegate != nullptr) {
+            mt_matter_chime_delegate_unclaim(chime_delegate);
+        }
         return -1;
     }
-    s_ep_heap_used += want;
+    s_ep_heap_used += kHeapCostOf(want);
+
+    /* Construct the trailing store(s) before the endpoint can be served:
+     * heap bytes arrive uninitialized where the old .bss stores were
+     * zeroed, and value-initialization () is exactly "count 0, entries
+     * zeroed, ModeOptionStructs default-constructed", the empty-list state
+     * every reader maps to the pre-reclaim no-slot answers (mt_dyn_store.h).
+     * Never destroyed, the block policy; offsets come from store_offset(),
+     * the alignment-correct store_walk (fix round 2) shared with the
+     * accessors, so writer and readers place every store identically. */
+    {
+        uint8_t *region = static_cast<uint8_t *>(block) + base;
+        if (type_has_cluster(type->ep_type, ModeSelect::Id)) {
+            new (region + store_offset(type->ep_type, ModeSelect::Id)) mt_mode_store_t();
+        }
+        if (type_has_cluster(type->ep_type, Chime::Id)) {
+            new (region + store_offset(type->ep_type, Chime::Id)) mt_chime_store_t();
+        }
+    }
 
     dyn_endpoint &d = s_dyn[index];
     d.type = type;
@@ -3147,6 +3417,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         d.block = nullptr;
         LOG_ERR("emberAfSetDynamicEndpoint(0x%04X) failed: %" CHIP_ERROR_FORMAT,
                 (unsigned)devtype_id, err.Format());
+        if (chime_delegate != nullptr) {
+            mt_matter_chime_delegate_unclaim(chime_delegate);
+        }
         return -1;
     }
 
@@ -3184,6 +3457,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         emberAfClearDynamicEndpoint(index);
         d.used = false;
         d.block = nullptr;
+        if (chime_delegate != nullptr) {
+            mt_matter_chime_delegate_unclaim(chime_delegate);
+        }
         return -1;
     }
 
