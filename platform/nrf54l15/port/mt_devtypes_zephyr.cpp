@@ -3285,6 +3285,158 @@ constexpr EmberAfDeviceType kBatteryStorageNoDemTypes[] = { { 0x0018, 2 },
                                                             { 0x0011, 1 },
                                                             { 0x0510, 1 } };
 
+/* ======================================================================
+ * Catalogue batch 8: the composed appliances
+ * ======================================================================
+ *
+ * The five device type ids the PARENTING POLICY names, given names here
+ * because they appear in three places that must agree: mt_devtype_parent_ok()
+ * below, the shape maps that render the same policy as cluster sets, and the
+ * registry rows themselves. Every other row in this file keeps its bare hex
+ * literal, because no other row's id is read by anything but the lookup.
+ */
+constexpr uint32_t kDtRefrigerator          = 0x0070;
+constexpr uint32_t kDtTempControlledCabinet = 0x0071;
+constexpr uint32_t kDtCookSurface           = 0x0077;
+constexpr uint32_t kDtCooktop               = 0x0078;
+constexpr uint32_t kDtOven                  = 0x007B;
+
+/* ---- cooktop (0x0078) --------------------------------------------------
+ *
+ * Catalogue batch 8 audit, OnOff with the OffOnly feature.
+ *
+ *   Nothing new CHIP-side: OnOff is already compiled, already dispatched by
+ *   the generated IMClusterCommandHandler, already in hearth.zap, already
+ *   seeded. The regeneration for this batch leaves it untouched.
+ *
+ *   The C6's mk_cooktop() (platform/esp32c6/main/mt_devtypes.cpp:422-427) is
+ *   a bare thunk: cooktop::add() calls add_device_type(), on_off::create()
+ *   and on_off::feature::off_only::add() (esp_matter_endpoint.cpp:1562-1573),
+ *   and cooktop::config_t is {descriptor, on_off} with NO identify field, so
+ *   there is no Identify on a cooktop on either platform. Cooktop.xml:66-67
+ *   lists Identify as optional only, so the omission is conformant and is
+ *   the C6-parity choice, not an oversight.
+ *
+ * THE ONE TRAP ON THIS DEVICE TYPE, and it is the whole reason for the
+ * command list below. Cooktop.xml:69-74 makes OnOff mandatory WITH the
+ * OFFONLY feature mandatory inside it: a controller may switch a cooktop
+ * off, never on. Reusing kOnOffIncoming (Off/On/Toggle, declared with the
+ * lighting types above) would advertise On and Toggle in
+ * AcceptedCommandList, and the generated OnOff dispatch would happily
+ * execute them, so a controller could switch a cooktop ON against the
+ * device type's own conformance. Turning a cooktop on is the host's act, an
+ * AT+MTATTR write of 0x0006/0x0000 (AT_MT_SPEC.md 640-655 says so for the
+ * cook surface, and the same rule governs its parent).
+ *
+ * The C6 arrives at the same AcceptedCommandList by a different road, worth
+ * recording because it reads like an accident there and is a declaration
+ * here: cluster::on_off::create() adds ONLY command::create_off()
+ * (esp_matter_cluster.cpp:1233-1260); On and Toggle are added per device
+ * type by esp_matter_endpoint.cpp, and cooktop::add() does not add them. So
+ * the C6's cooktop also accepts Off alone, and feature::off_only::add() sets
+ * the feature-map bit and nothing else (esp_matter_feature.cpp:508-523).
+ *
+ * racOnOffAttrs is reused rather than onOffAttrs for the reason its own note
+ * gives: the four Lighting-gated attributes (GlobalSceneControl, OnTime,
+ * OffWaitTime, StartUpOnOff) have no place on a featureless-but-for-OffOnly
+ * OnOff. The FeatureMap seed is device-type-qualified (0x04,
+ * OnOff::Feature::kOffOnly, OnOff/Enums.h:85) against the wildcard 0x01 the
+ * lighting types take.
+ *
+ * Revision 1 per data_model/1.5/device_types/Cooktop.xml. */
+constexpr CommandId kOnOffOffOnlyIncoming[] = { OnOff::Commands::Off::Id, kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cooktopClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffOffOnlyIncoming,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(cooktopEndpoint, cooktopClusters);
+
+constexpr EmberAfDeviceType kCooktopTypes[] = { { 0x0078, 1 } };
+
+/* ---- oven (0x007B) -----------------------------------------------------
+ *
+ * Catalogue batch 8 audit. Identify plus Descriptor, four slots, the
+ * cheapest block in the catalogue.
+ *
+ *   Nothing new CHIP-side: Identify is already compiled and already seeded.
+ *
+ *   The C6's mk_oven() (mt_devtypes.cpp:1037-1049) calls oven::create() and
+ *   then hand-adds Identify, because oven::add() calls add_device_type() and
+ *   nothing else (esp_matter_endpoint.cpp:1360-1367) and oven::config_t
+ *   carries no identify field. This list is the result, declared.
+ *
+ * THE OVEN IS A BARE PARENT ENDPOINT BY DESIGN (AT_MT_SPEC.md 529-534): all
+ * of its function lives in its Temperature Controlled Cabinet children, so a
+ * useful oven is always at least two AT+MTEP rows. That is also a disclosed
+ * conformance hole shared with the refrigerator: Oven.xml:67-71 puts a
+ * mandatory conditionRequirement on a 0x0071 child, so a lone AT+MTEP=0x007B
+ * row is sub-conformant. The firmware does not and should not refuse it: a
+ * composition-level requirement is not an append-level one, the host can
+ * only satisfy it by declaring a second row, and the C6 has the identical
+ * hole. AT_MT_SPEC.md carries the sentence instead of the code carrying a
+ * check.
+ *
+ * Revision 2 per data_model/1.5/device_types/Oven.xml. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(ovenClusters)
+DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(ovenEndpoint, ovenClusters);
+
+constexpr EmberAfDeviceType kOvenTypes[] = { { 0x007B, 2 } };
+
+/* ---- extractor hood (0x007A) -------------------------------------------
+ *
+ * Catalogue batch 8 audit. FanControl plus Descriptor, and NO Identify.
+ *
+ *   Nothing new CHIP-side: FanControl is already compiled, already in
+ *   hearth.zap, already seeded, and its ClustersWithAttributeChangedFunctions
+ *   entry (config-data.yaml:106-112) already works for 0x002B.
+ *
+ * WHY THIS IS A NEW TWO-CLUSTER LIST AND NOT A SECOND fanEndpoint ROW. The
+ * air purifier (0x002D) above reuses &fanEndpoint verbatim, and its note is
+ * explicit about why that is legitimate: air_purifier::add() really does
+ * create Identify AND FanControl (esp_matter_endpoint.cpp:745-754), so the
+ * reused list mirrors what the C6 actually builds. extractor_hood::add()
+ * does NOT: it calls add_device_type() and fan_control::create() only
+ * (esp_matter_endpoint.cpp:1650-1657), and extractor_hood::config_t is
+ * {descriptor, fan_control} with no identify field. Reusing fanEndpoint here
+ * would carry an Identify cluster the C6 does not, breaking the stated
+ * invariant that this file's lists mirror what the C6 actually builds, for a
+ * cluster ExtractorHood.xml:66-67 lists as optional anyway. Ruled in the
+ * batch brief: compose WITHOUT Identify. The cost is four slots and 64 heap
+ * bytes cheaper per endpoint, which is incidental.
+ *
+ * Conformance note: ExtractorHood.xml:79-85 marks the FanControl Wind,
+ * AirflowDirection and Rocking features disallowConform. This port seeds
+ * FanControl's FeatureMap 0 for every fan-bearing type, so nothing is
+ * advertised and nothing disallowed is present. Clean.
+ *
+ * The fan's known FanMode/PercentSetting coupling gap (the audit note on
+ * fanControlAttrs above: MatterFanControlClusterServerAttributeChangedCallback
+ * is functions-array-bound and never runs on a dynamic endpoint) now ships
+ * under a THIRD device-type name. Restated deliberately, the air purifier's
+ * rule: an extractor hood host owns that coupling exactly the way a fan host
+ * does, and nothing about this row re-solves it.
+ *
+ * Revision 1 per data_model/1.5/device_types/ExtractorHood.xml. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(extractorHoodClusters)
+DECLARE_DYNAMIC_CLUSTER(FanControl::Id, fanControlAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(extractorHoodEndpoint, extractorHoodClusters);
+
+constexpr EmberAfDeviceType kExtractorHoodTypes[] = { { 0x007A, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 /* Catalogue batch 7a added ep_type_v1, the port's rendering of the C6's
@@ -3307,6 +3459,98 @@ constexpr EmberAfDeviceType kBatteryStorageNoDemTypes[] = { { 0x0018, 2 },
  * variants' cluster sets cannot back (the C6 has no such member because
  * each add_device_type() call sits inside the variant branch that earns
  * it, mk_water_heater()/mk_battery_storage()). */
+/*
+ * ---- the parenting policy, encoding one of two ------------------------
+ *
+ * Catalogue batch 8. Until this batch mt_devtype_parent_ok() was a
+ * `return true` stub, because no device type in s_registry required a parent
+ * or restricted which device type could parent it. Two now do
+ * (AT_MT_SPEC.md 367-379), and this constexpr predicate is where the rule
+ * lives; the extern "C" entry point the AT layer calls is a one-line
+ * forwarder further down.
+ *
+ * It is constexpr for one reason: the SAME policy is encoded a second time,
+ * as the per-row shape maps below, and the two can disagree. That hazard is
+ * exactly the one ARCHITECTURE.md:1350-1364 records the C6 rejecting when it
+ * declined to give the cabinet a variant bit ("a second encoding of a fact
+ * the tree already carries, able to disagree with it"). Here the second
+ * encoding is unavoidable (the cluster set has to come from somewhere) so it
+ * is made CHECKABLE instead: shape_domain_matches_policy() below evaluates
+ * this function over the whole registry at compile time and fails the build
+ * on any disagreement in either direction.
+ *
+ * variant is a parameter of the contract (core/include/mt_devtypes.h) and is
+ * deliberately unused: neither rule depends on it today. It stays in the
+ * signature, and in the compile-time check's enumeration, so a future rule
+ * that DOES depend on it needs no plumbing.
+ */
+constexpr bool parent_policy_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
+{
+    (void)variant;
+    /* Cook Surface: legal ONLY under a Cooktop. The unparented form is
+     * rejected by the same expression, since no device type id is 0 and
+     * parent_devtype 0 is how the AT layer spells "no parent"
+     * (core/mt/mt_at.c:1903-1905). This is the catalogue's only device type
+     * that REQUIRES a parent; the C6's rule is mt_devtypes.cpp:2767-2772 and
+     * carries the identical one-expression note. */
+    if (devtype_id == kDtCookSurface) {
+        return parent_devtype == kDtCooktop;
+    }
+    /* Temperature Controlled Cabinet: legal unparented (the standalone rows
+     * earlier compositions declared keep working), or under a Refrigerator
+     * or an Oven and nothing else. Those two are the appliances that give a
+     * child cabinet a coherent conditional cluster set (Cooler, Heater); a
+     * third parent would be a cabinet with no defined set at all, which is
+     * why the policy refuses rather than falling back to the bare shape.
+     * The C6's rule is mt_devtypes.cpp:2773-2783. */
+    if (devtype_id == kDtTempControlledCabinet) {
+        return parent_devtype == 0 || parent_devtype == kDtRefrigerator ||
+               parent_devtype == kDtOven;
+    }
+    /* Everything else is permissive, including the unparented form: PartsList
+     * simply reflects whatever the host declares and this firmware holds no
+     * opinion about whether the pairing makes sense (AT_MT_SPEC.md 366-370). */
+    return true;
+}
+
+/*
+ * ---- shape selection, the second encoding ----------------------------
+ *
+ * A shape is one realised cluster set for one (variant, parent devtype)
+ * pair. Rows whose cluster set does not depend on the parent carry no
+ * shapes at all and keep the ep_type / ep_type_v1 pair the struct comment
+ * below describes; only a row the policy RESTRICTS needs a shape map, and
+ * the compile-time check makes that an if-and-only-if rather than a
+ * convention.
+ *
+ * parent_devtype 0 is the unparented shape, the same spelling
+ * mt_devtype_create()'s parent_devtype argument uses (main.cpp passes 0 when
+ * comp.parent[i] is MT_COMP_NO_PARENT).
+ *
+ * WHY NOT A WIDENED ROW FOR ALL 44 EXISTING ROWS. Ruled in the batch brief
+ * (DE416). A Span<const shape> replacing ep_type/ep_type_v1 on every row is
+ * the more general mechanism and remains the right refactor for the day a
+ * SECOND parent-conditional device type appears; landing it in the same
+ * commit as seven new device types, a heap resize, three new SDK translation
+ * units and a zap regeneration would make the whole batch unreviewable. This
+ * member is additive by construction: it is the LAST member, so aggregate
+ * initialization zero-fills it to an empty span for every row that does not
+ * name it, and all 44 pre-batch-8 rows keep their exact original text and
+ * their exact original bytes. That is the same trick batches 7a and 7b each
+ * relied on once (ep_type_v1, device_types_v1) and this is its third use.
+ *
+ * WHY NOT DUPLICATE REGISTRY ROWS keyed by parent: mt_devtype_is_known() and
+ * mt_devtype_variant_ok() are called from core/mt/mt_at.c:1873 and :1885
+ * BEFORE any parent has been parsed, so the registry's primary key has to
+ * stay the bare device type id. Changing it to (id, parent) would have made
+ * AT+MTEP=0x0071 answer +MTERR:6.
+ */
+struct hearth_shape {
+    uint8_t variant;
+    uint32_t parent_devtype;
+    const EmberAfEndpointType *ep_type;
+};
+
 struct hearth_devtype {
     uint32_t id;
     uint8_t max_variant;
@@ -3314,9 +3558,24 @@ struct hearth_devtype {
     Span<const EmberAfDeviceType> device_types;
     const EmberAfEndpointType *ep_type_v1;
     Span<const EmberAfDeviceType> device_types_v1;
+    /* Catalogue batch 8, the LAST member for the zero-fill reason above.
+     * Empty (the zero-fill) means "this row's cluster set does not depend on
+     * its parent"; a non-empty span REPLACES the ep_type/ep_type_v1
+     * selection entirely for that row, and must cover exactly the pairs
+     * parent_policy_ok() accepts. */
+    Span<const hearth_shape> shapes;
 };
 
-const hearth_devtype s_registry[] = {
+/* constexpr, not merely const, since batch 8: shape_domain_matches_policy()
+ * below has to READ this table at compile time to prove the shape maps and
+ * the parenting policy agree, and a const object of class type is not usable
+ * in a constant expression. Every initializer here was already a constant
+ * expression (ids and counts are literals, the endpoint pointers are
+ * addresses of static objects, the device-type spans are built from
+ * constexpr arrays through Span's constexpr array constructor,
+ * Span.h:68), so this is a one-token change that moves no byte: the 44
+ * pre-batch-8 rows below are unchanged, text and value. */
+constexpr hearth_devtype s_registry[] = {
     { 0x0100, 0, &onOffLightEndpoint, Span<const EmberAfDeviceType>(kOnOffLightTypes) },
     { 0x0101, 0, &dimmableLightEndpoint, Span<const EmberAfDeviceType>(kDimmableLightTypes) },
     { 0x0302, 0, &temperatureSensorEndpoint, Span<const EmberAfDeviceType>(kTemperatureSensorTypes) },
@@ -3385,7 +3644,93 @@ const hearth_devtype s_registry[] = {
       &waterHeaterBareEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterBareTypes) },
     { 0x0018, 1, &batteryStorageEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageTypes),
       &batteryStorageNoDemEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageNoDemTypes) },
+    /* Catalogue batch 8: the composed appliances. These three carry no
+     * shapes: the policy is permissive for all of them, and a cooktop's or
+     * an oven's own cluster set does not change when a child is composed
+     * under it (only the child's does, and only PartsList moves on the
+     * parent, which the provider serves). */
+    { kDtCooktop, 0, &cooktopEndpoint, Span<const EmberAfDeviceType>(kCooktopTypes) },
+    { kDtOven, 0, &ovenEndpoint, Span<const EmberAfDeviceType>(kOvenTypes) },
+    { 0x007A, 0, &extractorHoodEndpoint, Span<const EmberAfDeviceType>(kExtractorHoodTypes) },
 };
+
+/*
+ * ---- the tie between the two encodings of the parenting policy --------
+ *
+ * Catalogue batch 8, and the reason parent_policy_ok() and s_registry are
+ * both constexpr. This walks the whole registry at compile time and proves,
+ * for every row, every variant it accepts and every device type in the
+ * catalogue used as a parent (plus the unparented form), that:
+ *
+ *   a row the policy RESTRICTS carries a shape map, and its domain is
+ *   EXACTLY the policy's accept set: one shape for every accepted pair, no
+ *   shape for any rejected pair, and never two shapes for one pair;
+ *
+ *   a row the policy leaves PERMISSIVE carries no shape map, because it
+ *   needs none: its cluster set is chosen by variant alone.
+ *
+ * The parent universe is s_registry itself, so nothing here is a second list
+ * that could go stale: adding a device type automatically widens the
+ * enumeration, and a new restricted row without a matching shape map, or a
+ * shape map with a hole in it, fails THIS build rather than a boot rebuild
+ * on someone's bench.
+ *
+ * Which direction is load-bearing, said plainly. "Every shape is accepted"
+ * catches a dead shape row, which is confusing but harmless. "Every accepted
+ * pair has a shape" catches the dangerous one: a pairing AT+MTEP accepts at
+ * staging time whose cluster set does not exist, which would be discovered
+ * only at the next boot, as a create failure that aborts the whole rebuild
+ * and truncates the composition (mt_devtype_create()'s no-shape arm logs it,
+ * but by then the device is already serving a prefix).
+ */
+constexpr bool shape_domain_matches_policy()
+{
+    constexpr size_t kRows = sizeof(s_registry) / sizeof(s_registry[0]);
+    for (size_t r = 0; r < kRows; r++) {
+        const hearth_devtype &e = s_registry[r];
+        for (size_t s = 0; s < e.shapes.size(); s++) {
+            if (e.shapes.data()[s].variant > e.max_variant) {
+                return false;
+            }
+            if (e.shapes.data()[s].ep_type == nullptr) {
+                return false;
+            }
+        }
+        for (uint8_t v = 0; v <= e.max_variant; v++) {
+            /* p == kRows is the unparented probe; the rest walk the
+             * catalogue's own ids. */
+            for (size_t p = 0; p <= kRows; p++) {
+                const uint32_t parent = (p == kRows) ? 0u : s_registry[p].id;
+                size_t matches = 0;
+                for (size_t s = 0; s < e.shapes.size(); s++) {
+                    if (e.shapes.data()[s].variant == v &&
+                        e.shapes.data()[s].parent_devtype == parent) {
+                        matches++;
+                    }
+                }
+                if (matches > 1) {
+                    return false;
+                }
+                const bool accepted = parent_policy_ok(e.id, v, parent);
+                if (e.shapes.empty()) {
+                    /* No shape map: the policy must be permissive for this
+                     * row, or a legal pairing would have no cluster set. */
+                    if (!accepted) {
+                        return false;
+                    }
+                } else if (accepted != (matches == 1)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(shape_domain_matches_policy(),
+              "the shape maps and mt_devtype_parent_ok() disagree: a restricted device type "
+              "has no shape map, a shape map has a hole or a duplicate, or a permissive row "
+              "grew a shape map");
 
 /* ---- the external attribute store ------------------------------------ */
 
@@ -3547,8 +3892,11 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   electrical utility mtr  0x0511            3      7      124        128
  *   boolean-state sensors, air quality        3      7      124        128
  *   electrical sensor v1    0x0510            3      6      108        112
+ *   extractor hood          0x007A            2      6      104        112
  *   electrical meter v0     0x0514            3      6      108        112
+ *   oven                    0x007B            2      4       72         80
  *   electrical meter v1     0x0514            2      4       72         80
+ *   cooktop                 0x0078            2      3       56         64
  *
  * (Mode select payload is 140 + 436 store, chime 72 + 273 store; both rows
  * sat at bare 140/72 before the reclaim round moved their stores in. The
@@ -4274,13 +4622,53 @@ uint16_t s_next_ep_id = 1;
  * on purpose: aggregate initialization zero-fills members a brace list does
  * not reach, so every pre-existing row keeps its exact original text and
  * gets devtype 0 for free.
+ *
+ * Catalogue batch 8 added the `variant` qualifier by the identical trick,
+ * one member further out. It exists because TemperatureControl's FeatureMap
+ * is variant-dependent AND shared by two device types (0x0071 and 0x0077),
+ * so neither the wildcard nor the devtype qualifier can split it: variant 0
+ * is TemperatureNumber|TemperatureStep (0x05) and variant 1 is
+ * TemperatureLevel (0x02) on BOTH types. Batches 7a and 7b had already met
+ * this problem twice (the DEM and WHM FeatureMaps) and each solved it with a
+ * hand-written special case ahead of the table lookup in seed_slots(); this
+ * column is the general fix, and both of those special cases were RETIRED
+ * into ordinary rows when it landed. AirQuality's special case stays, and is
+ * not the same problem: its value comes from a shared accessor function
+ * rather than from a literal, which no table column can express.
+ *
+ * Why TemperatureControl is what forced the general fix rather than a fourth
+ * special case: it is the first variant-dependent FeatureMap that is
+ * FUNCTIONALLY load-bearing rather than merely descriptive.
+ * emberAfTemperatureControlClusterSetTemperatureCallback() reads the
+ * FeatureMap back to pick SetTemperature's branch
+ * (temperature-control-server.cpp:117-124, :183), so a wrong bit does not
+ * just misreport a capability, it makes a healthy endpoint answer Failure or
+ * InvalidCommand to a valid command.
+ *
+ * THE ENCODING, because the zero-fill has to keep meaning "any variant":
+ * 0 is the wildcard and a row naming a variant stores variant + 1.
+ * seed_variant() is the only place that arithmetic appears.
+ *
+ * PRECEDENCE, generalising batch 2's rule rather than replacing it: the most
+ * specific matching row wins, scored devtype-qualified 2, variant-qualified
+ * 1, both 3, neither 0. A row whose qualifier is present but does not match
+ * is skipped outright. Every pre-batch-8 row is variant-wildcard, so the
+ * relative order of any two of them is exactly what it was and every
+ * existing seed resolves to the identical value. Ranking a devtype match
+ * above a variant match is a choice, not a derivation; no pair in this table
+ * makes the two compete today, and if one ever does the comment is here to
+ * be argued with.
  */
+constexpr uint8_t kSeedAnyVariant = 0;
+constexpr uint8_t seed_variant(uint8_t v) { return (uint8_t)(v + 1); }
+
 struct attr_seed {
     ClusterId cluster;
     AttributeId attr;
     uint8_t size;
     uint8_t bytes[4];
     uint32_t devtype;
+    uint8_t variant;
 };
 
 const attr_seed s_seeds[] = {
@@ -4912,14 +5300,25 @@ const attr_seed s_seeds[] = {
      * (AT_MT_SPEC.md 3.25); ESAType 0 (kEvse), ESACanGenerate false and
      * OptOutState 0 (kNoOptOut) are the zero-fill matching the delegate
      * defaults, all Instance-served with carve-out reads either way.
-     * FeatureMap carries NO row: it is the catalogue's one
-     * variant-dependent boot value, written by seed_slots()'s special
-     * case below (the demAttrs audit note). ClusterRevision 4 is LIVE
-     * (Instance::Read() falls through for it) and is
-     * DeviceEnergyManagement/Metadata.h:20 in THIS tree. The DEMMode
+     * ClusterRevision 4 is LIVE (Instance::Read() falls through for it) and
+     * is DeviceEnergyManagement/Metadata.h:20 in THIS tree. The DEMMode
      * revision is LIVE too (the ModeBase no-default-arm rule the RVC rows
-     * above document): DeviceEnergyManagementMode/Metadata.h:20 says 2. */
+     * above document): DeviceEnergyManagementMode/Metadata.h:20 says 2.
+     *
+     * FeatureMap is the catalogue's FIRST variant-dependent boot value.
+     * Until batch 8 it had no row here at all and was written by a special
+     * case in seed_slots(); the variant column retired that (the s_seeds
+     * header comment). Variant 0 is Feature::kPowerAdjustment (0x1) and
+     * variant 1 is 0, the same two values, and the create path still hands
+     * the identical `variant == 0` predicate to mt_matter_dem_register() so
+     * the seeded shadow and the Instance's own mask agree by construction.
+     * Both variants share device type 0x050D, which is why the devtype
+     * column could never have split them. */
     { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::ESAState::Id, 1, { 0x01 } },
+    { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::FeatureMap::Id, 4,
+      { 0x01, 0x00, 0x00, 0x00 }, 0, seed_variant(0) },
+    { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::FeatureMap::Id, 4,
+      { 0x00, 0x00, 0x00, 0x00 }, 0, seed_variant(1) },
     { DeviceEnergyManagement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x04, 0x00 } },
     { DeviceEnergyManagementMode::Id, Globals::Attributes::ClusterRevision::Id, 2,
       { 0x02, 0x00 } },
@@ -4934,15 +5333,39 @@ const attr_seed s_seeds[] = {
      * HeaterTypes 0, HeatDemand 0, TankVolume 0, TankPercentage 0 and
      * BoostState 0 (kInactive) are the zero-fill matching the
      * HearthWhmDelegate defaults (all Instance-served with carve-out reads
-     * either way). FeatureMap carries NO row: it is the catalogue's second
-     * variant-dependent boot value, written by seed_slots()'s WHM special
-     * case below (the whmAttrs audit note). */
+     * either way).
+     *
+     * FeatureMap is the catalogue's SECOND variant-dependent boot value and
+     * had no row here either until batch 8's variant column retired its
+     * special case. Variant 0 is Feature::kEnergyManagement |
+     * Feature::kTankPercent (0x3, the value the C6 hand-sets around its two
+     * broken feature helpers) and variant 1 is 0; the create path still
+     * hands the identical `variant == 0` predicate to
+     * mt_matter_whm_register(), whose Instance snapshots mFeature at
+     * construction and answers the fabric-side read from it, so seed and
+     * Instance agree by construction. Both variants share device type
+     * 0x050F. */
+    { WaterHeaterManagement::Id, WaterHeaterManagement::Attributes::FeatureMap::Id, 4,
+      { 0x03, 0x00, 0x00, 0x00 }, 0, seed_variant(0) },
+    { WaterHeaterManagement::Id, WaterHeaterManagement::Attributes::FeatureMap::Id, 4,
+      { 0x00, 0x00, 0x00, 0x00 }, 0, seed_variant(1) },
     { WaterHeaterManagement::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x02, 0x00 } },
     /* WaterHeaterMode. ClusterRevision 1 is LIVE (the ModeBase AAI has no
      * revision case, the RVC rows' rule on the fourth alias) and is
      * WaterHeaterMode/Metadata.h:20 in THIS tree. CurrentMode 0 and
      * FeatureMap 0 are the zero-fill, the DEMMode shape. */
     { WaterHeaterMode::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* ---- catalogue batch 8: the composed appliances ------------------- */
+
+    /* Cooktop's OnOff FeatureMap: Feature::kOffOnly (0x4, OnOff/Enums.h:85),
+     * device-type-qualified against the lighting types' wildcard 0x01, the
+     * pump and room air conditioner rows' exact mechanism. Mandatory rather
+     * than optional here: Cooktop.xml:69-74 makes OFFONLY mandatory inside a
+     * mandatory OnOff, which is also why cooktopClusters declares its own
+     * incoming command list (the cooktop audit note). ClusterRevision rides
+     * the shared OnOff row (6) and OnOff itself is the zero-fill false. */
+    { OnOff::Id, OnOff::Attributes::FeatureMap::Id, 4, { 0x04, 0x00, 0x00, 0x00 }, kDtCooktop },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -5015,53 +5438,42 @@ void seed_slots(dyn_endpoint *d)
                 continue;
             }
 
-            /* Catalogue batch 7a: the DEM FeatureMap, the catalogue's one
-             * VARIANT-dependent boot value (both variants share device
-             * type 0x050D, so an s_seeds row cannot split them). Variant 0
-             * seeds Feature::kPowerAdjustment (0x1), variant 1 seeds 0,
-             * and the create path hands the identical variant predicate to
-             * mt_matter_dem_register(), whose Instance mask is what the
-             * fabric-side FeatureMap read actually answers: seed and
-             * Instance agree by construction, the AirQuality discipline
-             * with the variant as the shared source. */
-            if (cl.clusterId == DeviceEnergyManagement::Id &&
-                md.attributeId == Globals::Attributes::FeatureMap::Id) {
-                s.data[0] = (d->variant == 0) ? 0x01 : 0x00;
-                continue;
-            }
+            /* Catalogue batch 7a's DEM FeatureMap special case and batch
+             * 7b's WHM one both stood HERE until batch 8 gave attr_seed a
+             * variant column and retired them into ordinary rows (the
+             * s_seeds comment). Nothing about their contract changed: the
+             * create path still hands the identical variant predicate to
+             * mt_matter_dem_register() / mt_matter_whm_register(), whose
+             * Instance masks are what the fabric-side FeatureMap reads
+             * actually answer, so the seed and the Instance still agree by
+             * construction with the variant as the single shared source.
+             * Only where the literal lives moved. */
 
-            /* Catalogue batch 7b: the WHM FeatureMap, the second
-             * variant-dependent boot value (both variants share device
-             * type 0x050F, the DEM case's exact problem). Variant 0 seeds
-             * Feature::kEnergyManagement | Feature::kTankPercent (0x3,
-             * the value the C6 hand-sets around its two broken feature
-             * helpers), variant 1 seeds 0, and the create path hands the
-             * identical variant predicate to mt_matter_whm_register(),
-             * whose Instance mask is what the fabric-side FeatureMap read
-             * actually answers (Read() encodes mFeature, snapshotted at
-             * construction): seed and Instance agree by construction,
-             * single-sourced on the variant. */
-            if (cl.clusterId == WaterHeaterManagement::Id &&
-                md.attributeId == Globals::Attributes::FeatureMap::Id) {
-                s.data[0] = (d->variant == 0) ? 0x03 : 0x00;
-                continue;
-            }
-
-            /* A seed row naming this device type wins over the wildcard row
-             * (devtype 0) for the same cluster and attribute; the loop
-             * handles either order in the table, since it only stops early
-             * on an exact match. */
+            /* The most specific matching seed row wins: a row naming this
+             * device type AND this variant beats one naming only the device
+             * type, which beats one naming only the variant, which beats the
+             * bare wildcard. A row whose qualifier is present but does not
+             * match is skipped. Scored rather than short-circuited so the
+             * table's row order stays irrelevant (batch 2's loop stopped
+             * early on a devtype hit, which was the same property with two
+             * levels instead of four). */
             const attr_seed *chosen = nullptr;
+            int chosen_score = -1;
             for (auto &seed : s_seeds) {
                 if (seed.cluster != cl.clusterId || seed.attr != md.attributeId) {
                     continue;
                 }
-                if (seed.devtype == d->type->id) {
-                    chosen = &seed;
-                    break;
+                if (seed.devtype != 0 && seed.devtype != d->type->id) {
+                    continue;
                 }
-                if (seed.devtype == 0 && chosen == nullptr) {
+                if (seed.variant != kSeedAnyVariant && seed.variant != seed_variant(d->variant)) {
+                    continue;
+                }
+                const int score = (seed.devtype != 0 ? 2 : 0) +
+                                  (seed.variant != kSeedAnyVariant ? 1 : 0);
+                if (score > chosen_score) {
                     chosen = &seed;
+                    chosen_score = score;
                 }
             }
             if (chosen != nullptr) {
@@ -5231,17 +5643,17 @@ extern "C" bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant)
     return false;
 }
 
+/*
+ * Catalogue batch 8 made this real. The rule itself is parent_policy_ok()
+ * beside the registry, constexpr so the shape maps can be checked against it
+ * at compile time; this is only the extern "C" door core/mt/mt_at.c knocks
+ * on, called on the AT+MTEP= line itself (mt_at.c:1897-1905) so a bad
+ * pairing answers +MTERR:1 on the line that proposed it and consumes no
+ * staging slot.
+ */
 extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
 {
-    (void)devtype_id;
-    (void)variant;
-    (void)parent_devtype;
-    /* None of the device types in s_registry requires a parent or
-     * restricts which device type may parent it, so every combination is
-     * legal, including the unparented case (parent_devtype 0). Same answer
-     * as the C6 table gives for all of these (all max_variant 0, generic
-     * parenting). */
-    return true;
+    return parent_policy_ok(devtype_id, variant, parent_devtype);
 }
 
 extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype,
@@ -5288,9 +5700,48 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * registry comment) because this port cannot tear a cluster out of a
      * built list at runtime; every walk below and every block-layout
      * accessor later reads this chosen list, never type->ep_type
-     * directly. */
-    const EmberAfEndpointType *ep_type =
-        (variant == 1 && type->ep_type_v1 != nullptr) ? type->ep_type_v1 : type->ep_type;
+     * directly.
+     *
+     * Catalogue batch 8: a row whose cluster set depends on its PARENT
+     * carries a shape map instead, and the pair (variant, parent_devtype)
+     * selects from it. The map's domain is proven equal to
+     * parent_policy_ok()'s accept set at compile time
+     * (shape_domain_matches_policy() beside the registry), so the no-match
+     * arm below cannot be reached by any composition AT+MTEP accepted; it is
+     * the drift alarm for the day someone edits one encoding and not the
+     * other in a way the assertion somehow admits, and it aborts rather than
+     * falling back, because a fallback would serve a cabinet whose stored
+     * composition says something else.
+     *
+     * A DELIBERATE DIVERGENCE FROM THE C6, and the better half of it.
+     * The C6 builds the base endpoint, calls set_parent_endpoint(), and only
+     * THEN augments the cabinet with its parent-conditional clusters
+     * (mt_devtypes.cpp:2802-2837), so a failed augment leaves a half-built
+     * child already attached in the parent's tree (ARCHITECTURE.md:1447-1452
+     * records the consequence). This port SELECTS the whole cluster set
+     * here, before emberAfSetDynamicEndpoint() is called at all, so a
+     * composed endpoint appears complete or does not appear: there is no
+     * moment at which a parent's PartsList names a child that is still being
+     * assembled. Same derived-never-stored rule as the C6 (the blob carries
+     * device type, variant and parent index only, AT_MT_SPEC.md 495-505);
+     * only the ordering differs. */
+    const EmberAfEndpointType *ep_type = nullptr;
+    if (!type->shapes.empty()) {
+        for (auto &s : type->shapes) {
+            if (s.variant == variant && s.parent_devtype == parent_devtype) {
+                ep_type = s.ep_type;
+                break;
+            }
+        }
+        if (ep_type == nullptr) {
+            LOG_ERR("devtype 0x%04X variant %u under parent 0x%04X has no declared cluster set; "
+                    "the shape map and mt_devtype_parent_ok() have drifted apart",
+                    (unsigned)devtype_id, (unsigned)variant, (unsigned)parent_devtype);
+            return -1;
+        }
+    } else {
+        ep_type = (variant == 1 && type->ep_type_v1 != nullptr) ? type->ep_type_v1 : type->ep_type;
+    }
 
     /*
      * ---- the per-endpoint delegate handout (catalogue batch 3) ---------
