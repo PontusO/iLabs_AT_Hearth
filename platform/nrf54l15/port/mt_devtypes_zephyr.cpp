@@ -4023,6 +4023,22 @@ constexpr hearth_shape kCookSurfaceShapes[] = {
  * app_with_operational_state_config, whose base has no identify field at all
  * (mt_devtypes.cpp:885-889), and MicrowaveOven.xml agrees.
  *
+ * ONE DISCLOSED CONFORMANCE GAP, and it is worth naming because it is the
+ * thing revision 2 exists for. MicrowaveOven.xml's own revision history
+ * reads "2: Mandate OperationCompletion Event", and this firmware emits
+ * neither OperationCompletion nor OperationalError, on either platform: the
+ * host owns appliance state transitions and reports them with AT+MTOPSTATE,
+ * which writes the attribute and reports it without generating the cluster's
+ * events. The dynamic endpoint's eventList is empty regardless, so EventList
+ * reads empty rather than advertising an event that never fires. The
+ * advertised device-type revision stays 2 because it matches the XML this
+ * file has taken as its authority since batch 1 AND what the C6 advertises
+ * (ESP_MATTER_MICROWAVE_OVEN_DEVICE_TYPE_VERSION 2,
+ * esp_matter_endpoint.h:90), so dropping to 1 would invent a divergence
+ * rather than fix one. The same gap exists unremarked on the washer trio and
+ * the RVC; it is named here because here the revision number points straight
+ * at it.
+ *
  * Revision 2 per data_model/1.5/device_types/MicrowaveOven.xml. */
 HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(microwaveOpStateAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::PhaseList::Id, ARRAY, 0,
