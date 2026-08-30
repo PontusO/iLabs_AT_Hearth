@@ -2340,17 +2340,45 @@ static int cmd_mtcmdresp(at_type_t type, char *args)
  * kind defines. */
 #define MT_ROW_MAX_TOKENS (3 + MT_ROW_MAX_FIELDS)
 
-/* One global staging buffer for the HOST's row sets, matching
- * s_staged/s_staging above: a host stages one (ep, kind) set at a time, and
- * mt_rows_stage() itself discards a set staged for a different (ep, kind)
- * before starting a new one.
+/* The HOST's row staging session, matching s_staged/s_staging above: a host
+ * stages one (ep, kind) set at a time, and mt_rows_stage() itself discards a
+ * set staged for a different (ep, kind) before starting a new one.
  *
- * WRITTEN ONLY BY THE AT PARSER TASK. The fabric-originated sets a
- * controller's SetTargets brings in live in s_row_inbound below, a
- * separate buffer written only by the CHIP event loop task; see that
- * block's comment for why the two are not one buffer, and mt_at.h for the
- * host-facing contract. */
-static mt_row_stage_t s_row_stage;
+ * ---- WHY THIS IS A POINTER AND NOT A BUFFER (ruling DE419) -------------
+ *
+ * mt_row_stage_t is about 5.6 KB: MT_ROW_MAX_ROWS rows of MT_ROW_MAX_FIELDS
+ * int64 fields each (mt_rows.h). Reserved statically it charges every
+ * platform that merely COMPILES this file, on every boot, for ever, for a
+ * capability the host may never use. It is allocated instead when the host
+ * OPENS a staging session (the first AT+MTROW that stages a row) and
+ * released the moment the session ends: applied, cleared, or refused before
+ * anything was staged. One line is what the rest of this file relies on:
+ *
+ *     s_row_stage is non-NULL if and only if a set is staged.
+ *
+ * row_stage_open() and row_stage_retire() below are what keep that true.
+ * Retire is called after every mutation and frees the session whenever the
+ * stage has gone inactive, so an idle session never exists.
+ *
+ * This is deliberately PLATFORM-NEUTRAL. There is no supported/unsupported
+ * compile flag and no per-platform #ifdef in the four verb handlers: a
+ * platform whose host never sends AT+MTROW simply never allocates, and one
+ * whose host does behaves exactly as it always did, byte for byte on the
+ * wire and error code for error code. malloc() is the allocator
+ * core/at/at_parser.c already takes its line buffer from, so this needs no
+ * new hearth_port.h surface either.
+ *
+ * The capacity is unchanged: a session still holds MT_ROW_MAX_ROWS rows.
+ * What moved is when the memory is spent, not how much of it a host can
+ * use, which is the whole point of doing it this way rather than compiling
+ * the row family out on the platforms that have no consumer for it today.
+ *
+ * WRITTEN ONLY BY THE AT PARSER TASK, and that now includes the allocation
+ * and the free. The fabric-originated sets a controller's SetTargets brings
+ * in live in s_row_inbound below, a separate session written only by the
+ * CHIP event loop task; see that block's comment for why the two are not
+ * one buffer, and mt_at.h for the host-facing contract. */
+static mt_row_stage_t *s_row_stage;
 
 /*
  * HEARTH_CRIT_ROWS guards every call into mt_rows.c's mutators
@@ -2367,7 +2395,7 @@ static mt_row_stage_t s_row_stage;
  * on every platform that implements them (ISR-safe, interrupt-disabling),
  * which must never wrap a call that can block or take another lock.
  * cmd_mtrowapply() below reads s_row_stage under the section only long
- * enough to validate and decide whether to proceed, then passes the struct
+ * enough to validate and decide whether to proceed, then passes the session
  * to the bridge by pointer, unguarded: a full copy does not fit the AT
  * parser task's 6144-byte stack (mt_row_stage_t holds MT_ROW_MAX_ROWS rows
  * and runs to several KB, see mt_rows.h).
@@ -2376,10 +2404,61 @@ static mt_row_stage_t s_row_stage;
  * something the inbound SetTargets path would have to close, because it is
  * only safe while the AT parser task is s_row_stage's ONLY writer. Task 6
  * closed it by keeping that true: the inbound path never touches this
- * buffer. Anything added here that writes s_row_stage from another task
+ * session. Anything added here that writes s_row_stage from another task
  * re-opens the window, and the failure mode is a host's AT+MTROWAPPLY
- * committing rows it never staged.
+ * committing rows it never staged. Since DE419 the same rule covers the
+ * ALLOCATION and the FREE: the AT parser task is the only task that may
+ * malloc or free this pointer, which is what makes it safe to hand the
+ * bridge a pointer this task will not release until the bridge returns.
+ *
+ * malloc() and free() are never called with the section held. It wraps a
+ * spinlock with interrupts disabled on every platform that implements it,
+ * and an allocator takes a lock of its own; the two helpers below allocate
+ * and free outside the section and only publish or detach the pointer
+ * inside it.
  */
+
+static mt_row_stage_t *row_stage_open(void)
+{
+    if (s_row_stage) {
+        return s_row_stage;
+    }
+
+    mt_row_stage_t *fresh = malloc(sizeof(*fresh));
+    if (!fresh) {
+        return NULL;
+    }
+    mt_rows_init(fresh);
+
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
+    s_row_stage = fresh;
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
+    return fresh;
+}
+
+/*
+ * Release the host staging session when nothing is staged in it any more.
+ * This is what makes "s_row_stage is non-NULL iff a set is staged" an
+ * invariant rather than a hope, so it is called on every path that can
+ * leave the stage inactive: a row that failed validation and opened the
+ * session for nothing, AT+MTROWCLEAR, and both of the ways AT+MTROWAPPLY
+ * finishes. Calling it when nothing is open, or when a set is still staged,
+ * does nothing; it is safe to call unconditionally and that is how it is
+ * used.
+ */
+static void row_stage_retire(void)
+{
+    mt_row_stage_t *doomed = NULL;
+
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
+    if (s_row_stage && !s_row_stage->active) {
+        doomed      = s_row_stage;
+        s_row_stage = NULL;
+    }
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
+
+    free(doomed);
+}
 
 /* ---- the inbound row stage (energy round C2, task 6) ------------------- *
  *
@@ -2398,8 +2477,8 @@ static mt_row_stage_t s_row_stage;
  * the state below  written by both, always inside HEARTH_CRIT_ROWS.
  *
  * There is no buffer either task can write while the other reads. That is
- * the whole design, and it is why the ~5.6 KB of a second mt_row_stage_t is
- * spent rather than sharing one: with one buffer, a controller's SetTargets
+ * the whole design, and it is why a second mt_row_stage_t is allocated
+ * rather than sharing one: with one buffer, a controller's SetTargets
  * lands on top of whatever set the host is half way through uploading for
  * the same (ep, kind), and when the two happen to hold the same number of
  * rows the host's next AT+MTROWAPPLY validates cleanly and commits THE
@@ -2420,8 +2499,9 @@ static mt_row_stage_t s_row_stage;
  *          stage, never a write). No NEW reader is admitted, because the
  *          set is no longer what a host would be asking about, but a reader
  *          already streaming keeps going: mt_rows_inbound_release() below
- *          deliberately does NOT clear row[], so the bytes under an
- *          in-flight reader stay intact.
+ *          deliberately does NOT free the session while a read is in
+ *          flight, so the bytes under an in-flight reader stay intact and
+ *          stay MAPPED.
  *
  * s_inbound_reading is the one flag that guards the other direction: a
  * bulk AT+MTROWGET of 70 rows takes on the order of 300 ms at 115200, long
@@ -2429,6 +2509,19 @@ static mt_row_stage_t s_row_stage;
  * mt_rows_init() to memset the array under the reader's feet. A claim is
  * therefore refused while a read is in flight, and the controller gets
  * Busy, which it can retry.
+ *
+ * ---- WHO FREES THE SESSION (ruling DE419) ----
+ *
+ * The inbound stage is allocated by the claim and freed by the release,
+ * for the same reason the host's own stage is (see s_row_stage above): a
+ * platform whose fabric never sends a multi-row command never pays for the
+ * buffer at all. The two tasks make that one degree harder than it looks.
+ * The releasing task is the CHIP task; the reader is the AT parser task,
+ * and the two overlap by design in CLOSED. Freeing under a live reader is
+ * a use-after-free where the old code merely left stale bytes, so the
+ * release HANDS THE SESSION OVER when s_inbound_reading is set:
+ * s_inbound_free_pending says "the last one out frees it", and the reader
+ * is the one who does. Nothing else may free this pointer.
  *
  * ---- WHY THE READ IS QUALIFIED BY SEQUENCE NUMBER ----
  *
@@ -2447,7 +2540,7 @@ static mt_row_stage_t s_row_stage;
  * for a proposal is now an act a host cannot perform by accident, and an
  * unqualified read is always the live store.
  */
-static mt_row_stage_t s_row_inbound;
+static mt_row_stage_t *s_row_inbound;
 
 typedef enum {
     MT_INBOUND_IDLE = 0,
@@ -2458,6 +2551,10 @@ typedef enum {
 
 static mt_inbound_state_t s_inbound_state   = MT_INBOUND_IDLE;
 static bool               s_inbound_reading = false;
+/* Set by mt_rows_inbound_release() when it could not free the session
+ * because a reader was still streaming it. The reader frees it and clears
+ * this on its way out; see the CLAIM STATES comment above. */
+static bool               s_inbound_free_pending = false;
 /* 0 when nothing is outstanding. mt_cmdbox_open() never issues 0, so the
  * idle value cannot be matched by any seq a host could legitimately hold. */
 static uint32_t           s_inbound_seq     = 0;
@@ -2465,7 +2562,12 @@ static uint32_t           s_inbound_seq     = 0;
 mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
 {
     hearth_crit_enter(HEARTH_CRIT_ROWS);
-    bool got = (s_inbound_state == MT_INBOUND_IDLE && !s_inbound_reading);
+    /* s_row_inbound is NULL in IDLE unless a deferred free is outstanding,
+     * and a deferred free implies s_inbound_reading, which this condition
+     * already refuses on. Testing the pointer as well is belt and braces:
+     * allocating over a non-NULL one would leak a whole session, and
+     * refusing costs the controller only a retryable Busy. */
+    bool got = (s_inbound_state == MT_INBOUND_IDLE && !s_inbound_reading && s_row_inbound == NULL);
     if (got) {
         s_inbound_state = MT_INBOUND_STAGING;
     }
@@ -2475,12 +2577,24 @@ mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
         return NULL;
     }
 
-    /* Outside the critical section on purpose: this memsets several KB, and
-     * hearth_crit_enter()/hearth_crit_exit() disable interrupts on every
-     * platform that implements them as a spinlock. The STAGING state is
-     * what keeps everyone else out meanwhile, which is exactly what a
-     * state machine buys over holding a lock. */
-    mt_rows_init(&s_row_inbound);
+    /* Outside the critical section on purpose: this allocates and memsets
+     * several KB, and hearth_crit_enter()/hearth_crit_exit() disable
+     * interrupts on every platform that implements them as a spinlock (an
+     * allocator takes a lock of its own, which must never be nested inside
+     * one). The STAGING state is what keeps everyone else out meanwhile,
+     * which is exactly what a state machine buys over holding a lock. */
+    mt_row_stage_t *stage = malloc(sizeof(*stage));
+    if (!stage) {
+        /* Out of memory reaches the caller as the same NULL that "somebody
+         * else owns it" does, which mt_at.h already documents as a refusal
+         * the caller answers with Status::Busy: a status a controller
+         * retries. No new failure mode on the wire. */
+        hearth_crit_enter(HEARTH_CRIT_ROWS);
+        s_inbound_state = MT_INBOUND_IDLE;
+        hearth_crit_exit(HEARTH_CRIT_ROWS);
+        return NULL;
+    }
+    mt_rows_init(stage);
 
     /*
      * Stamp the identity HERE rather than leaving it to the first
@@ -2492,10 +2606,14 @@ mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
      * in the one case with no rows in it. An empty set must answer "total
      * 0, no rows" exactly as promptly as a full one.
      */
-    s_row_inbound.active = true;
-    s_row_inbound.ep     = ep;
-    s_row_inbound.kind   = kind;
-    return &s_row_inbound;
+    stage->active = true;
+    stage->ep     = ep;
+    stage->kind   = kind;
+
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
+    s_row_inbound = stage;
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
+    return stage;
 }
 
 bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, uint32_t aux)
@@ -2504,7 +2622,7 @@ bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, ui
      * the wire and the number of rows AT+MTROWGET will hand back are then
      * the same fact read once, not two values to keep in step. */
     hearth_crit_enter(HEARTH_CRIT_ROWS);
-    uint16_t count = s_row_inbound.count;
+    uint16_t count = s_row_inbound ? s_row_inbound->count : 0;
     if (s_inbound_state == MT_INBOUND_STAGING) {
         s_inbound_state = MT_INBOUND_PENDING;
     }
@@ -2539,16 +2657,31 @@ bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, ui
 
 void mt_rows_inbound_release(void)
 {
+    mt_row_stage_t *doomed = NULL;
+
     hearth_crit_enter(HEARTH_CRIT_ROWS);
-    /* active/count only. row[] is deliberately left alone: a reader that
-     * snapshotted the count under this same mux is still walking it, and
-     * the next claim's mt_rows_init() is the thing that actually clears the
-     * array, which cannot run while that reader holds s_inbound_reading. */
-    s_row_inbound.active = false;
-    s_row_inbound.count  = 0;
-    s_inbound_state      = MT_INBOUND_IDLE;
-    s_inbound_seq        = 0;
+    if (s_row_inbound) {
+        /* active/count first, so anything that looks again sees an empty
+         * set rather than a stale one, whichever way the free goes. */
+        s_row_inbound->active = false;
+        s_row_inbound->count  = 0;
+        if (s_inbound_reading) {
+            /* A reader snapshotted the count under this same mux and is
+             * still walking row[]. Freeing it here would be a
+             * use-after-free where the old fixed buffer merely left stale
+             * bytes behind, so the session is handed to the reader instead
+             * and it frees it on its way out. */
+            s_inbound_free_pending = true;
+        } else {
+            doomed        = s_row_inbound;
+            s_row_inbound = NULL;
+        }
+    }
+    s_inbound_state = MT_INBOUND_IDLE;
+    s_inbound_seq   = 0;
     hearth_crit_exit(HEARTH_CRIT_ROWS);
+
+    free(doomed);
 }
 
 /*
@@ -2672,9 +2805,34 @@ static int cmd_mtrow(at_type_t type, char *args)
         row.value[i] = v;
     }
 
+    /*
+     * Open the staging session, if this is the row that opens it. Deliberately
+     * the LAST thing before the codec call: every form and range check the
+     * handler can make on its own has already run, so a malformed line never
+     * costs an allocation, and a session that is already open is never
+     * re-allocated (row_stage_open() returns it as it stands, rows and all).
+     */
+    mt_row_stage_t *stage = row_stage_open();
+    if (!stage) {
+        /*
+         * The session could not be allocated. There is no +MTERR code for
+         * "out of memory" and this round does not invent one: AT_MT_SPEC.md
+         * section 5 already defines a bare ERROR as "the command form was
+         * wrong, OR an unclassified runtime failure", and this is the second
+         * of those. Nothing has been staged and nothing staged earlier has
+         * been lost, so a host may simply retry.
+         */
+        return MT_R_ERROR;
+    }
+
     hearth_crit_enter(HEARTH_CRIT_ROWS);
-    int r = mt_rows_stage(&s_row_stage, (uint16_t)ep, (uint8_t)kind, (uint16_t)idx, &row);
+    int r = mt_rows_stage(stage, (uint16_t)ep, (uint8_t)kind, (uint16_t)idx, &row);
     hearth_crit_exit(HEARTH_CRIT_ROWS);
+
+    /* A rejected row may have opened the session for nothing (mt_rows_stage()
+     * leaves the stage inactive when it refuses), and an empty session must
+     * not sit on 5.6 KB. */
+    row_stage_retire();
 
     return row_err_to_mterr(r);
 }
@@ -2721,8 +2879,21 @@ static int cmd_mtrowclear(at_type_t type, char *args)
     }
 
     hearth_crit_enter(HEARTH_CRIT_ROWS);
-    int r = mt_rows_clear(&s_row_stage, (uint16_t)ep, (uint8_t)kind);
+    /*
+     * No session open means nothing is staged for ANY (ep, kind), which is
+     * exactly the case mt_rows_clear() answers MT_ROW_ERR_VALUE (+MTERR:1)
+     * for on an inactive stage. It is answered here rather than by handing
+     * the codec a NULL stage, which would answer MT_ROW_ERR_FORM and turn a
+     * documented value error into a bare ERROR on the wire.
+     */
+    int r = s_row_stage ? mt_rows_clear(s_row_stage, (uint16_t)ep, (uint8_t)kind)
+                        : MT_ROW_ERR_VALUE;
     hearth_crit_exit(HEARTH_CRIT_ROWS);
+
+    /* A successful clear ends the session (mt_rows_clear() calls
+     * mt_rows_init()); a refused one leaves the staged set alone, and its
+     * session with it. */
+    row_stage_retire();
 
     return row_err_to_mterr(r);
 }
@@ -2789,8 +2960,8 @@ static int cmd_mtrowapply(at_type_t type, char *args)
     }
 
     hearth_crit_enter(HEARTH_CRIT_ROWS);
-    bool matches = s_row_stage.active && s_row_stage.ep == (uint16_t)ep &&
-                   s_row_stage.kind == (uint8_t)kind;
+    bool matches = s_row_stage && s_row_stage->active && s_row_stage->ep == (uint16_t)ep &&
+                   s_row_stage->kind == (uint8_t)kind;
     int vr;
     if (count == 0) {
         /*
@@ -2815,9 +2986,12 @@ static int cmd_mtrowapply(at_type_t type, char *args)
          * 80, then AT+MTROW=5,1,1,32,600,90, then AT+MTROWAPPLY=5,1,0
          * must empty ep 5's schedule, not merge those two rows into it).
          * Resetting unconditionally means the bridge always sees a
-         * non-matching (inactive) stage for a count-0 call, so its own
-         * "no match -> zero rows" rule is what actually clears, with no
-         * special case to keep in sync on either side.
+         * non-matching stage for a count-0 call, so its own "no match ->
+         * zero rows" rule is what actually clears, with no special case to
+         * keep in sync on either side. Since DE419 the stage the bridge
+         * sees on this path is NULL rather than merely inactive, because
+         * row_stage_retire() below hands the session back first; mt_matter.h
+         * reads the two identically, and deliberately so.
          *
          * This is the SECOND time count == 0's semantics have needed a
          * deliberate, commented carve-out in this function: the first was
@@ -2826,15 +3000,17 @@ static int cmd_mtrowapply(at_type_t type, char *args)
          * +MTERR:1 instead of clearing). Read both defects before
          * touching this branch again.
          */
-        mt_rows_init(&s_row_stage);
+        if (s_row_stage) {
+            mt_rows_init(s_row_stage);
+        }
         vr = MT_ROW_OK;
     } else if (!matches) {
-        /* nothing staged for THIS (ep, kind): a nonzero count cannot
-         * possibly match it, the same value error mt_rows_validate() gives
-         * when a matching stage's count is wrong */
+        /* nothing staged for THIS (ep, kind), or no session open at all: a
+         * nonzero count cannot possibly match it, the same value error
+         * mt_rows_validate() gives when a matching stage's count is wrong */
         vr = MT_ROW_ERR_VALUE;
     } else {
-        vr = mt_rows_validate(&s_row_stage, (uint16_t)count);
+        vr = mt_rows_validate(s_row_stage, (uint16_t)count);
     }
     hearth_crit_exit(HEARTH_CRIT_ROWS);
 
@@ -2842,23 +3018,34 @@ static int cmd_mtrowapply(at_type_t type, char *args)
         return row_err_to_mterr(vr);
     }
 
+    /* The count-0 branch above has just neutralised the stage. Retire it
+     * HERE, before the bridge call, so the session's 5.6 KB goes back
+     * before the blocking commit rather than after it. On the nonzero path
+     * the stage is still active, so this does nothing. */
+    row_stage_retire();
+
     /* Outside the critical section: mt_matter_rows_apply() may block (it
      * takes ChipStackLock), which hearth_crit_enter()/hearth_crit_exit()
-     * must never wrap. It is passed the file-static stage directly (see
-     * HEARTH_CRIT_ROWS's comment above for why this is not a full copy)
-     * and is responsible for treating a stage that does not currently
-     * match (ep, kind) as an empty set, exactly the convention just used
-     * above. */
-    int r = mt_matter_rows_apply((uint16_t)ep, (uint8_t)kind, &s_row_stage);
+     * must never wrap. It is passed the session pointer directly (see
+     * HEARTH_CRIT_ROWS's comment above for why this is not a full copy),
+     * and only the AT parser task, which is this one, ever frees it, so it
+     * cannot go away underneath the call. The bridge is responsible for
+     * treating a stage that does not currently match (ep, kind), NULL
+     * included, as an empty set, exactly the convention just used above. */
+    int r = mt_matter_rows_apply((uint16_t)ep, (uint8_t)kind, s_row_stage);
     if (r != MT_ROW_OK) {
         return row_err_to_mterr(r);
     }
 
     hearth_crit_enter(HEARTH_CRIT_ROWS);
-    if (s_row_stage.active && s_row_stage.ep == (uint16_t)ep && s_row_stage.kind == (uint8_t)kind) {
-        mt_rows_init(&s_row_stage);
+    if (s_row_stage && s_row_stage->active && s_row_stage->ep == (uint16_t)ep &&
+        s_row_stage->kind == (uint8_t)kind) {
+        mt_rows_init(s_row_stage);
     }
     hearth_crit_exit(HEARTH_CRIT_ROWS);
+
+    /* Committed: the staging session is over, and its memory goes back. */
+    row_stage_retire();
 
     return AT_R_OK;
 }
@@ -3035,15 +3222,17 @@ static int cmd_mtrowget(at_type_t type, char *args)
      * whole of MT_INBOUND_PENDING and no claim can start while
      * s_inbound_reading is set.
      */
-    bool     inbound = false;
-    uint16_t itotal  = 0;
+    bool            inbound = false;
+    uint16_t        itotal  = 0;
+    mt_row_stage_t *ibstage = NULL;
     if (qualified) {
         hearth_crit_enter(HEARTH_CRIT_ROWS);
         inbound = (s_inbound_state == MT_INBOUND_PENDING && s_inbound_seq == (uint32_t)seq &&
-                   s_row_inbound.active && s_row_inbound.ep == (uint16_t)ep &&
-                   s_row_inbound.kind == (uint8_t)kind);
+                   s_row_inbound != NULL && s_row_inbound->active &&
+                   s_row_inbound->ep == (uint16_t)ep && s_row_inbound->kind == (uint8_t)kind);
         if (inbound) {
-            itotal            = s_row_inbound.count;
+            itotal            = s_row_inbound->count;
+            ibstage           = s_row_inbound;
             s_inbound_reading = true;
         }
         hearth_crit_exit(HEARTH_CRIT_ROWS);
@@ -3059,20 +3248,35 @@ static int cmd_mtrowget(at_type_t type, char *args)
     }
 
     if (inbound) {
+        /* ibstage, not s_row_inbound: the snapshot taken under the mux is
+         * what this read owns for its duration. mt_rows_inbound_release()
+         * may run on the CHIP task meanwhile, and while s_inbound_reading is
+         * set it will not free the session, only hand it over. */
         if (single) {
             /* Same "at or past total answers OK with no line" rule as the
              * live read below, so a host parses one response shape. */
             if (idx < itotal) {
-                emit_row_line((uint16_t)idx, itotal, &s_row_inbound.row[idx], nfields);
+                emit_row_line((uint16_t)idx, itotal, &ibstage->row[idx], nfields);
             }
         } else {
             for (uint16_t i = 0; i < itotal; i++) {
-                emit_row_line(i, itotal, &s_row_inbound.row[i], nfields);
+                emit_row_line(i, itotal, &ibstage->row[i], nfields);
             }
         }
+
+        /* Last one out. If the release ran while this read was streaming it
+         * left the session to us; free it here, outside the section. */
+        mt_row_stage_t *doomed = NULL;
         hearth_crit_enter(HEARTH_CRIT_ROWS);
         s_inbound_reading = false;
+        if (s_inbound_free_pending) {
+            doomed                 = s_row_inbound;
+            s_row_inbound          = NULL;
+            s_inbound_free_pending = false;
+        }
         hearth_crit_exit(HEARTH_CRIT_ROWS);
+        free(doomed);
+
         return AT_R_OK;
     }
 

@@ -237,11 +237,12 @@ void mt_cmd_notify(uint16_t ep, uint32_t cluster, uint32_t command);
  *
  * ---- WHY THIS IS A SEPARATE BUFFER FROM THE HOST'S OWN STAGE ----
  *
- * The AT+MTROW family stages the HOST's row sets in its own file-static
- * buffer, written only by the AT parser task. This one is written only by
- * the CHIP event loop task. They are deliberately not the same buffer, and
- * the ~5.6 KB that costs buys the elimination of a defect class that
- * nothing but a bench run could ever have caught: sharing one buffer means
+ * The AT+MTROW family stages the HOST's row sets in its own session buffer,
+ * written only by the AT parser task. This one is written only by the CHIP
+ * event loop task. They are deliberately not the same buffer, and the
+ * ~5.6 KB that costs, for as long as a forward is actually in flight, buys
+ * the elimination of a defect class that nothing but a bench run could ever
+ * have caught: sharing one buffer means
  * a controller's SetTargets overwrites whatever set the host happens to
  * have half-uploaded for the same (ep, kind), and if the two happen to hold
  * the same number of rows, the host's next AT+MTROWAPPLY passes every check
@@ -260,10 +261,18 @@ void mt_cmd_notify(uint16_t ep, uint32_t cluster, uint32_t command);
  * outcome (a controller may send an empty schedule list) and the host must
  * be able to fetch "nothing" as promptly as it fetches seventy rows.
  *
- * Returns NULL if the stage is already owned by another forward, or if the
- * AT parser task is streaming a previous set out; the caller must then
- * refuse the command (Status::Busy is the honest answer) rather than
- * proceed.
+ * The stage is ALLOCATED by this call and freed by mt_rows_inbound_release()
+ * (ruling DE419): a platform whose fabric never sends a multi-row command
+ * never pays for the buffer, and one whose fabric does pays for it only
+ * while a forward is outstanding. Nothing about the sequence below changes,
+ * and the returned pointer is valid until the matching release.
+ *
+ * Returns NULL if the stage is already owned by another forward, if the
+ * AT parser task is streaming a previous set out, or if the buffer could
+ * not be allocated; the caller must then refuse the command (Status::Busy
+ * is the honest answer) rather than proceed. The three are deliberately
+ * indistinguishable: all three are transient and all three are retryable,
+ * so a caller has nothing to do differently.
  */
 mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind);
 
@@ -303,8 +312,13 @@ bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, ui
 /*
  * Give the inbound stage back. Must be called on every path out of the
  * command handler, including the ones that never forwarded: nothing else
- * ever frees the claim, and a leaked claim makes every later forward on any
- * endpoint answer Busy until reboot.
+ * ever frees the claim, and a leaked claim now leaks the buffer with it as
+ * well as making every later forward on any endpoint answer Busy until
+ * reboot.
+ *
+ * The pointer mt_rows_inbound_claim() returned is INVALID from this call
+ * onwards. Do the merge before releasing, which is the order the sequence
+ * above already prescribes.
  */
 void mt_rows_inbound_release(void);
 

@@ -1168,14 +1168,24 @@ int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *q
  * per EvseTargetsDelegate::SetTargets() semantics, not a wholesale replace,
  * design spec 2.6).
  *
+ * stage MAY BE NULL, and NULL means "no set is staged at all". The host's
+ * staging session is allocated when a host opens one and released when it
+ * ends (ruling DE419, mt_at.c's s_row_stage), so between sessions there is
+ * no stage to point at, and the AT+MTROWAPPLY count-0 clear path reaches
+ * this function as NULL. NULL is the SAME instruction as a stage that does
+ * not match (ep, kind), namely apply zero rows, so no implementation needs
+ * a separate case for it; it does need to check the pointer before
+ * dereferencing, and the match test below is the natural place.
+ *
  * stage->row[0..stage->count-1] are the rows to commit, but ONLY when
- * stage->active && stage->ep == ep && stage->kind == kind. When that match
- * does not hold, treat the call as applying zero rows, i.e. a clear: this
+ * stage != NULL && stage->active && stage->ep == ep && stage->kind == kind.
+ * When that match does not hold, treat the call as applying zero rows, i.e.
+ * a clear: this
  * is the same (ep, kind) match convention mt_rows_clear() and
  * mt_rows_validate() already use against their own copy of the same
  * mt_row_stage_t, and it is what makes AT+MTROWAPPLY=<ep>,<kind>,0 with
  * nothing staged (the documented clear path, see mt_rows_validate()'s own
- * comment) work correctly: the caller passes the file-static stage
+ * comment) work correctly: the caller passes whatever session it holds
  * unconditionally and relies on this function to recognise it does not
  * belong to (ep, kind) rather than misreading unrelated staged data. Do
  * NOT read stage->row[] when the match fails.
