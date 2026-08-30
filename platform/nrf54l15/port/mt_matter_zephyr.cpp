@@ -4667,22 +4667,34 @@ private:
  * esp-matter's DeviceEnergyManagementDelegateInitCB news the Instance at
  * endpoint enable from a FeatureMap snapshot, this port constructs it in
  * mt_matter_dem_register() with the variant's own mask (measured 40 B per
- * Instance in the step-0 build). Endpoint id stamped at handout (the
- * alloc(ep) contract); the Instance constructor sets it again,
- * identically. Exhaustion aborts the create before anything is spent.
+ * Instance in the step-0 build). Endpoint id stamped in the SUCCESS-ONLY
+ * second half by the Instance constructor, never at handout (batch 7b
+ * fix round M1, the reasoning at the alloc below). Exhaustion aborts the
+ * create before anything is spent.
  */
 static HearthDemDelegate s_dem_delegates[MT_DEM_MAX];
 static size_t            s_dem_next;
 alignas(chip::app::Clusters::DeviceEnergyManagement::Instance) static uint8_t
     s_dem_instances[MT_DEM_MAX][sizeof(chip::app::Clusters::DeviceEnergyManagement::Instance)];
 
+/* Batch 7b fix round M1: the id is NOT stamped at handout any more. The
+ * WHM alloc's comment carries the full reasoning, one discipline for
+ * both id-at-alloc pools: a claim stranded by a create failure after
+ * this point used to keep the s_next_ep_id stamp the NEXT successful
+ * create then took, and dem_for()'s first-match walk would bind the
+ * 0x98 pushes, AT+MTDEMCAP and the carve-out reads to the dead delegate
+ * (inherited 7a pattern, fixed with its double). The sentinel is
+ * unmatchable; the real id lands in mt_matter_dem_register()'s Instance
+ * construction, whose ctor runs mDelegate.SetEndpointId(aEndpointId)
+ * (device-energy-management-server.h:210-216), success-only. */
 extern "C" void *mt_matter_dem_delegate_alloc(uint16_t ep)
 {
+    (void)ep;
     if (s_dem_next >= MT_DEM_MAX) {
         return nullptr;
     }
     HearthDemDelegate *d = &s_dem_delegates[s_dem_next++];
-    d->SetEndpointId(ep);
+    d->SetEndpointId(chip::kInvalidEndpointId);
     return d;
 }
 
@@ -4938,7 +4950,7 @@ static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  * =========================================================================
  * THE BOOST EVENT DERIVATION STATE MACHINE, exhaustively, because it is
  * stateful firmware logic with no SDK support and no build check
- * (AT_MT_SPEC.md 3.25:2734-2749 and core/include/mt_matter.h:865-876,
+ * (AT_MT_SPEC.md 3.25:2734-2749 and core/include/mt_matter.h:865-874,
  * both binding; the C6's mt_meas_whm_apply() implements it identically).
  *
  * State: the delegate's cached BoostState (kInactive/kActive,
@@ -4979,13 +4991,40 @@ static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  *     host-initiated boost from a physical button, no controller
  *     involved) must emit duration 0 and no optionals, "parameters
  *     unknown", rather than restate a finished boost's numbers. That is
- *     the round B rule mt_matter.h:865-876 fixes, and the reset after
+ *     the round B rule mt_matter.h:865-874 fixes, and the reset after
  *     emission is what implements it.
+ *   ALSO CONSUMED: by the guarded (Inactive-state) CancelBoost, RULED
+ *     this round (graph B411; batch 7b review I1). An accepted Boost a
+ *     controller then cancels before the host ever pushes Active is a
+ *     boost that never started, and the spec's own no-cache-on-deny
+ *     rationale ("a denied Boost never started anything") applies to it
+ *     verbatim: without this reset the next genuinely unrelated
+ *     host-initiated boost would emit BoostStarted carrying the
+ *     CANCELLED command's duration and optionals. DELIBERATE C6
+ *     DIVERGENCE: the C6's guard leaves its cache set and has the exact
+ *     stale-parameter window, parked as bug B410; AT_MT_SPEC.md is being
+ *     amended to this consume-on-guarded-cancel rule (the coordinator's
+ *     spec pass), so this port implements the amended rule and the C6
+ *     catches up with B410. Only the guarded arm consumes: an ALLOWED
+ *     forwarded CancelBoost (Active state) still touches nothing, since
+ *     the boost it cancels already consumed the cache at its
+ *     BoostStarted.
  *   REPLACED: a second accepted Boost before any Active push simply
  *     overwrites the cache; the last accepted command is the one whose
  *     parameters the eventual BoostStarted carries.
- *   NEVER cleared by BoostEnded, CancelBoost or a deny: only emission
- *     consumes it, only an allow writes it.
+ *   NEVER cleared by BoostEnded, a forwarded CancelBoost or a deny: only
+ *     an allow writes it, and only the two consumers above (emission,
+ *     the guarded cancel) reset it.
+ *
+ *   ONE DISCLOSED WIRE TENSION rides on the duration-0 emission, spec-
+ *   mandated and deliberately NOT "fixed" here (review M2):
+ *   WaterHeaterBoostInfoStruct declares Duration min="1"
+ *   (water-heater-management-cluster.xml:42), so the "parameters unknown"
+ *   BoostStarted sends a value the struct's own constraint excludes. The
+ *   wire rule stands (AT_MT_SPEC.md 3.25 and mt_matter.h pin duration 0;
+ *   the C6 emits the same 0), but a certification harness or a strict
+ *   controller validating the decoded event against the constraint may
+ *   reject it: a named TH risk for the bench, not a port defect.
  *
  * Emission discipline (the DEM section's rule, restated per path): the
  * derivation runs ONLY from mt_meas_whm_apply(), i.e. under the StackLock
@@ -5011,8 +5050,21 @@ static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  * already Inactive, because the cluster test plan requires "status
  * SUCCESS and no event sent" for exactly that case (TC_EWATERHTR_2_2 step
  * 26; AT_MT_SPEC.md 3.17:1487-1495). This port mirrors the observable
- * behaviour: Success, no +MTCMD, no event. The guard reads the
- * host-pushed BoostState cache, the same value a controller reads.
+ * behaviour (Success, no +MTCMD, no event) and ADDS the ruled
+ * cache consume the lifecycle block above records (B411): the one
+ * deliberate divergence from both the C6 and the SDK reference delegate,
+ * neither of which clears its cache there (the C6's window is parked as
+ * B410). The guard reads the host-pushed BoostState cache, the same
+ * value a controller reads.
+ *
+ * The ALLOWED (Active-state) CancelBoost emits no BoostEnded here, BY
+ * DESIGN (review M4): the split-ownership rule again, the host owns the
+ * state, so the event fires only when the host's BoostState 0 push
+ * reaches the derivation. The SDK's own reference delegate emits
+ * BoostEnded inside HandleCancelBoost instead; a host that actuates the
+ * cancel and never pushes leaves the served BoostState Active with no
+ * event, which is the host library documentation's line to carry, not a
+ * firmware guard's.
  *
  * Lock discipline, the file's standing rule: HandleBoost/HandleCancelBoost
  * run on the CHIP task from the Instance's CHI invoke path, NO StackLock
@@ -5144,13 +5196,19 @@ public:
      * CancelBoost: in-state guard FIRST, without waking the host, since
      * there is nothing for the host to adjudicate (the section comment
      * traces where the guard lives on each platform; the SDK server has
-     * none). The guarded answer is SUCCESS-and-silence, not a failure.
-     * The "no event" half holds by construction: no forward means no host
-     * actuation, no BoostState push, no Active-to-Inactive transition, so
-     * the derivation never emits BoostEnded. Otherwise forward command 1
-     * payload-less (NULL fields reproduces mt_cmd_forward()'s exact
-     * four-field +MTCMD line) and pass the verdict through raw, same as
-     * Boost above.
+     * none). The guarded answer is SUCCESS-and-silence, not a failure,
+     * AND it consumes the parameter cache (ruling B411, the lifecycle
+     * block's ALSO CONSUMED arm: a cancelled not-yet-started boost is a
+     * boost that never started, so its parameters must not survive to
+     * describe some future unrelated one; the C6's identical stale
+     * window is parked as B410). The "no event" half holds by
+     * construction: no forward means no host actuation, no BoostState
+     * push, no Active-to-Inactive transition, so the derivation never
+     * emits BoostEnded. Otherwise forward command 1 payload-less (NULL
+     * fields reproduces mt_cmd_forward()'s exact four-field +MTCMD line)
+     * and pass the verdict through raw, same as Boost above; the
+     * forwarded arm touches no state and emits nothing here, the M4
+     * design note in the section comment.
      */
     chip::Protocols::InteractionModel::Status HandleCancelBoost() override
     {
@@ -5158,6 +5216,7 @@ public:
         using chip::app::Clusters::WaterHeaterManagement::BoostStateEnum;
 
         if (m_boost_state == BoostStateEnum::kInactive) {
+            m_boost = BoostParams{};
             return Status::Success;
         }
         bool allow = mt_cmd_forward_fields(
@@ -5199,25 +5258,44 @@ private:
  * shape: this port constructs the Instance in mt_matter_whm_register()
  * with the variant's own mask, where the C6 lets esp-matter's
  * WaterHeaterManagementDelegateInitCB new it from a FeatureMap snapshot at
- * endpoint enable. Endpoint id stamped at handout (the alloc(ep) contract,
- * mt_matter.h:1003); the Instance constructor sets it again, identically
- * (water-heater-management-server.h:142-149). Exhaustion aborts the create
- * before anything is spent; never destroyed (~Instance() would Shutdown()
- * cleanly, but this platform has no teardown path, the standing
- * allocate-only policy).
+ * endpoint enable. Endpoint id stamped in the SUCCESS-ONLY second half by
+ * the Instance constructor (water-heater-management-server.h:142-149),
+ * never at handout: the alloc takes the id per the header's contract
+ * (mt_matter.h:1003) and discards it, fix round M1, the full reasoning at
+ * the alloc below. Exhaustion aborts the create before anything is spent;
+ * never destroyed (~Instance() would Shutdown() cleanly, but this
+ * platform has no teardown path, the standing allocate-only policy).
  */
 static HearthWhmDelegate s_whm_delegates[MT_WHM_MAX];
 static size_t            s_whm_next;
 alignas(chip::app::Clusters::WaterHeaterManagement::Instance) static uint8_t
     s_whm_instances[MT_WHM_MAX][sizeof(chip::app::Clusters::WaterHeaterManagement::Instance)];
 
+/* Fix round M1, one discipline for both id-at-alloc pools (this one and
+ * the DEM's): the id passed per the header's alloc(ep) contract is
+ * DELIBERATELY NOT stamped here. s_next_ep_id is only the id this create
+ * WILL assign if nothing after the claim fails, and a claim stranded by a
+ * later failure kept that stamp while the NEXT successful create took the
+ * same id: whm_for()'s first-match walk would then bind pushes and
+ * carve-out reads to the dead delegate while the fabric served the live
+ * Instance, a silent split. The sentinel makes a stranded claim
+ * unmatchable (dynamic endpoints are 1..N, never kInvalidEndpointId), and
+ * the REAL id lands in the success-only second half, where
+ * mt_matter_whm_register()'s Instance construction runs
+ * mDelegate.SetEndpointId(ep) (water-heater-management-server.h:142-149):
+ * the id-in-the-second-half discipline every other pool in this file
+ * already follows (ModeBase, opstate, valve, EPM/PTOP), now uniform. The
+ * header's stamp-at-handout rationale is C6 init-callback timing that
+ * does not exist here (header read-only, the standing staleness
+ * disposition). */
 extern "C" void *mt_matter_whm_delegate_alloc(uint16_t ep)
 {
+    (void)ep;
     if (s_whm_next >= MT_WHM_MAX) {
         return nullptr;
     }
     HearthWhmDelegate *d = &s_whm_delegates[s_whm_next++];
-    d->SetEndpointId(ep);
+    d->SetEndpointId(chip::kInvalidEndpointId);
     return d;
 }
 

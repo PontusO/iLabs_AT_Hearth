@@ -2858,7 +2858,7 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  * true-width 8 B for the AAI gate (DE407 option C), no slot, its own
  * kQuietNoSlot row, k_instance_served live-read row. v1 drops the
  * feature-gated pair whole per the cluster XML's gates (TankVolume and
- * EstimatedHeatRequired mandatory under EM only, :73-81; TankPercentage
+ * EstimatedHeatRequired mandatory under EM only, :73-82; TankPercentage
  * under TP only, :83-86; HeaterTypes/HeatDemand/BoostState mandatory
  * unconditionally, :67-71 and :88-90): 5 slots. All six values are
  * Instance-served from the HearthWhmDelegate cache (AT+MTMEAS 0x94 is the
@@ -2945,7 +2945,7 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  *
  * Events: BoostStarted and BoostEnded, derived FIRMWARE-SIDE from
  * BoostState transitions pushed over AT+MTMEAS, with the cached-parameters
- * lifecycle (core/include/mt_matter.h:865-876, binding); the derivation
+ * lifecycle (core/include/mt_matter.h:865-874, binding); the derivation
  * state machine and its exhaustive commentary live beside the delegate in
  * mt_matter_zephyr.cpp. Plus CumulativeEnergyMeasured on v0 (the EEM push
  * path, batch 7a).
@@ -3987,8 +3987,10 @@ constexpr size_t kWaterHeaterBlockBytes =
                     (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) + MT_COUNT(ptopAttrs) +
                     (MT_COUNT(epmAttrs) - kEpmNoSlot) + (MT_COUNT(eemAttrs) - kEemNoSlot)) +
     sizeof(mt_mb_store_t);
-/* Payload pinned (kHeapCostOf is not declared yet at this point in the
- * file); 798 B payload is 808 B heap cost, the sizing table's row. */
+/* Payload pinned here (kHeapCostOf is not declared yet at this point in
+ * the file); the 808 B HEAP figure the tables quote is pinned too, below
+ * the kHeapCostOf definition beside the floor assertion (fix round M5),
+ * so a formula change cannot stale the tables silently. */
 static_assert(kWaterHeaterBlockBytes == 798,
               "the water heater block changed size; redo the sizing table rows and the "
               "batch 7b capacity arithmetic");
@@ -4012,7 +4014,8 @@ constexpr size_t kBatteryStorageBlockBytes =
                     (MT_COUNT(eemAttrs) - kEemNoSlot) + (MT_COUNT(demAttrs) - kDemNoSlot) +
                     (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot)) +
     sizeof(mt_mb_store_t);
-/* 846 B payload is 856 B heap cost, the sizing table's row; the audit's
+/* 846 B payload; the 856 B heap figure is pinned below the kHeapCostOf
+ * definition (fix round M5, the water heater pin's note). The audit's
  * 3.6 estimate (830/832) under-counted this list by one slot and
  * mis-rounded, re-derived per the batch brief (the section comment). */
 static_assert(kBatteryStorageBlockBytes == 846,
@@ -4072,6 +4075,18 @@ constexpr size_t kHeapOverheadBytes = 80;
 constexpr size_t kHeapUsableBytes = HEARTH_EP_HEAP_BYTES - kHeapOverheadBytes;
 
 constexpr size_t kMinWidestEndpoints = 8;
+
+/* Fix round M5: the HEAP figures the in-file sizing table, the README
+ * rows and the capacity arithmetic actually quote for the two batch 7b
+ * shapes, pinned through the same kHeapCostOf the runtime charge model
+ * uses (their PAYLOADS are pinned at the candidates above, where this
+ * function was not yet declared). A change to kHeapCostOf's formula, or
+ * to either block, now fails the build instead of silently staling three
+ * tables. */
+static_assert(kHeapCostOf(kWaterHeaterBlockBytes) == 808,
+              "the water heater heap cost moved off the tables' 808; redo the sizing rows");
+static_assert(kHeapCostOf(kBatteryStorageBlockBytes) == 856,
+              "the battery storage heap cost moved off the tables' 856; redo the sizing rows");
 
 static_assert(kHeapCostOf(kWidestBlockBytes) * kMinWidestEndpoints <= kHeapUsableBytes,
               "the endpoint heap no longer holds eight of the widest device type; redo the "
@@ -5434,10 +5449,15 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
 
     /* Catalogue batch 7a: the DEM handout's first half. The alloc takes
-     * the endpoint id up front (core/include/mt_matter.h pins alloc(ep);
-     * s_next_ep_id is exactly the id this create assigns if it succeeds,
-     * and a claim stranded by a later failure is bounded at one per boot,
-     * the standing policy). The DEMMode ModeBase claim is the RVC pair's
+     * the endpoint id per core/include/mt_matter.h's alloc(ep) contract,
+     * and since the batch 7b fix round (review M1) the pool DISCARDS it
+     * until the success-only second half: s_next_ep_id is only the id
+     * this create assigns IF IT SUCCEEDS, and a stamp on a claim
+     * stranded by a later failure would alias the NEXT successful
+     * create's id into the dead delegate (the stranded claim itself
+     * stays bounded at one per boot, the standing policy; the full
+     * reasoning is at the pool). The DEMMode ModeBase claim is the RVC
+     * pair's
      * discipline verbatim, one slot from the shared pool with the cluster
      * id fixed at alloc; its second half's Instance::Init() VerifyOrDies
      * on ordering, so the only acceptable failure is this abort before
@@ -5472,9 +5492,10 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
 
     /* Catalogue batch 7b: the water heater handout's first half, the DEM
-     * pair's discipline verbatim: the WHM alloc takes the endpoint id up
-     * front (core/include/mt_matter.h:1003 pins alloc(ep); s_next_ep_id is
-     * exactly the id this create assigns if it succeeds), the
+     * pair's discipline verbatim: the WHM alloc takes the endpoint id per
+     * the header's alloc(ep) contract (core/include/mt_matter.h:1003) and
+     * discards it until the success-only second half (fix round M1, the
+     * DEM claim's note above and the pool's own comment), the
      * WaterHeaterMode ModeBase claim is one more slot from the shared pool
      * with the cluster id fixed at alloc, and its second half's
      * Instance::Init() VerifyOrDies on ordering, so the only acceptable
