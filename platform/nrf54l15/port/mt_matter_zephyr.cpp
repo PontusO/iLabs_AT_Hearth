@@ -59,6 +59,9 @@
  * below through the Instance's CHI after the server's own pre-validation),
  * and EventLogging for the firmware-emitted PowerAdjustStart/End pair. */
 #include <app/clusters/device-energy-management-server/device-energy-management-server.h>
+/* Catalogue batch 7b: WaterHeaterManagement::Instance and Delegate, both
+ * interface bases, the DEM shape (batch7-audit.md 2.2). */
+#include <app/clusters/water-heater-management-server/water-heater-management-server.h>
 #include <app/EventLogging.h>
 #include <app/reporting/reporting.h>
 
@@ -652,6 +655,36 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::DeviceEnergyManagement::Attributes::OptOutState::Id },
     { chip::app::Clusters::DeviceEnergyManagementMode::Id,
       chip::app::Clusters::DeviceEnergyManagementMode::Attributes::CurrentMode::Id },
+    /* WaterHeaterManagement (batch 7b): all six delegate-served values,
+     * the five narrow ones with inert shadows plus the DE407 metadata-only
+     * energy_mwh declaration (EstimatedHeatRequired). Reads answer the
+     * HearthWhmDelegate cache below; writes +MTERR:11 (MANAGED_INTERNALLY
+     * without WRITABLE on the C6 for all six,
+     * esp_matter_attribute.cpp:4485-4519); AT+MTMEAS 0x94 is the write
+     * path. The three feature-gated rows are declared on variant 0 only;
+     * on a variant-1 endpoint attr_locate()'s metadata miss answers
+     * +MTERR:4 before this table is ever consulted, so the rows are
+     * harmless there. The WaterHeaterMode CurrentMode row is the RVC
+     * ModeBase pair's rule on the fourth alias; its ClusterRevision stays
+     * out (LIVE seed, the ModeBase no-default-arm note above), while
+     * WHM's ClusterRevision stays out for the OPPOSITE reason: its seed
+     * is an inert shadow kept equal to the value Instance::Read() serves
+     * itself (water-heater-management-server.cpp:146-147), so the generic
+     * arena read answers the same 2 either way and needs no carve-out. */
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::HeaterTypes::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::HeatDemand::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::TankVolume::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::EstimatedHeatRequired::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::TankPercentage::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::BoostState::Id },
+    { chip::app::Clusters::WaterHeaterMode::Id,
+      chip::app::Clusters::WaterHeaterMode::Attributes::CurrentMode::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -676,6 +709,7 @@ static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *ou
 static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_meter_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 /* The RVC opstate pool's Instance lookup (defined beside the pool below),
  * shared by mt_matter_opstate_set()'s RVC branch and the live reader. */
 static chip::app::Clusters::OperationalState::Instance *mt_rvc_opstate_instance(uint16_t ep);
@@ -760,6 +794,7 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         case chip::app::Clusters::RvcRunMode::Id:
         case chip::app::Clusters::RvcCleanMode::Id:
         case chip::app::Clusters::DeviceEnergyManagementMode::Id:
+        case chip::app::Clusters::WaterHeaterMode::Id:
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::RvcOperationalState::Id:
             return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
@@ -771,6 +806,8 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_meter_attr_read_live(ep, attr, out, is_unsigned);
         case chip::app::Clusters::DeviceEnergyManagement::Id:
             return mt_dem_attr_read_live(ep, attr, out, is_unsigned);
+        case chip::app::Clusters::WaterHeaterManagement::Id:
+            return mt_whm_attr_read_live(ep, attr, out, is_unsigned);
         default:
             return MT_ATTR_ERR_FAILED;
         }
@@ -2751,6 +2788,14 @@ private:
              * promise). */
             return chip::to_underlying(DeviceEnergyManagementMode::ModeTag::kNoOptimization);
         }
+        if (m_cluster == WaterHeaterMode::Id) {
+            /* Batch 7b: kManual (0x4001) on every mode, the AT_MT_SPEC.md
+             * 3.20 table row (Mode_WaterHeater.xml names no mandatory tag
+             * either; Manual is the everyday operating mode a host that
+             * does not care about tags most plausibly means, the OvenMode
+             * reasoning the spec row records). */
+            return chip::to_underlying(WaterHeaterMode::ModeTag::kManual);
+        }
         return chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
     }
 
@@ -2789,8 +2834,21 @@ private:
  * 4 DEM endpoints (4 slots, 1,856 B) = 18 slots in 7,904 of 8,112 usable
  * B, and every other mix is at or under 18 before a heap or MT_DEM_MAX
  * wall lands; the two extra slots are the brief's deliberate headroom for
- * 160 B of .bss, and batch 7b's Water Heater and EVSE mode clusters redo
- * this arithmetic when they join. */
+ * 160 B of .bss.
+ *
+ * Catalogue batch 7b redid the arithmetic with WaterHeaterMode as the
+ * fourth consumer, as 7a's note promised, and 20 STANDS: the ceiling is
+ * set by heap cost per ModeBase slot, and the RVC's 432 B/slot (864 B
+ * block, two slots) beats every 7b provider (DEM v1 456 B/slot, water
+ * heater v1 632, water heater v0 808, battery storage v0 856), so the
+ * slot-maximizing mixes are still RVC-led: 9 RVCs = 18 slots in 7,776 B,
+ * or 8 RVCs + 2 DEM v1 = 18 in 7,824 B, or 7 RVCs + 4 DEM v1 = 18 in
+ * 7,872 B; folding a water heater in always costs more heap per slot and
+ * lands at or under 18 before the heap or an MT_*_MAX wall does
+ * (MT_WHM_MAX caps water heaters at 4, MT_DEM_MAX caps DEM-bearing
+ * endpoints, battery storage included, at 4). No growth; the 7a headroom
+ * still covers exactly the two slots it always did. EnergyEvseMode would
+ * be the fifth consumer and is out by ruling DE408 (LM20 tier). */
 constexpr size_t kModeBasePoolSlots = 20;
 
 static HearthModeBaseDelegate s_mb_delegates[kModeBasePoolSlots];
@@ -2893,11 +2951,11 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         return MT_ATTR_ERR_ENDPOINT;
     }
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
-        cluster != DeviceEnergyManagementMode::Id) {
+        cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id) {
         /* Batch 7a widened the accept set to three of the C6's seven
-         * ModeBase ids; the remaining aliases arrive with their device
-         * types (WaterHeaterMode and EnergyEvseMode in batch 7b, the
-         * appliance modes with the composed-appliance batch). */
+         * ModeBase ids, batch 7b to four (WaterHeaterMode; EnergyEvseMode
+         * stays out with its device type, ruling DE408 LM20-tier); the
+         * appliance modes arrive with the composed-appliance batch. */
         return MT_ATTR_ERR_CLUSTER;
     }
     if (!emberAfContainsServer(ep, cluster)) {
@@ -2931,6 +2989,11 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                 /* Batch 7a: kNoOptimization on every mode, first or not
                  * (the placeholder_tag() arm's reasoning). */
                 tag = chip::to_underlying(DeviceEnergyManagementMode::ModeTag::kNoOptimization);
+            } else if (cluster == WaterHeaterMode::Id) {
+                /* Batch 7b: kManual on every mode, first or not (the
+                 * placeholder_tag() arm's reasoning; the AT_MT_SPEC.md
+                 * 3.20 table row). */
+                tag = chip::to_underlying(WaterHeaterMode::ModeTag::kManual);
             } else {
                 tag = chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
             }
@@ -3689,16 +3752,19 @@ static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  * applied, so a bad third pair leaves the first two unapplied.
  *
  * Cluster admission is a batch boundary, not machinery: of the five
- * push-served ids the spec names, this build serves 0x0090, 0x0091
- * and 0x0098 (batch 7a); WaterHeaterManagement (0x0094) and EnergyEvse
- * (0x0099) answer MT_ATTR_ERR_CLUSTER until batch 7b lands their device
- * types, exactly as an unlisted cluster id does, and their branches slot
- * into the dispatch below without reshaping it.
+ * push-served ids the spec names, this build serves 0x0090, 0x0091 and
+ * 0x0098 (batch 7a) and 0x0094 (batch 7b); EnergyEvse (0x0099) answers
+ * MT_ATTR_ERR_CLUSTER until its device type lands (out of batch 7b by
+ * ruling DE408, the LM20 tier), exactly as an unlisted cluster id does,
+ * and its branch slots into the dispatch below without reshaping it.
  */
-/* The DeviceEnergyManagement (0x0098) branch body: defined in the DEM
- * section below, after HearthDemDelegate and its pool exist to look into.
- * Runs under the StackLock mt_matter_meas_set() already holds. */
+/* The DeviceEnergyManagement (0x0098) and WaterHeaterManagement (0x0094)
+ * branch bodies: defined in their sections below, after HearthDemDelegate
+ * and HearthWhmDelegate and their pools exist to look into. Both run
+ * under the StackLock mt_matter_meas_set() already holds. */
 static int mt_meas_dem_apply(uint16_t ep, const uint8_t *fields, const int64_t *values,
+                             uint8_t count);
+static int mt_meas_whm_apply(uint16_t ep, const uint8_t *fields, const int64_t *values,
                              uint8_t count);
 
 extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
@@ -3711,7 +3777,7 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
         return MT_ATTR_ERR_ENDPOINT;
     }
     if (cluster != ElectricalPowerMeasurement::Id && cluster != ElectricalEnergyMeasurement::Id &&
-        cluster != DeviceEnergyManagement::Id) {
+        cluster != DeviceEnergyManagement::Id && cluster != WaterHeaterManagement::Id) {
         return MT_ATTR_ERR_CLUSTER;
     }
     if (!emberAfContainsServer(ep, cluster)) {
@@ -3724,6 +3790,9 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
 
     if (cluster == DeviceEnergyManagement::Id) {
         return mt_meas_dem_apply(ep, fields, values, count);
+    }
+    if (cluster == WaterHeaterManagement::Id) {
+        return mt_meas_whm_apply(ep, fields, values, count);
     }
 
     if (cluster == ElectricalPowerMeasurement::Id) {
@@ -4838,6 +4907,546 @@ static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
     case DEM::Attributes::OptOutState::Id:   v = chip::to_underlying(d->m_opt_out); break;
     case DEM::Attributes::AbsMinPower::Id:   v = d->m_abs_min_power; u = false; break;
     case DEM::Attributes::AbsMaxPower::Id:   v = d->m_abs_max_power; u = false; break;
+    default:
+        /* Unreachable: only the six k_instance_served rows route here. */
+        if (is_unsigned) {
+            *is_unsigned = false;
+        }
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (is_unsigned) {
+        *is_unsigned = u;
+    }
+    *out = v;
+    return MT_ATTR_OK;
+}
+
+/*
+ * ---- water heater: HearthWhmDelegate and its pool (batch 7b) --------------
+ *
+ * The C6's HearthWhmDelegate (main.cpp:4405-4564) ported whole: the cached
+ * attribute store the Instance's AAI reads, the Boost/CancelBoost command
+ * forwards, and the firmware-derived Boost event pair. The cluster is FULLY
+ * delegate-served (its six values answer from the Delegate getters,
+ * water-heater-management-server.cpp:114-152; the C6 creates all six
+ * MANAGED_INTERNALLY, esp_matter_attribute.cpp:4485-4519); the split
+ * ownership rule is the AT+MTLOCK/AT+MTVALVE one: an ALLOWED Boost does NOT
+ * touch the cached BoostState here, because "the host decided" (the command
+ * verdict) and "the host actually did it" (the AT+MTMEAS BoostState push)
+ * are different moments, and only the second one moves the served state.
+ *
+ * =========================================================================
+ * THE BOOST EVENT DERIVATION STATE MACHINE, exhaustively, because it is
+ * stateful firmware logic with no SDK support and no build check
+ * (AT_MT_SPEC.md 3.25:2734-2749 and core/include/mt_matter.h:865-876,
+ * both binding; the C6's mt_meas_whm_apply() implements it identically).
+ *
+ * State: the delegate's cached BoostState (kInactive/kActive,
+ * WaterHeaterManagement/Enums.h:32-36), written ONLY by the AT+MTMEAS 0x94
+ * push path below. Input: each applied MT_WHM_F_BOOST_STATE pair, IN ORDER
+ * within one command (sequential last-writer semantics, so one push
+ * carrying 2,1,2,0 legitimately emits BoostStarted then BoostEnded).
+ * Transitions, evaluated per applied pair against the cache value it is
+ * about to replace:
+ *
+ *   Inactive -> Active: emit BoostStarted, its boostInfo carrying the
+ *     CACHED PARAMETERS OF THE LAST HOST-ACCEPTED BOOST COMMAND (the
+ *     m_boost lifecycle below), then CONSUME the cache (reset to the
+ *     duration-0/no-optionals default).
+ *   Active -> Inactive: emit BoostEnded (no payload beyond the event).
+ *   Same state -> same state: emit NOTHING. This is also what makes
+ *     HandleCancelBoost()'s in-state guard's "no event sent" claim hold by
+ *     construction: no forward means no host actuation, no BoostState
+ *     push, no transition.
+ *
+ * Attribute reporting is SEPARATE from event derivation and fires per
+ * sample: every applied pair, BoostState included and SAME-STATE pushes
+ * included, is reported dirty (one MatterReportingAttributeChangeCallback
+ * per applied pair, the EPM rule), the deliberate CONTRAST to DEM's
+ * ESAState, which reports on change only. Two clusters, two spec'd
+ * shapes; do not "fix" one to match the other.
+ *
+ * THE PARAMETER-CACHE LIFECYCLE (m_boost), the round's delicate piece:
+ *
+ *   SET: in HandleBoost(), on ALLOW only, after the host's verdict comes
+ *     back positive. A denied Boost never started anything, so there is
+ *     nothing for a later BoostStarted to describe, and caching on deny
+ *     would attribute a stale command's parameters to some future
+ *     host-initiated boost.
+ *   CONSUMED: by the Inactive-to-Active emission, exactly once. The
+ *     parameters describe the boost that just started; a LATER Active
+ *     transition without a fresh accepted Boost in between (a
+ *     host-initiated boost from a physical button, no controller
+ *     involved) must emit duration 0 and no optionals, "parameters
+ *     unknown", rather than restate a finished boost's numbers. That is
+ *     the round B rule mt_matter.h:865-876 fixes, and the reset after
+ *     emission is what implements it.
+ *   REPLACED: a second accepted Boost before any Active push simply
+ *     overwrites the cache; the last accepted command is the one whose
+ *     parameters the eventual BoostStarted carries.
+ *   NEVER cleared by BoostEnded, CancelBoost or a deny: only emission
+ *     consumes it, only an allow writes it.
+ *
+ * Emission discipline (the DEM section's rule, restated per path): the
+ * derivation runs ONLY from mt_meas_whm_apply(), i.e. under the StackLock
+ * mt_matter_meas_set() already holds, so GenerateBoostStartedEvent()/
+ * GenerateBoostEndedEvent() (Delegate base helpers wrapping LogEvent,
+ * water-heater-management-server.cpp:48-86) run lock-held. A Generate*
+ * failure (event buffer exhaustion) is logged by the helper itself and
+ * deliberately does NOT fail the push: the pushed state is applied and
+ * served either way, so answering an error would tell the host "nothing
+ * changed" about a change that took (the EEM branch's error-after-apply
+ * caveat, without the misleading answer).
+ * =========================================================================
+ *
+ * The CancelBoost in-state guard, and WHERE it lives, traced on both
+ * platforms because the batch brief asks exactly that: the SDK server has
+ * NO guard (Instance::HandleCancelBoost, water-heater-management-server
+ * .cpp:232-241, is a bare delegate call; contrast DEM, where the server
+ * itself answers InvalidInState). The guard is DELEGATE property on both
+ * platforms: the SDK's own reference delegate skips the cancel body and
+ * answers Success when not boosting (WhmDelegateImpl::HandleCancelBoost,
+ * examples/energy-management-app), and the C6's HearthWhmDelegate returns
+ * Status::Success without waking the host when the cached BoostState is
+ * already Inactive, because the cluster test plan requires "status
+ * SUCCESS and no event sent" for exactly that case (TC_EWATERHTR_2_2 step
+ * 26; AT_MT_SPEC.md 3.17:1487-1495). This port mirrors the observable
+ * behaviour: Success, no +MTCMD, no event. The guard reads the
+ * host-pushed BoostState cache, the same value a controller reads.
+ *
+ * Lock discipline, the file's standing rule: HandleBoost/HandleCancelBoost
+ * run on the CHIP task from the Instance's CHI invoke path, NO StackLock
+ * taken; the push-path derivation runs from mt_meas_whm_apply(), which
+ * inherits mt_matter_meas_set()'s.
+ */
+class HearthWhmDelegate : public chip::app::Clusters::WaterHeaterManagement::Delegate
+{
+public:
+    /* Host-pushed cached state, written only by mt_meas_whm_apply(). The
+     * defaults are the spec's pre-first-push answers (AT_MT_SPEC.md 3.25):
+     * everything 0, BoostState Inactive; they match the zero-filled inert
+     * shadows in mt_devtypes_zephyr.cpp's whmAttrs seeds. */
+    uint8_t  m_heater_types = 0;
+    uint8_t  m_heat_demand  = 0;
+    chip::app::Clusters::WaterHeaterManagement::BoostStateEnum m_boost_state =
+        chip::app::Clusters::WaterHeaterManagement::BoostStateEnum::kInactive;
+    uint16_t m_tank_volume  = 0;
+    int64_t  m_est_heat_req = 0;
+    uint8_t  m_tank_percent = 0;
+
+    /* The parameters of the last host-ACCEPTED Boost command, cached for
+     * the derived BoostStarted event. The full lifecycle contract is the
+     * section comment's PARAMETER-CACHE block; the value-initialized
+     * default (duration 0, every Optional missing) IS the "parameters
+     * unknown" emission, so consuming the cache is one aggregate reset. */
+    struct BoostParams {
+        uint32_t                      duration = 0;
+        chip::Optional<bool>          one_shot;
+        chip::Optional<bool>          emergency;
+        chip::Optional<int16_t>       setpoint;
+        chip::Optional<chip::Percent> target_pct;
+        chip::Optional<chip::Percent> reheat;
+    } m_boost;
+
+    chip::EndpointId endpoint() const { return mEndpointId; }
+
+    /* The endpoint's WHM feature bits, stamped by mt_matter_whm_register()
+     * from the create path's variant predicate, the single source the
+     * FeatureMap seed and the Instance mask share (the DEM with_pa
+     * divergence's reasoning: the C6 reads its live FeatureMap attribute
+     * back, but this port's ember copy is a seed shadow, so the port
+     * record stamped from the same predicate is the honest source). Read
+     * by mt_meas_whm_apply()'s field gates. */
+    void set_features(uint32_t mask) { m_features = mask; }
+    bool has_feature(chip::app::Clusters::WaterHeaterManagement::Feature f) const
+    {
+        return (m_features & chip::to_underlying(f)) != 0;
+    }
+
+    /*
+     * Boost: pack the five Optionals into the wire form
+     * "<duration>,<mask>[,<v1>[,<v2>[,<v3>]]]" (AT_MT_SPEC.md 3.17's
+     * five-field tail, the first five-field +MTCMD consumer):
+     * MT_BOOST_P_* presence bits in canonical order, MT_BOOST_V_* carrying
+     * the two bools' VALUES when present (a present bool needs no appended
+     * field), then ONLY the present numeric optionals appended in
+     * canonical order, temporarySetpoint / targetPercentage / targetReheat
+     * (core/include/mt_matter.h:973-979; worked example: duration 3600,
+     * oneShot true, targetPercentage 80 forwards as "3600,265,80"). The
+     * Instance has already range-checked targetPercentage/targetReheat and
+     * their feature conformance before calling this
+     * (water-heater-management-server.cpp:171-222), so the packing needs
+     * no validation of its own. The verdict is the wire response raw:
+     * HandleBoost's Status lands in AddStatus unmapped (:224-225).
+     * Accepted parameters are cached ON ALLOW ONLY (the lifecycle
+     * contract above).
+     */
+    chip::Protocols::InteractionModel::Status HandleBoost(
+        uint32_t duration, chip::Optional<bool> oneShot, chip::Optional<bool> emergencyBoost,
+        chip::Optional<int16_t> temporarySetpoint, chip::Optional<chip::Percent> targetPercentage,
+        chip::Optional<chip::Percent> targetReheat) override
+    {
+        using chip::Protocols::InteractionModel::Status;
+
+        unsigned mask = 0;
+        if (oneShot.HasValue()) {
+            mask |= MT_BOOST_P_ONESHOT;
+            if (oneShot.Value()) {
+                mask |= MT_BOOST_V_ONESHOT;
+            }
+        }
+        if (emergencyBoost.HasValue()) {
+            mask |= MT_BOOST_P_EMERGENCY;
+            if (emergencyBoost.Value()) {
+                mask |= MT_BOOST_V_EMERGENCY;
+            }
+        }
+        if (temporarySetpoint.HasValue()) {
+            mask |= MT_BOOST_P_SETPOINT;
+        }
+        if (targetPercentage.HasValue()) {
+            mask |= MT_BOOST_P_TARGET_PCT;
+        }
+        if (targetReheat.HasValue()) {
+            mask |= MT_BOOST_P_REHEAT;
+        }
+
+        char fields[48];
+        int n = snprintf(fields, sizeof(fields), "%lu,%u", (unsigned long)duration, mask);
+        if (temporarySetpoint.HasValue()) {
+            n += snprintf(fields + n, sizeof(fields) - n, ",%d", (int)temporarySetpoint.Value());
+        }
+        if (targetPercentage.HasValue()) {
+            n += snprintf(fields + n, sizeof(fields) - n, ",%u",
+                          (unsigned)targetPercentage.Value());
+        }
+        if (targetReheat.HasValue()) {
+            n += snprintf(fields + n, sizeof(fields) - n, ",%u", (unsigned)targetReheat.Value());
+        }
+        (void)n;
+
+        bool allow = mt_cmd_forward_fields(
+            mEndpointId, chip::app::Clusters::WaterHeaterManagement::Id,
+            chip::app::Clusters::WaterHeaterManagement::Commands::Boost::Id, fields);
+        if (!allow) {
+            return Status::Failure;
+        }
+        m_boost.duration   = duration;
+        m_boost.one_shot   = oneShot;
+        m_boost.emergency  = emergencyBoost;
+        m_boost.setpoint   = temporarySetpoint;
+        m_boost.target_pct = targetPercentage;
+        m_boost.reheat     = targetReheat;
+        return Status::Success;
+    }
+
+    /*
+     * CancelBoost: in-state guard FIRST, without waking the host, since
+     * there is nothing for the host to adjudicate (the section comment
+     * traces where the guard lives on each platform; the SDK server has
+     * none). The guarded answer is SUCCESS-and-silence, not a failure.
+     * The "no event" half holds by construction: no forward means no host
+     * actuation, no BoostState push, no Active-to-Inactive transition, so
+     * the derivation never emits BoostEnded. Otherwise forward command 1
+     * payload-less (NULL fields reproduces mt_cmd_forward()'s exact
+     * four-field +MTCMD line) and pass the verdict through raw, same as
+     * Boost above.
+     */
+    chip::Protocols::InteractionModel::Status HandleCancelBoost() override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        using chip::app::Clusters::WaterHeaterManagement::BoostStateEnum;
+
+        if (m_boost_state == BoostStateEnum::kInactive) {
+            return Status::Success;
+        }
+        bool allow = mt_cmd_forward_fields(
+            mEndpointId, chip::app::Clusters::WaterHeaterManagement::Id,
+            chip::app::Clusters::WaterHeaterManagement::Commands::CancelBoost::Id, NULL);
+        return allow ? Status::Success : Status::Failure;
+    }
+
+    /* The six getters, serving the host-pushed cache. */
+    chip::BitMask<chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>
+    GetHeaterTypes() override
+    {
+        return chip::BitMask<
+            chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>(
+            m_heater_types);
+    }
+    chip::BitMask<chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>
+    GetHeatDemand() override
+    {
+        return chip::BitMask<
+            chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>(
+            m_heat_demand);
+    }
+    uint16_t GetTankVolume() override { return m_tank_volume; }
+    chip::Energy_mWh GetEstimatedHeatRequired() override { return m_est_heat_req; }
+    chip::Percent GetTankPercentage() override { return m_tank_percent; }
+    chip::app::Clusters::WaterHeaterManagement::BoostStateEnum GetBoostState() override
+    {
+        return m_boost_state;
+    }
+
+private:
+    uint32_t m_features = 0;
+};
+
+/*
+ * The pool, MT_WHM_MAX (4, core/include/mt_matter.h:939, the C6 depth per
+ * DE407) delegates plus raw aligned Instance storage, the DEM pool's exact
+ * shape: this port constructs the Instance in mt_matter_whm_register()
+ * with the variant's own mask, where the C6 lets esp-matter's
+ * WaterHeaterManagementDelegateInitCB new it from a FeatureMap snapshot at
+ * endpoint enable. Endpoint id stamped at handout (the alloc(ep) contract,
+ * mt_matter.h:1003); the Instance constructor sets it again, identically
+ * (water-heater-management-server.h:142-149). Exhaustion aborts the create
+ * before anything is spent; never destroyed (~Instance() would Shutdown()
+ * cleanly, but this platform has no teardown path, the standing
+ * allocate-only policy).
+ */
+static HearthWhmDelegate s_whm_delegates[MT_WHM_MAX];
+static size_t            s_whm_next;
+alignas(chip::app::Clusters::WaterHeaterManagement::Instance) static uint8_t
+    s_whm_instances[MT_WHM_MAX][sizeof(chip::app::Clusters::WaterHeaterManagement::Instance)];
+
+extern "C" void *mt_matter_whm_delegate_alloc(uint16_t ep)
+{
+    if (s_whm_next >= MT_WHM_MAX) {
+        return nullptr;
+    }
+    HearthWhmDelegate *d = &s_whm_delegates[s_whm_next++];
+    d->SetEndpointId(ep);
+    return d;
+}
+
+/* The pool lookup the AT+MTMEAS 0x94 branch and the DE397 live reader
+ * use, the meas_epm_for() shape. */
+static HearthWhmDelegate *whm_for(chip::EndpointId ep)
+{
+    for (size_t i = 0; i < s_whm_next; i++) {
+        if (s_whm_delegates[i].endpoint() == ep) {
+            return &s_whm_delegates[i];
+        }
+    }
+    return nullptr;
+}
+
+/*
+ * The WHM second half: construct the Instance with the variant's feature
+ * mask and Init() it (CHI registration then AAI, SOFT on both,
+ * water-heater-management-server.cpp:94-100: no emberAfContainsServer
+ * check anywhere, so ordering mistakes cannot panic; below the successful
+ * create by the same strand-nothing reasoning as the measurement halves).
+ * with_em_tp is the create path's variant predicate, the single source
+ * shared with seed_slots()'s WHM FeatureMap special case
+ * (mt_devtypes_zephyr.cpp), and is recorded on the delegate for
+ * mt_meas_whm_apply()'s field gates. The ctor takes a single Feature value
+ * that seeds a BitMask (server.h:142-149), so the two-bit mask is cast
+ * through the underlying type, the DEM register's own idiom.
+ */
+extern "C" void mt_matter_whm_register(void *delegate, uint16_t ep, bool with_em_tp)
+{
+    using namespace chip::app::Clusters::WaterHeaterManagement;
+    auto *d = static_cast<HearthWhmDelegate *>(delegate);
+    uint32_t mask = with_em_tp ? (chip::to_underlying(Feature::kEnergyManagement) |
+                                  chip::to_underlying(Feature::kTankPercent))
+                               : 0;
+    d->set_features(mask);
+    size_t idx = (size_t)(d - s_whm_delegates);
+    auto *inst = new (s_whm_instances[idx]) Instance(ep, *d, static_cast<Feature>(mask));
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        LOG_ERR("WHM Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
+                "; the cluster will serve nothing and its commands will not dispatch",
+                (unsigned)ep, err.Format());
+    }
+}
+
+/*
+ * AT+MTMEAS's WaterHeaterManagement (0x0094) branch. Called only from
+ * mt_matter_meas_set(), which already holds the StackLock and resolved the
+ * endpoint and cluster lookups; this function owns the field table
+ * (AT_MT_SPEC.md 3.25's 0x0094 rows) and the derivation state machine the
+ * section comment above fixes.
+ *
+ * Feature gate, bridge-side by design (mt_at.c only classifies
+ * signedness): TankVolume and EstimatedHeatRequired exist only under
+ * EnergyManagement, TankPercentage only under TankPercent
+ * (water-heater-management-cluster.xml:73-87), and a push to a gated field
+ * on an endpoint without the feature answers MT_ATTR_ERR_CLUSTER
+ * (+MTERR:3), the same data-model code an energy push gets on a
+ * power-only electrical endpoint: "this endpoint does not serve that
+ * data" is one condition, not two (the spec's own words). The bits come
+ * from the delegate's port record, stamped from the identical variant
+ * predicate the FeatureMap seed and the Instance mask derive from, so the
+ * gate and the served FeatureMap cannot disagree (the section comment's
+ * honest-source note; the C6 reads its live FeatureMap attribute instead
+ * because esp-matter's copy is authoritative there).
+ *
+ * Value bounds, the cluster XML: HeaterTypes/HeatDemand are
+ * WaterHeaterHeatSourceBitmap (defined bits 0x01..0x10, so 0..0x1F);
+ * BoostState is enum8 0/1; TankVolume u16; EstimatedHeatRequired is
+ * energy_mwh with min 0 (int64 on the wire for pipeline symmetry, so the
+ * negative half is cut here, +MTERR:1 through MT_ATTR_ERR_VALUE);
+ * TankPercentage is percent 0..100. Two passes, the family's hard
+ * contract: every pair is validated (range AND feature gate) before any
+ * pair is applied.
+ */
+static int mt_meas_whm_apply(uint16_t ep, const uint8_t *fields, const int64_t *values,
+                             uint8_t count)
+{
+    using namespace chip::app::Clusters::WaterHeaterManagement;
+
+    HearthWhmDelegate *d = whm_for(ep);
+    if (d == nullptr) {
+        /* Cluster present but no pool slot serves this endpoint: cannot
+         * happen once the boot rebuild has run; defensive, the pool
+         * bridges' standing answer. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    /* Pass 1: validate everything, range and feature gate both. */
+    for (uint8_t i = 0; i < count; i++) {
+        switch (fields[i]) {
+        case MT_WHM_F_HEATER_TYPES:
+        case MT_WHM_F_HEAT_DEMAND:
+            if (values[i] < 0 || values[i] > 0x1F) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            break;
+        case MT_WHM_F_BOOST_STATE:
+            if (values[i] < 0 || values[i] > 1) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            break;
+        case MT_WHM_F_TANK_VOLUME:
+            if (!d->has_feature(Feature::kEnergyManagement)) {
+                return MT_ATTR_ERR_CLUSTER;
+            }
+            if (values[i] < 0 || values[i] > 0xFFFF) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            break;
+        case MT_WHM_F_EST_HEAT_REQ:
+            if (!d->has_feature(Feature::kEnergyManagement)) {
+                return MT_ATTR_ERR_CLUSTER;
+            }
+            if (values[i] < 0 || values[i] > kMeasValueAbsMax) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            break;
+        case MT_WHM_F_TANK_PERCENT:
+            if (!d->has_feature(Feature::kTankPercent)) {
+                return MT_ATTR_ERR_CLUSTER;
+            }
+            if (values[i] < 0 || values[i] > 100) {
+                return MT_ATTR_ERR_VALUE;
+            }
+            break;
+        default:
+            return MT_ATTR_ERR_VALUE;
+        }
+    }
+
+    /* Pass 2: apply, one subscription report per applied field (same-state
+     * BoostState pushes included, the per-sample rule the section comment
+     * contrasts with DEM), deriving the boost events on BoostState
+     * transitions AS THEY ARE APPLIED, in pair order. */
+    for (uint8_t i = 0; i < count; i++) {
+        uint32_t attr_id;
+        switch (fields[i]) {
+        case MT_WHM_F_HEATER_TYPES:
+            d->m_heater_types = (uint8_t)values[i];
+            attr_id = Attributes::HeaterTypes::Id;
+            break;
+        case MT_WHM_F_HEAT_DEMAND:
+            d->m_heat_demand = (uint8_t)values[i];
+            attr_id = Attributes::HeatDemand::Id;
+            break;
+        case MT_WHM_F_BOOST_STATE: {
+            /* THE STATE MACHINE (the section comment's transition table).
+             * prev is the cache value this pair replaces; the write
+             * happens before the emission so a Generate* helper that
+             * somehow read the attribute back would see the new state,
+             * and the same-state arm falls through to the per-sample
+             * dirty report below with no event. */
+            BoostStateEnum next = (values[i] != 0) ? BoostStateEnum::kActive
+                                                   : BoostStateEnum::kInactive;
+            BoostStateEnum prev = d->m_boost_state;
+            d->m_boost_state    = next;
+            if (prev != next) {
+                if (next == BoostStateEnum::kActive) {
+                    /* Inactive -> Active: BoostStarted with the cached
+                     * last-accepted parameters, then CONSUME the cache
+                     * (aggregate reset to duration 0 / no optionals, the
+                     * "parameters unknown" default a later
+                     * host-initiated boost must emit). Lock-held per the
+                     * emission discipline; failure logged by the helper,
+                     * never failing the push. */
+                    (void)d->GenerateBoostStartedEvent(d->m_boost.duration, d->m_boost.one_shot,
+                                                       d->m_boost.emergency, d->m_boost.setpoint,
+                                                       d->m_boost.target_pct, d->m_boost.reheat);
+                    d->m_boost = HearthWhmDelegate::BoostParams{};
+                } else {
+                    /* Active -> Inactive: BoostEnded. The parameter cache
+                     * is NOT touched here (only emission consumes it,
+                     * only an allow writes it). */
+                    (void)d->GenerateBoostEndedEvent();
+                }
+            }
+            attr_id = Attributes::BoostState::Id;
+            break;
+        }
+        case MT_WHM_F_TANK_VOLUME:
+            d->m_tank_volume = (uint16_t)values[i];
+            attr_id = Attributes::TankVolume::Id;
+            break;
+        case MT_WHM_F_EST_HEAT_REQ:
+            d->m_est_heat_req = values[i];
+            attr_id = Attributes::EstimatedHeatRequired::Id;
+            break;
+        default: /* MT_WHM_F_TANK_PERCENT, pass 1 admits nothing else */
+            d->m_tank_percent = (uint8_t)values[i];
+            attr_id = Attributes::TankPercentage::Id;
+            break;
+        }
+        MatterReportingAttributeChangeCallback(ep, Id, attr_id);
+    }
+    return MT_ATTR_OK;
+}
+
+/*
+ * DE397 live read for the six WHM values, dispatched from
+ * mt_matter_attr_read() under its StackLock: the delegate cache is the
+ * served truth (the five narrow shadows are seeds, EstimatedHeatRequired
+ * has no slot at all). None of the six is nullable; EstimatedHeatRequired
+ * is the one signed answer (energy_mwh, the INT64S alias family).
+ */
+static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned)
+{
+    namespace WHM = chip::app::Clusters::WaterHeaterManagement;
+    HearthWhmDelegate *d = whm_for(ep);
+    if (d == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        if (is_unsigned) {
+            *is_unsigned = false;
+        }
+        return MT_ATTR_ERR_FAILED;
+    }
+    bool u = true;
+    int64_t v;
+    switch (attr) {
+    case WHM::Attributes::HeaterTypes::Id:    v = d->m_heater_types; break;
+    case WHM::Attributes::HeatDemand::Id:     v = d->m_heat_demand; break;
+    case WHM::Attributes::TankVolume::Id:     v = d->m_tank_volume; break;
+    case WHM::Attributes::TankPercentage::Id: v = d->m_tank_percent; break;
+    case WHM::Attributes::BoostState::Id:     v = chip::to_underlying(d->m_boost_state); break;
+    case WHM::Attributes::EstimatedHeatRequired::Id:
+        v = d->m_est_heat_req;
+        u = false;
+        break;
     default:
         /* Unreachable: only the six k_instance_served rows route here. */
         if (is_unsigned) {
