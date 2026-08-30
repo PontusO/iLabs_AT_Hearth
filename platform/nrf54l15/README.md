@@ -23,9 +23,40 @@ Dishwasher, `0x007C` Laundry Dryer, `0x0076` Smoke/CO Alarm, `0x0146`
 Chime; and catalogue batch 5 (the standalone remainder): `0x002D` Air
 Purifier, `0x010F` Mounted On/Off Control, `0x0110` Mounted Dimmable Load
 Control, `0x000F` Generic Switch, `0x0303` Pump, `0x0072` Room Air
-Conditioner, `0x0074` Robotic Vacuum Cleaner. **Thirty-six device
+Conditioner, `0x0074` Robotic Vacuum Cleaner; and catalogue batch 7a (the
+energy foundation): `0x0510` Electrical Sensor, `0x0514` Electrical
+Meter, `0x0309` Heat Pump, `0x0017` Solar Power, `0x0511` Electrical
+Utility Meter, `0x050D` Device Energy Management. **Forty-two device
 types.** Anything else answers `+MTERR:6`
 until the catalogue grows toward C6 parity.
+
+Batch 7a boundaries worth knowing before a bench session:
+
+- The electrical sensor and meter are the first VARIANT-carrying types on
+  this platform: variant `0` is power + energy, variant `1` power only
+  (each variant is its own declared cluster list; there is no runtime
+  teardown). The meter's variant `1` and solar power's variant `1` are
+  disclosed sub-conformances, restated at their declarations.
+- Every measurement value is `Instance`-served from the host's `AT+MTMEAS`
+  push store (`0x0090`/`0x0091`; `0x0098` for DEM): `AT+MTATTR` reads
+  answer the live store through the carve-out, writes answer `+MTERR:11`,
+  and no `+MTATTR` URC ever fires for them. The EEM struct attributes,
+  the meter's strings and `PowerThreshold` answer `+MTERR:5`.
+- The energy types are the first whose capacity is POOL-bound rather than
+  table- or heap-bound: the EPM/PowerTopology pools serve 8
+  measurement-bearing endpoints per composition (`MT_MEAS_MAX`, shared by
+  sensors, meters, heat pumps and solar), DEM serves 4 (`MT_DEM_MAX`),
+  utility meters 2 (`MT_METER_MAX`), the C6's own depths (ruling DE407).
+  Exhaustion aborts the boot rebuild at the offending endpoint with the
+  pool named, the standing stop-at-failure prefix semantics.
+- On an accepted `PowerAdjustRequest` the firmware owns the ESAState
+  transition and both PA events; a null `AT+MTDEMCAP` capability means a
+  controller's `PowerAdjustRequest` answers `ConstraintError` without the
+  host ever seeing a `+MTCMD`.
+- `AT+MTMETERID` is the only write path to the meter identity and has no
+  read-back verb; the meter endpoint is not conformant against the
+  superset's TimeSyncCond (no Time Synchronization on endpoint 0),
+  disclosed on both platforms.
 
 Batch 2 takes on fewer cluster features than the specs allow, but never
 fewer commands than a feature it does take on requires. The boundaries are
@@ -266,17 +297,22 @@ Block payload is `4 x clusters + 16 x slots`; Zephyr charges
 | `0x0074` Robotic Vacuum Cleaner (244 B payload + two 306 B mode stores) | 5 | 14 | 864 B |
 | `0x010D` Extended Colour Light | 5 | 36 | 600 B |
 | `0x010C` Colour Temperature Light | 5 | 32 | 536 B |
+| `0x050D` Device Energy Management (v0; 462 B payload incl. one 306 B mode store) | 3 | 9 | 472 B |
 | `0x0101` / `0x010B` / `0x0110` Dimmable Light, Dimmable Plug, Mounted Dimmable Load Control | 4 | 20 | 344 B |
 | `0x0303` / `0x0072` Pump, Room Air Conditioner | 4 | 18 | 312 B |
 | `0x0301` Thermostat | 3 | 15 | 256 B |
+| `0x0309` / `0x0017` Heat Pump, Solar Power (v0) | 5 | 13 | 232 B |
 | `0x0202` Window Covering | 3 | 13 | 224 B |
 | `0x000A` Door Lock | 3 | 12 | 208 B |
 | `0x0100` / `0x010A` / `0x010F` On/Off Light, On/Off Plug, Mounted On/Off Control | 3 | 11 | 192 B |
 | `0x0042` Water Valve | 3 | 11 | 192 B |
 | `0x002B` / `0x002D` Fan, Air Purifier | 3 | 10 | 176 B |
-| `0x000F` Generic Switch | 3 | 8 | 144 B |
 | `0x0302` `0x0307` `0x0305` `0x0106` `0x0306` `0x0107` sensors | 3 | 9 | 160 B |
+| `0x0510` Electrical Sensor (v0) | 4 | 8 | 152 B |
+| `0x000F` Generic Switch | 3 | 8 | 144 B |
+| `0x0511` Electrical Utility Meter | 3 | 7 | 128 B |
 | `0x0015` `0x0044` `0x0041` `0x0043` `0x002C` boolean-state, air quality | 3 | 7 | 128 B |
+| `0x0514` Electrical Meter (v0) | 3 | 6 | 112 B |
 
 ### Worked examples
 
@@ -426,6 +462,25 @@ mode base); RvcOperationalState rides the already-compiled
 operational-state server. The RVC's two in-block ModeBase stores make it
 the widest type in the catalogue (864 B per endpoint, capacity table
 above); `HEARTH_EP_HEAP_BYTES` is unchanged.
+
+Catalogue batch 7a on top of that, pristine builds, 2026-08-30 (`f614936`,
+including the fix round):
+
+| | Batch 5 | Batch 7a (six energy foundation types) |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 237,900 B (90.75%) | **251,812 B (96.06%)** |
+| RAM used, `nrf54l15dk` | 238,124 B (90.84%) | **252,036 B (96.14%)** |
+
+RAM `+13,912 B` on both arms, dominated by one item this port does not
+own: the SDK's `ElectricalEnergyMeasurement` server keeps a static
+17-entry `gMeasurements` table (measured 8,432 B) charged the moment the
+cluster enters `hearth.zap`, composition or not, indexed from inside the
+SDK and therefore not reclaimable by the endpoint-heap technique. The
+rest is the measurement, DEM and meter pools at the C6's own depths
+(8/4/2 per ruling DE407, never 16) plus metadata for six new clusters.
+Free RAM is 10,332 B: batch 7b (Water Heater, Battery Storage, Energy
+EVSE) starts from here, and its sizing levers, including the nRF54LM20
+tier, are recorded in the batch 7 audit.
 
 ## Dev board wiring
 

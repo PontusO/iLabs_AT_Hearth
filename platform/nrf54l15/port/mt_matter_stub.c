@@ -108,25 +108,15 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
     (void)ep;
 }
 
-int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
-                       const int64_t *values, uint8_t count)
-{
-    (void)ep;
-    (void)cluster;
-    (void)fields;
-    (void)values;
-    (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
-}
-
-void *mt_matter_epm_delegate_alloc(void) { return NULL; }
-void *mt_matter_ptop_delegate_alloc(void) { return NULL; }
-
-void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep)
-{
-    (void)delegate;
-    (void)ep;
-}
+/* The measurement foundation (mt_matter_meas_set, mt_matter_epm_delegate_
+ * alloc, mt_matter_ptop_delegate_alloc, mt_matter_meas_delegate_set_
+ * endpoint) left this file in catalogue batch 7a, when the electrical
+ * sensor (0x0510) and electrical meter (0x0514) entered the registry: real
+ * in mt_matter_zephyr.cpp now, on the MT_MEAS_MAX EPM/PowerTopology
+ * delegate-plus-Instance pools and the ElectricalEnergyMeasurement push
+ * server. mt_matter_meas_set() there still answers MT_ATTR_ERR_CLUSTER for
+ * WaterHeaterManagement (0x0094) and EnergyEvse (0x0099), whose device
+ * types are batch 7b. */
 
 void *mt_matter_whm_delegate_alloc(uint16_t ep)
 {
@@ -134,20 +124,10 @@ void *mt_matter_whm_delegate_alloc(uint16_t ep)
     return NULL;
 }
 
-void *mt_matter_dem_delegate_alloc(uint16_t ep)
-{
-    (void)ep;
-    return NULL;
-}
-
-int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *quads)
-{
-    (void)ep;
-    (void)cause;
-    (void)n;
-    (void)quads;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* The DEM pair (mt_matter_dem_delegate_alloc, mt_matter_demcap_set) left
+ * this file in catalogue batch 7a, when the device energy management
+ * device type (0x050D) entered the registry: real in mt_matter_zephyr.cpp
+ * now, on the MT_DEM_MAX HearthDemDelegate-plus-Instance pool. */
 
 int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
 {
@@ -176,16 +156,12 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
     return MT_ROW_ERR_ENDPOINT;
 }
 
-uint32_t mt_meter_feature_mask(void) { return 0; }
-bool mt_meter_reserve(void) { return false; }
-void mt_meter_register_all(void) { }
-
-int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity_t *id)
-{
-    (void)ep;
-    (void)id;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* The meter quartet (mt_meter_feature_mask, mt_meter_reserve,
+ * mt_meter_register_all, mt_matter_meter_set_identity) left this file in
+ * catalogue batch 7a, when the electrical utility meter (0x0511) entered
+ * the registry: real in mt_matter_zephyr.cpp now, on the MT_METER_MAX
+ * MeterIdentification Instance pool and the post-rebuild registration
+ * scan main.cpp runs. */
 
 void *mt_matter_evse_delegate_alloc(uint16_t ep)
 {

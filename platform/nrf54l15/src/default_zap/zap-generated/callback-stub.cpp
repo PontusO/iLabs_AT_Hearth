@@ -51,11 +51,23 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::Descriptor::Id:
     emberAfDescriptorClusterInitCallback(endpoint);
     break;
+  case app::Clusters::DeviceEnergyManagement::Id:
+    emberAfDeviceEnergyManagementClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::DeviceEnergyManagementMode::Id:
+    emberAfDeviceEnergyManagementModeClusterInitCallback(endpoint);
+    break;
   case app::Clusters::DiagnosticLogs::Id:
     emberAfDiagnosticLogsClusterInitCallback(endpoint);
     break;
   case app::Clusters::DoorLock::Id:
     emberAfDoorLockClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::ElectricalEnergyMeasurement::Id:
+    emberAfElectricalEnergyMeasurementClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::ElectricalPowerMeasurement::Id:
+    emberAfElectricalPowerMeasurementClusterInitCallback(endpoint);
     break;
   case app::Clusters::FanControl::Id:
     emberAfFanControlClusterInitCallback(endpoint);
@@ -84,6 +96,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::LevelControl::Id:
     emberAfLevelControlClusterInitCallback(endpoint);
     break;
+  case app::Clusters::MeterIdentification::Id:
+    emberAfMeterIdentificationClusterInitCallback(endpoint);
+    break;
   case app::Clusters::ModeSelect::Id:
     emberAfModeSelectClusterInitCallback(endpoint);
     break;
@@ -110,6 +125,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
     break;
   case app::Clusters::PowerSource::Id:
     emberAfPowerSourceClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::PowerTopology::Id:
+    emberAfPowerTopologyClusterInitCallback(endpoint);
     break;
   case app::Clusters::PressureMeasurement::Id:
     emberAfPressureMeasurementClusterInitCallback(endpoint);
@@ -203,12 +221,32 @@ emberAfDescriptorClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfDeviceEnergyManagementClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfDeviceEnergyManagementModeClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfDiagnosticLogsClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
 void __attribute__((weak))
 emberAfDoorLockClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfElectricalEnergyMeasurementClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfElectricalPowerMeasurementClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
@@ -258,6 +296,11 @@ emberAfLevelControlClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfMeterIdentificationClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfModeSelectClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
@@ -299,6 +342,11 @@ emberAfOperationalStateClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfPowerSourceClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfPowerTopologyClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
