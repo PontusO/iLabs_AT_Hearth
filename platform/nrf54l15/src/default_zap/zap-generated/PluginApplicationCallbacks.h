@@ -48,6 +48,11 @@ void MatterSmokeCoAlarmPluginServerInitCallback();
 void MatterOperationalStatePluginServerInitCallback();
 void MatterRvcOperationalStatePluginServerInitCallback();
 void MatterValveConfigurationAndControlPluginServerInitCallback();
+void MatterElectricalPowerMeasurementPluginServerInitCallback();
+void MatterElectricalEnergyMeasurementPluginServerInitCallback();
+void MatterDeviceEnergyManagementPluginServerInitCallback();
+void MatterPowerTopologyPluginServerInitCallback();
+void MatterDeviceEnergyManagementModePluginServerInitCallback();
 void MatterDoorLockPluginServerInitCallback();
 void MatterWindowCoveringPluginServerInitCallback();
 void MatterPumpConfigurationAndControlPluginServerInitCallback();
@@ -61,6 +66,7 @@ void MatterFlowMeasurementPluginServerInitCallback();
 void MatterRelativeHumidityMeasurementPluginServerInitCallback();
 void MatterOccupancySensingPluginServerInitCallback();
 void MatterChimePluginServerInitCallback();
+void MatterMeterIdentificationPluginServerInitCallback();
 
 #define MATTER_PLUGINS_INIT                                                    \
   MatterIdentifyPluginServerInitCallback();                                    \
@@ -92,6 +98,11 @@ void MatterChimePluginServerInitCallback();
   MatterOperationalStatePluginServerInitCallback();                            \
   MatterRvcOperationalStatePluginServerInitCallback();                         \
   MatterValveConfigurationAndControlPluginServerInitCallback();                \
+  MatterElectricalPowerMeasurementPluginServerInitCallback();                  \
+  MatterElectricalEnergyMeasurementPluginServerInitCallback();                 \
+  MatterDeviceEnergyManagementPluginServerInitCallback();                      \
+  MatterPowerTopologyPluginServerInitCallback();                               \
+  MatterDeviceEnergyManagementModePluginServerInitCallback();                  \
   MatterDoorLockPluginServerInitCallback();                                    \
   MatterWindowCoveringPluginServerInitCallback();                              \
   MatterPumpConfigurationAndControlPluginServerInitCallback();                 \
@@ -104,4 +115,5 @@ void MatterChimePluginServerInitCallback();
   MatterFlowMeasurementPluginServerInitCallback();                             \
   MatterRelativeHumidityMeasurementPluginServerInitCallback();                 \
   MatterOccupancySensingPluginServerInitCallback();                            \
-  MatterChimePluginServerInitCallback();
+  MatterChimePluginServerInitCallback();                                       \
+  MatterMeterIdentificationPluginServerInitCallback();
