@@ -399,13 +399,33 @@ compositions that declare those types pay:
 Exactly `-11,488 B` on both arms (nm-verified: both store symbols gone
 from the image), flash within a few hundred bytes. The per-endpoint heap
 cost of the two types rises accordingly: mode select 144 to **584 B**
-(now the widest type in the catalogue, and the shape the compile-time
-floor assertion guards), chime 80 to **352 B**. The capacity consequence
+(the widest type in the catalogue until batch 5's RVC took the title),
+chime 80 to **352 B**. The capacity consequence
 is in the table above: an all-mode-select composition serves a
 13-endpoint prefix under the stop-at-failure semantics, observed on the
 bench exactly as computed; 16 chimes still fit. The
 `OperationalState::Instance`, `ChimeServer` and delegate pools stay in
 .bss deliberately (CHIP registration lifetime).
+
+Catalogue batch 5 on top of that, pristine builds, 2026-08-30 (`79c97ff`,
+including the fix round):
+
+| | Store reclaim | Batch 5 (seven standalone types) |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 231,364 B (88.26%) | **237,900 B (90.75%)** |
+| RAM used, `nrf54l15dk` | 231,588 B (88.34%) | **238,124 B (90.84%)** |
+| Flash, `ophelia_cpico` | 825,616 B | **836,036 B (60.84%)** |
+| Flash, `nrf54l15dk` | 833,416 B | **843,936 B (57.71%)** |
+
+RAM `+6,536 B` on both arms: the ModeBase Instance and delegate pools
+(sized 18 per ruling DE404: two per RVC endpoint times the nine the arena
+serves), the RvcOperationalState Instance and delegate pools (16), and
+metadata growth for the five new clusters. Flash `+10.4 KB` is the three
+new cluster server directories (switch, pump configuration and control,
+mode base); RvcOperationalState rides the already-compiled
+operational-state server. The RVC's two in-block ModeBase stores make it
+the widest type in the catalogue (864 B per endpoint, capacity table
+above); `HEARTH_EP_HEAP_BYTES` is unchanged.
 
 ## Dev board wiring
 
