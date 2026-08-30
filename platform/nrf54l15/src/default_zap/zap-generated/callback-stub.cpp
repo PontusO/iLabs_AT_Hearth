@@ -123,6 +123,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::OperationalState::Id:
     emberAfOperationalStateClusterInitCallback(endpoint);
     break;
+  case app::Clusters::OvenCavityOperationalState::Id:
+    emberAfOvenCavityOperationalStateClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::OvenMode::Id:
+    emberAfOvenModeClusterInitCallback(endpoint);
+    break;
   case app::Clusters::PowerSource::Id:
     emberAfPowerSourceClusterInitCallback(endpoint);
     break;
@@ -353,6 +359,16 @@ emberAfOperationalCredentialsClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfOperationalStateClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfOvenCavityOperationalStateClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfOvenModeClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

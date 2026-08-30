@@ -3353,17 +3353,10 @@ constexpr bool parent_policy_ok(uint32_t devtype_id, uint8_t variant, uint32_t p
      * child cabinet a coherent conditional cluster set (Cooler, Heater); a
      * third parent would be a cabinet with no defined set at all, which is
      * why the policy refuses rather than falling back to the bare shape.
-     * The C6's rule is mt_devtypes.cpp:2773-2783.
-     *
-     * AT THIS COMMIT the parented halves are NOT yet accepted, and the arm
-     * is deliberately narrower than AT_MT_SPEC.md 367-372 for exactly one
-     * commit. The Cooler and Heater cluster sets land in the next one, and
-     * this predicate must never accept a pairing whose cluster set does not
-     * exist: shape_domain_matches_policy() would fail the build if it did,
-     * which is the check working rather than getting in the way. Widen this
-     * expression and the shape map together. */
+     * The C6's rule is mt_devtypes.cpp:2773-2783. */
     if (devtype_id == kDtTempControlledCabinet) {
-        return parent_devtype == 0;
+        return parent_devtype == 0 || parent_devtype == kDtRefrigerator ||
+               parent_devtype == kDtOven;
     }
     /* Everything else is permissive, including the unparented form: PartsList
      * simply reflects whatever the host declares and this firmware holds no
@@ -3744,11 +3737,8 @@ constexpr CommandId kTemperatureControlIncoming[] = {
  * identify field. TemperatureControlledCabinet.xml lists no Identify either,
  * so there is NO Identify on a cabinet on either platform.
  *
- * These are two of the cabinet's six realised shapes. The other four arrive
- * with the parent-conditional commit; the parenting policy is deliberately
- * narrowed to the unparented form until they do, so that at every commit the
- * policy describes what this build can actually serve rather than what the
- * finished batch will. */
+ * These are two of the cabinet's six realised shapes, the two the parent
+ * does not touch; the Cooler and Heater halves are below. */
 HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetNumberClusters)
 DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlNumberAttrs,
                         ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
@@ -3773,9 +3763,101 @@ HEARTH_DECLARE_CONST_ENDPOINT(cabinetLevelEndpoint, cabinetLevelClusters);
  * lives in the cluster set alone. */
 constexpr EmberAfDeviceType kCabinetTypes[] = { { 0x0071, 5 } };
 
+/* ---- the cabinet's parent-conditional halves --------------------------
+ *
+ * Catalogue batch 8. Four more shapes, and the batch's one genuinely good
+ * surprise: where the C6 had to HAND-ROLL two entire cluster shells because
+ * esp-matter ships no cluster::oven_mode and no
+ * cluster::oven_cavity_operational_state namespace at all
+ * (ARCHITECTURE.md:1386-1401 records that as the section 8.6 disease at its
+ * worst grade), CHIP ships both server halves. OvenMode is a plain
+ * mode-base-server alias (zap_cluster_list.json:279), so modeBaseAttrs and
+ * the two shared ModeBase command lists carry it verbatim, and
+ * OvenCavityOperationalState::Instance is a purpose-built public subclass
+ * that forwards to the protected three-argument OperationalState::Instance
+ * ctor with the id baked in (operational-state-server.h:459-478). It adds no
+ * data members, so opStateAttrs is reused verbatim too and the existing
+ * OperationalState Instance storage is exactly the right size (asserted at
+ * the pool in mt_matter_zephyr.cpp).
+ *
+ * THE CAVITY'S COMMAND LIST IS NARROWER THAN THE BASE CLUSTER'S, and that is
+ * not an omission. operational-state-oven-cluster.xml declares Stop (0x01)
+ * and Start (0x02) only; Pause (0x00) and Resume (0x03) are disallowConform
+ * on this derived cluster, so a controller invoking either gets
+ * UNSUPPORTED_COMMAND from the data model with nothing reaching the host at
+ * all (AT_MT_SPEC.md 1338-1348). The outgoing list is the shared
+ * kOpStateOutgoing: OperationalCommandResponse is 0x04 in the cavity's own
+ * generated CommandIds.h as well, so one constant serves both.
+ *
+ * Revisions are this tree's own Metadata.h, as ever, and BOTH diverge
+ * downward from the C6, which hand-set 2 for each from the 1.5.1 XMLs
+ * (mt_devtypes.cpp:1200, :1218) rather than copying the 4 and 3 its mirrored
+ * rvc_run_mode / rvc_operational_state bodies carried. This tree says
+ * OvenMode 1 and OvenCavityOperationalState 1. Disclosable, not a bug: the
+ * port's convention has been this tree's kRevision since batch 2, and the
+ * cavity's is inert anyway because Instance::Read() answers ClusterRevision
+ * itself. */
+constexpr CommandId kOvenCavityIncoming[] = { OvenCavityOperationalState::Commands::Stop::Id,
+                                              OvenCavityOperationalState::Commands::Start::Id,
+                                              kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetCoolerNumberClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlNumberAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(RefrigeratorAndTemperatureControlledCabinetMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetCoolerLevelClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlLevelAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(RefrigeratorAndTemperatureControlledCabinetMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetHeaterNumberClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlNumberAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(OvenMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(OvenCavityOperationalState::Id, opStateAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kOvenCavityIncoming, kOpStateOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetHeaterLevelClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlLevelAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(OvenMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(OvenCavityOperationalState::Id, opStateAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kOvenCavityIncoming, kOpStateOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetCoolerNumberEndpoint, cabinetCoolerNumberClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetCoolerLevelEndpoint, cabinetCoolerLevelClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetHeaterNumberEndpoint, cabinetHeaterNumberClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetHeaterLevelEndpoint, cabinetHeaterLevelClusters);
+
+/* All six realised shapes, and the whole point of the mechanism: the
+ * composition blob stores only device type, variant and parent index, and
+ * this table is what turns the pair into a cluster set at rebuild time. A
+ * host cannot ask for a different set, and changing a cabinet's parent
+ * changes the cabinet (AT_MT_SPEC.md 495-505). */
 constexpr hearth_shape kCabinetShapes[] = {
     { 0, 0, &cabinetNumberEndpoint },
     { 1, 0, &cabinetLevelEndpoint },
+    { 0, kDtRefrigerator, &cabinetCoolerNumberEndpoint },
+    { 1, kDtRefrigerator, &cabinetCoolerLevelEndpoint },
+    { 0, kDtOven, &cabinetHeaterNumberEndpoint },
+    { 1, kDtOven, &cabinetHeaterLevelEndpoint },
 };
 
 /* ---- cook surface (0x0077) ---------------------------------------------
@@ -4187,11 +4269,15 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   robotic vacuum cleaner  0x0074            5     14      856        864
  *   battery storage v0      0x0018            7     32      846        856
  *   water heater v0         0x050F            7     29      798        808
+ *   cabinet heater v1       0x0071            4     10      755        760
+ *   cabinet cooler v1       0x0071            3      6      687        696
  *   water heater v1         0x050F            4     19      626        632
  *   extended colour light   0x010D            5     36      596        600
  *   mode select             0x0027            3      8      576        584
  *   colour temperature lt   0x010C            5     32      532        536
+ *   cabinet heater v0       0x0071            4     13      530        536
  *   refrigerator            0x0070            4     12      514        520
+ *   cabinet cooler v0       0x0071            3      9      462        472
  *   device energy mgmt v0   0x050D            3      9      462        472
  *   device energy mgmt v1   0x050D            3      8      446        456
  *   battery storage v1      0x0018            5     23      388        392
@@ -4530,6 +4616,8 @@ constexpr store_desc kStoreWalk[] = {
     /* Catalogue batch 8: the refrigerator's mode list, the fifth. */
     { RefrigeratorAndTemperatureControlledCabinetMode::Id, kInvalidAttributeId,
       sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    /* Catalogue batch 8: the heater cabinet's mode list, the sixth. */
+    { OvenMode::Id, kInvalidAttributeId, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
     /* Catalogue batch 8: the temperature-level label store, and the ONLY row
      * with an attribute discriminator (the struct comment). Present on a
      * variant-1 cabinet or cook surface, absent on their variant-0 forms,
@@ -4894,11 +4982,6 @@ static_assert(kBatteryStorageBlockBytes == 846,
  * (PhaseList and OperationalStateList, both ARRAY, and OperationalError, a
  * STRUCT), modeBaseAttrs one (SupportedModes, already named above).
  *
- * The candidate is declared here, in the batch that introduces the shapes,
- * and the heater cabinet's own cluster list arrives with the
- * parent-conditional commit; until then it is computed from the level
- * list, the ModeBase list and the opstate list directly, which is the same
- * arithmetic that list will produce.
  */
 constexpr size_t kTcLevelNoSlot = 1;
 constexpr size_t kOpStateNoSlot = 3;
@@ -4907,7 +4990,8 @@ constexpr size_t kOpStateNoSlot = 3;
  * OvenCavityOperationalState, Descriptor), 3 + 3 + 4 = 10 slots, one
  * ModeBase store and one label store. */
 constexpr size_t kCabinetHeaterLevelBlockBytes =
-    block_bytes(4, (MT_COUNT(temperatureControlLevelAttrs) - kTcLevelNoSlot) +
+    block_bytes(MT_COUNT(cabinetHeaterLevelClusters),
+                (MT_COUNT(temperatureControlLevelAttrs) - kTcLevelNoSlot) +
                        (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) +
                        (MT_COUNT(opStateAttrs) - kOpStateNoSlot)) +
     sizeof(mt_mb_store_t) + sizeof(mt_temp_levels_store_t);
@@ -5876,6 +5960,30 @@ const attr_seed s_seeds[] = {
     { TemperatureControl::Id, TemperatureControl::Attributes::SelectedTemperatureLevel::Id, 1,
       { 0x01 } },
     { TemperatureControl::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* OvenMode. ClusterRevision 1 is LIVE (the ModeBase AAI has no revision
+     * case, the standing rule on the sixth alias) and is
+     * OvenMode/Metadata.h:20 in THIS tree; the C6 hand-set 2 from the 1.5.1
+     * XML, a disclosable divergence. CurrentMode 0 and FeatureMap 0 are the
+     * zero-fill.
+     *
+     * OvenCavityOperationalState. It reuses opStateAttrs, so it also reuses
+     * that list's seed values, but NOT through the same rows: every
+     * OperationalState seed here is keyed on cluster id, and the cavity is a
+     * different cluster id, so it needs its own three. CurrentPhase 0xFF is
+     * null (these cavities publish no phases, so PhaseList reads null and
+     * CurrentPhase with it), OperationalState 0 is kStopped, FeatureMap 0 is
+     * the zero-fill. ClusterRevision 1 is this tree's Metadata.h and is
+     * INERT: Instance::Read() answers ClusterRevision itself
+     * (operational-state-server.cpp:408-409), so this row is a shadow kept
+     * equal to the served value, the Thermostat and WHM discipline. */
+    { OvenMode::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+    { OvenCavityOperationalState::Id, OperationalState::Attributes::CurrentPhase::Id, 1,
+      { 0xFF } }, /* null */
+    { OvenCavityOperationalState::Id, OperationalState::Attributes::OperationalState::Id, 1,
+      { 0x00 } },
+    { OvenCavityOperationalState::Id, Globals::Attributes::ClusterRevision::Id, 2,
+      { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -6114,7 +6222,8 @@ mt_mb_store_t *mt_dyn_mb_store(EndpointId ep, ClusterId cluster)
 {
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
         cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id &&
-        cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id) {
+        cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id &&
+        cluster != OvenMode::Id) {
         return nullptr;
     }
     for (auto &d : s_dyn) {
@@ -6365,9 +6474,21 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * because Init() bails on emberAfContainsServer (see the opStateAttrs
      * audit note). Pool exhaustion aborts here, before anything is spent,
      * for the valve's exact reasons. */
+    /* Catalogue batch 8: the pool now serves TWO cluster ids. The heater
+     * cabinet carries OvenCavityOperationalState (0x0048), a derived cluster
+     * whose Instance is a public subclass of the base one with no data
+     * members of its own, so it shares this pool, this delegate class and
+     * this raw storage; only the cluster id, fixed at alloc, differs. No
+     * device type carries both, so one variable still suffices. */
     void *opstate_delegate = nullptr;
+    ClusterId opstate_cluster = kInvalidClusterId;
     if (type_has_cluster(ep_type, OperationalState::Id)) {
-        opstate_delegate = mt_matter_opstate_delegate_alloc(OperationalState::Id);
+        opstate_cluster = OperationalState::Id;
+    } else if (type_has_cluster(ep_type, OvenCavityOperationalState::Id)) {
+        opstate_cluster = OvenCavityOperationalState::Id;
+    }
+    if (opstate_cluster != kInvalidClusterId) {
+        opstate_delegate = mt_matter_opstate_delegate_alloc(opstate_cluster);
         if (opstate_delegate == nullptr) {
             LOG_ERR("devtype 0x%04X: opstate delegate pool exhausted (%u slots, one per "
                     "serviceable endpoint); %u of %u serviceable endpoints in use, endpoint "
@@ -6648,6 +6769,23 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 8: the heater cabinet's OvenMode claim, the seventh
+     * ModeBase consumer. Same discipline as every other. */
+    void *oven_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, OvenMode::Id)) {
+        oven_mode_delegate = mt_matter_modebase_delegate_alloc(OvenMode::Id);
+        if (oven_mode_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: modebase delegate pool exhausted (oven mode); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     void *valve_delegate = nullptr;
     if (type_has_cluster(ep_type, ValveConfigurationAndControl::Id)) {
         valve_delegate = mt_matter_valve_delegate_alloc();
@@ -6782,6 +6920,11 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
             new (region + store_offset(ep_type,
                                        RefrigeratorAndTemperatureControlledCabinetMode::Id))
                 mt_mb_store_t();
+        }
+        /* Catalogue batch 8: the heater cabinet's mode list, same
+         * obligation. */
+        if (type_has_cluster(ep_type, OvenMode::Id)) {
+            new (region + store_offset(ep_type, OvenMode::Id)) mt_mb_store_t();
         }
         /* Catalogue batch 8: the temperature-level label store, the first
          * store whose presence is finer than a cluster id (the kStoreWalk
@@ -7089,6 +7232,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * unless it runs below a successful emberAfSetDynamicEndpoint()). */
     if (fridge_mode_delegate != nullptr) {
         mt_matter_modebase_delegate_set_endpoint(fridge_mode_delegate, d.ep_id);
+    }
+    if (oven_mode_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(oven_mode_delegate, d.ep_id);
     }
 
     /* Catalogue batch 8: hand the SDK the one global TemperatureControl

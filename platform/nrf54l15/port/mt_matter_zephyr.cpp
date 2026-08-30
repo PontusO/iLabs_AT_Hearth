@@ -948,6 +948,22 @@ static const instance_served_attr k_instance_served[] = {
     { chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id,
       chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Attributes::
           CurrentMode::Id },
+    /* OvenMode and OvenCavityOperationalState (batch 8, the heater cabinet):
+     * the ModeBase pair's rule on the sixth alias, and the opstate pair's on
+     * the derived cluster, all read live from the shared pools and refused
+     * +MTERR:11 on write. The cavity's two rows are the RvcOperationalState
+     * rows one cluster over and exist for the same reason: its Instance's
+     * AAI intercepts both scalars, so the arena slots beneath them are inert
+     * shadows. AT+MTOPSTATE and AT+MTMODES are the write paths. The cavity's
+     * ClusterRevision stays out for the WHM reason rather than the ModeBase
+     * one: Instance::Read() serves it, and the seed is a shadow kept equal
+     * to what it serves, so the generic arena read answers the same 1. */
+    { chip::app::Clusters::OvenMode::Id,
+      chip::app::Clusters::OvenMode::Attributes::CurrentMode::Id },
+    { chip::app::Clusters::OvenCavityOperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
+    { chip::app::Clusters::OvenCavityOperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -963,7 +979,8 @@ static bool instance_attr_served(uint32_t cluster, uint32_t attr)
 /* Defined in the OperationalState, chime, ModeBase and RVC opstate
  * sections below, beside the pools they read. All run under the caller's
  * StackLock. */
-static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_opstate_attr_read_live(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
+                                     bool *is_unsigned);
 static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
 static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, bool *is_unsigned);
@@ -1053,12 +1070,14 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
     if (instance_attr_served(cluster, attr)) {
         switch (cluster) {
         case chip::app::Clusters::OperationalState::Id:
-            return mt_opstate_attr_read_live(ep, attr, out, is_unsigned);
+        case chip::app::Clusters::OvenCavityOperationalState::Id:
+            return mt_opstate_attr_read_live(ep, cluster, attr, out, is_unsigned);
         case chip::app::Clusters::RvcRunMode::Id:
         case chip::app::Clusters::RvcCleanMode::Id:
         case chip::app::Clusters::DeviceEnergyManagementMode::Id:
         case chip::app::Clusters::WaterHeaterMode::Id:
         case chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id:
+        case chip::app::Clusters::OvenMode::Id:
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::RvcOperationalState::Id:
             return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
@@ -2216,19 +2235,53 @@ extern "C" void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id)
  * state but does not adjudicate, plus a shouting log, beats tearing down
  * a healthy endpoint.
  */
+/*
+ * Catalogue batch 8 gave this function its second Instance type, and the
+ * delegate class was written for it three batches ago: m_cluster exists
+ * precisely so "a future derived-cluster consumer (the oven cavity) reuses
+ * this class unchanged".
+ *
+ * OvenCavityOperationalState::Instance is a public subclass of
+ * OperationalState::Instance whose entire body is a two-argument constructor
+ * forwarding to the protected three-argument base with the cluster id baked
+ * in (operational-state-server.h:459-478). It declares NO data members and
+ * NO overrides, so its sizeof and alignof equal the base's and the raw
+ * storage obj_pair_new() reserved for the base holds it exactly. That is
+ * asserted rather than trusted: a future SDK that gave the subclass a member
+ * would otherwise placement-construct past the end of the block, silently.
+ */
+static_assert(sizeof(chip::app::Clusters::OvenCavityOperationalState::Instance) ==
+                  sizeof(chip::app::Clusters::OperationalState::Instance),
+              "OvenCavityOperationalState::Instance grew past the base Instance's storage in "
+              "the opstate pool's blocks");
+static_assert(alignof(chip::app::Clusters::OvenCavityOperationalState::Instance) ==
+                  alignof(chip::app::Clusters::OperationalState::Instance),
+              "OvenCavityOperationalState::Instance out-aligns the base Instance's storage");
+
 extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
 {
+    namespace OpState     = chip::app::Clusters::OperationalState;
+    namespace OvenCavity  = chip::app::Clusters::OvenCavityOperationalState;
     auto *d = static_cast<HearthOpStateDelegate *>(delegate);
     d->set_endpoint(ep);
-    auto *inst =
-        new (obj_inst_storage<HearthOpStateDelegate,
-                              chip::app::Clusters::OperationalState::Instance>(d))
-            chip::app::Clusters::OperationalState::Instance(d, ep);
+    uint8_t *storage = obj_inst_storage<HearthOpStateDelegate, OpState::Instance>(d);
+    /* The cluster id was fixed at alloc time, before anything could be
+     * spent, and it is what picks the Instance type here. Both arms yield an
+     * OperationalState::Instance * (the derived one by upcast), which is
+     * what the delegate's own GetInstance() passthrough hands back later, so
+     * everything downstream of this point is cluster-agnostic. */
+    OpState::Instance *inst = nullptr;
+    if (d->cluster() == OvenCavity::Id) {
+        inst = new (storage) OvenCavity::Instance(d, ep);
+    } else {
+        inst = new (storage) OpState::Instance(d, ep);
+    }
     CHIP_ERROR err = inst->Init();
     if (err != CHIP_NO_ERROR) {
-        LOG_ERR("opstate Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
+        LOG_ERR("opstate Instance::Init failed for endpoint %u cluster 0x%08X: "
+                "%" CHIP_ERROR_FORMAT
                 "; commands on it will not reach the host and its attributes will not be served",
-                (unsigned)ep, err.Format());
+                (unsigned)ep, (unsigned)d->cluster(), err.Format());
     }
 }
 
@@ -2256,6 +2309,7 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
 {
     namespace OpState = chip::app::Clusters::OperationalState;
     namespace RvcOpState = chip::app::Clusters::RvcOperationalState;
+    namespace OvenCavityOperationalState = chip::app::Clusters::OvenCavityOperationalState;
     chip::DeviceLayer::StackLock lock;
     if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
         return MT_ATTR_ERR_ENDPOINT;
@@ -2310,6 +2364,40 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
                                                                    : MT_ATTR_ERR_FAILED;
     }
 
+    /* Catalogue batch 8: the third branch this function's own comment has
+     * promised since batch 5, and it is the RVC's mirror image
+     * (AT_MT_SPEC.md 2078-2090). OvenCavityOperationalState is a DERIVED
+     * cluster that adds no derived-number-space states at all, so its legal
+     * set is identical to the base cluster's {0 Stopped, 1 Running,
+     * 2 Paused} and 0x40..0x42 answer +MTERR:1 on a cavity exactly as they
+     * do on a washer. mt_at.c's union check needed no edit for this branch
+     * for the same reason: the cavity's set is a subset of the union it
+     * already admits. What is narrower than the base is the COMMAND set
+     * (Stop and Start only), and that is the declared list's business, not
+     * this function's: a host may report a Paused cavity even though no
+     * controller can ask for one. The Instance comes from the shared opstate
+     * pool, matched on both endpoint and cluster like the base branch. */
+    if (emberAfContainsServer(ep, OvenCavityOperationalState::Id)) {
+        if (state > 2) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        OpState::Instance *inst = nullptr;
+        for (size_t i = 0; i < s_opstate_delegate_next; i++) {
+            HearthOpStateDelegate *d = s_opstate_delegates[i];
+            if (d->endpoint() == ep && d->cluster() == OvenCavityOperationalState::Id) {
+                inst = d->instance();
+                break;
+            }
+        }
+        if (inst == nullptr) {
+            /* Cannot happen once the boot rebuild has run; defensive, the
+             * base branch's arm. */
+            return MT_ATTR_ERR_FAILED;
+        }
+        return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK
+                                                                   : MT_ATTR_ERR_FAILED;
+    }
+
     return MT_ATTR_ERR_CLUSTER;
 }
 
@@ -2324,16 +2412,22 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
  * These appliances publish no phases, so CurrentPhase in practice always
  * answers +MTERR:5 here, matching what a controller reads as null.
  */
-static int mt_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned)
+static int mt_opstate_attr_read_live(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
+                                     bool *is_unsigned)
 {
     namespace OpState = chip::app::Clusters::OperationalState;
     if (is_unsigned) {
         *is_unsigned = true;
     }
+    /* Catalogue batch 8: keyed on (endpoint, CLUSTER) rather than endpoint
+     * and the base cluster id, because the shared pool now serves the oven
+     * cavity's derived cluster too. The base cluster's answers are
+     * unchanged: no device type carries both, so the same slot is found
+     * either way. */
     OpState::Instance *inst = nullptr;
     for (size_t i = 0; i < s_opstate_delegate_next; i++) {
         HearthOpStateDelegate *d = s_opstate_delegates[i];
-        if (d->endpoint() == ep && d->cluster() == OpState::Id) {
+        if (d->endpoint() == ep && d->cluster() == cluster) {
             inst = d->instance();
             break;
         }
@@ -3291,6 +3385,13 @@ private:
              * reasoning the spec row records). */
             return chip::to_underlying(WaterHeaterMode::ModeTag::kManual);
         }
+        if (m_cluster == OvenMode::Id) {
+            /* Batch 8: kBake (0x4000) on every mode, the AT_MT_SPEC.md 3.20
+             * table row. Mode_Oven.xml mandates no tag, and Bake is the
+             * everyday oven mode a host that does not care about tags most
+             * plausibly means, the WaterHeaterMode kManual reasoning. */
+            return chip::to_underlying(OvenMode::ModeTag::kBake);
+        }
         if (m_cluster == RefrigeratorAndTemperatureControlledCabinetMode::Id) {
             /* Batch 8: kAuto on every mode, the AT_MT_SPEC.md 3.20 table
              * row. Worth pointing at, because it is the one arm here whose
@@ -3355,7 +3456,23 @@ private:
  * (MT_WHM_MAX caps water heaters at 4, MT_DEM_MAX caps DEM-bearing
  * endpoints, battery storage included, at 4). No growth; the 7a headroom
  * still covers exactly the two slots it always did. EnergyEvseMode would
- * be the fifth consumer and is out by ruling DE408 (LM20 tier). */
+ * be the fifth consumer and is out by ruling DE408 (LM20 tier).
+ *
+ * Catalogue batch 8 added THREE more consumers at once (0x0052 on the
+ * refrigerator and the cooler cabinet, OvenMode on the heater cabinet,
+ * MicrowaveOvenMode on the microwave) and 20 STILL STANDS, for the reason
+ * that has decided this number every time: the ceiling is set by endpoint
+ * block-heap cost per ModeBase slot, and the RVC's 432 B/slot (864 B block,
+ * two slots on one endpoint) still beats every batch-8 provider by a wide
+ * margin: cooler cabinet v0 472 B/slot, refrigerator 520, microwave 536,
+ * heater cabinet v0 536, every variant-1 shape worse again. The
+ * slot-maximising mixes are therefore still RVC-led and still top out at 18
+ * (9 RVCs, 7,776 B of block heap; 8 RVCs plus 2 cooler cabinets, 18 slots in
+ * 7,856 B; 8 RVCs plus 2 DEM v1, 18 in 7,824), with nothing MB-bearing cheap
+ * enough to fit any of their remainders. Re-derived by exhaustive search
+ * over the full batch-8 catalogue rather than argued by inspection, the
+ * batch's own worst-object-mix discipline. The 7a headroom is still exactly
+ * the two slots it always was. */
 constexpr size_t kModeBasePoolSlots = 20;
 
 /* Memory reclaim round A: a table of pointers into the cluster-object
@@ -3467,7 +3584,8 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
     }
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
         cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id &&
-        cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id) {
+        cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id &&
+        cluster != OvenMode::Id) {
         /* Batch 7a widened the accept set to three of the C6's seven
          * ModeBase ids, batch 7b to four (WaterHeaterMode; EnergyEvseMode
          * stays out with its device type, ruling DE408 LM20-tier), batch 8
@@ -3512,6 +3630,10 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                  * placeholder_tag() arm's reasoning; the AT_MT_SPEC.md
                  * 3.20 table row). */
                 tag = chip::to_underlying(WaterHeaterMode::ModeTag::kManual);
+            } else if (cluster == OvenMode::Id) {
+                /* Batch 8: kBake on every mode, first or not (the
+                 * placeholder_tag() arm's reasoning). */
+                tag = chip::to_underlying(OvenMode::ModeTag::kBake);
             } else if (cluster == RefrigeratorAndTemperatureControlledCabinetMode::Id) {
                 /* Batch 8: kAuto on every mode, first or not. The one
                  * substitution in this loop whose result is itself 0 (a

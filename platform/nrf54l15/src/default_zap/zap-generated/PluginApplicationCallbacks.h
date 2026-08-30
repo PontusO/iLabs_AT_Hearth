@@ -40,6 +40,8 @@ void MatterAdministratorCommissioningPluginServerInitCallback();
 void MatterOperationalCredentialsPluginServerInitCallback();
 void MatterGroupKeyManagementPluginServerInitCallback();
 void MatterBooleanStatePluginServerInitCallback();
+void MatterOvenCavityOperationalStatePluginServerInitCallback();
+void MatterOvenModePluginServerInitCallback();
 void MatterModeSelectPluginServerInitCallback();
 void MatterRefrigeratorAndTemperatureControlledCabinetModePluginServerInitCallback();
 void MatterRvcRunModePluginServerInitCallback();
@@ -95,6 +97,8 @@ void MatterMeterIdentificationPluginServerInitCallback();
   MatterOperationalCredentialsPluginServerInitCallback();                          \
   MatterGroupKeyManagementPluginServerInitCallback();                              \
   MatterBooleanStatePluginServerInitCallback();                                    \
+  MatterOvenCavityOperationalStatePluginServerInitCallback();                      \
+  MatterOvenModePluginServerInitCallback();                                        \
   MatterModeSelectPluginServerInitCallback();                                      \
   MatterRefrigeratorAndTemperatureControlledCabinetModePluginServerInitCallback(); \
   MatterRvcRunModePluginServerInitCallback();                                      \
