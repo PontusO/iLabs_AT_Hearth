@@ -161,6 +161,38 @@ struct mt_mb_store_t {
 };
 
 /*
+ * Catalogue batch 8: the TemperatureControl label store, one per
+ * TemperatureLevel-variant endpoint (a variant-1 Temperature Controlled
+ * Cabinet 0x0071 or Cook Surface 0x0077). AT+MTTEMPLEVELS feeds it and the
+ * port's SupportedTemperatureLevelsIteratorDelegate (mt_matter_zephyr.cpp)
+ * iterates it for the SupportedTemperatureLevels attribute.
+ *
+ * THE NUMBER THAT MUST NOT BE COPIED FROM THE C6. Its store is
+ * `mt_temp_level_entry_t s_temp_levels[MT_COMP_MAX_ENDPOINTS]`
+ * (platform/esp32c6/main/main.cpp:1786-1793), 28 slots x (used + ep + count
+ * + 16 x 17 label bytes), about 7,728 B of .bss, paid by every composition
+ * whether or not it contains a single cabinet. That is roughly a quarter of
+ * this port's whole post-reclaim free RAM. This shape is the store-reclaim
+ * round's instead: the pool bookkeeping is gone (a store IS its endpoint's,
+ * found through the endpoint's block), it is 273 B, and only the endpoints
+ * that actually carry the TemperatureLevel variant pay for it. Identical
+ * size and shape to mt_chime_store_t above, by coincidence of the bounds
+ * rather than by sharing: both are a count byte plus 16 x 17.
+ *
+ * count 0 means the host has not fed a list yet, and unlike the ModeBase
+ * store there is no placeholder: an empty list is a legitimate steady state
+ * (AT_MT_SPEC.md 1243's "empty before the host sends it"), the AAI encodes
+ * an empty SupportedTemperatureLevels list, and a controller's
+ * SetTemperature naming any level answers ConstraintError because every
+ * index is >= Size(). Not persisted, by the same contract as every other
+ * host-fed store here.
+ */
+struct mt_temp_levels_store_t {
+    uint8_t count;
+    char labels[MT_TEMP_LEVEL_MAX_COUNT][MT_TEMP_LEVEL_MAX_LEN + 1];
+};
+
+/*
  * Locate ep's mode store / chime store through its block. Returns nullptr
  * when ep is not a live dynamic endpoint OR its device type carries no
  * such store (no ModeSelect / Chime cluster in its declared cluster list):
@@ -180,3 +212,18 @@ mt_chime_store_t *mt_dyn_chime_store(chip::EndpointId ep);
  * or RvcCleanMode::Id. Same nullptr and locking contract as the two
  * accessors above. */
 mt_mb_store_t *mt_dyn_mb_store(chip::EndpointId ep, chip::ClusterId cluster);
+
+/*
+ * Catalogue batch 8: the temperature-level label store. Keyed by endpoint
+ * alone (one TemperatureControl cluster per endpoint), same nullptr and
+ * locking contract as the accessors above, with ONE extra way to answer
+ * nullptr that no earlier store has: the endpoint may carry the
+ * TemperatureControl cluster and still have no store, because the store
+ * belongs to the TemperatureLevel VARIANT of that cluster and not to the
+ * cluster itself. Callers that need to tell the two apart (AT+MTTEMPLEVELS
+ * owes +MTERR:3 for a missing cluster and +MTERR:4 for a
+ * TemperatureNumber-variant one) must ask emberAfContainsServer() first;
+ * this accessor deliberately does not, because every other caller only
+ * wants the store or nothing.
+ */
+mt_temp_levels_store_t *mt_dyn_temp_levels_store(chip::EndpointId ep);

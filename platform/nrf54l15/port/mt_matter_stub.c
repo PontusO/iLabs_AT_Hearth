@@ -58,13 +58,11 @@
  * generic switch (0x000F) entered the registry: real in
  * mt_matter_zephyr.cpp now, on the stateless SwitchServer singleton. */
 
-int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count)
-{
-    (void)ep;
-    (void)labels;
-    (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* mt_matter_temp_levels_set() left this file in catalogue batch 8, when the
+ * temperature controlled cabinet (0x0071) and cook surface (0x0077) entered
+ * the registry: real in mt_matter_zephyr.cpp now, on the one process-global
+ * SupportedTemperatureLevelsIteratorDelegate and a block-resident label
+ * store per TemperatureLevel-variant endpoint. */
 
 /* mt_matter_mode_select_manager() and mt_matter_modes_set() left this file
  * in catalogue batch 4, when the mode select (0x0027) entered the
@@ -100,13 +98,13 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
  * chime (0x0146) entered the registry: real in mt_matter_zephyr.cpp now,
  * on a per-endpoint ChimeServer-plus-delegate pool. */
 
-void *mt_matter_mwoc_delegate_alloc(void) { return NULL; }
-
-void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
-{
-    (void)delegate;
-    (void)ep;
-}
+/* The MicrowaveOvenControl pair (mt_matter_mwoc_delegate_alloc,
+ * mt_matter_mwoc_delegate_set_endpoint) left this file in catalogue batch 8,
+ * when the microwave oven (0x0079) entered the registry: real in
+ * mt_matter_zephyr.cpp now, on a HearthMwocDelegate-plus-Instance pool. The
+ * second half there only stamps the endpoint; the Instance is born inside
+ * mt_matter_mwoc_register(), which owns the three-way construction order its
+ * constructor's two live-Instance references demand. */
 
 /* The measurement foundation (mt_matter_meas_set, mt_matter_epm_delegate_
  * alloc, mt_matter_ptop_delegate_alloc, mt_matter_meas_delegate_set_

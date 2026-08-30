@@ -99,6 +99,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::MeterIdentification::Id:
     emberAfMeterIdentificationClusterInitCallback(endpoint);
     break;
+  case app::Clusters::MicrowaveOvenControl::Id:
+    emberAfMicrowaveOvenControlClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::MicrowaveOvenMode::Id:
+    emberAfMicrowaveOvenModeClusterInitCallback(endpoint);
+    break;
   case app::Clusters::ModeSelect::Id:
     emberAfModeSelectClusterInitCallback(endpoint);
     break;
@@ -123,6 +129,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::OperationalState::Id:
     emberAfOperationalStateClusterInitCallback(endpoint);
     break;
+  case app::Clusters::OvenCavityOperationalState::Id:
+    emberAfOvenCavityOperationalStateClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::OvenMode::Id:
+    emberAfOvenModeClusterInitCallback(endpoint);
+    break;
   case app::Clusters::PowerSource::Id:
     emberAfPowerSourceClusterInitCallback(endpoint);
     break;
@@ -144,6 +156,13 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::RvcRunMode::Id:
     emberAfRvcRunModeClusterInitCallback(endpoint);
     break;
+  case app::Clusters::RefrigeratorAlarm::Id:
+    emberAfRefrigeratorAlarmClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id:
+    emberAfRefrigeratorAndTemperatureControlledCabinetModeClusterInitCallback(
+        endpoint);
+    break;
   case app::Clusters::RelativeHumidityMeasurement::Id:
     emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
     break;
@@ -155,6 +174,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
     break;
   case app::Clusters::Switch::Id:
     emberAfSwitchClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::TemperatureControl::Id:
+    emberAfTemperatureControlClusterInitCallback(endpoint);
     break;
   case app::Clusters::TemperatureMeasurement::Id:
     emberAfTemperatureMeasurementClusterInitCallback(endpoint);
@@ -307,6 +329,16 @@ emberAfMeterIdentificationClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfMicrowaveOvenControlClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfMicrowaveOvenModeClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfModeSelectClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
@@ -347,6 +379,16 @@ emberAfOperationalStateClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfOvenCavityOperationalStateClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfOvenModeClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfPowerSourceClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
@@ -382,6 +424,17 @@ emberAfRvcRunModeClusterInitCallback(EndpointId endpoint) {
   (void)endpoint;
 }
 void __attribute__((weak))
+emberAfRefrigeratorAlarmClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfRefrigeratorAndTemperatureControlledCabinetModeClusterInitCallback(
+    EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
 emberAfRelativeHumidityMeasurementClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
@@ -398,6 +451,11 @@ emberAfSoftwareDiagnosticsClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfSwitchClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfTemperatureControlClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }
