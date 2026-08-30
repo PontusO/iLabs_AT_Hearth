@@ -166,16 +166,12 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
     return MT_ROW_ERR_ENDPOINT;
 }
 
-uint32_t mt_meter_feature_mask(void) { return 0; }
-bool mt_meter_reserve(void) { return false; }
-void mt_meter_register_all(void) { }
-
-int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity_t *id)
-{
-    (void)ep;
-    (void)id;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* The meter quartet (mt_meter_feature_mask, mt_meter_reserve,
+ * mt_meter_register_all, mt_matter_meter_set_identity) left this file in
+ * catalogue batch 7a, when the electrical utility meter (0x0511) entered
+ * the registry: real in mt_matter_zephyr.cpp now, on the MT_METER_MAX
+ * MeterIdentification Instance pool and the post-rebuild registration
+ * scan main.cpp runs. */
 
 void *mt_matter_evse_delegate_alloc(uint16_t ep)
 {

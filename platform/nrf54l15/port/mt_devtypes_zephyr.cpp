@@ -2561,6 +2561,100 @@ DECLARE_DYNAMIC_ENDPOINT(wiredElectricalSensorPowerOnlyEndpoint,
 constexpr EmberAfDeviceType kHeatPumpTypes[] = { { 0x0309, 1 }, { 0x0011, 1 }, { 0x0510, 1 } };
 constexpr EmberAfDeviceType kSolarPowerTypes[] = { { 0x0017, 1 }, { 0x0011, 1 }, { 0x0510, 1 } };
 
+/* ---- electrical utility meter (0x0511) --------------------------------
+ *
+ * Catalogue batch 7a audit section 3.9. One new cluster,
+ * MeterIdentification (0x0B06), the cheapest type in the batch: Instance
+ * only, NO delegate of any kind (the Instance owns its own attribute
+ * storage, three 64-byte string buffers included: 304 B measured in the
+ * step-0 build), pool MT_METER_MAX (2, core/include/mt_matter.h:1273, the
+ * C6 depth).
+ *
+ *   Code-driven? No; CHI-only? Not listed, harmless (no commands). Both
+ *   confirmed empirically by the batch's one zap regeneration
+ *   (byte-identical trio, the epmAttrs note).
+ *
+ *   AAI? YES, per endpoint, and NOTHING IN THE SDK EVER CONSTRUCTS IT:
+ *   Instance::Init() (meter-identification-server.cpp:59-68, soft: nulls
+ *   the five attributes and registers the AAI) has no SDK caller anywhere
+ *   in the pinned tree, the chime/EEM disease in the organ the C6's
+ *   mt_meter.cpp documents at length. The port's fix is the same shape:
+ *   mt_meter_register_all() (mt_matter_zephyr.cpp), a registration scan
+ *   over the live composition run once from main.cpp after
+ *   rebuild_composition() and before mt_at_start(), so every meter
+ *   endpoint answers before +MTREADY lets the host ask. Forget the scan
+ *   and the endpoint advertises five attributes and answers none of them,
+ *   the exact failure mode the C6 round found on the bench (the audit's
+ *   risk line).
+ *
+ *   Capacity is claimed at CREATE time, not registration time:
+ *   mt_meter_reserve() below runs with the other pre-create pool claims,
+ *   because only a create failure can abort the composition rebuild; a
+ *   shortfall discovered in the later scan could not un-create the
+ *   cluster already on the wire (the C6's fix-round-2 lesson,
+ *   mt_meter.cpp's s_meter_reserved comment).
+ *
+ * Slots: MeterType (ENUM8, nullable, k_instance_served live-read; its
+ * inert shadow seeds the null sentinel), FeatureMap (inert shadow of the
+ * Instance's construction mask, mt_meter_feature_mask() = kPowerThreshold
+ * 0x1) and ClusterRevision (LIVE: Instance::Read() serves the five
+ * attributes and FeatureMap only, meter-identification-server.cpp:
+ * 215-245; MeterIdentification/Metadata.h:20 kRevision = 1). The three
+ * char_strings (64 bytes each, so 65 ember bytes, under the 66-byte IO
+ * buffer) and the PowerThresholdStruct are metadata-only, no slot, quiet
+ * by type; an AT+MTATTR read of any of the four answers +MTERR:5. On the
+ * C6 those four +MTERR:5 answers come from two different mechanisms (the
+ * strings reach the Instance and fail conversion, the struct is refused
+ * before dispatch by an esp-matter ARRAY refusal, AT_MT_SPEC.md 3.9:
+ * 808-822); on this port all four come from attr_type_info()'s one
+ * refusal, same wire, different plumbing, the spec's platform-note gap
+ * the batch report flags.
+ *
+ * Identify IS composed, a conformance requirement, not decoration:
+ * ElectricalUtilityMeter.xml declares superset="Meter Reference Point"
+ * and MeterReferencePoint.xml's own body mandates Identify; a superset
+ * conformance is transitive (the C6's mk_electrical_utility_meter()
+ * reasoning, mt_devtypes.cpp:2547-2557).
+ *
+ * TimeSyncCond is DISCLOSED, NOT FIXED, on both platforms: this
+ * firmware's root endpoint carries no Time Synchronization cluster on any
+ * image, so no meter endpoint is conformant against that condition
+ * (AT_MT_SPEC.md 3.9:800-806; adding the cluster to endpoint 0 is a
+ * whole-composition decision out of this batch's scope).
+ *
+ * The five attributes are set in ONE call, AT+MTMETERID
+ * (mt_matter_meter_set_identity, mt_matter_zephyr.cpp), all-or-nothing;
+ * there is no other write path and deliberately no read-back verb
+ * (AT_MT_SPEC.md 3.29). One variant. Device revision 1 per
+ * data_model/1.5/device_types/ElectricalUtilityMeter.xml. */
+
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(meterIdAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::MeterType::Id, ENUM8, 1,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::PointOfDelivery::Id, CHAR_STRING,
+                              65, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::MeterSerialNumber::Id, CHAR_STRING,
+                              65, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::ProtocolVersion::Id, CHAR_STRING,
+                              65, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::PowerThreshold::Id, STRUCT, 0,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(utilityMeterClusters)
+DECLARE_DYNAMIC_CLUSTER(MeterIdentification::Id, meterIdAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(utilityMeterEndpoint, utilityMeterClusters);
+
+constexpr EmberAfDeviceType kElectricalUtilityMeterTypes[] = { { 0x0511, 1 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 /* Catalogue batch 7a added ep_type_v1, the port's rendering of the C6's
@@ -2640,6 +2734,8 @@ const hearth_devtype s_registry[] = {
     { 0x0309, 0, &wiredElectricalSensorEndpoint, Span<const EmberAfDeviceType>(kHeatPumpTypes) },
     { 0x0017, 1, &wiredElectricalSensorEndpoint, Span<const EmberAfDeviceType>(kSolarPowerTypes),
       &wiredElectricalSensorPowerOnlyEndpoint },
+    { 0x0511, 0, &utilityMeterEndpoint,
+      Span<const EmberAfDeviceType>(kElectricalUtilityMeterTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -3945,6 +4041,21 @@ const attr_seed s_seeds[] = {
     { PowerTopology::Id, PowerTopology::Attributes::FeatureMap::Id, 4,
       { 0x01, 0x00, 0x00, 0x00 } },
     { PowerTopology::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+
+    /* MeterIdentification. MeterType boots null (Instance::Init() nulls
+     * all five attributes; the inert shadow carries the 1-byte unsigned
+     * sentinel so the arena agrees at boot; reads answer the live
+     * Instance through the carve-out either way). FeatureMap 0x1 is
+     * Feature::kPowerThreshold, the inert shadow of
+     * mt_meter_feature_mask(), the one-accessor-two-callers discipline.
+     * ClusterRevision 1 is LIVE (no Read() case) and is
+     * MeterIdentification/Metadata.h:20 in THIS tree. The strings and
+     * the struct are metadata-only and carry no rows. */
+    { MeterIdentification::Id, MeterIdentification::Attributes::MeterType::Id, 1,
+      { 0xFF } }, /* null */
+    { MeterIdentification::Id, MeterIdentification::Attributes::FeatureMap::Id, 4,
+      { 0x01, 0x00, 0x00, 0x00 } },
+    { MeterIdentification::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -4492,6 +4603,29 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
             LOG_ERR("devtype 0x%04X: PowerTopology delegate pool exhausted (MT_MEAS_MAX %u); "
                     "%u of %u serviceable endpoints in use",
                     (unsigned)devtype_id, (unsigned)MT_MEAS_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
+    /* Catalogue batch 7a: the meter capacity claim, the C6's
+     * reserve-before-create fix rendered in this port's claim block. Only
+     * a count is claimed here (MT_METER_MAX, mt_matter_zephyr.cpp's
+     * pool); the Instance itself is constructed later by
+     * mt_meter_register_all()'s post-rebuild scan, because its Init()
+     * wants the endpoint's cluster to exist first and because a scan
+     * discovered shortfall could not abort this create retroactively (the
+     * meterIdAttrs audit note). A claim stranded by a later failure in
+     * this function is bounded at one per boot, the modebase claims'
+     * standing policy. */
+    if (type_has_cluster(ep_type, MeterIdentification::Id)) {
+        if (!mt_meter_reserve()) {
+            LOG_ERR("devtype 0x%04X: MeterIdentification instance pool exhausted "
+                    "(MT_METER_MAX %u); %u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)MT_METER_MAX, (unsigned)live_endpoints(),
                     (unsigned)kServiceableEndpoints);
             if (chime_delegate != nullptr) {
                 mt_matter_chime_delegate_unclaim(chime_delegate);
