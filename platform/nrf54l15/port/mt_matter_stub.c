@@ -71,44 +71,19 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
  * registry: real in mt_matter_zephyr.cpp now, on the one process-global
  * SupportedModesManager. */
 
-void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
-{
-    (void)cluster_id;
-    return NULL;
-}
-
-void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep)
-{
-    (void)delegate;
-    (void)ep;
-}
-
-int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
-                            const char *const *labels, uint8_t count)
-{
-    (void)ep;
-    (void)cluster;
-    (void)modes;
-    (void)tags;
-    (void)labels;
-    (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* The ModeBase slice (mt_matter_modebase_delegate_alloc,
+ * mt_matter_modebase_delegate_set_endpoint, mt_matter_modebase_set) and
+ * the RVC opstate pair (mt_matter_rvc_opstate_delegate_alloc,
+ * mt_matter_rvc_opstate_delegate_set_endpoint) left this file in
+ * catalogue batch 5, when the robotic vacuum cleaner (0x0074) entered the
+ * registry: real in mt_matter_zephyr.cpp now, on per-(endpoint, cluster)
+ * ModeBase pools and the RVC's own delegate subclass pool. */
 
 /* The plain OperationalState slice (mt_matter_opstate_delegate_alloc,
  * mt_matter_opstate_delegate_set_endpoint, mt_matter_opstate_set) left
  * this file in catalogue batch 4, when the washer/dishwasher/dryer trio
  * entered the registry: real in mt_matter_zephyr.cpp now, on a
- * per-endpoint Instance-plus-Delegate pool. The RVC variant below is
- * still a stub. */
-
-void *mt_matter_rvc_opstate_delegate_alloc(void) { return NULL; }
-
-void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
-{
-    (void)delegate;
-    (void)ep;
-}
+ * per-endpoint Instance-plus-Delegate pool. */
 
 /* mt_air_quality_feature_mask() left this file in catalogue batch 2, when
  * the air quality sensor (0x002C) entered the registry: it lives in

@@ -2450,6 +2450,136 @@ cluster ModeSelect = 80 {
   command ChangeToMode(ChangeToModeRequest): DefaultSuccess = 0;
 }
 
+/** Attributes and commands for selecting a mode from a list of supported options. */
+cluster RvcRunMode = 84 {
+  revision 4;
+
+  enum ModeTag : enum16 {
+    kAuto = 0;
+    kQuick = 1;
+    kQuiet = 2;
+    kLowNoise = 3;
+    kLowEnergy = 4;
+    kVacation = 5;
+    kMin = 6;
+    kMax = 7;
+    kNight = 8;
+    kDay = 9;
+    kIdle = 16384;
+    kCleaning = 16385;
+    kMapping = 16386;
+  }
+
+  enum StatusCode : enum8 {
+    kStuck = 65;
+    kDustBinMissing = 66;
+    kDustBinFull = 67;
+    kWaterTankEmpty = 68;
+    kWaterTankMissing = 69;
+    kWaterTankLidOpen = 70;
+    kMopCleaningPadMissing = 71;
+    kBatteryLow = 72;
+  }
+
+  bitmap Feature : bitmap32 {
+    kDirectModeChange = 0x100000;
+  }
+
+  shared struct ModeTagStruct {
+    optional vendor_id mfgCode = 0;
+    enum16 value = 1;
+  }
+
+  shared struct ModeOptionStruct {
+    char_string<64> label = 0;
+    int8u mode = 1;
+    ModeTagStruct modeTags[] = 2;
+  }
+
+  readonly attribute ModeOptionStruct supportedModes[] = 0;
+  readonly attribute int8u currentMode = 1;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
+
+  request struct ChangeToModeRequest {
+    int8u newMode = 0;
+  }
+
+  response struct ChangeToModeResponse = 1 {
+    enum8 status = 0;
+    optional char_string statusText = 1;
+  }
+
+  /** This command is used to change device modes.
+        On receipt of this command the device SHALL respond with a ChangeToModeResponse command. */
+  command ChangeToMode(ChangeToModeRequest): ChangeToModeResponse = 0;
+}
+
+/** Attributes and commands for selecting a mode from a list of supported options. */
+cluster RvcCleanMode = 85 {
+  revision 5;
+
+  enum ModeTag : enum16 {
+    kAuto = 0;
+    kQuick = 1;
+    kQuiet = 2;
+    kLowNoise = 3;
+    kLowEnergy = 4;
+    kVacation = 5;
+    kMin = 6;
+    kMax = 7;
+    kNight = 8;
+    kDay = 9;
+    kDeepClean = 16384;
+    kVacuum = 16385;
+    kMop = 16386;
+    kVacuumThenMop = 16387;
+  }
+
+  enum StatusCode : enum8 {
+    kCleaningInProgress = 64;
+  }
+
+  bitmap Feature : bitmap32 {
+    kDirectModeChange = 0x100000;
+  }
+
+  shared struct ModeTagStruct {
+    optional vendor_id mfgCode = 0;
+    enum16 value = 1;
+  }
+
+  shared struct ModeOptionStruct {
+    char_string<64> label = 0;
+    int8u mode = 1;
+    ModeTagStruct modeTags[] = 2;
+  }
+
+  readonly attribute ModeOptionStruct supportedModes[] = 0;
+  readonly attribute int8u currentMode = 1;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
+
+  request struct ChangeToModeRequest {
+    int8u newMode = 0;
+  }
+
+  response struct ChangeToModeResponse = 1 {
+    enum8 status = 0;
+    optional char_string statusText = 1;
+  }
+
+  /** This command is used to change device modes.
+        On receipt of this command the device SHALL respond with a ChangeToModeResponse command. */
+  command ChangeToMode(ChangeToModeRequest): ChangeToModeResponse = 0;
+}
+
 /** Attributes for reporting air quality classification */
 cluster AirQuality = 91 {
   revision 1;
@@ -2653,6 +2783,91 @@ cluster OperationalState = 96 {
   command Start(): OperationalCommandResponse = 2;
   /** Upon receipt, the device SHALL resume its operation from the point it was at when it received the Pause command, or from the point when it was paused by means outside of this cluster (for example by manual button press). */
   command Resume(): OperationalCommandResponse = 3;
+}
+
+/** This cluster supports remotely monitoring and, where supported, changing the operational state of a Robotic Vacuum. */
+cluster RvcOperationalState = 97 {
+  revision 1;
+
+  enum ErrorStateEnum : enum8 {
+    kNoError = 0;
+    kUnableToStartOrResume = 1;
+    kUnableToCompleteOperation = 2;
+    kCommandInvalidInState = 3;
+    kFailedToFindChargingDock = 64;
+    kStuck = 65;
+    kDustBinMissing = 66;
+    kDustBinFull = 67;
+    kWaterTankEmpty = 68;
+    kWaterTankMissing = 69;
+    kWaterTankLidOpen = 70;
+    kMopCleaningPadMissing = 71;
+    kLowBattery = 72;
+    kCannotReachTargetArea = 73;
+    kDirtyWaterTankFull = 74;
+    kDirtyWaterTankMissing = 75;
+    kWheelsJammed = 76;
+    kBrushJammed = 77;
+    kNavigationSensorObscured = 78;
+  }
+
+  enum OperationalStateEnum : enum8 {
+    kStopped = 0;
+    kRunning = 1;
+    kPaused = 2;
+    kError = 3;
+    kSeekingCharger = 64;
+    kCharging = 65;
+    kDocked = 66;
+    kEmptyingDustBin = 67;
+    kCleaningMop = 68;
+    kFillingWaterTank = 69;
+    kUpdatingMaps = 70;
+  }
+
+  shared struct ErrorStateStruct {
+    enum8 errorStateID = 0;
+    optional char_string<64> errorStateLabel = 1;
+    optional char_string<64> errorStateDetails = 2;
+  }
+
+  shared struct OperationalStateStruct {
+    enum8 operationalStateID = 0;
+    optional char_string<64> operationalStateLabel = 1;
+  }
+
+  critical event OperationalError = 0 {
+    ErrorStateStruct errorState = 0;
+  }
+
+  info event OperationCompletion = 1 {
+    enum8 completionErrorCode = 0;
+    optional nullable elapsed_s totalOperationalTime = 1;
+    optional nullable elapsed_s pausedTime = 2;
+  }
+
+  readonly attribute nullable char_string phaseList[] = 0;
+  readonly attribute nullable int8u currentPhase = 1;
+  readonly attribute optional nullable elapsed_s countdownTime = 2;
+  readonly attribute OperationalStateStruct operationalStateList[] = 3;
+  readonly attribute enum8 operationalState = 4;
+  readonly attribute ErrorStateStruct operationalError = 5;
+  readonly attribute command_id generatedCommandList[] = 65528;
+  readonly attribute command_id acceptedCommandList[] = 65529;
+  readonly attribute attrib_id attributeList[] = 65531;
+  readonly attribute bitmap32 featureMap = 65532;
+  readonly attribute int16u clusterRevision = 65533;
+
+  response struct OperationalCommandResponse = 4 {
+    ErrorStateStruct commandResponseState = 0;
+  }
+
+  /** Upon receipt, the device SHALL pause its operation if it is possible based on the current function of the server. */
+  command Pause(): OperationalCommandResponse = 0;
+  /** Upon receipt, the device SHALL resume its operation from the point it was at when it received the Pause command, or from the point when it was paused by means outside of this cluster (for example by manual button press). */
+  command Resume(): OperationalCommandResponse = 3;
+  /** On receipt of this command, the device SHALL start seeking the charging dock, if possible in the current state of the device. */
+  command GoHome(): OperationalCommandResponse = 128;
 }
 
 /** This cluster is used to configure a valve. */
@@ -5129,6 +5344,32 @@ endpoint 240 {
     handle command ChangeToMode;
   }
 
+  server cluster RvcRunMode {
+    callback attribute supportedModes;
+    callback attribute currentMode;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    callback attribute featureMap;
+    ram      attribute clusterRevision default = 4;
+
+    handle command ChangeToMode;
+    handle command ChangeToModeResponse;
+  }
+
+  server cluster RvcCleanMode {
+    callback attribute supportedModes;
+    callback attribute currentMode;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    callback attribute featureMap;
+    ram      attribute clusterRevision default = 5;
+
+    handle command ChangeToMode;
+    handle command ChangeToModeResponse;
+  }
+
   server cluster AirQuality {
     callback attribute airQuality;
     callback attribute generatedCommandList;
@@ -5181,6 +5422,26 @@ endpoint 240 {
     handle command Start;
     handle command Resume;
     handle command OperationalCommandResponse;
+  }
+
+  server cluster RvcOperationalState {
+    emits event OperationalError;
+    emits event OperationCompletion;
+    callback attribute phaseList;
+    callback attribute currentPhase;
+    callback attribute operationalStateList;
+    callback attribute operationalState;
+    callback attribute operationalError;
+    callback attribute generatedCommandList;
+    callback attribute acceptedCommandList;
+    callback attribute attributeList;
+    ram      attribute featureMap default = 0;
+    callback attribute clusterRevision;
+
+    handle command Pause;
+    handle command Resume;
+    handle command OperationalCommandResponse;
+    handle command GoHome;
   }
 
   server cluster ValveConfigurationAndControl {

@@ -20,7 +20,11 @@ command-verdict types): `0x000A` Door Lock, `0x0042` Water Valve; and
 catalogue batch 4 (the appliance and notification types): `0x0011` Power
 Source, `0x0027` Mode Select, `0x0073` Laundry Washer, `0x0075`
 Dishwasher, `0x007C` Laundry Dryer, `0x0076` Smoke/CO Alarm, `0x0146`
-Chime. **Twenty-nine device types.** Anything else answers `+MTERR:6`
+Chime; and catalogue batch 5 (the standalone remainder): `0x002D` Air
+Purifier, `0x010F` Mounted On/Off Control, `0x0110` Mounted Dimmable Load
+Control, `0x000F` Generic Switch, `0x0303` Pump, `0x0072` Room Air
+Conditioner, `0x0074` Robotic Vacuum Cleaner. **Thirty-six device
+types.** Anything else answers `+MTERR:6`
 until the catalogue grows toward C6 parity.
 
 Batch 2 takes on fewer cluster features than the specs allow, but never
@@ -259,15 +263,18 @@ Block payload is `4 x clusters + 16 x slots`; Zephyr charges
 
 | Device type | Clusters | Slots | Heap cost |
 |---|---|---|---|
+| `0x0074` Robotic Vacuum Cleaner (244 B payload + two 306 B mode stores) | 5 | 14 | 864 B |
 | `0x010D` Extended Colour Light | 5 | 36 | 600 B |
 | `0x010C` Colour Temperature Light | 5 | 32 | 536 B |
-| `0x0101` / `0x010B` Dimmable Light, Dimmable Plug | 4 | 20 | 344 B |
+| `0x0101` / `0x010B` / `0x0110` Dimmable Light, Dimmable Plug, Mounted Dimmable Load Control | 4 | 20 | 344 B |
+| `0x0303` / `0x0072` Pump, Room Air Conditioner | 4 | 18 | 312 B |
 | `0x0301` Thermostat | 3 | 15 | 256 B |
 | `0x0202` Window Covering | 3 | 13 | 224 B |
 | `0x000A` Door Lock | 3 | 12 | 208 B |
-| `0x0100` / `0x010A` On/Off Light, On/Off Plug | 3 | 11 | 192 B |
+| `0x0100` / `0x010A` / `0x010F` On/Off Light, On/Off Plug, Mounted On/Off Control | 3 | 11 | 192 B |
 | `0x0042` Water Valve | 3 | 11 | 192 B |
-| `0x002B` Fan | 3 | 10 | 176 B |
+| `0x002B` / `0x002D` Fan, Air Purifier | 3 | 10 | 176 B |
+| `0x000F` Generic Switch | 3 | 8 | 144 B |
 | `0x0302` `0x0307` `0x0305` `0x0106` `0x0306` `0x0107` sensors | 3 | 9 | 160 B |
 | `0x0015` `0x0044` `0x0041` `0x0043` `0x002C` boolean-state, air quality | 3 | 7 | 128 B |
 
@@ -289,10 +296,16 @@ bucket table) and 16 header slots:
 | 13 mode selects (store in-block since the reclaim round) | 7,592 B | **yes**, three short of 16 (bench-observed 2026-08-30) |
 | 16 mode selects | 9,344 B wanted | **no**, fails at the 14th |
 | 16 chimes (store in-block) | 5,632 B | **yes**, table-bound |
+| 9 robotic vacuum cleaners (two mode stores in-block each) | 7,776 B | **yes**, seven short of 16 |
+| 16 robotic vacuum cleaners | 13,824 B wanted | **no**, fails at the 10th |
 
 So every device type in the catalogue reaches the full 16 **except** the two
-colour lights (15 and 13) and, since the store reclaim round moved its
-host-fed mode store into the endpoint block, mode select (13). Sizing the
+colour lights (15 and 13), mode select (13, since the store reclaim round
+moved its host-fed mode store into the endpoint block), and the robotic
+vacuum cleaner (9: its block carries TWO host-fed ModeBase stores, making
+it the catalogue's widest type at 864 B; dropping the optional RvcCleanMode
+would have doubled that capacity and was ruled out, DE404, as a real
+cross-platform data-model divergence). Sizing the
 heap for 16 extended colour lights would want 9,600 B and buy a composition
 nobody builds; the RAM is worth more elsewhere. A compile-time assertion
 keeps the heap holding at least eight of whatever the widest device type

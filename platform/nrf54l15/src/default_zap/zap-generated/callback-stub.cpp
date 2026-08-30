@@ -117,6 +117,15 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::PumpConfigurationAndControl::Id:
     emberAfPumpConfigurationAndControlClusterInitCallback(endpoint);
     break;
+  case app::Clusters::RvcCleanMode::Id:
+    emberAfRvcCleanModeClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::RvcOperationalState::Id:
+    emberAfRvcOperationalStateClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::RvcRunMode::Id:
+    emberAfRvcRunModeClusterInitCallback(endpoint);
+    break;
   case app::Clusters::RelativeHumidityMeasurement::Id:
     emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
     break;
@@ -300,6 +309,21 @@ emberAfPressureMeasurementClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfPumpConfigurationAndControlClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfRvcCleanModeClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfRvcOperationalStateClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfRvcRunModeClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

@@ -2098,6 +2098,160 @@ DECLARE_DYNAMIC_ENDPOINT(roomAirConditionerEndpoint, roomAirConditionerClusters)
 /* Revision 3 per data_model/1.5/device_types/RoomAirConditioner.xml. */
 constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
 
+/* ---- robotic vacuum cleaner (0x0074) ----------------------------------
+ *
+ * Catalogue batch 5's weight: RvcRunMode 0x0054 + RvcCleanMode 0x0055
+ * (one server, mode-base-server) and RvcOperationalState 0x0061, plus
+ * Identify and Descriptor. Five clusters, fourteen slots, and the two
+ * host-fed ModeBase stores that make this the widest block in the
+ * catalogue (see the sizing table below).
+ *
+ * The C6 composes the same five: robotic_vacuum_cleaner::add()
+ * (esp_matter_endpoint.cpp:1389-1400) creates Identify, RvcRunMode and
+ * RvcOperationalState (plus its OperationCompletion event), and the thunk
+ * hand-adds RvcCleanMode after create() (mk_rvc(), mt_devtypes.cpp:
+ * 846-852). RvcCleanMode is optional in the device library
+ * (Device-Library-Specification.md:4780) and STAYS composed here, ruled
+ * DE404: parity with the C6's deliberate hand-add beats the one design
+ * lever that would have bought capacity (dropping it would cost a real
+ * cross-platform data-model divergence to fit 16 endpoints instead of 9).
+ *
+ * ---- the two ModeBase clusters (RvcRunMode, RvcCleanMode) -------------
+ *
+ *   Code-driven? No for both (config-data.yaml:144-168; this batch's
+ *   regeneration left CodeDrivenInitShutdown.cpp byte-identical). Both
+ *   ARE CommandHandlerInterface-only ("RVC Clean Mode" config-data.yaml:
+ *   67, "RVC Run Mode" :69): ChangeToMode reaches the per-(endpoint,
+ *   cluster) ModeBase::Instance's own handler and IMClusterCommandHandler
+ *   stayed byte-identical too.
+ *
+ *   Delegate or plain ember? ModeBase::Instance PLUS ModeBase::Delegate,
+ *   one PAIR per (endpoint, cluster): both interfaces are scoped
+ *   Optional<EndpointId>(aEndpointId) with the cluster id
+ *   (mode-base-server.cpp:44-53), so the one RVC endpoint carries TWO
+ *   pairs. The pools and the Init() ordering rules live in
+ *   mt_matter_zephyr.cpp beside the delegate; the create-path handout is
+ *   below in mt_devtype_create(). The ordering is this batch's sharpest
+ *   constraint and is documented at both ends: Instance::Init()
+ *   VerifyOrDies on emberAfContainsServer (mode-base-server.cpp:77), a
+ *   PANIC where the opstate trio's same check soft-bails, so construction
+ *   and Init() run strictly below a successful emberAfSetDynamicEndpoint().
+ *
+ *   Which attributes the Instance's AAI answers: CurrentMode, StartUpMode,
+ *   OnMode, FeatureMap and SupportedModes (Instance::Read(),
+ *   mode-base-server.cpp:325-347), and the switch has NO default arm, so
+ *   ClusterRevision falls through to ember and its seeds are LIVE:
+ *   RvcRunMode 4 and RvcCleanMode 5 per this tree's Metadata.h:20, per
+ *   cluster in s_seeds. The CurrentMode and FeatureMap slots are inert
+ *   shadows (the opstate split), carved out for AT+MTATTR by
+ *   k_instance_served in mt_matter_zephyr.cpp. StartUpMode and OnMode are
+ *   optional and deliberately not declared, the ModeSelect precedent.
+ *
+ *   Neither joins B388: MatterRvcRunMode/RvcCleanModePluginServerInit
+ *   Callback are empty bodies (src/app/util/util.cpp:126-127), no
+ *   emberAf...InitCallback exists, and the real init is Instance::Init(),
+ *   the create path's job.
+ *
+ *   The one metadata list serves BOTH clusters: the ModeBase aliases share
+ *   attribute ids (SupportedModes 0x0000, CurrentMode 0x0001) and command
+ *   ids (ChangeToMode 0x00 / ChangeToModeResponse 0x01, verified against
+ *   both clusters' generated CommandIds.h), so modeBaseAttrs and the two
+ *   command lists below are declared once, the shared-metadata principle
+ *   at the top of this file. The response command is declared in the
+ *   outgoing list for the same two reasons the opstate trio's is
+ *   (DE399 truthfulness AND, here, C6 parity: esp-matter's
+ *   rvc_run_mode/rvc_clean_mode::create() add ChangeToModeResponse
+ *   unconditionally).
+ *
+ * ---- RvcOperationalState ----------------------------------------------
+ *
+ *   Costs no new translation unit: zap_cluster_list.json maps
+ *   OPERATIONAL_STATE_RVC_CLUSTER to operational-state-server, already in
+ *   this build, and RvcOperationalState::Instance lives in the same
+ *   operational-state-server.cpp (:520-570). CHI-only (config-data.yaml:
+ *   68), no generated dispatch. The Instance derives from
+ *   OperationalState::Instance, constructed Instance(Delegate*, ep)
+ *   forwarding Id as the cluster id (operational-state-server.h:421-423);
+ *   the delegate is a NEW subclass (HearthRvcOpStateDelegate,
+ *   mt_matter_zephyr.cpp) because the base HearthOpStateDelegate has no
+ *   GoHome hook, and it takes its own pool: the base
+ *   Delegate::SetInstance() VerifyOrDies on sharing
+ *   (operational-state-server.h:349-353), so handing an RVC Instance a
+ *   pooled trio delegate would abort the device.
+ *
+ *   The incoming command list is EXACTLY {Pause 0x00, Resume 0x03, GoHome
+ *   0x80}, and declaring Start/Stop would be a real defect, not just
+ *   noise: Instance::InvokeCommand() switches on Pause/Resume/Start/Stop
+ *   unconditionally before InvokeDerivedClusterCommand()
+ *   (operational-state-server.cpp:296-334), so a declared Start would
+ *   route a controller invoke into the base handler and out to the
+ *   derived delegate's kUnknownEnumValue stub, where the RVC cluster XML
+ *   declares no Start/Stop at all. The outgoing list carries
+ *   OperationalCommandResponse 0x04, the DE399 discipline (kOpStateOutgoing
+ *   reused: same numeric id on the derived cluster's CommandIds.h).
+ *
+ *   Server-side guards that run BEFORE the delegate, so the +MTCMD
+ *   forwards only ever carry legitimate adjudication requests: Pause is
+ *   additionally compatible with kSeekingCharger (:522-525), Resume with
+ *   kCharging/kDocked (:527-531); GoHome from kCharging/kDocked answers
+ *   kCommandInvalidInState WITHOUT calling the delegate (:556-559) and
+ *   from kSeekingCharger answers success without calling it either
+ *   (:561).
+ *
+ *   Attribute split: Instance::Read() (operational-state-server.cpp:
+ *   335-408) serves everything except FeatureMap, which falls through to
+ *   ember (live seed 0); ClusterRevision is answered by the AAI as the
+ *   BASE cluster's kRevision constant (:407), so unlike the ModeBase pair
+ *   the revision seed here is INERT; both constants are 1 in this tree
+ *   (OperationalState/Metadata.h:20, RvcOperationalState/Metadata.h:20)
+ *   and the seed is written 1 anyway for truthful arena metadata. The
+ *   opStateAttrs list above is reused verbatim: the derived cluster
+ *   shares the base's attribute ids and this composition declares the
+ *   same subset (CountdownTime stays optional-absent on both platforms).
+ *
+ *   Events: OperationalError and OperationCompletion are declared in the
+ *   XML (the former optional="false"); this firmware emits neither, the
+ *   C6 emits neither, and the dynamic endpoint's empty eventList makes
+ *   EventList read empty without blocking emission (the generic switch
+ *   note above). The C6's rvc create() has its own conformance gap here
+ *   (no OperationalError event metadata where the base cluster creates
+ *   one); nothing for this port to mirror since dynamic eventList is
+ *   empty regardless.
+ *
+ * Revision 4 per data_model/1.5/device_types/RoboticVacuumCleaner.xml. */
+DECLARE_DYNAMIC_ATTRIBUTE_LIST_BEGIN(modeBaseAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(RvcRunMode::Attributes::SupportedModes::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(RvcRunMode::Attributes::CurrentMode::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(RvcRunMode::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kModeBaseIncoming[] = { RvcRunMode::Commands::ChangeToMode::Id,
+                                            kInvalidCommandId };
+constexpr CommandId kModeBaseOutgoing[] = { RvcRunMode::Commands::ChangeToModeResponse::Id,
+                                            kInvalidCommandId };
+
+constexpr CommandId kRvcOpStateIncoming[] = { RvcOperationalState::Commands::Pause::Id,
+                                              RvcOperationalState::Commands::Resume::Id,
+                                              RvcOperationalState::Commands::GoHome::Id,
+                                              kInvalidCommandId };
+
+DECLARE_DYNAMIC_CLUSTER_LIST_BEGIN(rvcClusters)
+DECLARE_DYNAMIC_CLUSTER(RvcRunMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming,
+                        kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(RvcCleanMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(RvcOperationalState::Id, opStateAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kRvcOpStateIncoming, kOpStateOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER_LIST_END;
+
+DECLARE_DYNAMIC_ENDPOINT(rvcEndpoint, rvcClusters);
+
+constexpr EmberAfDeviceType kRvcTypes[] = { { 0x0074, 4 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 struct hearth_devtype {
@@ -2154,6 +2308,7 @@ const hearth_devtype s_registry[] = {
     { 0x0303, 0, &pumpEndpoint, Span<const EmberAfDeviceType>(kPumpTypes) },
     { 0x0072, 0, &roomAirConditionerEndpoint,
       Span<const EmberAfDeviceType>(kRoomAirConditionerTypes) },
+    { 0x0074, 0, &rvcEndpoint, Span<const EmberAfDeviceType>(kRvcTypes) },
 };
 
 /* ---- the external attribute store ------------------------------------ */
@@ -2282,6 +2437,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * roundup(payload + 4, 8):
  *
  *   device type                        clusters  slots  payload  heap cost
+ *   robotic vacuum cleaner  0x0074            5     14      856        864
  *   extended colour light   0x010D            5     36      596        600
  *   mode select             0x0027            3      8      576        584
  *   colour temperature lt   0x010C            5     32      532        536
@@ -2303,7 +2459,10 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   boolean-state sensors, air quality        3      7      124        128
  *
  * (Mode select payload is 140 + 436 store, chime 72 + 273 store; both rows
- * sat at bare 140/72 before the reclaim round moved their stores in.)
+ * sat at bare 140/72 before the reclaim round moved their stores in. The
+ * RVC's payload is 244 + two 306 B ModeBase stores, catalogue batch 5:
+ * the widest type since the reclaim round made stores block-resident,
+ * past the extended colour light's 600.)
  *
  * HEARTH_EP_HEAP_BYTES is 8192, which leaves 8,112 usable after the
  * heap's own header and bucket table. Against kServiceableEndpoints = 16:
@@ -2313,6 +2472,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   16 x colour temperature light           15 fit (8,040)    ONE SHORT
  *   16 x mode select                        13 fit (7,592)    THREE SHORT
  *   16 x extended colour light              13 fit (7,800)    THREE SHORT
+ *   16 x robotic vacuum cleaner              9 fit (7,776)    SEVEN SHORT
  *   a realistic mixed composition, say
  *     2 extended colour + 2 dimmable +
  *     12 assorted sensors               1,200+688+1,920 = 3,808   fits easily
@@ -2324,7 +2484,13 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * the same trade: an all-mode-select composition that fit 16 when the
  * store was a .bss pool now serves the 13-endpoint prefix under the
  * stop-at-failure semantics above, and bought the whole build 11.5 KB of
- * .bss back. A composition that does ask for more gets the loud, specific
+ * .bss back. The RVC line (catalogue batch 5) is the same trade at its
+ * widest: two block-resident ModeBase stores make it the catalogue's
+ * heaviest type at 864 B, an all-RVC composition serves a 9-endpoint
+ * prefix, and DE404 ruled RvcCleanMode STAYS composed (dropping the
+ * optional cluster would have bought 16 endpoints at the price of a real
+ * cross-platform data-model divergence). A composition that does ask for
+ * more gets the loud, specific
  * failure in mt_devtype_create() rather than a silent truncation, and the
  * README's "Endpoint capacity" section tells an integrator the numbers up
  * front.
@@ -2465,6 +2631,13 @@ struct store_desc {
 constexpr store_desc kStoreWalk[] = {
     { ModeSelect::Id, sizeof(mt_mode_store_t), alignof(mt_mode_store_t) },
     { Chime::Id, sizeof(mt_chime_store_t), alignof(mt_chime_store_t) },
+    /* Catalogue batch 5: the RVC's two host-fed ModeBase lists. Both rows
+     * are PRESENT on one type (0x0074 carries RvcRunMode and RvcCleanMode
+     * at once), the first time the walk places two stores in one block;
+     * store_walk() already iterates the whole table and align_up() makes
+     * the order taste, so the mechanism extends without change. */
+    { RvcRunMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    { RvcCleanMode::Id, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
 };
 
 constexpr size_t align_up(size_t off, size_t align) { return ((off + align - 1) / align) * align; }
@@ -2507,6 +2680,8 @@ static_assert(sizeof(mt_mode_store_t) == 436,
               "mt_mode_store_t changed size; redo the sizing table's mode select row");
 static_assert(sizeof(mt_chime_store_t) == 273,
               "mt_chime_store_t changed size; redo the sizing table's chime row");
+static_assert(sizeof(mt_mb_store_t) == 306,
+              "mt_mb_store_t changed size; redo the sizing table's rvc row");
 
 /* The trailing store begins at 4 * clusterCount + 16 * n_slots, a multiple
  * of 4, and a k_heap block is 4-byte aligned (the layout note beside
@@ -2516,6 +2691,8 @@ static_assert(alignof(mt_mode_store_t) <= alignof(DataVersion),
               "mt_mode_store_t must not out-align the block's store offset");
 static_assert(alignof(mt_chime_store_t) <= alignof(DataVersion),
               "mt_chime_store_t must not out-align the block's store offset");
+static_assert(alignof(mt_mb_store_t) <= alignof(DataVersion),
+              "mt_mb_store_t must not out-align the block's store offset");
 
 /*
  * The header table. Four fields plus the two counts the block walk needs;
@@ -2631,8 +2808,10 @@ constexpr size_t kWidestEndpointSlots =
  * same three-cluster shape, so temperatureSensorClusters stands in for all
  * of them rather than listing seventeen identical counts. */
 constexpr size_t kWidestClusterList = kMax2(
-    kMax2(kMax2(MT_COUNT(onOffLightClusters), MT_COUNT(dimmableLightClusters)),
-          kMax2(MT_COUNT(colorTemperatureLightClusters), MT_COUNT(extendedColorLightClusters))),
+    kMax2(kMax2(kMax2(MT_COUNT(onOffLightClusters), MT_COUNT(dimmableLightClusters)),
+                kMax2(MT_COUNT(colorTemperatureLightClusters),
+                      MT_COUNT(extendedColorLightClusters))),
+          MT_COUNT(rvcClusters)),
     kMax2(kMax2(MT_COUNT(onOffPlugInUnitClusters), MT_COUNT(dimmablePlugInUnitClusters)),
           kMax2(kMax2(MT_COUNT(thermostatClusters), MT_COUNT(fanClusters)),
                 kMax2(MT_COUNT(windowCoveringClusters), MT_COUNT(temperatureSensorClusters)))));
@@ -2657,9 +2836,19 @@ constexpr size_t kModeSelectBlockBytes =
 constexpr size_t kChimeBlockBytes =
     block_bytes(MT_COUNT(chimeClusters), MT_COUNT(chimeAttrs)) + sizeof(mt_chime_store_t);
 
+/* Catalogue batch 5: the RVC candidate, the same own-lists-plus-stores
+ * shape, with TWO trailing stores (the first type to carry more than
+ * one). The MT_COUNT over-count (each list's metadata-only members plus
+ * the LIST_END ClusterRevision) again only pushes the asserted floor
+ * higher than the real 864 B block, never lower. */
+constexpr size_t kRvcBlockBytes =
+    block_bytes(MT_COUNT(rvcClusters),
+                kIdentifySlots + 2 * MT_COUNT(modeBaseAttrs) + MT_COUNT(opStateAttrs)) +
+    2 * sizeof(mt_mb_store_t);
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
-          kMax2(kModeSelectBlockBytes, kChimeBlockBytes));
+          kMax2(kMax2(kModeSelectBlockBytes, kChimeBlockBytes), kRvcBlockBytes));
 
 /*
  * Zephyr charges roundup(payload + 4, 8) per allocation on a heap this size,
@@ -3281,6 +3470,34 @@ const attr_seed s_seeds[] = {
       { 0x08, 0x00, 0x00, 0x00 } },
     { PumpConfigurationAndControl::Id, Globals::Attributes::ClusterRevision::Id, 2,
       { 0x04, 0x00 } },
+
+    /* The RVC's ModeBase pair. CurrentMode 0 and FeatureMap 0 are the
+     * zero-fill (both slots are inert AAI shadows anyway; DirectModeChange
+     * is the aliases' only feature and is optional, so 0 is passed to the
+     * Instance constructor too and the two stay in agreement). The
+     * ClusterRevision seeds are LIVE, unlike every other Instance-served
+     * cluster in this file: ModeBase's Instance::Read() has no default
+     * arm, so revision reads fall through to ember (mode-base-server.cpp:
+     * 325-347, and CodegenDataModelProvider_Read.cpp treats a no-encode
+     * AAI return as "continue to ember"). RvcRunMode/Metadata.h:20 says 4,
+     * RvcCleanMode/Metadata.h:20 says 5, per cluster in THIS tree. */
+    { RvcRunMode::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x04, 0x00 } },
+    { RvcCleanMode::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x05, 0x00 } },
+
+    /* RvcOperationalState. Same split as the base trio's rows above
+     * (CurrentPhase boots null, sentinel 0xFF; OperationalState 0 kStopped
+     * and FeatureMap 0 are the zero-fill), keyed to the DERIVED cluster id
+     * since seed matching is per cluster. The revision seed is INERT here,
+     * unlike the ModeBase pair's: the Instance's AAI answers
+     * ClusterRevision itself, hardcoded to the BASE cluster's
+     * OperationalState::kRevision constant even on the derived cluster
+     * (operational-state-server.cpp:407); both constants are 1 in this
+     * tree (OperationalState/Metadata.h:20, RvcOperationalState/
+     * Metadata.h:20), so there is no observable divergence, and the seed
+     * is written 1 anyway so the arena's metadata stays truthful. */
+    { RvcOperationalState::Id, OperationalState::Attributes::CurrentPhase::Id, 1,
+      { 0xFF } }, /* null */
+    { RvcOperationalState::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -3478,6 +3695,31 @@ mt_chime_store_t *mt_dyn_chime_store(EndpointId ep)
             static_cast<uint8_t *>(d.block) +
             block_bytes(d.type->ep_type->clusterCount, d.slot_capacity) +
             store_offset(d.type->ep_type, Chime::Id));
+    }
+    return nullptr;
+}
+
+/* Catalogue batch 5: cluster-keyed, unlike the two accessors above,
+ * because the RVC block carries two ModeBase stores and store_offset()
+ * places each by its own cluster id. The cluster check doubles as the
+ * only-these-two guard: any cluster this type does not carry (including a
+ * non-ModeBase id) answers nullptr, the callers' defensive arm. */
+mt_mb_store_t *mt_dyn_mb_store(EndpointId ep, ClusterId cluster)
+{
+    if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id) {
+        return nullptr;
+    }
+    for (auto &d : s_dyn) {
+        if (!d.used || d.ep_id != ep) {
+            continue;
+        }
+        if (!type_has_cluster(d.type->ep_type, cluster)) {
+            return nullptr;
+        }
+        return reinterpret_cast<mt_mb_store_t *>(
+            static_cast<uint8_t *>(d.block) +
+            block_bytes(d.type->ep_type->clusterCount, d.slot_capacity) +
+            store_offset(d.type->ep_type, cluster));
     }
     return nullptr;
 }
@@ -3696,6 +3938,67 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 5, the RVC's three delegates: two ModeBase (one per
+     * (endpoint, cluster) pair, RvcRunMode and RvcCleanMode both on this
+     * one endpoint) and one RvcOperationalState (its own pool: the base
+     * OperationalState Delegate::SetInstance() VerifyOrDies on sharing,
+     * so the trio's pool cannot serve it, and the RVC delegate class
+     * additionally carries the GoHome hook). All claimed HERE, before
+     * anything is spent, the two-halves rule: for the ModeBase pair the
+     * pre-create half matters MORE than for any earlier pool, because the
+     * second half's Instance::Init() VerifyOrDies (panics) rather than
+     * soft-bailing, so the only acceptable failure mode is this abort
+     * before an endpoint id, header entry or block exists. The cluster id
+     * is fixed at alloc time (mt_matter.h's contract: the delegate must
+     * answer GetModeValueByIndex(0, ...) for its OWN cluster the moment
+     * Init() asks, which is before set_endpoint could run a second
+     * setter). Like the opstate and valve claims, and unlike the chime's
+     * (fix round M3 scoped the unclaim to the chime), a claim stranded by
+     * a later failure path is bounded at one create per boot: the rebuild
+     * stops at the failure. */
+    void *mb_run_delegate = nullptr;
+    void *mb_clean_delegate = nullptr;
+    if (type_has_cluster(type->ep_type, RvcRunMode::Id)) {
+        mb_run_delegate = mt_matter_modebase_delegate_alloc(RvcRunMode::Id);
+        if (mb_run_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: modebase delegate pool exhausted (run mode); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    if (type_has_cluster(type->ep_type, RvcCleanMode::Id)) {
+        mb_clean_delegate = mt_matter_modebase_delegate_alloc(RvcCleanMode::Id);
+        if (mb_clean_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: modebase delegate pool exhausted (clean mode); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    void *rvc_opstate_delegate = nullptr;
+    if (type_has_cluster(type->ep_type, RvcOperationalState::Id)) {
+        rvc_opstate_delegate = mt_matter_rvc_opstate_delegate_alloc();
+        if (rvc_opstate_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: rvc opstate delegate pool exhausted (%u slots); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
+                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     void *valve_delegate = nullptr;
     if (type_has_cluster(type->ep_type, ValveConfigurationAndControl::Id)) {
         valve_delegate = mt_matter_valve_delegate_alloc();
@@ -3799,6 +4102,19 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
         if (type_has_cluster(type->ep_type, Chime::Id)) {
             new (region + store_offset(type->ep_type, Chime::Id)) mt_chime_store_t();
+        }
+        /* Catalogue batch 5: the RVC's two ModeBase stores, the first
+         * type with more than one trailing store in a block. count 0 is
+         * the pre-feed state the delegate's placeholder-mode-0 policy
+         * answers for; value-initialization is what produces it, and it
+         * MUST be in place before emberAfSetDynamicEndpoint() below,
+         * because the ModeBase Instance::Init() run in the handout's
+         * second half reads the delegate's index 0 as its first act. */
+        if (type_has_cluster(type->ep_type, RvcRunMode::Id)) {
+            new (region + store_offset(type->ep_type, RvcRunMode::Id)) mt_mb_store_t();
+        }
+        if (type_has_cluster(type->ep_type, RvcCleanMode::Id)) {
+            new (region + store_offset(type->ep_type, RvcCleanMode::Id)) mt_mb_store_t();
         }
     }
 
@@ -3996,6 +4312,33 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * reasoning. */
     if (chime_delegate != nullptr) {
         mt_matter_chime_delegate_set_endpoint(chime_delegate, d.ep_id);
+    }
+
+    /* Catalogue batch 5, the RVC's second halves. THE ORDER OF THIS CALL
+     * RELATIVE TO emberAfSetDynamicEndpoint() IS LOAD-BEARING AND WRONG
+     * ORDER IS A PANIC, not a log line: each ModeBase set_endpoint
+     * placement-constructs its Instance and runs Init(), whose second act
+     * is VerifyOrDie(emberAfContainsServer(ep, cluster))
+     * (mode-base-server.cpp:77). Run above the successful
+     * emberAfSetDynamicEndpoint() and the board aborts; every earlier
+     * pool in this function merely soft-bails on the same mistake. Its
+     * FIRST act is reading the delegate's mode index 0 (:74), which is
+     * why the mt_mb_store_t construction above sits before the endpoint
+     * is served and why the delegate's placeholder-mode-0 policy exists:
+     * a failure there returns early and the Instance silently never
+     * registers, no abort, no diagnostic. Both set_endpoint
+     * implementations check Init()'s return and log loudly
+     * (mt_matter_zephyr.cpp), unlike the C6 whose SDK init-callback path
+     * discards it. The RVC opstate half is the trio's shape verbatim
+     * (soft-bail Init, logged inside). */
+    if (mb_run_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(mb_run_delegate, d.ep_id);
+    }
+    if (mb_clean_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(mb_clean_delegate, d.ep_id);
+    }
+    if (rvc_opstate_delegate != nullptr) {
+        mt_matter_rvc_opstate_delegate_set_endpoint(rvc_opstate_delegate, d.ep_id);
     }
 
     s_next_ep_id++;
