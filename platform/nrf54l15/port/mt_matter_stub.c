@@ -98,13 +98,13 @@
  * chime (0x0146) entered the registry: real in mt_matter_zephyr.cpp now,
  * on a per-endpoint ChimeServer-plus-delegate pool. */
 
-void *mt_matter_mwoc_delegate_alloc(void) { return NULL; }
-
-void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
-{
-    (void)delegate;
-    (void)ep;
-}
+/* The MicrowaveOvenControl pair (mt_matter_mwoc_delegate_alloc,
+ * mt_matter_mwoc_delegate_set_endpoint) left this file in catalogue batch 8,
+ * when the microwave oven (0x0079) entered the registry: real in
+ * mt_matter_zephyr.cpp now, on a HearthMwocDelegate-plus-Instance pool. The
+ * second half there only stamps the endpoint; the Instance is born inside
+ * mt_matter_mwoc_register(), which owns the three-way construction order its
+ * constructor's two live-Instance references demand. */
 
 /* The measurement foundation (mt_matter_meas_set, mt_matter_epm_delegate_
  * alloc, mt_matter_ptop_delegate_alloc, mt_matter_meas_delegate_set_

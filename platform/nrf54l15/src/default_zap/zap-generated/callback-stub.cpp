@@ -99,6 +99,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId) {
   case app::Clusters::MeterIdentification::Id:
     emberAfMeterIdentificationClusterInitCallback(endpoint);
     break;
+  case app::Clusters::MicrowaveOvenControl::Id:
+    emberAfMicrowaveOvenControlClusterInitCallback(endpoint);
+    break;
+  case app::Clusters::MicrowaveOvenMode::Id:
+    emberAfMicrowaveOvenModeClusterInitCallback(endpoint);
+    break;
   case app::Clusters::ModeSelect::Id:
     emberAfModeSelectClusterInitCallback(endpoint);
     break;
@@ -319,6 +325,16 @@ emberAfLevelControlClusterInitCallback(EndpointId endpoint) {
 }
 void __attribute__((weak))
 emberAfMeterIdentificationClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfMicrowaveOvenControlClusterInitCallback(EndpointId endpoint) {
+  // To prevent warning
+  (void)endpoint;
+}
+void __attribute__((weak))
+emberAfMicrowaveOvenModeClusterInitCallback(EndpointId endpoint) {
   // To prevent warning
   (void)endpoint;
 }

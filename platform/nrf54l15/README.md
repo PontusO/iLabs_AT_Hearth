@@ -28,11 +28,15 @@ energy foundation): `0x0510` Electrical Sensor, `0x0514` Electrical
 Meter, `0x0309` Heat Pump, `0x0017` Solar Power, `0x0511` Electrical
 Utility Meter, `0x050D` Device Energy Management; and catalogue batch 7b
 (the delegate-served energy pair): `0x050F` Water Heater, `0x0018`
-Battery Storage. **Forty-four device types.** Anything else answers
-`+MTERR:6` until the catalogue grows toward C6 parity; the Energy EVSE
-(`0x050C`) is deliberately out of the 256 KB tier by ruling DE408 (its
-delegate store and block size are LM20-tier costs, batch 7 audit 5.2
-and 5.4).
+Battery Storage; and catalogue batch 8 (the composed appliances): `0x0078`
+Cooktop, `0x007B` Oven, `0x007A` Extractor Hood, `0x0070` Refrigerator,
+`0x0071` Temperature Controlled Cabinet, `0x0077` Cook Surface, `0x0079`
+Microwave Oven. **Fifty-one device types**, the whole C6 catalogue except
+one. Anything else answers
+`+MTERR:6`; the Energy EVSE
+(`0x050C`) is the single remaining row and is deliberately out of the 256 KB
+tier by ruling DE408 (its delegate store and block size are LM20-tier costs,
+batch 7 audit 5.2 and 5.4).
 
 Batch 7a boundaries worth knowing before a bench session:
 
@@ -90,6 +94,52 @@ Batch 7b boundaries on top of those:
   device-type span: the water heater's variant 1 loses the sensor graft
   and its `0x0510` id together, battery storage's variant 1 the DEM pair
   and `0x050D`.
+
+Batch 8 boundaries, the first COMPOSED appliances on this platform:
+
+- Parenting is real. `AT+MTEP=<devtype>,<variant>,<parent_idx>` was already
+  parsed, staged, persisted in the v3 blob and re-emitted by `AT+MTEP?` on
+  this platform; what batch 8 added is a `mt_devtype_parent_ok()` with
+  opinions and the cluster sets that follow from them. **Cook Surface
+  (`0x0077`) requires a Cooktop (`0x0078`) parent** and answers `+MTERR:1` on
+  the `AT+MTEP=` line for the unparented form or any other parent;
+  **Temperature Controlled Cabinet (`0x0071`) is legal unparented or under a
+  Refrigerator (`0x0070`) or an Oven (`0x007B`) only.**
+- The cabinet's cluster set is **derived from its parent at every boot**, not
+  stored: unparented it is bare TemperatureControl, under a Refrigerator it
+  gains `RefrigeratorAndTemperatureControlledCabinetMode` (Cooler), under an
+  Oven it gains `OvenMode` and `OvenCavityOperationalState` (Heater). Six
+  realised shapes across the two variants. Changing a cabinet's parent
+  changes the cabinet.
+- Unlike the C6, this port SELECTS the whole cluster set before the endpoint
+  is served, where the C6 augments after parenting. A composed endpoint
+  therefore appears complete or not at all; there is no window in which a
+  parent's `PartsList` names a half-built child.
+- **A composed appliance costs two or more of the 16 servable endpoints.** A
+  four-cavity oven is five `AT+MTEP` rows. See "Endpoint capacity" below.
+- `AT+MTTEMPLEVELS` does something on this platform for the first time,
+  against a **block-resident** 273 B label store charged only to
+  TemperatureLevel-variant endpoints (the C6's equivalent is about 7,728 B
+  of unconditional `.bss`). `+MTERR:3` for an endpoint with no
+  TemperatureControl cluster, `+MTERR:4` for a TemperatureNumber-variant one.
+- A controller's `SetTemperature` is **not** adjudicated: the SDK handles it
+  end to end and the write lands in this port's arena, so it reaches the host
+  as an ordinary `+MTATTR` URC and the host has no veto. No other cluster in
+  this firmware behaves that way.
+- Cooktop and Cook Surface carry OnOff with the **OffOnly** feature: `Off` is
+  the only accepted command, so turning one on is always the host's act, an
+  `AT+MTATTR` write of `0x0006`/`0x0000`.
+- `MicrowaveOvenMode` has **no** `ChangeToMode` command at all; the cooking
+  mode is selected through `MicrowaveOvenControl`'s `SetCookingParameters`.
+  `AT+MTMODES` still feeds its list, and the tag-0 default is `kNormal`,
+  which is what lets `SetCookingParameters` work before the host has fed one.
+- The microwave's `CookTime` and `PowerSetting` are Instance-owned: they
+  raise no `+MTATTR` URC and `AT+MTATTR` reads their boot shadow, which goes
+  stale after the first cooking command. Read them through a commissioned
+  controller.
+- `OvenCavityOperationalState` accepts `Stop` and `Start` only (`Pause` and
+  `Resume` are `disallowConform` on the derived cluster) and adds no states:
+  `AT+MTOPSTATE` takes `0`, `1` and `2` on a cavity exactly as on a washer.
 
 Batch 2 takes on fewer cluster features than the specs allow, but never
 fewer commands than a feature it does take on requires. The boundaries are
@@ -335,20 +385,28 @@ walls admit, found by exhaustive search rather than by a greedy fill:
 
 | Count | Device type | Object bytes | Block bytes |
 |---|---|---|---|
-| 4 | `0x0018` Battery Storage (v0) | 2,336 | 3,424 |
-| 4 | `0x0074` Robotic Vacuum Cleaner | 1,792 | 3,456 |
+| 13 | `0x0079` Microwave Oven | 5,720 | 6,968 |
 | 2 | `0x0511` Electrical Utility Meter | 624 | 256 |
-| 6 | `0x0073` Laundry Washer | 1,584 | 864 |
-| **16** | | **6,336** | **8,000** of 8,112 |
+| 1 | `0x0018` Battery Storage (v0) | 584 | 856 |
+| **16** | | **6,928** | **8,080** of 8,112 |
 
-`MT_DEM_MAX` and `MT_METER_MAX` are saturated, the endpoint count is
-saturated and the block heap is 112 B from its own wall. The arithmetic is
-at the end of `port/mt_matter_zephyr.cpp` and a `static_assert` pins it, so
-the claim cannot go stale. Exhaustion, if a future round ever makes it
-possible, is the same loud stop-at-failure prefix as either older wall.
-Note that 6,336 is a function of the block budget: raising
+`MT_METER_MAX` is saturated, the endpoint count is saturated and the block
+heap is 32 B from its own wall. The arithmetic is at the end of
+`port/mt_matter_zephyr.cpp` and a `static_assert` pins it, so the claim
+cannot go stale. Exhaustion, if a future round ever makes it possible, is
+the same loud stop-at-failure prefix as either older wall.
+Note that 6,928 is a function of the block budget: raising
 `HEARTH_EP_HEAP_BYTES` for the LM20 tier admits object-heavier compositions
 and this heap has to be re-derived with it.
+
+Catalogue batch 8 moved this maximum and the heap with it (6,528 to
+7,168 B). A Microwave Oven endpoint draws **three** per-endpoint object
+pairs at once, OperationalState, MicrowaveOvenMode and MicrowaveOvenControl,
+for a 536 B block: 0.82 object bytes per block byte, against Battery
+Storage's 0.68 and the RVC's 0.52, so a composition of microwaves now
+dominates where a mix of the heaviest energy types used to. The pre-batch-8
+maximum of 6,336 B (4 Battery Storage + 4 RVC + 2 meter + 6 washer) is
+still admissible; it is simply no longer the largest.
 
 ### Per-endpoint cost
 
@@ -360,11 +418,19 @@ Block payload is `4 x clusters + 16 x slots`; Zephyr charges
 | `0x0074` Robotic Vacuum Cleaner (244 B payload + two 306 B mode stores) | 5 | 14 | 864 B |
 | `0x0018` Battery Storage (v0; 540 B payload + one 306 B mode store) | 7 | 32 | 856 B |
 | `0x050F` Water Heater (v0; 492 B payload + one 306 B mode store) | 7 | 29 | 808 B |
+| `0x0071` Temp Controlled Cabinet (Heater, v1; 176 B payload + one 306 B mode store + one 273 B label store) | 4 | 10 | 760 B |
+| `0x0071` Temp Controlled Cabinet (Cooler, v1; 108 B payload + both stores) | 3 | 6 | 696 B |
 | `0x050F` Water Heater (v1; 320 B payload + one 306 B mode store) | 4 | 19 | 632 B |
 | `0x010D` Extended Colour Light | 5 | 36 | 600 B |
 | `0x010C` Colour Temperature Light | 5 | 32 | 536 B |
+| `0x0079` Microwave Oven (224 B payload + one 306 B mode store) | 4 | 13 | 536 B |
+| `0x0071` Temp Controlled Cabinet (Heater, v0; 224 B payload + one 306 B mode store) | 4 | 13 | 536 B |
+| `0x0070` Refrigerator (208 B payload + one 306 B mode store) | 4 | 12 | 520 B |
 | `0x050D` Device Energy Management (v0; 462 B payload incl. one 306 B mode store) | 3 | 9 | 472 B |
+| `0x0071` Temp Controlled Cabinet (Cooler, v0; 156 B payload + one 306 B mode store) | 3 | 9 | 472 B |
 | `0x0018` Battery Storage (v1, no DEM pair, no store) | 5 | 23 | 392 B |
+| `0x0077` Cook Surface (v1; 108 B payload + one 273 B label store) | 3 | 6 | 392 B |
+| `0x0071` Temp Controlled Cabinet (unparented, v1; 56 B payload + one 273 B label store) | 2 | 3 | 336 B |
 | `0x0101` / `0x010B` / `0x0110` Dimmable Light, Dimmable Plug, Mounted Dimmable Load Control | 4 | 20 | 344 B |
 | `0x0303` / `0x0072` Pump, Room Air Conditioner | 4 | 18 | 312 B |
 | `0x0301` Thermostat | 3 | 15 | 256 B |
@@ -375,11 +441,16 @@ Block payload is `4 x clusters + 16 x slots`; Zephyr charges
 | `0x0042` Water Valve | 3 | 11 | 192 B |
 | `0x002B` / `0x002D` Fan, Air Purifier | 3 | 10 | 176 B |
 | `0x0302` `0x0307` `0x0305` `0x0106` `0x0306` `0x0107` sensors | 3 | 9 | 160 B |
+| `0x0077` Cook Surface (v0) | 3 | 9 | 160 B |
 | `0x0510` Electrical Sensor (v0) | 4 | 8 | 152 B |
 | `0x000F` Generic Switch | 3 | 8 | 144 B |
 | `0x0511` Electrical Utility Meter | 3 | 7 | 128 B |
 | `0x0015` `0x0044` `0x0041` `0x0043` `0x002C` boolean-state, air quality | 3 | 7 | 128 B |
 | `0x0514` Electrical Meter (v0) | 3 | 6 | 112 B |
+| `0x0071` Temp Controlled Cabinet (unparented, v0) | 2 | 6 | 112 B |
+| `0x007A` Extractor Hood | 2 | 6 | 112 B |
+| `0x007B` Oven | 2 | 4 | 80 B |
+| `0x0078` Cooktop | 2 | 3 | 64 B |
 
 ### Worked examples
 
@@ -401,6 +472,19 @@ bucket table) and 16 header slots:
 | 16 chimes (store in-block) | 5,632 B | **yes**, table-bound |
 | 9 robotic vacuum cleaners (two mode stores in-block each) | 7,776 B | **yes**, seven short of 16 |
 | 16 robotic vacuum cleaners | 13,824 B wanted | **no**, fails at the 10th |
+| 16 cooktops, ovens or extractor hoods | up to 1,792 B | **yes**, table-bound |
+| 15 microwave ovens | 8,040 B | **yes**, one short of 16 |
+| 16 microwave ovens | 8,576 B wanted | **no**, fails at the 16th |
+| 10 Heater cabinets (v1, both stores in-block each) | 7,600 B | **yes**, six short of 16 |
+| 1 oven + 4 Heater cabinets (v0), a four-cavity oven | 2,224 B | **yes**, 5 of the 16 endpoints |
+| 1 cooktop + 4 cook surfaces (v0) | 704 B | **yes**, 5 of the 16 endpoints |
+
+**A composed appliance costs two or more of the 16 endpoints**, and that is
+the capacity consequence catalogue batch 8 introduced. An Oven or a
+Refrigerator with no Temperature Controlled Cabinet child is a bare parent
+(and sub-conformant against its own device-type XML); a Cook Surface cannot
+be declared at all without a Cooktop parent. A realistic four-cavity oven is
+five `AT+MTEP` rows.
 
 So every device type in the catalogue reaches the full 16 **except** the two
 colour lights (15 and 13), mode select (13, since the store reclaim round

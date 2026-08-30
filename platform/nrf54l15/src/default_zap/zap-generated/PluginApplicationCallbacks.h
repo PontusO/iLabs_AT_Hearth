@@ -50,6 +50,8 @@ void MatterTemperatureControlPluginServerInitCallback();
 void MatterRefrigeratorAlarmPluginServerInitCallback();
 void MatterAirQualityPluginServerInitCallback();
 void MatterSmokeCoAlarmPluginServerInitCallback();
+void MatterMicrowaveOvenModePluginServerInitCallback();
+void MatterMicrowaveOvenControlPluginServerInitCallback();
 void MatterOperationalStatePluginServerInitCallback();
 void MatterRvcOperationalStatePluginServerInitCallback();
 void MatterValveConfigurationAndControlPluginServerInitCallback();
@@ -107,6 +109,8 @@ void MatterMeterIdentificationPluginServerInitCallback();
   MatterRefrigeratorAlarmPluginServerInitCallback();                               \
   MatterAirQualityPluginServerInitCallback();                                      \
   MatterSmokeCoAlarmPluginServerInitCallback();                                    \
+  MatterMicrowaveOvenModePluginServerInitCallback();                               \
+  MatterMicrowaveOvenControlPluginServerInitCallback();                            \
   MatterOperationalStatePluginServerInitCallback();                                \
   MatterRvcOperationalStatePluginServerInitCallback();                             \
   MatterValveConfigurationAndControlPluginServerInitCallback();                    \

@@ -71,6 +71,11 @@
  * its free-function SetInstance(), the SDK's "the app must supply it" hole
  * that no SDK code fills. */
 #include <app/clusters/temperature-control-server/supported-temperature-levels-manager.h>
+/* Catalogue batch 8: MicrowaveOvenControl::Instance and Delegate. The one
+ * Instance in this file whose constructor takes references to two OTHER
+ * clusters' Instances; the ordering that makes that safe is at
+ * mt_matter_mwoc_register() below. */
+#include <app/clusters/microwave-oven-control-server/microwave-oven-control-server.h>
 #include <app/EventLogging.h>
 #include <app/reporting/reporting.h>
 
@@ -960,6 +965,17 @@ static const instance_served_attr k_instance_served[] = {
      * to what it serves, so the generic arena read answers the same 1. */
     { chip::app::Clusters::OvenMode::Id,
       chip::app::Clusters::OvenMode::Attributes::CurrentMode::Id },
+    /* MicrowaveOvenMode CurrentMode (batch 8), the seventh and last ModeBase
+     * alias. Note what is NOT here and why, because the microwave is the one
+     * device type where the omissions are the interesting part: the three
+     * MicrowaveOvenControl attributes are Instance-served too, and are
+     * deliberately left to the arena, because AT_MT_SPEC.md 1441-1456 says a
+     * host reads CookTime and PowerSetting back only through a commissioned
+     * controller; and OperationalState's CountdownTime is left to the arena
+     * because its seeded null and the delegate's NullNullable agree, so both
+     * paths answer +MTERR:5 already. */
+    { chip::app::Clusters::MicrowaveOvenMode::Id,
+      chip::app::Clusters::MicrowaveOvenMode::Attributes::CurrentMode::Id },
     { chip::app::Clusters::OvenCavityOperationalState::Id,
       chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
     { chip::app::Clusters::OvenCavityOperationalState::Id,
@@ -1078,6 +1094,7 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         case chip::app::Clusters::WaterHeaterMode::Id:
         case chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id:
         case chip::app::Clusters::OvenMode::Id:
+        case chip::app::Clusters::MicrowaveOvenMode::Id:
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::RvcOperationalState::Id:
             return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
@@ -2258,7 +2275,13 @@ static_assert(alignof(chip::app::Clusters::OvenCavityOperationalState::Instance)
                   alignof(chip::app::Clusters::OperationalState::Instance),
               "OvenCavityOperationalState::Instance out-aligns the base Instance's storage");
 
-extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
+/* Catalogue batch 8 split the body out so the microwave's ordering function
+ * can CHECK this Init()'s return rather than only hear about it in a log.
+ * mt_matter.h's setter signature is void and that header is read-only, so
+ * the public entry point below stays void and this helper carries the
+ * error; the log text is emitted here so both callers produce the identical
+ * line. */
+static CHIP_ERROR opstate_construct_and_init(void *delegate, uint16_t ep)
 {
     namespace OpState     = chip::app::Clusters::OperationalState;
     namespace OvenCavity  = chip::app::Clusters::OvenCavityOperationalState;
@@ -2283,6 +2306,12 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
                 "; commands on it will not reach the host and its attributes will not be served",
                 (unsigned)ep, (unsigned)d->cluster(), err.Format());
     }
+    return err;
+}
+
+extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    (void)opstate_construct_and_init(delegate, ep);
 }
 
 /*
@@ -3385,6 +3414,20 @@ private:
              * reasoning the spec row records). */
             return chip::to_underlying(WaterHeaterMode::ModeTag::kManual);
         }
+        if (m_cluster == MicrowaveOvenMode::Id) {
+            /* Batch 8: kNormal (0x4000) on every mode, the AT_MT_SPEC.md
+             * 3.20 table row, and THE ONE ARM IN THIS FUNCTION THAT IS
+             * LOAD-BEARING BEYOND ITS OWN CLUSTER. MicrowaveOvenControl's
+             * SetCookingParameters resolves an omitted cookMode through
+             * GetModeValueByModeTag(kNormal), so this value is what makes a
+             * freshly composed microwave answer cooking commands before the
+             * host has ever sent AT+MTMODES. Get it wrong and every
+             * SetCookingParameters answers InvalidCommand with no +MTCMD
+             * raised, forever and silently. mt_matter_mwoc_register() reads
+             * it back at create time precisely so that cannot happen
+             * unnoticed. */
+            return chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
+        }
         if (m_cluster == OvenMode::Id) {
             /* Batch 8: kBake (0x4000) on every mode, the AT_MT_SPEC.md 3.20
              * table row. Mode_Oven.xml mandates no tag, and Bake is the
@@ -3523,7 +3566,9 @@ extern "C" void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
  * live and correct in every other respect, the standing lesser-evil
  * argument.
  */
-extern "C" void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep)
+/* Split for the microwave's ordering function, the opstate helper's reason
+ * exactly (mt_matter.h's setter is void and read-only). */
+static CHIP_ERROR modebase_construct_and_init(void *delegate, uint16_t ep)
 {
     auto *d = static_cast<HearthModeBaseDelegate *>(delegate);
     d->set_endpoint(ep);
@@ -3537,6 +3582,12 @@ extern "C" void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_
                 "; the cluster is NOT registered and will answer nothing on the fabric",
                 (unsigned)ep, (unsigned)d->cluster(), err.Format());
     }
+    return err;
+}
+
+extern "C" void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    (void)modebase_construct_and_init(delegate, ep);
 }
 
 /*
@@ -3585,7 +3636,7 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
         cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id &&
         cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id &&
-        cluster != OvenMode::Id) {
+        cluster != OvenMode::Id && cluster != MicrowaveOvenMode::Id) {
         /* Batch 7a widened the accept set to three of the C6's seven
          * ModeBase ids, batch 7b to four (WaterHeaterMode; EnergyEvseMode
          * stays out with its device type, ruling DE408 LM20-tier), batch 8
@@ -3630,6 +3681,13 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                  * placeholder_tag() arm's reasoning; the AT_MT_SPEC.md
                  * 3.20 table row). */
                 tag = chip::to_underlying(WaterHeaterMode::ModeTag::kManual);
+            } else if (cluster == MicrowaveOvenMode::Id) {
+                /* Batch 8: kNormal on every mode, first or not. A host that
+                 * writes tag 0 for every mode still gets a list in which
+                 * SetCookingParameters can resolve a default cookMode,
+                 * which is the placeholder arm's reason applied to real
+                 * entries. */
+                tag = chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
             } else if (cluster == OvenMode::Id) {
                 /* Batch 8: kBake on every mode, first or not (the
                  * placeholder_tag() arm's reasoning). */
@@ -3720,6 +3778,352 @@ static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, boo
     }
     /* Cannot happen once the boot rebuild has run; defensive. */
     return MT_ATTR_ERR_FAILED;
+}
+
+/* ---- microwave oven: MicrowaveOvenControl (0x005F) ---------------------
+ *
+ * THE SHARPEST HAZARD IN THE COMPOSED-APPLIANCE BATCH, and it deserves the
+ * space. Every per-endpoint object this port has built so far is
+ * INDEPENDENT: claim a pool slot before emberAfSetDynamicEndpoint(),
+ * placement-construct and Init() after it, in any order among themselves.
+ * The microwave breaks that. MicrowaveOvenControl::Instance's constructor is
+ *
+ *   Instance(Delegate *, EndpointId, ClusterId, BitMask<Feature>,
+ *            OperationalState::Instance &, ModeBase::Instance &)
+ *
+ * (microwave-oven-control-server.h:58-59) and those last two are C++
+ * REFERENCES to two OTHER clusters' live Instances. So the OperationalState
+ * Instance and the MicrowaveOvenMode Instance must both exist before this
+ * one can be constructed at all, and its handlers dereference both on the
+ * very first invoke (microwave-oven-control-server.cpp:250, :277-281).
+ *
+ * WHAT MAKES IT DANGEROUS RATHER THAN MERELY FIDDLY is that every way of
+ * getting it wrong is QUIET. A reference bound to storage that has not been
+ * constructed yet compiles, links, boots, commissions and answers reads; the
+ * failure surfaces only when a controller invokes SetCookingParameters, and
+ * it surfaces as InvalidInState or InvalidCommand, statuses the server
+ * legitimately produces for perfectly ordinary reasons. There is no
+ * VerifyOrDie to catch it, no log, and no +MTCMD for a host to notice
+ * missing.
+ *
+ * THE THREE MANDATORY MITIGATIONS, all of them in this one function:
+ *
+ *   1. ONE function owns the order, and the order is fixed and commented.
+ *      The create path calls this instead of the three independent-looking
+ *      setters, and its else-branch is what stops the generic opstate setter
+ *      from constructing the same Instance twice.
+ *   2. ALL THREE Init() returns are checked and logged, not just this
+ *      cluster's. The two neighbours' setters were split into
+ *      construct-and-init helpers for exactly this, because mt_matter.h's
+ *      public setters return void and that header is read-only.
+ *   3. A GetModeValueByModeTag(kNormal) READBACK after construction, logged
+ *      loudly on failure. That call is the difference between a working
+ *      microwave and one that refuses every cooking command in silence
+ *      forever: SetCookingParameters resolves its default cookMode through
+ *      it (microwave-oven-control-server.cpp:277-281), so if the ModeBase
+ *      placeholder tag is not kNormal the command answers InvalidCommand
+ *      with nothing raised to the host. It succeeds against the unfed
+ *      placeholder by design (placeholder_tag()'s MicrowaveOvenMode arm),
+ *      which is what makes a freshly composed microwave usable before the
+ *      host has ever sent AT+MTMODES; the readback is here so that the day
+ *      that arm is edited wrongly, the bench sees it at boot.
+ *
+ * A failed neighbour Init() does NOT abort the MWOC construction. Both
+ * Instances still exist as constructed objects after a failed Init (Init
+ * only registers interfaces), so the references are sound and a microwave
+ * with an unregistered opstate cluster is still better than one with no
+ * cooking control at all; the loud summary line below is what a bench sees.
+ * A NULL delegate is different and does abort: there is no object to bind a
+ * reference to, and binding one would be undefined rather than degraded.
+ *
+ * WHAT THE SERVER GUARANTEES BEFORE THE HOST EVER SEES A COMMAND, which is
+ * why the forwards below carry only legitimate adjudication requests:
+ * SetCookingParameters requires the operational state to be kStopped or
+ * answers InvalidInState (:250); if startAfterSetting is present it asks the
+ * data model provider whether OperationalState's Start is accepted on this
+ * endpoint and answers InvalidCommand if not (:252-273, which is why
+ * kOpStateIncoming keeps Start on the microwave's list); cookTime is
+ * range-checked against GetMaxCookTimeSec(); powerSetting is range- and
+ * step-checked. AddMoreTime requires the state not be kError and range-checks
+ * the sum.
+ *
+ * CookTime and PowerSetting ownership: CookTime lives in the Instance
+ * (SetCookTimeSec(), which this delegate calls on an allowed command, the
+ * SDK's own reference implementation's pattern), PowerSetting lives in this
+ * delegate object because the Delegate interface has no setter for it at
+ * all, only GetPowerSettingNum(). Both are applied only on ALLOW: a denied
+ * command is a refusal to accept the new cooking parameters, so nothing is
+ * written for the host to have refused.
+ *
+ * The verdict IS the wire response, the chime's shape rather than the
+ * OperationalState family's GenericOperationalError indirection:
+ * HandleSetCookingParameters() copies whatever Status these two methods
+ * return straight into the InvokeResponse through AddStatus(), no remapping,
+ * so allow is Status::Success and deny is Status::Failure (AT_MT_SPEC.md
+ * 1391-1409). Both hooks run on the CHIP task (this cluster is CHI-only), so
+ * no StackLock, the standing hook discipline.
+ */
+class HearthMwocDelegate : public chip::app::Clusters::MicrowaveOvenControl::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+
+    /* GetInstance() is protected in the base Delegate and const-qualified
+     * here, unlike the OperationalState and ModeBase passthroughs: the base
+     * only offers `const Instance *GetInstance() const`
+     * (microwave-oven-control-server.h:195). SetCookTimeSec() is non-const,
+     * so the cast is needed; it is safe because the object it names is this
+     * delegate's own non-const Instance, constructed below. */
+    chip::app::Clusters::MicrowaveOvenControl::Instance *instance()
+    {
+        return const_cast<chip::app::Clusters::MicrowaveOvenControl::Instance *>(GetInstance());
+    }
+
+    /*
+     * SetCookingParameters: the four-field forward,
+     * cookMode,cookTime,power,startAfter, in that fixed order (AT_MT_SPEC.md
+     * 1391-1400 and 3.17's field-arity rule). THREE of the four arrive
+     * already resolved rather than Optional, and that is traced against the
+     * server rather than assumed from the Delegate interface's own doc
+     * comments: cookMode defaults to whichever mode carries the kNormal tag,
+     * cookTime to 30 s and startAfterSetting to false, all before this
+     * callback runs, which is why the signature declares them as plain
+     * values. Only powerSettingNum is still Optional at this boundary, and
+     * on a PowerAsNumber-only build it always has a value too (the server
+     * defaults it to MaxPower, 100). So none of the four fields is ever
+     * empty on this firmware's actual traffic; the empty-field wire
+     * convention still applies verbatim, it simply never triggers here.
+     * wattSettingIndex is not forwarded at all: it is always NullOptional on
+     * this build and carries the host nothing.
+     */
+    chip::Protocols::InteractionModel::Status HandleSetCookingParametersCallback(
+        uint8_t cookMode, uint32_t cookTimeSec, bool startAfterSetting,
+        chip::Optional<uint8_t> powerSettingNum, chip::Optional<uint8_t> wattSettingIndex) override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        (void)wattSettingIndex;
+        char fields[40];
+        int n = 0;
+        n += snprintf(fields + n, sizeof(fields) - n, "%u,", (unsigned)cookMode);
+        n += snprintf(fields + n, sizeof(fields) - n, "%lu,", (unsigned long)cookTimeSec);
+        n += powerSettingNum.HasValue()
+                 ? snprintf(fields + n, sizeof(fields) - n, "%u,",
+                            (unsigned)powerSettingNum.Value())
+                 : snprintf(fields + n, sizeof(fields) - n, ",");
+        n += snprintf(fields + n, sizeof(fields) - n, "%u", startAfterSetting ? 1u : 0u);
+        (void)n;
+        bool allow = mt_cmd_forward_fields(
+            m_ep, chip::app::Clusters::MicrowaveOvenControl::Id,
+            chip::app::Clusters::MicrowaveOvenControl::Commands::SetCookingParameters::Id, fields);
+        if (allow) {
+            if (instance() != nullptr) {
+                instance()->SetCookTimeSec(cookTimeSec);
+            }
+            if (powerSettingNum.HasValue()) {
+                m_power_setting = powerSettingNum.Value();
+            }
+        }
+        return allow ? Status::Success : Status::Failure;
+    }
+
+    /* AddMoreTime: the single-field forward, finalCookTimeSec. Same
+     * allow-applies, deny-refuses and raw-passthrough-verdict shape. */
+    chip::Protocols::InteractionModel::Status
+    HandleModifyCookTimeSecondsCallback(uint32_t finalCookTimeSec) override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        char fields[16];
+        snprintf(fields, sizeof(fields), "%lu", (unsigned long)finalCookTimeSec);
+        bool allow = mt_cmd_forward_fields(
+            m_ep, chip::app::Clusters::MicrowaveOvenControl::Id,
+            chip::app::Clusters::MicrowaveOvenControl::Commands::AddMoreTime::Id, fields);
+        if (allow && instance() != nullptr) {
+            instance()->SetCookTimeSec(finalCookTimeSec);
+        }
+        return allow ? Status::Success : Status::Failure;
+    }
+
+    /* PowerAsNumber-only. GetWattSettingByIndex() answering NOT_FOUND is not
+     * a stub: Init() only counts watt levels when PowerInWatts is set, so it
+     * is never called on this build, and the same is true of
+     * GetCurrentWattIndex() and GetWattRating(). The three power-limit
+     * getters ARE dead for a different and more interesting reason: the
+     * server only consults them when PowerNumberLimits is set, which
+     * conformance forbids without PowerAsNumber and esp-matter's own helper
+     * inverts, so MinPower/MaxPower/PowerStep always read the SDK's
+     * compiled-in 10/100/10 on both platforms. They are implemented anyway
+     * because the pure-virtual contract requires it, and they return the
+     * same constants the SDK would, so a future PowerNumberLimits build
+     * would not change behaviour by accident. */
+    CHIP_ERROR GetWattSettingByIndex(uint8_t index, uint16_t &wattSetting) override
+    {
+        (void)index;
+        (void)wattSetting;
+        return CHIP_ERROR_NOT_FOUND;
+    }
+
+    uint32_t GetMaxCookTimeSec() const override { return 86400; }
+    uint8_t GetPowerSettingNum() const override { return m_power_setting; }
+    uint8_t GetMinPowerNum() const override
+    {
+        return chip::app::Clusters::MicrowaveOvenControl::kDefaultMinPowerNum;
+    }
+    uint8_t GetMaxPowerNum() const override
+    {
+        return chip::app::Clusters::MicrowaveOvenControl::kDefaultMaxPowerNum;
+    }
+    uint8_t GetPowerStepNum() const override
+    {
+        return chip::app::Clusters::MicrowaveOvenControl::kDefaultPowerStepNum;
+    }
+    uint8_t GetCurrentWattIndex() const override { return 0; }
+    uint16_t GetWattRating() const override { return 0; }
+
+private:
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+    /* kDefaultMaxPowerNum, the value the server itself defaults an omitted
+     * powerSetting to and the value mwocAttrs seeds its shadow with. */
+    uint8_t m_power_setting = chip::app::Clusters::MicrowaveOvenControl::kDefaultMaxPowerNum;
+};
+
+/* One slot per serviceable endpoint, the opstate and chime pools' depth: one
+ * MicrowaveOvenControl cluster per microwave endpoint, so a seventeenth
+ * endpoint of any type fails its create before it could ask. Memory reclaim
+ * round A's shape, a table of pointers into the cluster-object heap with the
+ * Instance's raw storage behind each delegate in the same block.
+ *
+ * The Delegate's own SetInstance() carries the OperationalState shape, not
+ * the ModeBase one: VerifyOrDie(mInstance == nullptr || aInstance == nullptr
+ * || mInstance == aInstance) (microwave-oven-control-server.h:183-186), an
+ * ABORT on sharing. One delegate per Instance is enforced by the SDK here,
+ * not merely by this pool's discipline. */
+static HearthMwocDelegate *s_mwoc_delegates[kServiceableEndpoints];
+static size_t s_mwoc_delegate_next;
+
+extern "C" void *mt_matter_mwoc_delegate_alloc(void)
+{
+    if (s_mwoc_delegate_next >= kServiceableEndpoints) {
+        return nullptr;
+    }
+    HearthMwocDelegate *d =
+        obj_pair_new<HearthMwocDelegate, chip::app::Clusters::MicrowaveOvenControl::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_mwoc_delegates[s_mwoc_delegate_next++] = d;
+    return d;
+}
+
+/* The header's second half, and on this platform it stamps the endpoint and
+ * nothing else: the Instance cannot be born here, because this signature has
+ * no way to reach the other two Instances its constructor needs. It is
+ * called by mt_matter_mwoc_register() below as the first step of the ordered
+ * sequence, which is the only caller. */
+extern "C" void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    static_cast<HearthMwocDelegate *>(delegate)->set_endpoint(ep);
+}
+
+/*
+ * THE ORDERED CONSTRUCTION. Read the section comment above before changing a
+ * line of this; the order below is a correctness requirement that nothing at
+ * runtime enforces and every violation of which is silent.
+ */
+extern "C" void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_delegate,
+                                        void *mode_delegate, uint16_t ep)
+{
+    namespace Mwoc    = chip::app::Clusters::MicrowaveOvenControl;
+    namespace OpState = chip::app::Clusters::OperationalState;
+    namespace MwoMode = chip::app::Clusters::MicrowaveOvenMode;
+
+    /* A null delegate here is unrecoverable rather than degrading: there
+     * would be no object for the Instance constructor to bind a reference
+     * to. Cannot happen (all three claims aborted the create before anything
+     * was spent), so this is the drift alarm for a future edit that adds a
+     * claim without adding it to this call. */
+    if (mwoc_delegate == nullptr || opstate_delegate == nullptr || mode_delegate == nullptr) {
+        LOG_ERR("microwave endpoint %u: a delegate is missing (mwoc %p, opstate %p, mode %p); "
+                "no MicrowaveOvenControl cluster will be registered and every cooking command "
+                "will fail",
+                (unsigned)ep, mwoc_delegate, opstate_delegate, mode_delegate);
+        return;
+    }
+
+    /* STEP 1 and STEP 2, in this order and before anything else: the two
+     * Instances the MWOC constructor takes references to. Both are
+     * placement-constructed and Init()ed by these helpers, both returns are
+     * kept. */
+    CHIP_ERROR ops_err  = opstate_construct_and_init(opstate_delegate, ep);
+    CHIP_ERROR mode_err = modebase_construct_and_init(mode_delegate, ep);
+
+    OpState::Instance *ops_inst =
+        static_cast<HearthOpStateDelegate *>(opstate_delegate)->instance();
+    chip::app::Clusters::ModeBase::Instance *mode_inst =
+        static_cast<HearthModeBaseDelegate *>(mode_delegate)->instance();
+    if (ops_inst == nullptr || mode_inst == nullptr) {
+        /* Each Instance's constructor calls SetInstance(this) on its own
+         * delegate, so a null here means a constructor did not run, which
+         * the two steps above just did. Unreachable, and checked because
+         * binding a reference to it would be undefined rather than merely
+         * broken. */
+        LOG_ERR("microwave endpoint %u: neighbour Instance missing after construction "
+                "(opstate %p, mode %p); MicrowaveOvenControl will NOT be registered",
+                (unsigned)ep, (void *)ops_inst, (void *)mode_inst);
+        return;
+    }
+
+    /* STEP 3: only now can the MWOC Instance be built. The feature mask is
+     * kPowerAsNumber and is mandatory rather than chosen: Init() below
+     * refuses anything else, and it must agree with the FeatureMap seeded on
+     * mwocAttrs, which it does by both being derived from the same
+     * conformance fact. */
+    mt_matter_mwoc_delegate_set_endpoint(mwoc_delegate, ep);
+    auto *d = static_cast<HearthMwocDelegate *>(mwoc_delegate);
+    auto *mwoc_inst = new (obj_inst_storage<HearthMwocDelegate, Mwoc::Instance>(d))
+        Mwoc::Instance(d, ep, Mwoc::Id, chip::BitMask<Mwoc::Feature>(Mwoc::Feature::kPowerAsNumber),
+                       *ops_inst, *mode_inst);
+    CHIP_ERROR mwoc_err = mwoc_inst->Init();
+
+    /* All three returns, in one place. Each helper has already logged its
+     * own failure in its own words; this line exists so a bench sees the
+     * ENDPOINT named as degraded rather than three unrelated cluster
+     * complaints, and so a failure of this Init() (which nothing else logs)
+     * is never silent. */
+    if (mwoc_err != CHIP_NO_ERROR) {
+        LOG_ERR("microwave endpoint %u: MicrowaveOvenControl Instance::Init failed: "
+                "%" CHIP_ERROR_FORMAT
+                "; SetCookingParameters and AddMoreTime will not reach the host",
+                (unsigned)ep, mwoc_err.Format());
+    }
+    if (ops_err != CHIP_NO_ERROR || mode_err != CHIP_NO_ERROR || mwoc_err != CHIP_NO_ERROR) {
+        LOG_ERR("microwave endpoint %u is DEGRADED: opstate Init %" CHIP_ERROR_FORMAT
+                ", mode Init %" CHIP_ERROR_FORMAT ", control Init %" CHIP_ERROR_FORMAT,
+                (unsigned)ep, ops_err.Format(), mode_err.Format(), mwoc_err.Format());
+    }
+
+    /* THE READBACK. GetModeValueByModeTag(kNormal) is what
+     * SetCookingParameters uses to resolve an omitted cookMode, and a
+     * failure of it makes every cooking command answer InvalidCommand
+     * forever with nothing raised to the host. It succeeds here against the
+     * unfed ModeBase placeholder because placeholder_tag()'s
+     * MicrowaveOvenMode arm answers kNormal, which is the whole reason a
+     * freshly composed microwave works before the host has sent
+     * AT+MTMODES. Read back rather than trusted, because that arm is one
+     * edit away from being wrong and nothing else would notice. */
+    uint8_t normal_mode = 0;
+    CHIP_ERROR tag_err = mode_inst->GetModeValueByModeTag(
+        chip::to_underlying(MwoMode::ModeTag::kNormal), normal_mode);
+    if (tag_err != CHIP_NO_ERROR) {
+        LOG_ERR("microwave endpoint %u: NO MODE CARRIES THE kNormal TAG "
+                "(%" CHIP_ERROR_FORMAT "); every SetCookingParameters will answer "
+                "InvalidCommand and raise no +MTCMD. Check the MicrowaveOvenMode placeholder "
+                "tag and any host-fed AT+MTMODES list",
+                (unsigned)ep, tag_err.Format());
+    } else {
+        LOG_INF("microwave endpoint %u ready: kNormal resolves to mode %u", (unsigned)ep,
+                (unsigned)normal_mode);
+    }
 }
 
 /* ---- robotic vacuum cleaner: RvcOperationalState ----------------------
@@ -6264,11 +6668,13 @@ static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  *   ElectricalPowerMeasurement   120        28      148         160
  *   WaterHeaterManagement         48        40       88          96
  *   ModeBase                      16        64       80          88
+ *   MicrowaveOvenControl          12        64       76          88
  *   Chime                         12        40       56          64
  *   PowerTopology                  8        28       36          48
  *   water valve                    8         -        8          16
  *
- * (Sizes measured with nm on the 6c31f09 build; the constants below are
+ * (Sizes measured with nm on the 6c31f09 build, the MicrowaveOvenControl row
+ * read out of the compiler on the batch-8 build; the constants below are
  * sizeof()s, so the table is documentation and the arithmetic is not.)
  *
  * COST PER DEVICE TYPE is the sum over the families its cluster list draws
@@ -6280,10 +6686,12 @@ static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  *
  *   obj  device types (registry id, variant)          families claimed
  *   584  battery storage v0        0x0018 v0          DEM + ModeBase + EPM + PowerTopology
+ *   440  microwave oven            0x0079             OperationalState + ModeBase + MWOC
  *   448  robotic vacuum cleaner    0x0074             RvcOpState + 2 x ModeBase
  *   392  water heater v0           0x050F v0          WHM + ModeBase + EPM + PowerTopology
  *   376  device energy mgmt        0x050D v0 and v1   DEM + ModeBase
  *   312  electrical UTILITY meter  0x0511             MeterIdentification
+ *   352  cabinet, Heater           0x0071 under 0x007B  OperationalState + ModeBase
  *   264  laundry washer, dishwasher, laundry dryer
  *                                  0x0073 0x0075 0x007C   OperationalState
  *   208  electrical sensor         0x0510 v0 and v1   EPM + PowerTopology
@@ -6293,8 +6701,12 @@ static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  *   184  water heater v1           0x050F v1          WHM + ModeBase
  *   160  electrical meter          0x0514 v0 and v1   EPM
  *    64  chime                     0x0146             Chime
+ *    88  refrigerator              0x0070             ModeBase
+ *        cabinet, Cooler           0x0071 under 0x0070 ModeBase
  *    16  water valve               0x0042             valve delegate
- *     0  the other thirty catalogue rows
+ *     0  the other thirty-three catalogue rows, the unparented cabinet,
+ *        the cook surface, the cooktop, the oven and the extractor hood
+ *        among them
  *
  * Mode select (0x0027) is deliberately in the zero row: it takes the ONE
  * process-global SupportedModesManager, not a per-endpoint object.
@@ -6311,9 +6723,10 @@ static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  * sixteen endpoints (kServiceableEndpoints), 8,112 usable bytes of endpoint
  * block heap, and the per-family caps (MT_MEAS_MAX 8 for each of EPM and
  * PowerTopology, MT_DEM_MAX 4, MT_WHM_MAX 4, MT_METER_MAX 2,
- * kModeBasePoolSlots 20). The four 16-deep pools (OperationalState,
- * RvcOperationalState, Chime, valve) can never bind: each endpoint draws at
- * most one of each and there are at most sixteen endpoints.
+ * kModeBasePoolSlots 20). The FIVE 16-deep pools (OperationalState,
+ * RvcOperationalState, Chime, valve and, since batch 8, MicrowaveOvenControl)
+ * can never bind: each endpoint draws at most one of each and there are at
+ * most sixteen endpoints.
  *
  * Fix round C1: this is now an EXHAUSTIVE maximisation over every
  * admissible multiset of the table's rows, not a greedy fill. The greedy
@@ -6324,47 +6737,65 @@ static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  * block heap, so the greedy answer (6,112 B) was 224 B under the truth and
  * 16 B under what the heap then held. The maximum is:
  *
- *   4 x battery storage v0   2,336 B   block 3,424   DEM 4/4, EPM 4/8, PTOP 4/8, MB 4
- *   4 x robotic vacuum       1,792 B   block 3,456   RvcOpState 4/16, MB 12/20
- *   2 x utility meter          624 B   block   256   METER 2/2
- *   6 x laundry washer       1,584 B   block   864   OperationalState 6/16
+ *   13 x microwave oven      5,720 B   block 6,968   OpState 13/16, MWOC 13/16, MB 13
+ *    2 x utility meter          624 B   block   256   METER 2/2
+ *    1 x battery storage v0     584 B   block   856   DEM 1/4, EPM 1/8, PTOP 1/8, MB 1
  *   ---------------------------------------------------------------------
- *   16 endpoints             6,336 B   block 8,000 of 8,112 B
+ *   16 endpoints             6,928 B   block 8,080 of 8,112 B
  *
- * Every wall is satisfied and two of them are exactly saturated. The search
- * was run twice: once with the block-heap constraint dropped entirely,
- * which gives 7,216 B (4 battery + 6 RVC + 4 water heater + 2 meter, 12,096 B
- * of block, so the block heap IS load-bearing for the answer), and once with
- * it, which gives the 6,336 B above. The result does not move for block
- * budgets up to 8,400 B, nor if battery storage's block cost is taken as 840
- * rather than the compile-time-pinned 856, so it is not sensitive to the one
- * block figure that is arguable.
+ * CATALOGUE BATCH 8 MOVED THIS, and the microwave oven is the whole reason.
+ * Three per-endpoint object pairs (OperationalState, MicrowaveOvenMode's
+ * ModeBase and MicrowaveOvenControl) on a 536 B block is 0.82 object bytes
+ * per block byte, against battery storage's 0.68 and the RVC's 0.52, so a
+ * composition of microwaves now dominates the answer where a mix of the
+ * heaviest energy types used to. The pre-batch-8 maximum was 6,336 B from
+ * 4 battery + 4 RVC + 2 meter + 6 washer, 8,000 B of block; that mix is
+ * still admissible, it is simply no longer the largest.
  *
- * NOTE FOR THE LM20 TIER: 6,336 is a function of the block budget. Raising
- * HEARTH_EP_HEAP_BYTES admits object-heavier compositions (9,000 B of block
- * gives 6,520 B), so this heap must be re-derived and raised whenever that
- * one is.
+ * Every wall is satisfied: 16 endpoints exactly, the block heap 32 B short
+ * of its own wall, METER saturated, ModeBase 14 of 20 and OperationalState
+ * 13 of 16. Nearby mixes the same search reports: 2 meter + 14 microwave
+ * gives 6,784; 2 meter + 2 battery + 12 microwave wants 8,400 B of block and
+ * does not fit; 15 microwave + 1 cooktop gives 6,600. A second battery is
+ * what the 32 spare block bytes are 288 short of affording.
+ *
+ * The search is the same exhaustive maximisation over every admissible
+ * multiset the fix round C1 introduced, not a greedy fill, re-run against
+ * the full batch-8 catalogue with the seven new device types and their
+ * thirteen realised shapes added and with kObjMwoc taken from sizeof rather
+ * than estimated. It reproduces the pre-batch-8 6,336 B answer exactly when
+ * the batch-8 rows are removed, which is the check that it models the same
+ * problem the old comment did.
+ *
+ * The batch's other new object-drawing shapes do not compete and it is worth
+ * saying why, since two of them look close: the heater cabinet draws 352 B
+ * on a 536 B block, which is strictly worse than the microwave's 440 B on
+ * the same block, and the cooler cabinet and refrigerator draw 88 B on 472
+ * and 520 B blocks. Every one of them is dominated, so none appears in any
+ * maximising mix.
+ *
+ * NOTE FOR THE LM20 TIER: 6,928 is a function of the block budget. Raising
+ * HEARTH_EP_HEAP_BYTES admits object-heavier compositions, so this heap must
+ * be re-derived and raised whenever that one is.
  *
  * HEARTH_OBJ_HEAP_BYTES is 7168 since catalogue batch 8, which leaves 7,088
  * usable. The assertions below pin that against the worst mix and against
  * the two uniform compositions worth naming separately, so a future delegate
  * or Instance that grows fails the build here rather than a bench run later:
  *
- *   worst mixed composition   6,336   fits
+ *   worst mixed composition   6,928   fits, 160 B spare
  *   16 x laundry washer       4,224   fits
  *   9 x RVC (the block heap's own limit for that type)   4,032   fits
+ *   15 x microwave oven (the block heap's own limit)     6,600   fits
  *
- * WHY THE HEAP IS ALREADY 7168 WHILE THE WORST MIX IS STILL 6,336, at this
- * commit and only at this commit. Batch 8's sequencing raises the heap on
- * its own, ahead of every consumer, because the resize is the one change in
- * the batch that must not land in the same commit as the type that provokes
- * it: sizing a heap in the same diff that first draws on it is how a sizing
- * argument stops being checkable. Nothing in the catalogue draws the extra
- * 640 B yet. The Microwave Oven (0x0079) does, at the end of the batch, and
- * that commit re-derives this whole section against the real
- * obj_pair_bytes<HearthMwocDelegate, MicrowaveOvenControl::Instance>() and
- * moves the pinned figure below. Until then the spare bytes are exactly
- * that: spare.
+ * The resize itself landed two commits before the microwave, alone and ahead
+ * of every consumer, because sizing a heap in the same diff that first draws
+ * on it is how a sizing argument stops being checkable. This is the commit
+ * that spends it, and the 160 B margin is the same deliberate over-sizing
+ * ruling DE413 chose when the figures were 6,528 and 6,336: this heap is
+ * sized ABOVE its worst case, unlike the endpoint block heap, because a
+ * heap that could bite first would silently move a capacity boundary the
+ * README already states.
  *
  * This is a deliberately different trade from the endpoint block heap's.
  * That heap is sized BELOW its own worst case (16 extended colour lights
@@ -6401,6 +6832,17 @@ constexpr size_t kObjWhm = kObjCostOf(
 constexpr size_t kObjMeter =
     kObjCostOf(sizeof(chip::app::Clusters::MeterIdentification::Instance));
 constexpr size_t kObjValve = kObjCostOf(sizeof(HearthValveDelegate));
+/* Catalogue batch 8. PINNED BY sizeof, not estimated: the batch audit put
+ * this pair at "about 88 B" and said outright that the worst-mix search's
+ * answer depends on it, so the number below is the compiler's and the
+ * static_assert under it is what stops a future SDK bump from moving the
+ * worst case quietly. */
+constexpr size_t kObjMwoc = kObjCostOf(
+    obj_pair_bytes<HearthMwocDelegate,
+                   chip::app::Clusters::MicrowaveOvenControl::Instance>());
+static_assert(kObjMwoc == 88,
+              "the MicrowaveOvenControl pair changed size; re-run the worst-composition search "
+              "before touching the assertions below");
 
 /* Per device type, from mt_devtype_create()'s claim block. The five the
  * worst mix uses, plus the two the standalone assertions need; the full
@@ -6410,14 +6852,16 @@ constexpr size_t kObjPerRvc              = kObjRvcOpState + 2 * kObjModeBase;
 constexpr size_t kObjPerWaterHeaterV0    = kObjWhm + kObjModeBase + kObjEpm + kObjPtop;
 constexpr size_t kObjPerUtilityMeter     = kObjMeter;
 constexpr size_t kObjPerWasherTrio       = kObjOpState;
+/* Catalogue batch 8: the catalogue's only THREE-pair device type, and the
+ * one that moved the maximum. */
+constexpr size_t kObjPerMicrowaveOven    = kObjOpState + kObjModeBase + kObjMwoc;
 
 /* The 16-endpoint mix that maximises the draw, from the exhaustive search
- * in the comment above. DEM and METER are saturated, the endpoint count is
- * saturated, and the endpoint block heap is 112 B from its own wall. */
-constexpr size_t kObjWorstMixBytes = 4 * kObjPerBatteryStorageV0 +
-                                     4 * kObjPerRvc +
+ * in the comment above. METER is saturated, the endpoint count is
+ * saturated, and the endpoint block heap is 32 B from its own wall. */
+constexpr size_t kObjWorstMixBytes = 13 * kObjPerMicrowaveOven +
                                      2 * kObjPerUtilityMeter +
-                                     6 * kObjPerWasherTrio;
+                                     1 * kObjPerBatteryStorageV0;
 
 /* Not in the worst mix, but its cost feeds the search that found the mix,
  * so it is pinned here: if the water heater grows, the search has to be
@@ -6442,6 +6886,6 @@ static_assert(kObjPerRvc * kObjRvcEndpointLimit <= kObjHeapUsableBytes,
 /* Pinned so a delegate or Instance that changes size fails the build here
  * and forces the table above to be re-read, rather than silently moving the
  * worst case. */
-static_assert(kObjWorstMixBytes == 6336, "the worst-composition arithmetic moved off 6,336 B");
+static_assert(kObjWorstMixBytes == 6928, "the worst-composition arithmetic moved off 6,928 B");
 
 } /* namespace */

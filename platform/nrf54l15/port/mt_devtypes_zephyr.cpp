@@ -99,6 +99,18 @@ extern "C" void mt_matter_whm_register(void *delegate, uint16_t ep, bool with_em
  * endpoint from the SDK's own Reset() before every iteration. */
 extern "C" void mt_matter_temp_levels_register(void);
 
+/* Catalogue batch 8: the microwave's three-way second half. Port-local for
+ * the reason every register above is, and a SINGLE function rather than
+ * three calls for a reason none of them had: MicrowaveOvenControl::Instance's
+ * constructor takes C++ REFERENCES to the live OperationalState and ModeBase
+ * Instances, so those two must be fully constructed before it can even be
+ * built. That order is a correctness requirement nothing at runtime
+ * enforces, and every way of getting it wrong is silent, so it is owned by
+ * one function with the sequence fixed and commented rather than by the call
+ * order of three independent-looking lines here. */
+extern "C" void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_delegate,
+                                        void *mode_delegate, uint16_t ep);
+
 using namespace chip;
 using namespace chip::app::Clusters;
 
@@ -3924,6 +3936,142 @@ constexpr hearth_shape kCookSurfaceShapes[] = {
     { 1, kDtCooktop, &cookSurfaceLevelEndpoint },
 };
 
+/* ---- microwave oven (0x0079) -------------------------------------------
+ *
+ * Catalogue batch 8 audit, MicrowaveOvenMode (0x005E) and
+ * MicrowaveOvenControl (0x005F). The heaviest device type in the batch by
+ * every measure: three per-endpoint object pairs on one endpoint, and the
+ * one type whose object draw moved HEARTH_OBJ_HEAP_BYTES.
+ *
+ * MicrowaveOvenMode 0x005E:
+ *
+ *   Code-driven? No. CHI-only? No either (absent from config-data.yaml:
+ *   21-88), and harmlessly, because IT DECLARES NO COMMANDS AT ALL. The
+ *   regeneration left IMClusterCommandHandler.cpp byte-identical.
+ *
+ *   THE TRAP, and it is a copy-paste trap rather than a reasoning one:
+ *   MicrowaveOvenMode has NO ChangeToMode command. Every other ModeBase
+ *   alias in this file reuses kModeBaseIncoming and kModeBaseOutgoing, and
+ *   this one MUST NOT: its incoming and outgoing lists are both nullptr, so
+ *   AcceptedCommandList and GeneratedCommandList come out empty. The mode is
+ *   selected through MicrowaveOvenControl's SetCookingParameters cookMode
+ *   field instead (AT_MT_SPEC.md 1381-1382, 1980-1984; batch 5's audit found
+ *   the same). Advertising ChangeToMode here would let a controller invoke a
+ *   command microwave-oven-mode-cluster.xml does not define, and the ModeBase
+ *   Instance's own CommandHandlerInterface would execute it.
+ *
+ *   Everything else about it is the standard alias: modeBaseAttrs verbatim,
+ *   a ModeBase pool slot, a block-resident mt_mb_store_t, and Init()'s
+ *   VerifyOrDie ordering hazard.
+ *
+ * MicrowaveOvenControl 0x005F:
+ *
+ *   Code-driven? No. CHI-only? YES (config-data.yaml:61), so no generated
+ *   dispatch for its two commands; the Instance's own
+ *   CommandHandlerInterface takes them. Events: none.
+ *
+ *   Its Instance is the batch's sharpest hazard, and the whole ordering
+ *   contract lives at mt_matter_mwoc_register() in mt_matter_zephyr.cpp.
+ *
+ *   PowerAsNumber is MANDATORY and PowerNumberLimits is dead code, and that
+ *   pair of facts is why mwocAttrs is four attributes and not nine.
+ *   Instance::Init() enforces exactly one of PowerAsNumber/PowerInWatts and
+ *   that PowerNumberLimits implies PowerAsNumber
+ *   (microwave-oven-control-server.cpp:66-96); esp-matter's own create() runs
+ *   VALIDATE_FEATURES_EXACT_ONE against PowerAsNumber alone
+ *   (esp_matter_cluster.cpp:3083-3084), and its power_number_limits::add()
+ *   only applies when PowerAsNumber is ABSENT, the inverse of conformance
+ *   and therefore dead in the pinned tree. Consequence, on both platforms:
+ *   MinPower, MaxPower and PowerStep are NOT declared and read the SDK's own
+ *   compiled-in 10/100/10 (microwave-oven-control-server.cpp:163-179,
+ *   constants at the header's :34-38). SupportedWatts, SelectedWattIndex and
+ *   WattRating are PowerInWatts-side and absent for the same reason.
+ *
+ *   CookTime, MaxCookTime and PowerSetting ARE declared, and all three are
+ *   Instance-served: Instance::Read() answers CookTime from its own member
+ *   and the other two from the delegate (:145-155). The slots exist for
+ *   AttributeList truthfulness and are seeded to exactly what those sources
+ *   serve at boot, the FanControl agreement discipline, so an AT+MTATTR read
+ *   answers the same value a controller sees until the first cooking command
+ *   moves the live value. NO k_instance_served carve-out, deliberately and
+ *   against the audit's suggestion: AT_MT_SPEC.md 1441-1456 says plainly
+ *   that neither attribute raises a +MTATTR URC and that a host reads them
+ *   back only through a commissioned controller, because SetCookTimeSec()
+ *   and the delegate's own bookkeeping bypass emberAfWriteAttribute
+ *   entirely. A carve-out would have made the AT read live and contradicted
+ *   the published contract; the shadow going stale is what the spec
+ *   describes.
+ *
+ * AddMoreTime is where this port is SIMPLER than the C6. esp-matter ships
+ * create_add_more_time() (esp_matter_command.cpp:2590) with zero callers, so
+ * the C6's thunk hand-adds it after create() (mt_devtypes.cpp:946-949). Here
+ * the accepted-command list is declared metadata and AddMoreTime is simply a
+ * second entry in it.
+ *
+ * OperationalState needs its OWN attribute list, and this is the one place
+ * opStateAttrs could not be reused: MicrowaveOven.xml:76-88 makes
+ * CountdownTime (0x0002) MANDATORY and opStateAttrs does not declare it.
+ * Instance::Read() serves it from the delegate's GetCountdownTime()
+ * (operational-state-server.cpp:402-406), which this port's delegate answers
+ * NullNullable for, so the ember slot is an inert shadow seeded to the uint32
+ * null sentinel: the arena read and the served value agree on null, both
+ * answer +MTERR:5, and no carve-out row is needed. That agreement is exactly
+ * why CountdownTime is NOT in k_instance_served even though its two
+ * neighbours on the same cluster are.
+ *
+ * NO Identify: microwave_oven::config_t derives from
+ * app_with_operational_state_config, whose base has no identify field at all
+ * (mt_devtypes.cpp:885-889), and MicrowaveOven.xml agrees.
+ *
+ * Revision 2 per data_model/1.5/device_types/MicrowaveOven.xml. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(microwaveOpStateAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::PhaseList::Id, ARRAY, 0,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::CurrentPhase::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::CountdownTime::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalStateList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalError::Id, STRUCT, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(mwocAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(MicrowaveOvenControl::Attributes::CookTime::Id, INT32U, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(MicrowaveOvenControl::Attributes::MaxCookTime::Id, INT32U, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(MicrowaveOvenControl::Attributes::PowerSetting::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(MicrowaveOvenControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kMwocIncoming[] = {
+    MicrowaveOvenControl::Commands::SetCookingParameters::Id,
+    MicrowaveOvenControl::Commands::AddMoreTime::Id, kInvalidCommandId
+};
+
+/* kOpStateIncoming keeps all four commands here, and Start is load-bearing
+ * beyond its own invoke: SetCookingParameters with a startAfterSetting field
+ * asks the data model provider whether OperationalState's Start command is
+ * accepted on this endpoint, and answers InvalidCommand if it is not
+ * (microwave-oven-control-server.cpp:249-273). Dropping Start from this list
+ * as "the host starts it anyway" would break a legal cooking command. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(microwaveOvenClusters)
+DECLARE_DYNAMIC_CLUSTER(OperationalState::Id, microwaveOpStateAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kOpStateIncoming, kOpStateOutgoing),
+    /* nullptr, NOT kModeBaseIncoming: this alias has no ChangeToMode at all
+     * (the section comment's trap). */
+    DECLARE_DYNAMIC_CLUSTER(MicrowaveOvenMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(MicrowaveOvenControl::Id, mwocAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kMwocIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(microwaveOvenEndpoint, microwaveOvenClusters);
+
+constexpr EmberAfDeviceType kMicrowaveOvenTypes[] = { { 0x0079, 2 } };
+
 /* ---- the registry ---------------------------------------------------- */
 
 /* Catalogue batch 7a added ep_type_v1, the port's rendering of the C6's
@@ -4057,6 +4205,7 @@ constexpr hearth_devtype s_registry[] = {
       Span<const EmberAfDeviceType>(), Span<const hearth_shape>(kCabinetShapes) },
     { kDtCookSurface, 1, nullptr, Span<const EmberAfDeviceType>(kCookSurfaceTypes), nullptr,
       Span<const EmberAfDeviceType>(), Span<const hearth_shape>(kCookSurfaceShapes) },
+    { 0x0079, 0, &microwaveOvenEndpoint, Span<const EmberAfDeviceType>(kMicrowaveOvenTypes) },
 };
 
 /*
@@ -4276,6 +4425,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   mode select             0x0027            3      8      576        584
  *   colour temperature lt   0x010C            5     32      532        536
  *   cabinet heater v0       0x0071            4     13      530        536
+ *   microwave oven          0x0079            4     13      530        536
  *   refrigerator            0x0070            4     12      514        520
  *   cabinet cooler v0       0x0071            3      9      462        472
  *   device energy mgmt v0   0x050D            3      9      462        472
@@ -4618,6 +4768,8 @@ constexpr store_desc kStoreWalk[] = {
       sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
     /* Catalogue batch 8: the heater cabinet's mode list, the sixth. */
     { OvenMode::Id, kInvalidAttributeId, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
+    /* Catalogue batch 8: the microwave's mode list, the seventh. */
+    { MicrowaveOvenMode::Id, kInvalidAttributeId, sizeof(mt_mb_store_t), alignof(mt_mb_store_t) },
     /* Catalogue batch 8: the temperature-level label store, and the ONLY row
      * with an attribute discriminator (the struct comment). Present on a
      * variant-1 cabinet or cook surface, absent on their variant-0 forms,
@@ -5984,6 +6136,49 @@ const attr_seed s_seeds[] = {
       { 0x00 } },
     { OvenCavityOperationalState::Id, Globals::Attributes::ClusterRevision::Id, 2,
       { 0x01, 0x00 } },
+
+    /* MicrowaveOvenMode. ClusterRevision 1 is LIVE (the ModeBase AAI has no
+     * revision case, the standing rule on the seventh alias) and is
+     * MicrowaveOvenMode/Metadata.h:20 in THIS tree; the C6 says 2, a
+     * disclosable divergence. CurrentMode 0 and FeatureMap 0 are the
+     * zero-fill.
+     *
+     * MicrowaveOvenControl. All four declared values are Instance-served
+     * shadows kept equal to what Instance::Read() answers at boot, the
+     * FanControl agreement discipline (the mwocAttrs audit note explains why
+     * there is no k_instance_served carve-out and why the shadow is expected
+     * to go stale after the first cooking command):
+     *   CookTime 30, kDefaultCookTimeSec, the Instance's own mCookTimeSec
+     *     initialiser (microwave-oven-control-server.h:34) and the value
+     *     microwave-oven-control-cluster.xml:50 gives the attribute. The
+     *     audit's estimate said 0; 30 is what the server actually serves
+     *     from the first read onward, and a shadow that disagrees with its
+     *     source on boot would be wrong for no gain.
+     *   MaxCookTime 86400, HearthMwocDelegate::GetMaxCookTimeSec(), the C6's
+     *     same constant and the XML's own maximum.
+     *   PowerSetting 100, kDefaultMaxPowerNum and the delegate's
+     *     m_power_setting initialiser.
+     *   FeatureMap 0x01, Feature::kPowerAsNumber, MANDATORY rather than
+     *     chosen (the mwocAttrs note), and the value Init() will refuse to
+     *     start without.
+     * ClusterRevision 1 is MicrowaveOvenControl/Metadata.h:20.
+     *
+     * The microwave's OperationalState seeds ride the existing 0x0060 rows
+     * except CountdownTime, which no earlier device type declares: 0xFFFFFFFF
+     * is the uint32 null sentinel, matching the NullNullable the delegate's
+     * GetCountdownTime() answers, so the inert shadow and the served value
+     * agree on null. */
+    { MicrowaveOvenMode::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
+    { OperationalState::Id, OperationalState::Attributes::CountdownTime::Id, 4,
+      { 0xFF, 0xFF, 0xFF, 0xFF } }, /* null */
+    { MicrowaveOvenControl::Id, MicrowaveOvenControl::Attributes::CookTime::Id, 4,
+      { 0x1E, 0x00, 0x00, 0x00 } },
+    { MicrowaveOvenControl::Id, MicrowaveOvenControl::Attributes::MaxCookTime::Id, 4,
+      { 0x80, 0x51, 0x01, 0x00 } },
+    { MicrowaveOvenControl::Id, MicrowaveOvenControl::Attributes::PowerSetting::Id, 1, { 0x64 } },
+    { MicrowaveOvenControl::Id, MicrowaveOvenControl::Attributes::FeatureMap::Id, 4,
+      { 0x01, 0x00, 0x00, 0x00 } },
+    { MicrowaveOvenControl::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x01, 0x00 } },
 };
 
 /* Fills this endpoint's block. Walks the same two predicates count_slots()
@@ -6223,7 +6418,7 @@ mt_mb_store_t *mt_dyn_mb_store(EndpointId ep, ClusterId cluster)
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
         cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id &&
         cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id &&
-        cluster != OvenMode::Id) {
+        cluster != OvenMode::Id && cluster != MicrowaveOvenMode::Id) {
         return nullptr;
     }
     for (auto &d : s_dyn) {
@@ -6786,6 +6981,41 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 8: the microwave's TWO claims, on top of the
+     * OperationalState claim it already made above. Three per-endpoint
+     * object pairs on one endpoint, the most in the catalogue, and the
+     * reason HEARTH_OBJ_HEAP_BYTES moved this batch. Both abort before
+     * anything is spent, the standing rule; the second halves are NOT
+     * independent and are handed to one ordering function below. */
+    void *mwoc_delegate = nullptr;
+    void *microwave_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, MicrowaveOvenControl::Id)) {
+        mwoc_delegate = mt_matter_mwoc_delegate_alloc();
+        if (mwoc_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: MicrowaveOvenControl delegate pool exhausted (%u slots, "
+                    "one per serviceable endpoint); %u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
+                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    if (type_has_cluster(ep_type, MicrowaveOvenMode::Id)) {
+        microwave_mode_delegate = mt_matter_modebase_delegate_alloc(MicrowaveOvenMode::Id);
+        if (microwave_mode_delegate == nullptr) {
+            LOG_ERR("devtype 0x%04X: modebase delegate pool exhausted (microwave oven mode); "
+                    "%u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     void *valve_delegate = nullptr;
     if (type_has_cluster(ep_type, ValveConfigurationAndControl::Id)) {
         valve_delegate = mt_matter_valve_delegate_alloc();
@@ -6925,6 +7155,17 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
          * obligation. */
         if (type_has_cluster(ep_type, OvenMode::Id)) {
             new (region + store_offset(ep_type, OvenMode::Id)) mt_mb_store_t();
+        }
+        /* Catalogue batch 8: the microwave's mode list. The obligation is
+         * SHARPER here than anywhere else it appears, because the ModeBase
+         * Init()'s index-0 read is not the only reader of the placeholder:
+         * MicrowaveOvenControl's very first SetCookingParameters resolves
+         * its default cookMode through GetModeValueByModeTag(kNormal), which
+         * walks this delegate's tags. An unconstructed store there would not
+         * merely fail an Init, it would refuse every cooking command with a
+         * status the server also produces legitimately. */
+        if (type_has_cluster(ep_type, MicrowaveOvenMode::Id)) {
+            new (region + store_offset(ep_type, MicrowaveOvenMode::Id)) mt_mb_store_t();
         }
         /* Catalogue batch 8: the temperature-level label store, the first
          * store whose presence is finer than a cluster id (the kStoreWalk
@@ -7136,7 +7377,19 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * Init() failure is logged loudly inside and does not abort, the
      * valve read-back's reasoning: unreachable by ordering, and the
      * endpoint is live and correct in every other respect by then. */
-    if (opstate_delegate != nullptr) {
+    /* Catalogue batch 8: the microwave takes the ordered path instead, and
+     * the else here is the whole guard against constructing its
+     * OperationalState Instance twice. Every other type's second halves are
+     * independent and may run in any order among themselves; this one's are
+     * a three-way construction ORDER whose violations are all silent, so
+     * they are handed to a single function that owns the sequence. See
+     * mt_matter_mwoc_register() in mt_matter_zephyr.cpp for the contract;
+     * the two ModeBase and OperationalState claims it consumes were made in
+     * the claim block above like everyone else's. */
+    if (mwoc_delegate != nullptr) {
+        mt_matter_mwoc_register(mwoc_delegate, opstate_delegate, microwave_mode_delegate,
+                                d.ep_id);
+    } else if (opstate_delegate != nullptr) {
         mt_matter_opstate_delegate_set_endpoint(opstate_delegate, d.ep_id);
     }
 
