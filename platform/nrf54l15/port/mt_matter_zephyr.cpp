@@ -4994,7 +4994,7 @@ static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  *     the round B rule mt_matter.h:865-874 fixes, and the reset after
  *     emission is what implements it.
  *   ALSO CONSUMED: by the guarded (Inactive-state) CancelBoost, RULED
- *     this round (graph B411; batch 7b review I1). An accepted Boost a
+ *     this round (ruled at B410; batch 7b review I1). An accepted Boost a
  *     controller then cancels before the host ever pushes Active is a
  *     boost that never started, and the spec's own no-cache-on-deny
  *     rationale ("a denied Boost never started anything") applies to it
@@ -5051,7 +5051,7 @@ static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  * SUCCESS and no event sent" for exactly that case (TC_EWATERHTR_2_2 step
  * 26; AT_MT_SPEC.md 3.17:1487-1495). This port mirrors the observable
  * behaviour (Success, no +MTCMD, no event) and ADDS the ruled
- * cache consume the lifecycle block above records (B411): the one
+ * cache consume the lifecycle block above records (the B410 ruling): the one
  * deliberate divergence from both the C6 and the SDK reference delegate,
  * neither of which clears its cache there (the C6's window is parked as
  * B410). The guard reads the host-pushed BoostState cache, the same
@@ -5197,7 +5197,7 @@ public:
      * there is nothing for the host to adjudicate (the section comment
      * traces where the guard lives on each platform; the SDK server has
      * none). The guarded answer is SUCCESS-and-silence, not a failure,
-     * AND it consumes the parameter cache (ruling B411, the lifecycle
+     * AND it consumes the parameter cache (B410 ruling, the lifecycle
      * block's ALSO CONSUMED arm: a cancelled not-yet-started boost is a
      * boost that never started, so its parameters must not survive to
      * describe some future unrelated one; the C6's identical stale
