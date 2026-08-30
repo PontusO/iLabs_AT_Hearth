@@ -6872,6 +6872,11 @@ static_assert(kObjPerWaterHeaterV0 == 392,
 /* The endpoint block heap admits nine RVCs (8,112 usable / 864 per block);
  * named here so the RVC row cannot drift out of step with that heap. */
 constexpr size_t kObjRvcEndpointLimit = 9;
+/* Catalogue batch 8: and fifteen microwaves (8,112 / 536), one short of the
+ * endpoint count. Named for the RVC's reason: the README quotes the figure
+ * in its capacity table, and the assertion below is what keeps that row from
+ * drifting out of step with either heap. */
+constexpr size_t kObjMicrowaveEndpointLimit = 15;
 
 static_assert(kObjWorstMixBytes <= kObjHeapUsableBytes,
               "the cluster-object heap no longer covers the worst composition the other walls "
@@ -6882,6 +6887,9 @@ static_assert(kObjPerWasherTrio * kServiceableEndpoints <= kObjHeapUsableBytes,
 static_assert(kObjPerRvc * kObjRvcEndpointLimit <= kObjHeapUsableBytes,
               "the cluster-object heap no longer holds the nine RVC endpoints the endpoint "
               "block heap admits; raise HEARTH_OBJ_HEAP_BYTES");
+static_assert(kObjPerMicrowaveOven * kObjMicrowaveEndpointLimit <= kObjHeapUsableBytes,
+              "the cluster-object heap no longer holds the fifteen microwave endpoints the "
+              "endpoint block heap admits; raise HEARTH_OBJ_HEAP_BYTES");
 
 /* Pinned so a delegate or Instance that changes size fails the build here
  * and forces the table above to be re-read, rather than silently moving the
