@@ -731,6 +731,79 @@ and joiner-router state) plus a 4 KB message-pool floor, and is
 deliberately not taken. `CONFIG_OPENTHREAD_MAX_CHILDREN=16` is the part
 of that cost this round did trim.
 
+### Memory reclaim round B (2026-08-30)
+
+Round B is the cross-cutting half: one item in the SHARED `core/`, which
+the ESP32-C6 firmware compiles too, and one in the SDK, which needed a
+patch mechanism this project did not have. It returns 17,648 B on
+`ophelia_cpico` and 17,640 B on `nrf54l15dk` and, like round A, changes no
+AT command, URC, error code or seed. Pristine builds, 2026-08-30:
+
+| | Batch 8 (`abe72e7`) | Memory reclaim B |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 231,204 B (88.20%) | **213,556 B (81.47%)** |
+| RAM used, `nrf54l15dk` | 231,420 B (88.28%) | **213,780 B (81.55%)** |
+| RAM free, `ophelia_cpico` | 30,940 B | **48,588 B** |
+| RAM free, `nrf54l15dk` | 30,724 B | **48,364 B** |
+| Flash, `ophelia_cpico` | 883,120 B (64.26%) | **883,704 B (64.31%)** |
+| Flash, `nrf54l15dk` | 891,012 B (60.93%) | **891,600 B (60.97%)** |
+
+(`abe72e7` is round A plus catalogue batch 8, which is why the baseline
+reads 744 B above the round A row in the table above it. Same measurement,
+one merge later.)
+
+Two items, each measured on its own with `nm -S` and the linked image:
+
+| Item | RAM, `ophelia_cpico` | Flash |
+|---|---|---|
+| The two row stages become session-allocated | **-11,208 B** | +160 B |
+| The EEM measurement table becomes an instance pool | **-6,440 B** | +424 B |
+
+1. **The row stages are allocated per session, not reserved for ever.**
+   `core/mt/mt_at.c` held two `mt_row_stage_t` buffers of 5,608 B each in
+   `.bss`, measured: `s_row_stage` for the host's own `AT+MTROW` sets and
+   `s_row_inbound` for the ones a controller's `SetTargets` brings in. Both
+   are now allocated when a staging session opens and released when it
+   ends, so a build pays for them only while a set is actually staged.
+   **The capacity is unchanged and so is the wire contract**: a host still
+   stages `MT_ROW_MAX_ROWS` rows and still gets every error code
+   `AT_MT_SPEC.md` 3.28 specifies for every input. This is deliberately NOT
+   a compile-time removal of the row family on the platforms whose EVSE is
+   out of tier (ruling DE419): removing it would have made the reclaim
+   conditional on that exclusion and would have had to be undone to take
+   the EVSE back. The mechanism is platform-neutral, with no per-platform
+   `#ifdef` in the four verb handlers, because `core/` is shared: a
+   platform whose host never sends `AT+MTROW` simply never allocates.
+2. **The EEM measurement table, via the first SDK patch.**
+   `gMeasurements` in connectedhomeip's
+   `ElectricalEnergyMeasurementCluster.cpp` is indexed by
+   `emberAfGetClusterServerEndpointIndex()`, so it is declared as long as
+   the whole dynamic endpoint space and charged in full the moment the
+   cluster enters the build: 17 x 496 = 8,432 B measured, whether or not a
+   composition ever declares an energy endpoint. The endpoint-block
+   technique cannot reach it, because the indexing is inside the SDK. The
+   patch caps it at
+   `CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES` (4 here, the
+   `MT_DEM_MAX`/`MT_WHM_MAX` depth) and claims slots by endpoint id:
+   1,984 B plus a 12 B claim table, so 6,436 B of `.bss` by symbol.
+
+**The patch mechanism is `west patch`, and it is documented in
+`sdk-patches/README.md`.** Patches live in this repository, not in the
+workspace; two commands apply and remove them; and `CMakeLists.txt` REFUSES
+TO CONFIGURE against an unpatched tree. That refusal is the load-bearing
+part. The patch defaults to stock behaviour when its macro is unset, which
+is what makes it upstreamable and is exactly what makes its absence
+invisible: an unpatched tree compiles, links, boots and works, and quietly
+gives the 6.4 KB back. Read `sdk-patches/README.md` before an SDK bump;
+`west update` does not carry a patch forward.
+
+**What this means for the EVSE.** Ruling DE408 put the Energy EVSE in the
+LM20 tier and this round does not change that. It does remove the standing
+cost of the row machinery the EVSE needs: the 11,216 B is no longer spent
+on a platform that never stages a row, so bringing the EVSE back to this
+tier is now a question about its Instance, delegate and store cost alone,
+with no row-transfer tax to pay first.
+
 ## Dev board wiring
 
 The CPico RP2350 dev board carries the module and hosts the bridging firmware. This table is the soldering contract: a deviation means editing both the board `pinctrl` file and the sketch defines together.
@@ -771,6 +844,16 @@ export ZEPHYR_BASE="$HOME/ncs/v3.3.4/zephyr"
 ```
 
 CAUTION: this PYTHONHOME/PYTHONPATH breaks ordinary system Python in the same shell. Use a dedicated shell or subshell for west builds.
+
+**Apply the SDK patches** (once per workspace, and again after every `west
+update`). This platform carries patches against the pinned NCS tree; the
+build refuses to configure without them and prints this command. See
+`sdk-patches/README.md` for what they do and how to take them back out.
+
+```bash
+PATCHES=$PWD/sdk-patches
+cd $ZEPHYR_BASE/.. && west patch -l $PATCHES/patches.yml -b $PATCHES apply
+```
 
 **Build the bootloader and app**:
 
