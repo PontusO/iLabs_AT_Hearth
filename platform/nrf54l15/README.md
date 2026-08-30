@@ -322,13 +322,14 @@ extended colour lights exhaust the heap with headers to spare.
 
 A third resource exists since memory reclaim round A and is **deliberately
 sized so it can never be the first to run out**: the **cluster-object
-heap**, `HEARTH_OBJ_HEAP_BYTES` (6,528 B), a second
+heap**, `HEARTH_OBJ_HEAP_BYTES` (7,168 B since catalogue batch 8, 6,528 B
+before it), a second
 `K_HEAP_DEFINE(hearth_obj_heap)` holding the per-endpoint CHIP Delegate
 objects and their Instances for the appliance, mode, chime, valve, energy
 and meter families. It replaced fourteen fixed pools, and the per-family
 caps those pools carried (`MT_MEAS_MAX` 8, `MT_DEM_MAX` 4, `MT_WHM_MAX` 4,
 `MT_METER_MAX` 2, `kModeBasePoolSlots` 20) are unchanged and are still what
-a composition hits first. 6,448 usable bytes against a worst reachable draw
+a composition hits first. 7,088 usable bytes against a worst reachable draw
 of **6,336 B**, which is the maximum over every composition the other two
 walls admit, found by exhaustive search rather than by a greedy fill:
 

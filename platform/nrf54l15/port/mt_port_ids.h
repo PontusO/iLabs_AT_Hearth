@@ -112,5 +112,16 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * must be raised whenever HEARTH_EP_HEAP_BYTES is: a bigger block heap
  * admits object-heavier compositions, and the maximum above is a function
  * of the block budget.
+ *
+ * Catalogue batch 8 raised it 6528 to 7168, and the Microwave Oven (0x0079)
+ * is the whole reason. A microwave endpoint draws THREE per-endpoint object
+ * pairs at once (OperationalState, MicrowaveOvenMode's ModeBase and
+ * MicrowaveOvenControl) for a 536 B block, the best object-bytes-per-block-byte
+ * ratio in the catalogue after the utility meter, and a composition of them
+ * pushes the exhaustively-searched worst reachable draw past what 6,448
+ * usable bytes cover. The re-derived maximum and the mix that reaches it are
+ * beside the heap in mt_matter_zephyr.cpp, pinned by static_assert there as
+ * ever. 7168 keeps this heap in the same ten-bucket band the overhead figure
+ * is derived for (896 chunks, inside [512, 1023]) and costs 640 B of .bss.
  */
-#define HEARTH_OBJ_HEAP_BYTES 6528
+#define HEARTH_OBJ_HEAP_BYTES 7168

@@ -221,16 +221,23 @@ constexpr size_t kObjCostOf(size_t bytes) { return ((bytes + 7) / 8) * 8 + 8; }
  * heap sys_heap_init() (heap.c:525-580) spends:
  *
  *    4  the end-marker chunk header       heap_footer_bytes(), small heap
- *    4  rounding 6524 down to a CHUNK_UNIT boundary
+ *    4  rounding 7164 down to a CHUNK_UNIT boundary
  *   72  chunk 0, holding struct z_heap: 28 bytes plus ten buckets x 4,
  *       so 68 rounded up to 9 chunks
  *
  * Ten buckets because bucket_idx() (heap.h:261-265) is
- * 31 - clz(heap_sz - min_chunk_size + 1) + 1 and this heap is 815 chunks,
+ * 31 - clz(heap_sz - min_chunk_size + 1) + 1 and this heap is 895 chunks,
  * which lands in the same [512, 1023] band as the 8 KB endpoint heap. The
  * BUILD_ASSERT keeps it there; it is written against heap_sz's own bounds
  * (gross/8 - 1 <= heap_sz <= gross/8) rather than the gross size, so a heap
  * one chunk the wrong side of 512 cannot slip through.
+ *
+ * Catalogue batch 8 moved the gross size 6528 to 7168 and the three terms
+ * above are unchanged: 7168 is a whole number of chunks (896), the footer
+ * still costs one chunk header, the rounding still loses the same 4 bytes,
+ * and 895 chunks is still inside the ten-bucket band, so chunk 0 is still
+ * 9 chunks. 80 bytes of overhead, 7,088 usable. The middle line's arithmetic
+ * is the one that moved: it was "rounding 6524 down".
  */
 BUILD_ASSERT((HEARTH_OBJ_HEAP_BYTES - 8) / 8 >= 512 && HEARTH_OBJ_HEAP_BYTES / 8 <= 1023,
              "the object heap left the ten-bucket band kObjHeapOverheadBytes is derived for");
@@ -5970,14 +5977,26 @@ static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  * gives 6,520 B), so this heap must be re-derived and raised whenever that
  * one is.
  *
- * HEARTH_OBJ_HEAP_BYTES is 6528, which leaves 6,448 usable. The assertions
- * below pin that against the worst mix and against the two uniform
- * compositions worth naming separately, so a future delegate or Instance
- * that grows fails the build here rather than a bench run later:
+ * HEARTH_OBJ_HEAP_BYTES is 7168 since catalogue batch 8, which leaves 7,088
+ * usable. The assertions below pin that against the worst mix and against
+ * the two uniform compositions worth naming separately, so a future delegate
+ * or Instance that grows fails the build here rather than a bench run later:
  *
- *   worst mixed composition   6,336   fits, 112 B spare
+ *   worst mixed composition   6,336   fits
  *   16 x laundry washer       4,224   fits
  *   9 x RVC (the block heap's own limit for that type)   4,032   fits
+ *
+ * WHY THE HEAP IS ALREADY 7168 WHILE THE WORST MIX IS STILL 6,336, at this
+ * commit and only at this commit. Batch 8's sequencing raises the heap on
+ * its own, ahead of every consumer, because the resize is the one change in
+ * the batch that must not land in the same commit as the type that provokes
+ * it: sizing a heap in the same diff that first draws on it is how a sizing
+ * argument stops being checkable. Nothing in the catalogue draws the extra
+ * 640 B yet. The Microwave Oven (0x0079) does, at the end of the batch, and
+ * that commit re-derives this whole section against the real
+ * obj_pair_bytes<HearthMwocDelegate, MicrowaveOvenControl::Instance>() and
+ * moves the pinned figure below. Until then the spare bytes are exactly
+ * that: spare.
  *
  * This is a deliberately different trade from the endpoint block heap's.
  * That heap is sized BELOW its own worst case (16 extended colour lights
