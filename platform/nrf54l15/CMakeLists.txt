@@ -22,22 +22,40 @@ if(CONFIG_CHIP)
   # of RAM come back without a word. That is the trap this check closes, and
   # the reason it is a hard error rather than a warning in a thousand-line
   # log. The remedy is one command and it is printed here.
+  #
+  # The marker is a REVISION, not a presence flag. Searching for the
+  # configuration macro alone would pass on a workspace still carrying an
+  # OLDER cut of the same patch: it would configure, build and measure
+  # cleanly while running code nobody reviewed, which is the one failure a
+  # presence check cannot see. Each patch therefore defines
+  # HEARTH_<name>_PATCH_REV and this gate matches the number this tree
+  # expects. Bump both together whenever a patch is re-cut.
   set(HEARTH_SDK_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/sdk-patches)
+  set(HEARTH_EEM_PATCH_REV 2)
   file(READ
     ${ZEPHYR_CONNECTEDHOMEIP_MODULE_DIR}/src/app/clusters/electrical-energy-measurement-server/ElectricalEnergyMeasurementCluster.cpp
     hearth_eem_src)
   string(FIND "${hearth_eem_src}"
-    "CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES" hearth_eem_patched)
+    "HEARTH_EEM_POOL_PATCH_REV ${HEARTH_EEM_PATCH_REV}" hearth_eem_patched)
+  string(FIND "${hearth_eem_src}" "HEARTH_EEM_POOL_PATCH_REV" hearth_eem_any_rev)
   unset(hearth_eem_src)
   if(hearth_eem_patched EQUAL -1)
+    if(hearth_eem_any_rev EQUAL -1)
+      set(hearth_eem_state "is NOT patched")
+    else()
+      set(hearth_eem_state "carries a DIFFERENT revision of the patch than revision ${HEARTH_EEM_PATCH_REV}, which this tree expects")
+    endif()
     message(FATAL_ERROR
-      "The Matter module at ${ZEPHYR_CONNECTEDHOMEIP_MODULE_DIR} is NOT patched.\n"
-      "This platform's memory figures assume the patches in\n"
+      "The Matter module at ${ZEPHYR_CONNECTEDHOMEIP_MODULE_DIR} ${hearth_eem_state}.\n"
+      "This platform's memory figures and its EEM capacity both assume the patches in\n"
       "  ${HEARTH_SDK_PATCH_DIR}\n"
-      "Apply them from the west workspace:\n"
-      "  cd ${ZEPHYR_BASE}/.. && west patch \\\n"
-      "      -l ${HEARTH_SDK_PATCH_DIR}/patches.yml \\\n"
-      "      -b ${HEARTH_SDK_PATCH_DIR} apply\n"
+      "Apply them from the west workspace (run the clean first only if the tree is\n"
+      "already patched at another revision):\n"
+      "  cd ${ZEPHYR_BASE}/.. \\\n"
+      "    && west patch -l ${HEARTH_SDK_PATCH_DIR}/patches.yml \\\n"
+      "                  -b ${HEARTH_SDK_PATCH_DIR} clean \\\n"
+      "    && west patch -l ${HEARTH_SDK_PATCH_DIR}/patches.yml \\\n"
+      "                  -b ${HEARTH_SDK_PATCH_DIR} apply\n"
       "then build again.\n"
       "README.md in that directory says what each patch does, how to tell whether\n"
       "a tree is patched, and how to take it back out.")

@@ -20,29 +20,44 @@ checkout-command: "git checkout ."
 clean-command: ""
 
 patches:
-  - path: matter/electrical-energy-measurement-instance-pool.patch
-    sha256sum: 0d13478c9430d0a582d43bccc772633b7121114df46c3f1229db9ee8c913cac8
+  - path: connectedhomeip/electrical-energy-measurement-instance-pool.patch
+    sha256sum: 127ffbf924e5952219ee0610007bacc1d6e2a9968dbe05bf0d1c39a43b00cc4d
     module: modules/lib/matter
     author: Pontus Oldberg
     email: pontus.oldberg@invector.se
-    date: 2026-08-30
+    date: 2026-08-31
     upstreamable: true
     merge-status: false
     apply-command: git apply
+    # merge-pr: fill in with the pull request URL once one is opened, and flip
+    # merge-status to true when it lands. The key is deliberately absent
+    # rather than present and empty: the schema requires a URL, so an empty
+    # value fails validation and `west patch list` then refuses the file.
     comments: |
+      Revision 2. HEARTH_EEM_POOL_PATCH_REV in the patch carries the number and
+      ../CMakeLists.txt checks it, so a tree still holding revision 1 fails to
+      configure instead of building something nobody reviewed. Revision 1
+      shipped with MAX_INSTANCES 4 and no note that the getter mutates; the
+      review of memory reclaim round B raised the pool to the port's real
+      capacity and asked for the note.
+
       ElectricalEnergyMeasurement's gMeasurements table is sized by the whole
       dynamic endpoint space (17 x 496 = 8,432 bytes here) and charged in full
       the moment the cluster enters the build, whether or not a composition
       ever declares an energy endpoint. The patch caps it at
       CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES and claims slots
-      by endpoint id on first use, reclaiming 6,436 bytes of .bss at
-      MAX_INSTANCES 4 (set in src/chip_project_config.h).
+      by endpoint id on first use, reclaiming 4,440 bytes of .bss at
+      MAX_INSTANCES 8 (src/chip_project_config.h; 8 is MT_MEAS_MAX, this
+      port's own measurement capacity, so a composition it accepts is one it
+      can serve).
 
       The macro DEFAULTS TO THE OLD EXPRESSION, so an unpatched build and a
       patched build that does not set it are identical. That is what makes the
       change upstreamable, and it is also why an unpatched tree does not fail
-      to build: CMakeLists.txt checks for the patch explicitly rather than
-      letting the RAM quietly come back.
+      to build on its own: ../CMakeLists.txt checks for the patch and its
+      revision explicitly, rather than letting the RAM quietly come back.
 
-      Not yet submitted upstream. When it is, put the pull request URL in
-      merge-pr and flip merge-status when it lands.
+      Cut against modules/lib/matter at 47099d700f (NCS v3.3.4). The C6 arm's
+      older patchset (platform/esp32c6/sdk-patches) pins its trees by commit
+      and refuses on drift; the equivalent here is that a moved tree makes the
+      patch stop applying, and README.md says to re-cut rather than force.

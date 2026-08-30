@@ -35,14 +35,27 @@
  * tree precisely so that this line cannot become a no-op nobody notices;
  * see sdk-patches/README.md.
  *
- * 4 is the MT_DEM_MAX / MT_WHM_MAX depth (core/include/mt_matter.h), the
- * shape of pool every energy family in this port already uses, and it is
- * comfortably above the one or two EEM-bearing endpoints any plausible
- * composition declares. A fifth simultaneous EEM endpoint does not fail the
- * composition: MeasurementDataForEndpoint() answers nullptr, which the
- * cluster's own readers already render as null or NOT_FOUND, and the SDK
- * logs the macro to raise. A slot is reclaimed automatically once its
- * endpoint stops serving the cluster, so this is a concurrency bound and
- * not a lifetime budget.
+ * 8 is MT_MEAS_MAX (core/include/mt_matter.h), this port's own answer to
+ * "how many measurement-capable endpoints may one composition carry", and
+ * it is the only defensible number here. It was 4 for one round, chosen as
+ * comfortably above any plausible composition, and that was an assertion
+ * about plausibility rather than a bound: this port permits 16 dynamic
+ * endpoints, six catalogue device types carry the cluster, and nothing
+ * counted them. A composition this firmware ACCEPTS must be one it can
+ * SERVE, so the pool is sized from the port's own capacity, and
+ * mt_matter_zephyr.cpp static_asserts that the two cannot drift apart.
+ *
+ * Exhaustion is loud rather than silent: mt_matter_eem_reserve() claims a
+ * slot before the endpoint is built and stops the composition rebuild
+ * naming this macro, the way every other pool in this port does. Without
+ * that gate a ninth EEM endpoint would apply cleanly and then answer
+ * Failure to a controller reading its MANDATORY Accuracy attribute, with
+ * nothing on the AT wire to say so. The gate is unreachable while every
+ * EEM-bearing device type also declares ElectricalPowerMeasurement, which
+ * exhausts the MT_MEAS_MAX EPM pool first; it is there for the seventh type
+ * that does not.
+ *
+ * A slot is reclaimed automatically once its endpoint stops serving the
+ * cluster, so this is a concurrency bound and not a lifetime budget.
  */
-#define CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES 4
+#define CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES 8

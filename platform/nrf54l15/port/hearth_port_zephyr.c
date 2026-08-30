@@ -30,6 +30,65 @@ static struct k_mutex s_tx_lock;
 void hearth_os_sleep_ms(uint32_t ms) { k_msleep(ms); }
 void hearth_os_restart(void)         { sys_reboot(SYS_REBOOT_WARM); }
 
+/* ---- bulk working memory (ruling DE419) --------------------------------
+ *
+ * THE ONE THING TO KNOW BEFORE EDITING THIS: on this platform plain
+ * malloc() IS NOT THE LIBC HEAP. CONFIG_CHIP_MALLOC_SYS_HEAP_OVERRIDE=y
+ * links the application with --wrap=malloc/free/calloc/realloc, and
+ * connectedhomeip's src/platform/Zephyr/SysHeapMalloc.cpp aliases
+ * __wrap_malloc onto its own sys_heap over a static
+ * uint8_t sHeapMemory[CONFIG_CHIP_MALLOC_SYS_HEAP_SIZE], 10,240 bytes here,
+ * which is where the ENTIRE Matter stack allocates from: sessions,
+ * exchanges, attribute paths, TLV, mDNS. A 5,608-byte row staging session
+ * taken through malloc() would hold 55% of it for as long as a host leaves
+ * a set staged, and exhaustion there is a commissioning failure. Staging
+ * must never be able to starve the stack, and the stack must never be able
+ * to fail a stage.
+ *
+ * So this takes the libc arena instead, by name. __real_malloc is the
+ * unwrapped common-libc malloc that --wrap leaves reachable, and with
+ * CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=-1 its arena is every byte of SRAM
+ * the image does not statically use (malloc.c: HEAP_BASE is _end rounded
+ * up, running to the end of SRAM). It GROWS by exactly what moving the
+ * staging buffers out of .bss freed, so the round's reclaim and the round's
+ * spend are the same memory. Nothing else in the image draws on it,
+ * precisely because every other malloc in the link is wrapped away to
+ * CHIP's heap.
+ *
+ * Two consequences worth stating rather than rediscovering:
+ *
+ *   The lock is not CHIP's. Zephyr's common-libc malloc takes its own
+ *   z_malloc_heap_mutex (lib/libc/common/source/stdlib/malloc.c:140),
+ *   which the Matter stack never takes because its allocations are wrapped
+ *   elsewhere. The AT parser task therefore does not acquire a CHIP-owned
+ *   mutex on the AT+MTROW path, which going through malloc() would have
+ *   made it do.
+ *
+ *   The dependency fails loudly if it ever stops holding. Without --wrap,
+ *   __real_malloc is an undefined symbol and the link fails; the #error
+ *   below turns that into a readable message at compile time instead.
+ */
+#ifndef CONFIG_CHIP_MALLOC_SYS_HEAP_OVERRIDE
+#error "hearth_stage_alloc() takes the libc arena through __real_malloc, which exists \
+only because CONFIG_CHIP_MALLOC_SYS_HEAP_OVERRIDE links this application with \
+--wrap=malloc. Without the wrap, plain malloc() IS the libc arena, so the fix is to drop \
+the __real_ prefix. Do not delete this guard without establishing which heap malloc() \
+now resolves to: getting that question wrong is what this whole comment is about."
+#endif
+
+extern void *__real_malloc(size_t bytes);
+extern void  __real_free(void *block);
+
+void *hearth_stage_alloc(size_t bytes)
+{
+    return __real_malloc(bytes);
+}
+
+void hearth_stage_free(void *block)
+{
+    __real_free(block);
+}
+
 int hearth_os_task_spawn(const char *name, void (*fn)(void *), void *arg,
                          uint32_t stack_bytes, unsigned prio)
 {

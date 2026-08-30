@@ -67,6 +67,10 @@ extern "C" void mt_matter_chime_delegate_unclaim(void *delegate);
  * machinery); this file is the only caller, defined beside the
  * measurement pools in mt_matter_zephyr.cpp. */
 extern "C" void mt_matter_eem_register(uint16_t ep);
+/* Capacity gate for the SDK's measurement table, claimed before create()
+ * and consumed by the register above; see its definition in
+ * mt_matter_zephyr.cpp for why the count lives in this port. */
+extern "C" bool mt_matter_eem_reserve(void);
 
 /* Catalogue batch 7a: the DEM Instance's second half (construct + soft
  * Init with the variant's feature mask). Port-local for the same reason
@@ -6907,6 +6911,29 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
                     "%u of %u serviceable endpoints in use",
                     (unsigned)devtype_id, (unsigned)MT_MEAS_MAX, (unsigned)live_endpoints(),
                     (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    /* The EEM measurement table's capacity, claimed here for the same
+     * two-halves reason as the two above: mt_matter_eem_register() below
+     * cannot be the gate, because it needs an endpoint id that only a
+     * successful create() produces, so a pool-exhausted endpoint would
+     * already be live, and answering Failure on the MANDATORY Accuracy
+     * attribute of a cluster it advertises, by the time anyone could
+     * notice. The pool itself is inside the SDK (../sdk-patches), which is
+     * why this port has to hold the count; mt_matter_eem_reserve()'s
+     * comment carries the reasoning and why this is unreachable today. */
+    if (type_has_cluster(ep_type, ElectricalEnergyMeasurement::Id)) {
+        if (!mt_matter_eem_reserve()) {
+            LOG_ERR("devtype 0x%04X: EEM measurement pool exhausted "
+                    "(CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES %u, "
+                    "src/chip_project_config.h); %u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id,
+                    (unsigned)CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES,
+                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints);
             if (chime_delegate != nullptr) {
                 mt_matter_chime_delegate_unclaim(chime_delegate);
             }

@@ -2364,9 +2364,20 @@ static int cmd_mtcmdresp(at_type_t type, char *args)
  * compile flag and no per-platform #ifdef in the four verb handlers: a
  * platform whose host never sends AT+MTROW simply never allocates, and one
  * whose host does behaves exactly as it always did, byte for byte on the
- * wire and error code for error code. malloc() is the allocator
- * core/at/at_parser.c already takes its line buffer from, so this needs no
- * new hearth_port.h surface either.
+ * wire and error code for error code.
+ *
+ * The memory comes from hearth_stage_alloc(), NOT from malloc(), and that
+ * is the round's one hard-won lesson rather than a stylistic preference. On
+ * the nRF54L15 the application is linked with --wrap=malloc and plain
+ * malloc() resolves to the Matter stack's private 10,240-byte working heap
+ * (CONFIG_CHIP_MALLOC_SYS_HEAP_OVERRIDE), so a 5,608-byte session would
+ * take 55% of the memory CHIP needs to run and would put host staging in
+ * direct contention with commissioning, while the .bss this change frees
+ * went to an arena nothing allocates from. WHICH heap a several-kilobyte
+ * block comes from is a platform fact, so it is a platform decision;
+ * hearth_port.h states what an implementation must satisfy. "malloc is
+ * available here" was the wrong question; "what is malloc, here" is the
+ * right one.
  *
  * The capacity is unchanged: a session still holds MT_ROW_MAX_ROWS rows.
  * What moved is when the memory is spent, not how much of it a host can
@@ -2408,14 +2419,14 @@ static mt_row_stage_t *s_row_stage;
  * re-opens the window, and the failure mode is a host's AT+MTROWAPPLY
  * committing rows it never staged. Since DE419 the same rule covers the
  * ALLOCATION and the FREE: the AT parser task is the only task that may
- * malloc or free this pointer, which is what makes it safe to hand the
+ * allocate or release this pointer, which is what makes it safe to hand the
  * bridge a pointer this task will not release until the bridge returns.
  *
- * malloc() and free() are never called with the section held. It wraps a
- * spinlock with interrupts disabled on every platform that implements it,
- * and an allocator takes a lock of its own; the two helpers below allocate
- * and free outside the section and only publish or detach the pointer
- * inside it.
+ * hearth_stage_alloc() and hearth_stage_free() are never called with the
+ * section held. It wraps a spinlock with interrupts disabled on every
+ * platform that implements it, and an allocator takes a lock of its own;
+ * the two helpers below allocate and free outside the section and only
+ * publish or detach the pointer inside it.
  */
 
 static mt_row_stage_t *row_stage_open(void)
@@ -2424,7 +2435,7 @@ static mt_row_stage_t *row_stage_open(void)
         return s_row_stage;
     }
 
-    mt_row_stage_t *fresh = malloc(sizeof(*fresh));
+    mt_row_stage_t *fresh = hearth_stage_alloc(sizeof(*fresh));
     if (!fresh) {
         return NULL;
     }
@@ -2457,7 +2468,7 @@ static void row_stage_retire(void)
     }
     hearth_crit_exit(HEARTH_CRIT_ROWS);
 
-    free(doomed);
+    hearth_stage_free(doomed);
 }
 
 /* ---- the inbound row stage (energy round C2, task 6) ------------------- *
@@ -2499,9 +2510,8 @@ static void row_stage_retire(void)
  *          stage, never a write). No NEW reader is admitted, because the
  *          set is no longer what a host would be asking about, but a reader
  *          already streaming keeps going: mt_rows_inbound_release() below
- *          deliberately does NOT free the session while a read is in
- *          flight, so the bytes under an in-flight reader stay intact and
- *          stay MAPPED.
+ *          deliberately does NOT clear row[], so the bytes under an
+ *          in-flight reader stay intact.
  *
  * s_inbound_reading is the one flag that guards the other direction: a
  * bulk AT+MTROWGET of 70 rows takes on the order of 300 ms at 115200, long
@@ -2510,18 +2520,33 @@ static void row_stage_retire(void)
  * therefore refused while a read is in flight, and the controller gets
  * Busy, which it can retry.
  *
- * ---- WHO FREES THE SESSION (ruling DE419) ----
+ * ---- WHEN THE STORAGE IS COMMITTED, AND WHY NOT PER SESSION (DE419) ----
  *
- * The inbound stage is allocated by the claim and freed by the release,
- * for the same reason the host's own stage is (see s_row_stage above): a
- * platform whose fabric never sends a multi-row command never pays for the
- * buffer at all. The two tasks make that one degree harder than it looks.
- * The releasing task is the CHIP task; the reader is the AT parser task,
- * and the two overlap by design in CLOSED. Freeing under a live reader is
- * a use-after-free where the old code merely left stale bytes, so the
- * release HANDS THE SESSION OVER when s_inbound_reading is set:
- * s_inbound_free_pending says "the last one out frees it", and the reader
- * is the one who does. Nothing else may free this pointer.
+ * The host's stage above is allocated per SESSION. This one is committed
+ * per COMPOSITION, by mt_rows_inbound_commit(), which the platform calls
+ * when it wires up a cluster whose fabric commands carry rows (on the C6,
+ * mt_matter_evse_reserve(), the count-only gate that already runs before
+ * anything is built). A composition with no such endpoint never commits and
+ * pays nothing, which is the same reclaim; a composition that has one pays
+ * for the buffer while it exists.
+ *
+ * The difference matters and it is not symmetry for its own sake. Allocating
+ * this one per session would put a NEW failure on the FABRIC path: a
+ * controller's SetTargets could be refused with Status::Busy for want of
+ * memory, where before this round the claim could only fail for two reasons
+ * the device itself caused. That is a Matter-visible contract change on a
+ * shipped platform, and this round moves memory without changing contracts.
+ * Committing at composition time moves the failure to composition time,
+ * where "this pool is exhausted, the rebuild stops" is what every other pool
+ * in this firmware already does.
+ *
+ * It also keeps the CLOSED-state overlap exactly as it was. The releasing
+ * task is the CHIP task and the reader is the AT parser task; if release
+ * freed the buffer it would be a use-after-free where the old code merely
+ * left stale bytes, and closing that needs a handover between two tasks. The
+ * committed block simply stays mapped, so the original argument (release
+ * touches active and count, never row[]) holds unchanged and there is no
+ * handover to get right.
  *
  * ---- WHY THE READ IS QUALIFIED BY SEQUENCE NUMBER ----
  *
@@ -2540,6 +2565,10 @@ static void row_stage_retire(void)
  * for a proposal is now an act a host cannot perform by accident, and an
  * unqualified read is always the live store.
  */
+/* The committed block, NULL until mt_rows_inbound_commit() succeeds. Once
+ * committed it is never released: the composition it belongs to lasts until
+ * the next reboot, and every fabric row consumer in this firmware is
+ * created during the boot rebuild. */
 static mt_row_stage_t *s_row_inbound;
 
 typedef enum {
@@ -2551,23 +2580,42 @@ typedef enum {
 
 static mt_inbound_state_t s_inbound_state   = MT_INBOUND_IDLE;
 static bool               s_inbound_reading = false;
-/* Set by mt_rows_inbound_release() when it could not free the session
- * because a reader was still streaming it. The reader frees it and clears
- * this on its way out; see the CLAIM STATES comment above. */
-static bool               s_inbound_free_pending = false;
 /* 0 when nothing is outstanding. mt_cmdbox_open() never issues 0, so the
  * idle value cannot be matched by any seq a host could legitimately hold. */
 static uint32_t           s_inbound_seq     = 0;
 
+bool mt_rows_inbound_commit(void)
+{
+    if (s_row_inbound) {
+        return true;
+    }
+
+    mt_row_stage_t *stage = hearth_stage_alloc(sizeof(*stage));
+    if (!stage) {
+        return false;
+    }
+    mt_rows_init(stage);
+
+    /* Published under the mux for uniformity with every other access to
+     * this pointer. In practice the commit runs on the composition rebuild
+     * before any fabric command can arrive, so there is nobody to race. */
+    hearth_crit_enter(HEARTH_CRIT_ROWS);
+    s_row_inbound = stage;
+    hearth_crit_exit(HEARTH_CRIT_ROWS);
+    return true;
+}
+
 mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
 {
     hearth_crit_enter(HEARTH_CRIT_ROWS);
-    /* s_row_inbound is NULL in IDLE unless a deferred free is outstanding,
-     * and a deferred free implies s_inbound_reading, which this condition
-     * already refuses on. Testing the pointer as well is belt and braces:
-     * allocating over a non-NULL one would leak a whole session, and
-     * refusing costs the controller only a retryable Busy. */
-    bool got = (s_inbound_state == MT_INBOUND_IDLE && !s_inbound_reading && s_row_inbound == NULL);
+    /* s_row_inbound != NULL is the committed-storage test, and it is a
+     * PLATFORM WIRING check, not a resource one: a platform that wires a
+     * fabric row consumer must call mt_rows_inbound_commit() first
+     * (mt_at.h). A platform that never does refuses every claim, which is
+     * immediate and total rather than rare and load-dependent, so it cannot
+     * hide. No allocation happens on this path, which is what keeps the
+     * fabric answer set exactly as it was before ruling DE419. */
+    bool got = (s_inbound_state == MT_INBOUND_IDLE && !s_inbound_reading && s_row_inbound != NULL);
     if (got) {
         s_inbound_state = MT_INBOUND_STAGING;
     }
@@ -2577,23 +2625,13 @@ mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
         return NULL;
     }
 
-    /* Outside the critical section on purpose: this allocates and memsets
-     * several KB, and hearth_crit_enter()/hearth_crit_exit() disable
-     * interrupts on every platform that implements them as a spinlock (an
-     * allocator takes a lock of its own, which must never be nested inside
-     * one). The STAGING state is what keeps everyone else out meanwhile,
-     * which is exactly what a state machine buys over holding a lock. */
-    mt_row_stage_t *stage = malloc(sizeof(*stage));
-    if (!stage) {
-        /* Out of memory reaches the caller as the same NULL that "somebody
-         * else owns it" does, which mt_at.h already documents as a refusal
-         * the caller answers with Status::Busy: a status a controller
-         * retries. No new failure mode on the wire. */
-        hearth_crit_enter(HEARTH_CRIT_ROWS);
-        s_inbound_state = MT_INBOUND_IDLE;
-        hearth_crit_exit(HEARTH_CRIT_ROWS);
-        return NULL;
-    }
+    mt_row_stage_t *stage = s_row_inbound;
+
+    /* Outside the critical section on purpose: this memsets several KB, and
+     * hearth_crit_enter()/hearth_crit_exit() disable interrupts on every
+     * platform that implements them as a spinlock. The STAGING state is
+     * what keeps everyone else out meanwhile, which is exactly what a state
+     * machine buys over holding a lock. */
     mt_rows_init(stage);
 
     /*
@@ -2609,10 +2647,6 @@ mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind)
     stage->active = true;
     stage->ep     = ep;
     stage->kind   = kind;
-
-    hearth_crit_enter(HEARTH_CRIT_ROWS);
-    s_row_inbound = stage;
-    hearth_crit_exit(HEARTH_CRIT_ROWS);
     return stage;
 }
 
@@ -2657,31 +2691,20 @@ bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, ui
 
 void mt_rows_inbound_release(void)
 {
-    mt_row_stage_t *doomed = NULL;
-
     hearth_crit_enter(HEARTH_CRIT_ROWS);
+    /* active/count only. row[] is deliberately left alone: a reader that
+     * snapshotted the count under this same mux is still walking it, and
+     * the next claim's mt_rows_init() is the thing that actually clears the
+     * array, which cannot run while that reader holds s_inbound_reading.
+     * The committed block itself is never released here; see the storage
+     * note above for why the fabric path owns no allocation at all. */
     if (s_row_inbound) {
-        /* active/count first, so anything that looks again sees an empty
-         * set rather than a stale one, whichever way the free goes. */
         s_row_inbound->active = false;
         s_row_inbound->count  = 0;
-        if (s_inbound_reading) {
-            /* A reader snapshotted the count under this same mux and is
-             * still walking row[]. Freeing it here would be a
-             * use-after-free where the old fixed buffer merely left stale
-             * bytes behind, so the session is handed to the reader instead
-             * and it frees it on its way out. */
-            s_inbound_free_pending = true;
-        } else {
-            doomed        = s_row_inbound;
-            s_row_inbound = NULL;
-        }
     }
     s_inbound_state = MT_INBOUND_IDLE;
     s_inbound_seq   = 0;
     hearth_crit_exit(HEARTH_CRIT_ROWS);
-
-    free(doomed);
 }
 
 /*
@@ -3249,9 +3272,10 @@ static int cmd_mtrowget(at_type_t type, char *args)
 
     if (inbound) {
         /* ibstage, not s_row_inbound: the snapshot taken under the mux is
-         * what this read owns for its duration. mt_rows_inbound_release()
-         * may run on the CHIP task meanwhile, and while s_inbound_reading is
-         * set it will not free the session, only hand it over. */
+         * what this read serves for its duration. The block is committed for
+         * the life of the composition and nothing frees it, so the only
+         * thing the CHIP task can do meanwhile is the release's active/count
+         * write, which this read does not look at again. */
         if (single) {
             /* Same "at or past total answers OK with no line" rule as the
              * live read below, so a host parses one response shape. */
@@ -3264,19 +3288,9 @@ static int cmd_mtrowget(at_type_t type, char *args)
             }
         }
 
-        /* Last one out. If the release ran while this read was streaming it
-         * left the session to us; free it here, outside the section. */
-        mt_row_stage_t *doomed = NULL;
         hearth_crit_enter(HEARTH_CRIT_ROWS);
         s_inbound_reading = false;
-        if (s_inbound_free_pending) {
-            doomed                 = s_row_inbound;
-            s_row_inbound          = NULL;
-            s_inbound_free_pending = false;
-        }
         hearth_crit_exit(HEARTH_CRIT_ROWS);
-        free(doomed);
-
         return AT_R_OK;
     }
 

@@ -1,0 +1,219 @@
+From: Pontus Oldberg <pontus.oldberg@invector.se>
+Date: 2026-08-31
+Subject: [PATCH] ElectricalEnergyMeasurement: size the measurement table by
+ instances, not by the endpoint space
+
+gMeasurements is indexed by emberAfGetClusterServerEndpointIndex(), whose
+range on a build with dynamic endpoints is the whole dynamic endpoint space.
+The array is therefore declared as
+
+    MeasurementData gMeasurements[MATTER_DM_..._SERVER_ENDPOINT_COUNT +
+                                  CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT];
+
+and is charged in full the moment the cluster enters the build, whether or
+not any endpoint ever carries it. sizeof(MeasurementData) is 496 bytes on
+32-bit ARM, so a bridge with CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT of 16
+reserves 8,432 bytes of RAM for a cluster a given composition may never
+declare. On a part with 256 KB that is 3.2% of the whole address space held
+against a possibility.
+
+Cap the table at the number of endpoints that can carry measurements at once
+instead, and claim slots by endpoint id:
+
+  CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES sets the length.
+  Its DEFAULT IS THE OLD EXPRESSION, so a platform that does not set it gets
+  today's array, today's size and today's behaviour, byte for byte. Only a
+  platform that opts in pays the lookup and saves the RAM.
+
+  MeasurementDataForEndpoint() keeps its existing validity gate unchanged
+  (emberAfGetClusterServerEndpointIndex() != kEmberInvalidEndpointIndex is
+  what rejects an endpoint that is unconfigured, disabled, or does not carry
+  this cluster server), then searches the claim table for the endpoint and
+  claims a free slot on first use. Every caller reaches the data through
+  this one function, so no call site changes.
+
+  IT THEREFORE MUTATES, which the comment above it now says plainly. Read
+  behaviour is preserved exactly, and that rests on the gate: an endpoint
+  that does not carry the cluster server can never claim, so every claimant
+  is one that would have claimed at its first write anyway, and a read of a
+  live but never-written endpoint still returns a value-initialised slot
+  rather than nullptr. Under exhaustion, WHICH endpoints hold slots depends
+  on which is touched first, so an application that does not call
+  SetMeasurementAccuracy() at startup gets its slot order from whichever
+  endpoint a controller happens to read first. That is a fair design, and it
+  is a change a reviewer should see stated rather than have to infer.
+
+  A dynamic endpoint can be taken down, and nothing tells this file when.
+  Rather than add a release entry point that every bridge would have to
+  learn to call, a claim whose endpoint no longer serves the cluster is
+  treated as free and reused. The reclaim is therefore automatic and the
+  cluster's API is unchanged.
+
+  Exhaustion returns nullptr, which every caller in this file already
+  handles: reads encode null or CHIP_ERROR_NOT_FOUND, writes return
+  CHIP_ERROR_INVALID_ARGUMENT. The log line names the macro to raise. A
+  platform that must not present an endpoint it cannot serve should ALSO
+  bound the count on its own side, before the endpoint is built, because
+  this file learns about the endpoint too late to refuse it: by the time
+  SetMeasurementAccuracy() fails, the endpoint is live and a controller can
+  already read the mandatory Accuracy attribute it can no longer serve.
+
+The replaced "index >= MATTER_ARRAY_SIZE(gMeasurements)" guard becomes
+unnecessary: the returned pointer is now always into the pool, and the
+bound is enforced by the claim rather than by an index range check.
+
+Cost on the read path: the claim walks the pool at most twice and can call
+emberAfGetClusterServerEndpointIndex() up to MAX_INSTANCES times when the
+pool is full. Bounded by a small constant and paid only on the first touch
+of an endpoint, but it is a getter that now does ember lookups.
+
+Behaviour is identical for any composition with no more than
+CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES endpoints carrying
+the cluster, which for the default value is every composition the old code
+could serve at all.
+
+One line is downstream-only and marked as such in place:
+HEARTH_EEM_POOL_PATCH_REV lets a build system tell a tree carrying this
+revision of the patch from one carrying an older revision, which a search
+for the configuration macro cannot. Drop it when upstreaming.
+
+Measured on nRF54L15 with the macro set to 8: gMeasurements 8,432 to 3,968
+bytes, plus 24 bytes of claim table, 4,440 bytes of .bss reclaimed.
+---
+ .../ElectricalEnergyMeasurementCluster.cpp    | 111 ++++++++++++++++---
+ 1 file changed, 99 insertions(+), 12 deletions(-)
+
+--- a/src/app/clusters/electrical-energy-measurement-server/ElectricalEnergyMeasurementCluster.cpp
++++ b/src/app/clusters/electrical-energy-measurement-server/ElectricalEnergyMeasurementCluster.cpp
+@@ -39,8 +39,53 @@
+ using namespace chip::app::Clusters::ElectricalEnergyMeasurement::Attributes;
+ using namespace chip::app::Clusters::ElectricalEnergyMeasurement::Structs;
+
+-MeasurementData gMeasurements[MATTER_DM_ELECTRICAL_ENERGY_MEASUREMENT_CLUSTER_SERVER_ENDPOINT_COUNT +
+-                              CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT];
++/*
++ * The measurement table used to be indexed directly by the cluster server
++ * endpoint index, which on a build with dynamic endpoints spans every dynamic
++ * slot whether or not the endpoint occupying it carries this cluster. Sizing
++ * the table that way charges sizeof(MeasurementData) * (fixed + dynamic) to
++ * every build that merely compiles the cluster in, including one that never
++ * declares an energy endpoint at all. On a constrained bridge that is several
++ * kilobytes of RAM held for endpoints which do not exist.
++ *
++ * CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES caps the table at the
++ * number of endpoints that can carry measurements AT ONCE. A slot is claimed by
++ * endpoint id the first time that endpoint's data is asked for and found by id
++ * afterwards, so the table no longer has to be as long as the endpoint space.
++ *
++ * The default is the old size, so a platform that does not set the macro keeps
++ * today's behaviour exactly, table length included.
++ */
++#ifndef CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES
++#define CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES                                                                    \
++    (MATTER_DM_ELECTRICAL_ENERGY_MEASUREMENT_CLUSTER_SERVER_ENDPOINT_COUNT + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT)
++#endif
++
++// Downstream marker, not part of the change being proposed: it lets a build
++// system tell a tree carrying THIS revision of the patch from one carrying an
++// older revision, which a search for the macro above cannot. Drop this line
++// when upstreaming.
++#define HEARTH_EEM_POOL_PATCH_REV 2
++
++MeasurementData gMeasurements[CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES];
++
++namespace {
++
++// Which endpoint owns each slot of gMeasurements. The "used" flag is a separate
++// array rather than a kInvalidEndpointId sentinel so that neither array needs a
++// static initialiser.
++EndpointId gMeasurementSlotEndpoint[CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES];
++bool gMeasurementSlotUsed[CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES];
++
++// True when endpointId is configured, enabled, and carries this cluster server.
++bool IsLiveMeasurementEndpoint(EndpointId endpointId)
++{
++    return emberAfGetClusterServerEndpointIndex(endpointId, app::Clusters::ElectricalEnergyMeasurement::Id,
++                                                MATTER_DM_ELECTRICAL_ENERGY_MEASUREMENT_CLUSTER_SERVER_ENDPOINT_COUNT) !=
++        kEmberInvalidEndpointIndex;
++}
++
++} // namespace
+
+ CHIP_ERROR ElectricalEnergyMeasurementAttrAccess::Init()
+ {
+@@ -144,22 +189,68 @@
+     return mOptionalAttrs.Has(aOptionalAttrs);
+ }
+
++// NOTE: this function MUTATES. It claims a pool slot for endpointId on first
++// use, so it is no longer a pure lookup even though its signature is unchanged
++// and every existing caller is unaffected.
++//
++// Read behaviour is preserved exactly, and that rests on the gate below: an
++// endpoint that does not carry this cluster server can never claim, so every
++// claimant is an endpoint that would have claimed at its first write anyway,
++// and a read of a live endpoint that was never written still returns a
++// value-initialised slot rather than nullptr. Under exhaustion, though, WHICH
++// endpoints get slots depends on which is touched first, so an application that
++// does not call SetMeasurementAccuracy() at startup has its slot order decided
++// by whichever endpoint a controller happens to read first.
++//
++// The claim walks the pool at most twice and can call
++// emberAfGetClusterServerEndpointIndex() up to MAX_INSTANCES times when the
++// pool is full. Bounded by a small constant, and only on the first touch of an
++// endpoint, but it is a getter that now does ember lookups and a reader should
++// know that.
+ MeasurementData * MeasurementDataForEndpoint(EndpointId endpointId)
+ {
+-    auto index = emberAfGetClusterServerEndpointIndex(endpointId, app::Clusters::ElectricalEnergyMeasurement::Id,
+-                                                      MATTER_DM_ELECTRICAL_ENERGY_MEASUREMENT_CLUSTER_SERVER_ENDPOINT_COUNT);
+-
+-    if (index == kEmberInvalidEndpointIndex)
++    // Unchanged gate: an endpoint that is not configured, not enabled, or does
++    // not carry this cluster server has no measurement data and claims no slot.
++    if (!IsLiveMeasurementEndpoint(endpointId))
+     {
+         return nullptr;
+     }
+
+-    if (index >= MATTER_ARRAY_SIZE(gMeasurements))
++    for (size_t i = 0; i < MATTER_ARRAY_SIZE(gMeasurements); i++)
++    {
++        if (gMeasurementSlotUsed[i] && gMeasurementSlotEndpoint[i] == endpointId)
++        {
++            return &gMeasurements[i];
++        }
++    }
++
++    size_t slot = MATTER_ARRAY_SIZE(gMeasurements);
++    for (size_t i = 0; i < MATTER_ARRAY_SIZE(gMeasurements); i++)
+     {
+-        ChipLogError(NotSpecified, "Internal error: invalid/unexpected energy measurement index.");
++        // A free slot, or one whose endpoint has since been taken down: nothing
++        // tells this file when a dynamic endpoint goes away, so a stale claim is
++        // recognised by asking whether its endpoint still serves this cluster.
++        if (!gMeasurementSlotUsed[i] || !IsLiveMeasurementEndpoint(gMeasurementSlotEndpoint[i]))
++        {
++            slot = i;
++            break;
++        }
++    }
++
++    if (slot == MATTER_ARRAY_SIZE(gMeasurements))
++    {
++        ChipLogError(NotSpecified,
++                     "Electrical Energy Measurement: no measurement slot free for endpoint %u; raise "
++                     "CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES (currently %u).",
++                     static_cast<unsigned>(endpointId),
++                     static_cast<unsigned>(MATTER_ARRAY_SIZE(gMeasurements)));
+         return nullptr;
+     }
+-    return &gMeasurements[index];
++
++    gMeasurements[slot]            = MeasurementData();
++    gMeasurementSlotEndpoint[slot] = endpointId;
++    gMeasurementSlotUsed[slot]     = true;
++    return &gMeasurements[slot];
+ }
+
+ CHIP_ERROR SetMeasurementAccuracy(EndpointId endpointId, const MeasurementAccuracyStruct::Type & accuracy)

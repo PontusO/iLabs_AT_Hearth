@@ -261,20 +261,57 @@ void mt_cmd_notify(uint16_t ep, uint32_t cluster, uint32_t command);
  * outcome (a controller may send an empty schedule list) and the host must
  * be able to fetch "nothing" as promptly as it fetches seventy rows.
  *
- * The stage is ALLOCATED by this call and freed by mt_rows_inbound_release()
- * (ruling DE419): a platform whose fabric never sends a multi-row command
- * never pays for the buffer, and one whose fabric does pays for it only
- * while a forward is outstanding. Nothing about the sequence below changes,
- * and the returned pointer is valid until the matching release.
+ * THIS CALL ALLOCATES NOTHING, and that is deliberate. The storage is
+ * committed once at composition time by mt_rows_inbound_commit() below,
+ * which is what keeps the answers here exactly what they were before ruling
+ * DE419: no failure this function can report is a condition of the heap.
  *
- * Returns NULL if the stage is already owned by another forward, if the
- * AT parser task is streaming a previous set out, or if the buffer could
- * not be allocated; the caller must then refuse the command (Status::Busy
- * is the honest answer) rather than proceed. The three are deliberately
- * indistinguishable: all three are transient and all three are retryable,
- * so a caller has nothing to do differently.
+ * Returns NULL if the stage is already owned by another forward, or if the
+ * AT parser task is streaming a previous set out; the caller must then
+ * refuse the command (Status::Busy is the honest answer) rather than
+ * proceed. Both are transient and retryable, so a caller has nothing to do
+ * differently between them, and both are states the DEVICE caused.
+ *
+ * It also returns NULL if the platform never committed the storage. That is
+ * a wiring mistake rather than a resource condition, and it fails totally
+ * rather than intermittently: the first forward is refused and so is every
+ * one after it, which is a bench result rather than a field report.
  */
 mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind);
+
+/*
+ * Commit the inbound stage's storage. A PLATFORM must call this, once,
+ * before any endpoint whose fabric commands carry rows can be reached: on
+ * the ESP32-C6 that is mt_matter_evse_reserve() (mt_evse.cpp), the
+ * count-only capacity gate that already runs before an EVSE endpoint is
+ * built. Returns true when the storage is committed, including when it
+ * already was; false when it could not be, and the caller must then fail
+ * the endpoint exactly as it fails its own pool exhaustion.
+ *
+ * ---- WHY THIS IS NOT ALLOCATED PER FORWARD (ruling DE419) ----
+ *
+ * The HOST's staging buffer is allocated per session, because AT+MTROW has
+ * a documented answer for a runtime failure and a host is a cooperative
+ * peer that can retry. The FABRIC's is not, because it has neither. Making
+ * mt_rows_inbound_claim() allocate would let a controller's SetTargets be
+ * refused with Status::Busy for want of memory, a refusal no version of
+ * this firmware could previously produce, on a Matter-visible path, on the
+ * platform where the EVSE actually runs. Committing here instead moves the
+ * failure to composition time, where "this pool is exhausted, the rebuild
+ * stops" is what every other pool in this firmware already does and what a
+ * host already knows how to see.
+ *
+ * The reclaim is the same either way: a composition with no row-bearing
+ * cluster never calls this and pays nothing, which on a platform whose
+ * catalogue has no such device type at all means the buffer is never
+ * allocated in the life of the image.
+ *
+ * There is no matching decommit. Every fabric row consumer in this firmware
+ * is created during the boot composition rebuild and lives until the next
+ * reboot, so the commit is boot-scoped, which is the same allocate-only
+ * policy the port's cluster-object and endpoint-block heaps already carry.
+ */
+bool mt_rows_inbound_commit(void);
 
 /*
  * Publish the staged set and forward the command: raises
@@ -312,13 +349,11 @@ bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, ui
 /*
  * Give the inbound stage back. Must be called on every path out of the
  * command handler, including the ones that never forwarded: nothing else
- * ever frees the claim, and a leaked claim now leaks the buffer with it as
- * well as making every later forward on any endpoint answer Busy until
- * reboot.
+ * ever frees the claim, and a leaked claim makes every later forward on any
+ * endpoint answer Busy until reboot.
  *
- * The pointer mt_rows_inbound_claim() returned is INVALID from this call
- * onwards. Do the merge before releasing, which is the order the sequence
- * above already prescribes.
+ * This releases the CLAIM, never the storage. Do the merge before
+ * releasing, which is the order the sequence above already prescribes.
  */
 void mt_rows_inbound_release(void);
 
