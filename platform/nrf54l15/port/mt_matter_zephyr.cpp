@@ -2022,7 +2022,8 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
      * a tenth case in the same switch.
      *
      * <field> is not an attribute selector here, it is an alarm BIT NUMBER
-     * (AT_MT_SPEC.md 2312-2317): 0 is DoorOpen, the only bit the Matter spec
+     * (AT_MT_SPEC.md §3.22, its fridge form): 0 is DoorOpen, the only bit
+     * the Matter spec
      * defines in any revision through 1.5.1, and 1..7 exist only because the
      * union bound mt_at.c enforces is 0..11 and this bridge has to narrow it
      * somewhere. Bits 8..11 are legal for SmokeCoAlarm and out of range
@@ -2405,7 +2406,8 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
 
     /* Catalogue batch 8: the third branch this function's own comment has
      * promised since batch 5, and it is the RVC's mirror image
-     * (AT_MT_SPEC.md 2078-2090). OvenCavityOperationalState is a DERIVED
+     * (AT_MT_SPEC.md §3.21, its OvenCavityOperationalState bullet).
+     * OvenCavityOperationalState is a DERIVED
      * cluster that adds no derived-number-space states at all, so its legal
      * set is identical to the base cluster's {0 Stopped, 1 Running,
      * 2 Paused} and 0x40..0x42 answer +MTERR:1 on a cavity exactly as they

@@ -3581,7 +3581,7 @@ constexpr EmberAfDeviceType kExtractorHoodTypes[] = { { 0x007A, 1 } };
  *   Events: Notify (0x0000). Emitted by SetStateValue() itself, which writes
  *   the State attribute and then LogEvent()s the transition in one call
  *   (refrigerator-alarm-server.cpp:115-149) - the "one call, both effects"
- *   shape AT_MT_SPEC.md 2276-2278 describes, and the reason AT+MTALARM
+ *   shape AT_MT_SPEC.md §3.22 describes, and the reason AT+MTALARM
  *   rather than AT+MTATTR is the write path for State. The dynamic
  *   endpoint's empty eventList makes EventList read empty without blocking
  *   emission, the generic switch precedent.
