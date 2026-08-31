@@ -1167,6 +1167,35 @@ extern "C" bool mt_matter_evse_reserve(void)
     if (s_evse_reserved >= MT_EVSE_MAX) {
         return false;
     }
+    /*
+     * Commit the inbound row staging buffer here too (ruling DE419,
+     * mt_at.h's mt_rows_inbound_commit()). This endpoint's SetTargets is
+     * the only fabric-originated command in this firmware that carries
+     * rows, so this reserve is the exact moment the buffer becomes
+     * reachable; a composition with no EVSE never gets here and never pays
+     * for it.
+     *
+     * It belongs in the RESERVE rather than in the delegate alloc for the
+     * same reason the delegate count does: this runs before create(), so a
+     * failure builds nothing at all, where a failure after create() would
+     * leave a live, delegate-less EnergyEvse endpoint behind. That is the
+     * whole point of s_evse_reserved above.
+     *
+     * Committing at composition time rather than allocating per forward is
+     * what keeps SetTargets' answers on the Matter wire exactly what they
+     * have always been: nothing on the fabric path allocates, so nothing on
+     * the fabric path can be refused for want of memory. mt_at.h carries
+     * the full reasoning.
+     *
+     * Idempotent, so a second and third EVSE cost nothing more, and the
+     * reservation counter is not consumed when it fails.
+     */
+    if (!mt_rows_inbound_commit()) {
+        ESP_LOGE(TAG, "inbound row stage could not be committed (%u bytes); an EVSE "
+                 "cannot adjudicate SetTargets without it",
+                 (unsigned)sizeof(mt_row_stage_t));
+        return false;
+    }
     s_evse_reserved++;
     return true;
 }
@@ -1485,10 +1514,13 @@ int mt_evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage, uint8
     /*
      * The stage belongs to this (ep, kind) only when all three agree; when it
      * does not, the call carries ZERO rows. Do not read stage->row[] outside
-     * that match: the pointer is one of the TWO file-static staging buffers
-     * in mt_at.c (the AT parser task's s_row_stage, or the CHIP task's
-     * s_row_inbound, which the fabric path passes), and either may hold a
-     * set for a different endpoint entirely.
+     * that match: the pointer is one of the TWO staging buffers mt_at.c owns
+     * (the AT parser task's s_row_stage, or the CHIP task's s_row_inbound,
+     * which the fabric path passes), and either may hold a set for a
+     * different endpoint entirely. Since ruling DE419 neither is file-static
+     * storage: the host's is allocated per staging session and the inbound
+     * one is committed per composition, so stage may also be NULL, which
+     * mt_matter.h reads as the same instruction as a mismatch.
      */
     bool match = (stage != nullptr && stage->active && stage->ep == ep &&
                   stage->kind == MT_ROW_KIND_EVSE_TARGET && stage->count > 0);

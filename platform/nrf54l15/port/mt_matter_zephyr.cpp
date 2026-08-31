@@ -4838,6 +4838,51 @@ static HearthEpmDelegate *meas_epm_for(chip::EndpointId ep)
  *      endpoint configured and enabled first, which the call site's
  *      below-the-successful-create placement guarantees.
  */
+/*
+ * The EEM measurement-table capacity gate, the split-reserve shape every
+ * other pool in this port uses (the EPM and PowerTopology blocks in
+ * mt_devtypes_zephyr.cpp, and the C6's mt_matter_evse_reserve()).
+ *
+ * It exists because the SDK patch in ../sdk-patches replaced
+ * ElectricalEnergyMeasurement's gMeasurements, which used to be as long as
+ * the whole dynamic endpoint space and so had a slot for every endpoint
+ * this port could possibly create, with a pool of
+ * CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES. A pool has a
+ * bottom, and reaching it inside the SDK is SILENT on the AT wire:
+ * SetMeasurementAccuracy() answers CHIP_ERROR_INVALID_ARGUMENT,
+ * mt_matter_eem_register() logs and continues, the composition applies OK,
+ * and a controller then gets a Failure reading the MANDATORY Accuracy
+ * attribute of a cluster the endpoint declares. A device that says yes and
+ * then serves a broken endpoint is exactly what this port refuses to do
+ * everywhere else, so the count is checked HERE, before anything is built,
+ * and the rebuild stops with the constant to raise named in the log.
+ *
+ * Unreachable today, and deliberately kept anyway. Every one of the six
+ * device types whose cluster list carries ElectricalEnergyMeasurement also
+ * carries ElectricalPowerMeasurement (mt_devtypes_zephyr.cpp:2564/2566,
+ * 2582/2584, 2682/2684, 3120/3122, 3269/3271, 3287/3289), so the
+ * MT_MEAS_MAX EPM delegate pool is exhausted first and the static_assert
+ * below keeps the EEM pool at least as deep. A seventh EEM-bearing type
+ * declared WITHOUT EPM would break that coupling silently; this gate is
+ * what makes it break loudly instead.
+ */
+static_assert(CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES >= MT_MEAS_MAX,
+              "the EEM measurement pool must be at least as deep as the EPM delegate pool, "
+              "or an endpoint this port accepts cannot serve its Accuracy attribute; raise "
+              "CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES in "
+              "src/chip_project_config.h");
+
+static uint8_t s_eem_reserved;
+
+extern "C" bool mt_matter_eem_reserve(void)
+{
+    if (s_eem_reserved >= CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES) {
+        return false;
+    }
+    s_eem_reserved++;
+    return true;
+}
+
 extern "C" void mt_matter_eem_register(uint16_t ep)
 {
     using namespace chip::app::Clusters::ElectricalEnergyMeasurement;

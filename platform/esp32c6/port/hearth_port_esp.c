@@ -6,6 +6,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -19,6 +20,32 @@
 
 void hearth_os_sleep_ms(uint32_t ms)  { vTaskDelay(pdMS_TO_TICKS(ms)); }
 void hearth_os_restart(void)          { esp_restart(); }
+
+/* ---- bulk working memory (ruling DE419) --------------------------------
+ *
+ * The ordinary allocator, which on ESP-IDF is the general internal heap and
+ * is the same one esp_matter and CHIP already use. That is the right answer
+ * HERE and the wrong one on the nRF54L15, where the application is linked
+ * with --wrap=malloc and plain malloc() resolves to a private 10,240-byte
+ * Matter working heap; see hearth_port.h for what an implementation has to
+ * satisfy and hearth_port_zephyr.c for what that arm had to do instead.
+ * This image has around 106 KB free at a one-endpoint composition and about
+ * 47 KB at twenty-eight, so a 5,608-byte staging session is unremarkable
+ * and shares a heap that is sized for sharing.
+ *
+ * FreeRTOS-IDF's malloc is task-safe, which is what the header requires:
+ * the host stage is allocated on the AT parser task and the inbound stage
+ * is committed on whichever task runs the composition rebuild.
+ */
+void *hearth_stage_alloc(size_t bytes)
+{
+    return malloc(bytes);
+}
+
+void hearth_stage_free(void *block)
+{
+    free(block);
+}
 
 int hearth_os_task_spawn(const char *name, void (*fn)(void *), void *arg,
                          uint32_t stack_bytes, unsigned prio)

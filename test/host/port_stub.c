@@ -30,6 +30,12 @@ void hearth_sem_give(hearth_sem_t sem) { (void)sem; }
 void hearth_crit_enter(int id) { (void)id; }
 void hearth_crit_exit(int id)  { (void)id; }
 
+/* Row staging memory (ruling DE419). Plain malloc is the right backing on
+ * the host, where there is no second heap to get wrong; the two firmware
+ * ports differ, and hearth_port.h says why. */
+void *hearth_stage_alloc(size_t bytes) { return malloc(bytes); }
+void  hearth_stage_free(void *block)   { free(block); }
+
 void hearth_link_init(void) {}
 void hearth_link_write(const void *data, size_t len) { (void)data; (void)len; }
 void hearth_link_write_line(const char *fmt, ...) { (void)fmt; }

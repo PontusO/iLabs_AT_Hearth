@@ -21,6 +21,44 @@ extern "C" {
 void hearth_os_sleep_ms(uint32_t ms);
 void hearth_os_restart(void);
 
+/* ---- bulk working memory (ruling DE419) --------------------------- *
+ *
+ * One block of `bytes` for a ROW STAGING SESSION, or NULL. The core calls
+ * this instead of malloc() so that WHICH heap the block comes from is a
+ * platform decision, and that distinction is not academic: on the nRF54L15
+ * the application is linked with --wrap=malloc and plain malloc() resolves
+ * to the Matter stack's private 10,240-byte working heap
+ * (CONFIG_CHIP_MALLOC_SYS_HEAP_OVERRIDE), where a 5,608-byte staging
+ * session would take 55% of the memory CHIP needs to run. A hook is the
+ * only way core/ can ask for memory without knowing that.
+ *
+ * What an implementation must satisfy:
+ *
+ *   - The block must NOT come from memory the SDK's own stack allocates
+ *     from, and must not be contended by it. Staging must never be able to
+ *     starve commissioning, and commissioning must never be able to fail a
+ *     stage. An implementation that satisfies this by picking a pool
+ *     nothing else happens to use owes the next reader a note saying so,
+ *     and saying what would break it: "nothing else uses it" is a fact
+ *     about one link, not a property a build maintains, and no compiler
+ *     will notice when it stops being true. hearth_port_zephyr.c carries
+ *     the worked example.
+ *   - Blocks are a few kilobytes each (one mt_row_stage_t, currently about
+ *     5.6 KB) and at most two are live at once.
+ *   - Alignment must suit any scalar, int64_t included.
+ *   - Callable from more than one task, so the implementation must be
+ *     thread-safe. It is never called from an ISR and never with a
+ *     hearth_crit_enter() section held, so it MAY block on a lock.
+ *   - NULL is a legal answer and the core handles it: AT+MTROW answers a
+ *     bare ERROR (AT_MT_SPEC.md section 5's unclassified runtime failure)
+ *     and the composition-time commit fails the composition. An
+ *     implementation must not panic instead.
+ *
+ * hearth_stage_free(NULL) is a no-op, like free().
+ */
+void *hearth_stage_alloc(size_t bytes);
+void  hearth_stage_free(void *block);
+
 /* Spawn a detached task. Returns 0 on success, -1 on failure. */
 int hearth_os_task_spawn(const char *name, void (*fn)(void *), void *arg,
                          uint32_t stack_bytes, unsigned prio);

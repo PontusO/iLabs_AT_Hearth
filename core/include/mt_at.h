@@ -237,11 +237,12 @@ void mt_cmd_notify(uint16_t ep, uint32_t cluster, uint32_t command);
  *
  * ---- WHY THIS IS A SEPARATE BUFFER FROM THE HOST'S OWN STAGE ----
  *
- * The AT+MTROW family stages the HOST's row sets in its own file-static
- * buffer, written only by the AT parser task. This one is written only by
- * the CHIP event loop task. They are deliberately not the same buffer, and
- * the ~5.6 KB that costs buys the elimination of a defect class that
- * nothing but a bench run could ever have caught: sharing one buffer means
+ * The AT+MTROW family stages the HOST's row sets in its own session buffer,
+ * written only by the AT parser task. This one is written only by the CHIP
+ * event loop task. They are deliberately not the same buffer, and the
+ * ~5.6 KB that costs, for as long as a forward is actually in flight, buys
+ * the elimination of a defect class that nothing but a bench run could ever
+ * have caught: sharing one buffer means
  * a controller's SetTargets overwrites whatever set the host happens to
  * have half-uploaded for the same (ep, kind), and if the two happen to hold
  * the same number of rows, the host's next AT+MTROWAPPLY passes every check
@@ -260,12 +261,57 @@ void mt_cmd_notify(uint16_t ep, uint32_t cluster, uint32_t command);
  * outcome (a controller may send an empty schedule list) and the host must
  * be able to fetch "nothing" as promptly as it fetches seventy rows.
  *
+ * THIS CALL ALLOCATES NOTHING, and that is deliberate. The storage is
+ * committed once at composition time by mt_rows_inbound_commit() below,
+ * which is what keeps the answers here exactly what they were before ruling
+ * DE419: no failure this function can report is a condition of the heap.
+ *
  * Returns NULL if the stage is already owned by another forward, or if the
  * AT parser task is streaming a previous set out; the caller must then
  * refuse the command (Status::Busy is the honest answer) rather than
- * proceed.
+ * proceed. Both are transient and retryable, so a caller has nothing to do
+ * differently between them, and both are states the DEVICE caused.
+ *
+ * It also returns NULL if the platform never committed the storage. That is
+ * a wiring mistake rather than a resource condition, and it fails totally
+ * rather than intermittently: the first forward is refused and so is every
+ * one after it, which is a bench result rather than a field report.
  */
 mt_row_stage_t *mt_rows_inbound_claim(uint16_t ep, uint8_t kind);
+
+/*
+ * Commit the inbound stage's storage. A PLATFORM must call this, once,
+ * before any endpoint whose fabric commands carry rows can be reached: on
+ * the ESP32-C6 that is mt_matter_evse_reserve() (mt_evse.cpp), the
+ * count-only capacity gate that already runs before an EVSE endpoint is
+ * built. Returns true when the storage is committed, including when it
+ * already was; false when it could not be, and the caller must then fail
+ * the endpoint exactly as it fails its own pool exhaustion.
+ *
+ * ---- WHY THIS IS NOT ALLOCATED PER FORWARD (ruling DE419) ----
+ *
+ * The HOST's staging buffer is allocated per session, because AT+MTROW has
+ * a documented answer for a runtime failure and a host is a cooperative
+ * peer that can retry. The FABRIC's is not, because it has neither. Making
+ * mt_rows_inbound_claim() allocate would let a controller's SetTargets be
+ * refused with Status::Busy for want of memory, a refusal no version of
+ * this firmware could previously produce, on a Matter-visible path, on the
+ * platform where the EVSE actually runs. Committing here instead moves the
+ * failure to composition time, where "this pool is exhausted, the rebuild
+ * stops" is what every other pool in this firmware already does and what a
+ * host already knows how to see.
+ *
+ * The reclaim is the same either way: a composition with no row-bearing
+ * cluster never calls this and pays nothing, which on a platform whose
+ * catalogue has no such device type at all means the buffer is never
+ * allocated in the life of the image.
+ *
+ * There is no matching decommit. Every fabric row consumer in this firmware
+ * is created during the boot composition rebuild and lives until the next
+ * reboot, so the commit is boot-scoped, which is the same allocate-only
+ * policy the port's cluster-object and endpoint-block heaps already carry.
+ */
+bool mt_rows_inbound_commit(void);
 
 /*
  * Publish the staged set and forward the command: raises
@@ -305,6 +351,9 @@ bool mt_rows_inbound_forward(uint16_t ep, uint32_t cluster, uint32_t command, ui
  * command handler, including the ones that never forwarded: nothing else
  * ever frees the claim, and a leaked claim makes every later forward on any
  * endpoint answer Busy until reboot.
+ *
+ * This releases the CLAIM, never the storage. Do the merge before
+ * releasing, which is the order the sequence above already prescribes.
  */
 void mt_rows_inbound_release(void);
 
