@@ -572,16 +572,73 @@ nobody understands is the one the next person weakens.
 
 ### The LM20 tier
 
-The nRF54LM20 (512 KB RAM, supported upstream in this NCS) is where the 16
+The nRF54LM20 (511 KB RAM, supported upstream in this NCS) is where the 16
 goes back up. Raising `kServiceableEndpoints` and `HEARTH_EP_HEAP_BYTES`
 together in `port/mt_port_ids.h`, and the mirrored literal in
-`src/chip_project_config.h`, is the whole change: the header table, CHIP's
-per-endpoint pools and the block heap all follow from those two numbers, and
-the static assertions catch a mirror that drifts. 28 serviceable endpoints
-would want `28 x 600` = 16,800 B (about 16.4 KB) of block heap for an
-all-extended-colour worst case, and would hand back to CHIP's per-endpoint
-pools the roughly 6.7 KB this round reclaimed from them by going the other
-way.
+`src/chip_project_config.h`, is where the change starts: the header table,
+CHIP's per-endpoint pools and the block heap all follow from those two
+numbers, and the static assertions catch a mirror that drifts.
+
+**It is not the whole change, and this paragraph used to say it was.**
+`port/mt_port_ids.h` itself contradicts the claim fifty lines below where
+it makes it: `HEARTH_OBJ_HEAP_BYTES` must move with the block budget, and
+its own `BUILD_ASSERT` refuses anything above 16,376 B. `kModeBasePoolSlots`
+(`port/mt_matter_zephyr.cpp`) is derived from the nine RVC endpoints the
+8,112-byte block heap admits and is guarded by nothing, so it would become
+the first wall a mode-heavy composition hits while every other number said
+28. `kObjRvcEndpointLimit` and `kObjMicrowaveEndpointLimit` are the same
+shape. The five `MT_*_MAX` per-family caps live in `core/`, shared with the
+C6, where they size whole objects rather than pointers. The object heap's
+worst mix was found by exhaustive search, not by hand, and would have to be
+searched again. Two constants is the shape of the change; it is not the
+size of it.
+
+The `28 x 600` = 16,800 B sketch for an all-extended-colour block heap that
+used to sit here is wrong twice over. The catalogue's widest block is the
+RVC at 872 B, not 600, so an all-RVC 28 wants 24,416 B. And 16,800 B lands
+past a `sys_heap` bucket band: at a gross size of 16,388 B the heap has
+2,048 chunks, chunk 0 grows from nine to ten, and `kHeapOverheadBytes`
+becomes 88 rather than 80. Nothing checked that until the parity round
+below added the `BUILD_ASSERT` the object heap already had.
+
+#### The board half, done ahead of the tier (2026-08-31)
+
+`nrf54lm20dk/nrf54lm20a/cpuapp` is a third board target of this same
+application directory, alongside `ophelia_cpico` and `nrf54l15dk`, and it
+took two files and no code:
+
+- `boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay`: the `hearth,at-uart`
+  chosen node on `uart30` and that UART's status. No SRAM reclaim (this
+  part's `cpuapp_sram` already spans all 511 KB and the SoC dtsi deletes
+  `cpuflpr_sram`), no `&hfxo` load-capacitor block (the DK programs the
+  same 15,000 fF internally), no LFCLK guard (the DK has an LFXO crystal
+  where the Ophelia-IV has none).
+- `pm_static_nrf54lm20dk_nrf54lm20a_cpuapp.yml`: the L15 map stretched at
+  the app slot to fill this part's 1940 KB of cpuapp RRAM, with
+  `settings_storage` keeping both its name (the KV store binds by it) and
+  its 32 KB size (`CONFIG_ZMS_LOOKUP_CACHE_SIZE=64` is justified against
+  that number). Partition Manager finds it by name with no build-system
+  change.
+
+Every capacity constant is left at its L15 value, so the port serves 16
+endpoints on this part exactly as it does on the L15, and every existing
+`static_assert` still reads as one unconditional fact. Build it the same
+way as the other two:
+
+```bash
+west build -b nrf54lm20dk/nrf54lm20a/cpuapp -d build_lm20 --pristine \
+  --sysbuild -- -DZEPHYR_BASE=$ZEPHYR_BASE -DBOARD_ROOT=$PWD
+```
+
+Nothing about this target has been on hardware: no LM20 DK exists on this
+bench. The build establishes the link, the partition map and every
+assertion; it establishes nothing about the HFXO, the GRTC, ZMS on this
+part's RRAM, or recovery entry. Two board facts are known to differ and are
+not addressed here: `sysbuild/mcuboot.overlay` points `zephyr,uart-mcumgr`
+at `uart20`, which is this DK's CONSOLE VCOM rather than its AT link, so
+serial recovery would come up on the wrong port of the two; and the DK's
+onboard debugger exposes no DTR-equals-reset or RTS-equals-strap contract,
+so `fw/flash.py` cannot enter recovery on it at all.
 
 ### Measured
 
@@ -1013,6 +1070,46 @@ and a `sys_heap` also spends a chunk header and a rounding-up per live block,
 on the order of 150 to 200 bytes across two blocks. Read the last row as
 "about 29.5 KB with everything open", which is the number that matters.
 
+### The nRF54LM20 DK parity build (2026-08-31)
+
+The third board target, every capacity constant unmoved. Pristine builds,
+same NCS v3.3.4 workspace and same toolchain, 2026-08-31:
+
+| | `ophelia_cpico` | `nrf54l15dk` | `nrf54lm20dk` |
+|---|---|---|---|
+| RAM used | 220,548 B | 220,780 B | **220,860 B** |
+| RAM region | 256 KB (84.13%) | 256 KB (84.22%) | **511 KB (42.21%)** |
+| RAM free (`_end` to end of SRAM) | 41,596 B | 41,364 B | **302,404 B** |
+| Flash used | 897,272 B | 905,172 B | **894,904 B** |
+| Flash region | 1342 KB app (65.29%) | 1428 KB RRAM (61.90%) | 1854 KB app (47.14%) |
+| MCUboot | 30,276 B of 48 KB | not built | **35,520 B of 48 KB** |
+
+The flash regions are not comparable to each other and the percentages say
+why: `ophelia_cpico` and `nrf54lm20dk` are sysbuild targets measured against
+their Partition Manager `app` slot, while `nrf54l15dk` is the
+`--no-sysbuild` core-sanity build measured against the whole RRAM.
+
+**The image is the same image.** `.bss` moves 31 B against `ophelia_cpico`
+and `.data` 275 B, which is board driver state and nothing of this port's:
+`kheap_hearth_ep_heap` is 0x2000, `kheap_hearth_obj_heap` is 0x2C00 and
+`s_dyn` is 384 B on all three, as they must be while `kServiceableEndpoints`
+and both heap sizes are unmoved. Text is 2,644 B SMALLER than
+`ophelia_cpico`, a different SoC's HAL and driver set rather than anything
+this platform chose.
+
+**302,404 B free on a 511 KB part, against 41,596 B on the L15.** That is
+the whole reason the tier is worth doing, and it is measured rather than
+projected. The staging arena is the same span, so a host session and a
+fabric session cost the same 11.2 KB out of seven times the room.
+
+**The libc arena is still sole-tenant on this board**, which is the standing
+condition `port/hearth_port_zephyr.c` says must be re-checked by map or
+disassembly on any new link. Checked: `aligned_alloc`, `memalign`,
+`posix_memalign`, `reallocarray`, `strdup` and `strndup` are absent from all
+three images, and the only references to the unwrapped `malloc` and `free`
+in the LM20 disassembly are the tail-call branches out of
+`hearth_stage_alloc` and `hearth_stage_free`.
+
 ## Dev board wiring
 
 The CPico RP2350 dev board carries the module and hosts the bridging firmware. This table is the soldering contract: a deviation means editing both the board `pinctrl` file and the sketch defines together.
@@ -1098,6 +1195,8 @@ The pyocd tool is the SWD path for this platform. Recovery from any state (locke
 ## Everyday flashing
 
 2026-08-27: since the bootloader round, `sysbuild.conf` unconditionally sets `SB_CONFIG_BOOTLOADER_MCUBOOT=y`, so any `west build` from this directory pulls in MCUboot by default, sysbuild flag or not (there is no `.west/config` override). The stock `nrf54l15dk/nrf54l15/cpuapp` overlay used for core-sanity builds has no `mcuboot-button0` alias (only `ophelia_cpico`'s own dts wires the recovery strap to it), so MCUboot's serial-recovery build fails there with `#error "Serial recovery/USB DFU button must be declared in device tree as 'mcuboot_button0'"`. Build DK core-sanity targets with `--no-sysbuild` until the DK overlay gains recovery-button wiring or `sysbuild.conf` becomes board-conditional.
+
+2026-08-31, that paragraph is stale and this is the correction. It was written against NCS v3.0.2; the pinned workspace is v3.3.4, where `zephyr/boards/nordic/nrf54l15dk/nrf54l_05_10_15_cpuapp_common.dtsi` aliases `mcuboot-button0` to `button0` and `zephyr/boards/nordic/nrf54lm20dk/nrf54lm20_a_b_cpuapp_common.dtsi` does the same. Both DKs build under sysbuild now, verified by pristine builds of `nrf54l15dk/nrf54l15/cpuapp` and `nrf54lm20dk/nrf54lm20a/cpuapp` with MCUboot and serial recovery on. `--no-sysbuild` is no longer a workaround, only a faster core-sanity path, and the DK figures in the measurement tables above are still `--no-sysbuild` ones because that is how they were taken.
 
 After SWD install, all updates go over UART via the serial recovery mechanism. Flashing is driven by the host's `fw/flash.py` script:
 
