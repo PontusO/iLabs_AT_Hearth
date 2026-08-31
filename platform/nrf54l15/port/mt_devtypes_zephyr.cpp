@@ -7030,14 +7030,30 @@ mt_chime_store_t *mt_dyn_chime_store(EndpointId ep)
 /* Catalogue batch 5: cluster-keyed, unlike the two accessors above,
  * because the RVC block carries two ModeBase stores and store_offset()
  * places each by its own cluster id. The cluster check doubles as the
- * only-these-two guard: any cluster this type does not carry (including a
- * non-ModeBase id) answers nullptr, the callers' defensive arm. */
+ * only-these guard: any cluster this type does not carry (including a
+ * non-ModeBase id) answers nullptr, the callers' defensive arm.
+ *
+ * THIS LIST IS THE SECOND COPY OF THE MODEBASE ID SET, and it has to be kept
+ * in step with mt_matter_modebase_set()'s accept set in mt_matter_zephyr.cpp
+ * by hand, because the two guards mean different things (this one is "does a
+ * store exist at an offset for this id", that one is "does the wire contract
+ * admit this id") and neither can be derived from the other. When the EVSE
+ * round added the EnergyEvseMode row to kStoreWalk, this list was NOT
+ * updated, which was invisible: the store was allocated and constructed in
+ * the block, every accessor answered nullptr for it, and the delegate's
+ * count-0 arm served the placeholder exactly as it would have with no store
+ * at all. A composition paid 306 bytes an endpoint for a region nothing
+ * could reach. It became visible only when 0x009D was admitted to
+ * AT+MTMODES and the feed had somewhere to fail. There is no build check for
+ * this; the third copy, if one ever appears, should be derived from
+ * kStoreWalk instead. */
 mt_mb_store_t *mt_dyn_mb_store(EndpointId ep, ClusterId cluster)
 {
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
         cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id &&
         cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id &&
-        cluster != OvenMode::Id && cluster != MicrowaveOvenMode::Id) {
+        cluster != OvenMode::Id && cluster != MicrowaveOvenMode::Id &&
+        cluster != EnergyEvseMode::Id) {
         return nullptr;
     }
     for (auto &d : s_dyn) {

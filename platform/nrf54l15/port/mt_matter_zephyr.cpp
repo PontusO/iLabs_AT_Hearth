@@ -983,8 +983,8 @@ static const instance_served_attr k_instance_served[] = {
      * to what it serves, so the generic arena read answers the same 1. */
     { chip::app::Clusters::OvenMode::Id,
       chip::app::Clusters::OvenMode::Attributes::CurrentMode::Id },
-    /* MicrowaveOvenMode CurrentMode (batch 8), the seventh and last ModeBase
-     * alias. Note what is NOT here and why, because the microwave is the one
+    /* MicrowaveOvenMode CurrentMode (batch 8), the seventh ModeBase alias
+     * (the EVSE round's EnergyEvseMode row below is the eighth and last). Note what is NOT here and why, because the microwave is the one
      * device type where the omissions are the interesting part: the three
      * MicrowaveOvenControl attributes are Instance-served too, and are
      * deliberately left to the arena, because AT_MT_SPEC.md 1441-1456 says a
@@ -3552,12 +3552,13 @@ private:
              * a defensible-sounding tag arrived at entirely by accident, and
              * a different one from the C6's.
              *
-             * THIS ARM IS THE ONLY TAG AN ENERGYEVSEMODE ENDPOINT EVER
-             * CARRIES on either platform today, because AT+MTMODES does not
-             * admit cluster 0x009D (see mt_matter_modebase_set() below and
-             * AT_MT_SPEC.md 3.20.1's cluster list, which omits it on both
-             * platforms). So the placeholder is not a pre-feed state here,
-             * it is the served state. */
+             * This arm WAS the only tag an EnergyEvseMode endpoint ever
+             * carried, because AT+MTMODES did not admit cluster 0x009D. Spec
+             * 3.20.1 admits it since 2026-08-31 and
+             * mt_matter_modebase_set() below does too, so the placeholder is
+             * a pre-feed state again, like every other arm here. The value
+             * did not move: the spec's tag-0 default row for this cluster is
+             * the kManual this arm already chose. */
             return chip::to_underlying(EnergyEvseMode::ModeTag::kManual);
         }
         return chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
@@ -3749,32 +3750,36 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id &&
         cluster != DeviceEnergyManagementMode::Id && cluster != WaterHeaterMode::Id &&
         cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id &&
-        cluster != OvenMode::Id && cluster != MicrowaveOvenMode::Id) {
-        /* Batch 7a widened the accept set to three of the C6's seven
-         * ModeBase ids, batch 7b to four (WaterHeaterMode), and batch 8 to
-         * SEVEN: 0x0052 on the refrigerator and the cooler cabinet, OvenMode
-         * on the heater cabinet, MicrowaveOvenMode on the microwave, all
-         * three named in the condition above.
+        cluster != OvenMode::Id && cluster != MicrowaveOvenMode::Id &&
+        cluster != EnergyEvseMode::Id) {
+        /* Batch 7a widened the accept set to three of the C6's ModeBase ids,
+         * batch 7b to four (WaterHeaterMode), batch 8 to seven (0x0052 on the
+         * refrigerator and the cooler cabinet, OvenMode on the heater
+         * cabinet, MicrowaveOvenMode on the microwave), and the EVSE round to
+         * EIGHT, which is every ModeBase alias this firmware builds on either
+         * platform.
          *
-         * ENERGYEVSEMODE IS THE EIGHTH AND STAYS OUT, and the reason changed
-         * with the EVSE round without the code changing. It used to be "its
-         * device type is out of tier" (ruling DE408). The device type is in
-         * now, and 0x009D still answers +MTERR:3, because the C6 refuses it
-         * too (its own mt_matter_modebase_set() lists the same seven) and
-         * AT_MT_SPEC.md 3.20.1's cluster list omits it. Widening the set here
-         * alone would make this platform accept a cluster id the published
-         * contract says is an error, which is a wire divergence and not a
-         * fix.
+         * ENERGYEVSEMODE (0x009D) IS THE EIGHTH, AND IT WAS OUT UNTIL
+         * 2026-08-31. The record of why is worth keeping, because the
+         * reasoning was correct at the time and only the facts under it
+         * changed. It was first out because its device type was out of tier
+         * (ruling DE408, LM20). When the EVSE round brought the device type
+         * in, it STAYED out for a different and better reason: the C6's own
+         * bridge listed the same seven ids and AT_MT_SPEC.md 3.20.1's cluster
+         * list omitted 0x009D, so admitting it here alone would have made
+         * this platform accept a cluster id the published contract called an
+         * error, which is a wire divergence and not a fix.
          *
-         * WHAT THAT COSTS, said plainly rather than left to be discovered: an
-         * EnergyEvseMode endpoint serves the placeholder mode for ever. Its
-         * SupportedModes is one entry, its CurrentMode is 0, and a
-         * controller's ChangeToMode to that one mode still forwards to the
-         * host over +MTCMD, so the cluster is coherent and degenerate rather
-         * than broken. Both platforms behave identically, which is why this
-         * is a note and not a defect: closing it means a spec amendment
-         * adding 0x009D to 3.20.1's list and its tag-0 default table, then
-         * one condition here and one on the C6. */
+         * What that left was a degenerate pairing, and it is what the spec
+         * change closed: an EnergyEvseMode endpoint's SupportedModes was the
+         * firmware placeholder for ever, its CurrentMode 0, while
+         * ChangeToMode still forwarded to the host for adjudication, so a
+         * controller was being asked to choose between one option. Spec
+         * 3.20.1 now names 157/0x9D with a tag-0 default of kManual
+         * (0x4000), which is the value BOTH platforms already produced (the
+         * C6 by fall-through, this port by the explicit placeholder arm), so
+         * admitting it changes no value any host or controller could already
+         * observe. It only makes a previously-refused command succeed. */
         return MT_ATTR_ERR_CLUSTER;
     }
     if (!emberAfContainsServer(ep, cluster)) {
@@ -3893,6 +3898,17 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                  * matching arm. */
                 tag = chip::to_underlying(
                     RefrigeratorAndTemperatureControlledCabinetMode::ModeTag::kAuto);
+            } else if (cluster == EnergyEvseMode::Id) {
+                /* The EVSE round: kManual (0x4000) on every mode, first or
+                 * not, the AT_MT_SPEC.md 3.20 table row added 2026-08-31.
+                 * Explicit rather than left to the fall-through below, which
+                 * would have substituted kVacuum's 0x4001 and landed on
+                 * kTimeOfUse on this cluster's own enum: a plausible-looking
+                 * tag arrived at entirely by accident. placeholder_tag()
+                 * above carries the same value for the same reason, which is
+                 * what keeps a host-fed list and an unfed one describing the
+                 * same kind of mode. */
+                tag = chip::to_underlying(EnergyEvseMode::ModeTag::kManual);
             } else {
                 tag = chip::to_underlying(RvcCleanMode::ModeTag::kVacuum);
             }
