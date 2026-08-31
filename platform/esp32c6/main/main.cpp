@@ -2597,7 +2597,7 @@ private:
      * ModeBase common tags 0x00-0x09, but a cavity whose host has not yet
      * declared a list is more usefully described as a bake cavity than as
      * "Auto"), and (2026-08-31) EnergyEvseMode gets kManual (0x4000,
-     * Mode_EnergyEvse.xml's first cluster-specific tag), which is the number
+     * Mode_EVSE.xml's first cluster-specific tag), which is the number
      * the MicrowaveOvenMode fall-through already returned and is now chosen
      * rather than inherited. mt_matter_modebase_set() below applies the
      * identical table to real host-declared entries at store time.
@@ -2840,7 +2840,7 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
             } else if (cluster == EnergyEvseMode::Id) {
                 /* Manual (0x4000), AT_MT_SPEC.md 3.20's table row, added
                  * 2026-08-31 with the cluster's admission above and verified
-                 * against Mode_EnergyEvse.xml before this branch was written:
+                 * against Mode_EVSE.xml before this branch was written:
                  * the XML defines Manual as the first of the four
                  * cluster-specific tags and encodes no mandatory-tag
                  * conformance on SupportedModes at all, so nothing in it

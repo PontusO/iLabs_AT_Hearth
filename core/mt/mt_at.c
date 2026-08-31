@@ -2745,7 +2745,17 @@ static int row_err_to_mterr(int r)
  * of the structure, and the structure is what a spec sentence that flat needs
  * standing under it.
  *
- * The proof it holds TODAY, both platforms, so the narrowing below is a
+ * WHAT IS AND IS NOT STRUCTURAL, since the spec sentence names three verbs
+ * and this function defends one. AT+MTROWGET is the only one of the three
+ * that reaches a PLATFORM bridge, and it is therefore the only one whose
+ * guarantee needed making structural; AT+MTROW and AT+MTROWCLEAR still map
+ * through row_err_to_mterr(), and are safe for a stronger reason than a
+ * contract, namely that their only producers are mt_rows_stage() and
+ * mt_rows_clear() in shared core, which have no persistence code to reach.
+ * So: two verbs safe by construction of the codec, one safe by construction
+ * of this mapping, and none by coincidence.
+ *
+ * The proof for the third TODAY, both platforms, so the narrowing below is a
  * guarantee rather than a change: mt_matter_rows_get() and
  * mt_matter_rows_total() dispatch kind 1 to the EVSE target reads, which
  * locate the endpoint, read the in-memory store and return; neither calls the
@@ -3364,9 +3374,13 @@ static int cmd_mtrowget(at_type_t type, char *args)
     }
 
     /*
-     * THE BULK READ IS NOT ATOMIC, and the EVSE round is what made this path
-     * reachable for the first time, so it is worth stating rather than
-     * leaving to be discovered. `total` is snapshotted once and each row is
+     * THE BULK READ IS NOT ATOMIC, and AT_MT_SPEC.md 3.28 says so since
+     * 2026-08-31: the section used to promise an unbroken stream of +MTROW
+     * lines then OK with no failure branch, and now carries a paragraph for
+     * this, including that every line's own <total> is how a host tells a
+     * shrinking set apart from a complete one. The EVSE round is what made
+     * the path reachable for the first time, which is why the disclosure was
+     * owed. `total` is snapshotted once and each row is
      * then fetched through its own bridge call, which takes and releases the
      * platform's stack lock per row and re-walks the stored payload. A fabric
      * ClearTargets or an adjudicated SetTargets landing between two rows can

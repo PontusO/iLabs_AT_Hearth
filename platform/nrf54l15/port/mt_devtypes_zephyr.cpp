@@ -5299,10 +5299,11 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * build saying so. Deriving the candidate set from s_registry the way
  * shape_domain_matches_policy() derives the parent universe would close the
  * gap and is the right shape for whoever needs it next; count_slots() is not
- * constexpr, which is what has stopped it so far. Eight rather than sixteen because sizing for
- * sixteen of the heaviest is precisely the trade this round declined;
- * eight is the point below which the capacity table would be describing a
- * different device.
+ * constexpr, which is what has stopped it so far.
+ *
+ * Eight rather than sixteen because sizing for sixteen of the heaviest is
+ * precisely the trade this round declined; eight is the point below which the
+ * capacity table would be describing a different device.
  *
  * THE FLOOR IS CAP-AWARE SINCE THE EVSE ROUND, and the change is worth
  * understanding before anyone weakens it, because a floor nobody understands

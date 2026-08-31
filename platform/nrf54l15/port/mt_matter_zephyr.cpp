@@ -984,7 +984,8 @@ static const instance_served_attr k_instance_served[] = {
     { chip::app::Clusters::OvenMode::Id,
       chip::app::Clusters::OvenMode::Attributes::CurrentMode::Id },
     /* MicrowaveOvenMode CurrentMode (batch 8), the seventh ModeBase alias
-     * (the EVSE round's EnergyEvseMode row below is the eighth and last). Note what is NOT here and why, because the microwave is the one
+     * (the EVSE round's EnergyEvseMode row below is the eighth and last).
+     * Note what is NOT here and why, because the microwave is the one
      * device type where the omissions are the interesting part: the three
      * MicrowaveOvenControl attributes are Instance-served too, and are
      * deliberately left to the arena, because AT_MT_SPEC.md 1441-1456 says a
@@ -3541,7 +3542,7 @@ private:
         }
         if (m_cluster == EnergyEvseMode::Id) {
             /* The EVSE round: kManual (0x4000) on the placeholder.
-             * Mode_EnergyEvse.xml mandates no tag, and Manual is the
+             * Mode_EVSE.xml mandates no tag, and Manual is the
              * everyday "charge when plugged in" mode a host that has not
              * described its modes most plausibly means, the WaterHeaterMode
              * and OvenMode reasoning. It is also the value the C6 already
@@ -7170,7 +7171,11 @@ public:
      * predicate is the honest source, where the C6 reads its live
      * FeatureMap attribute back). Read by the 0x99 push branch's existence
      * gates and by the SOC-variant rule in the merge. */
-    void set_features(uint32_t mask) { m_features = mask; }
+    void set_features(uint32_t mask)
+    {
+        m_features       = mask;
+        m_features_known = true;
+    }
     bool has_feature(chip::app::Clusters::EnergyEvse::Feature f) const
     {
         return (m_features & chip::to_underlying(f)) != 0;
@@ -7373,6 +7378,76 @@ public:
         }
         refresh_views();
         return true;
+    }
+
+    /*
+     * THE SOC RULE APPLIES TO WHAT WAS LOADED, NOT ONLY TO WHAT ARRIVES, and
+     * it has to run after EVERY load rather than after the first one.
+     *
+     * The case it closes. The blob is keyed on the endpoint id alone
+     * ("t<ep>") and endpoint ids are assigned 1..N in composition order, so
+     * re-declaring an EVSE at the same index with the other variant hands the
+     * new endpoint the old one's schedule. decode() cannot see it: every
+     * target in that schedule is well formed, in range, and was legal for the
+     * variant that wrote it. Served unchanged, GetTargets() answers a
+     * controller with targets carrying a targetSoC the cluster's SOC
+     * conformance says may only be absent or 100, or with targets lacking one
+     * where ValidateTargets() makes it mandatory. Either way GetTargets hands
+     * back a schedule its own SetTargets would have been refused, which is
+     * the one thing evse_targets_apply_locked()'s SOC check exists to prevent
+     * on the other path.
+     *
+     * WHY IT IS A HELPER AND NOT AN INLINE BLOCK AT ONE CALL SITE. There are
+     * THREE loads per endpoint, not one: the boot load from
+     * mt_matter_evse_delegate_alloc(), the apply path's !m_loaded retry, and
+     * GetTargets()'s own lazy retry. A boot load that hits a transient KV
+     * failure leaves the store empty and m_loaded false, so a check placed at
+     * the boot site passes over nothing; the later retry then succeeds, loads
+     * the cross-variant blob and serves it unchecked, which is the exact
+     * sentence this check is written against, reached by a different door.
+     *
+     * THE ONE ASYMMETRY WITH THE C6, and the reason this is not simply called
+     * from LoadTargets() the way it is there: on that platform the variant is
+     * an attribute of the live endpoint and is readable at every load. Here
+     * the endpoint does not exist yet when the boot load runs
+     * (mt_matter_evse_delegate_alloc() is called from mt_devtype_create()
+     * BEFORE emberAfSetDynamicEndpoint()), so the first load genuinely cannot
+     * know the variant. m_features_known is that fact made explicit: this
+     * helper is a no-op until mt_matter_evse_register() stamps the mask, and
+     * that function calls it once immediately afterwards, which covers the
+     * boot load. LoadTargets() calls it too, which covers the other two.
+     * Between them every load is validated, and the one load that cannot be
+     * is validated the moment it becomes possible.
+     *
+     * THE DISCARD IS RAM-ONLY. The blob is not rewritten, so the log repeats
+     * on every boot and the schedule returns intact if the endpoint is later
+     * re-declared with its original variant. That is deliberate: a variant
+     * flip is a composition edit, often a mistake, and destroying the user's
+     * schedule to tidy up after it would be the worse failure. The store is
+     * simply not served while it cannot be served correctly.
+     */
+    void drop_store_if_variant_mismatch()
+    {
+        using namespace chip::app::Clusters::EnergyEvse;
+        if (!m_features_known || m_schedule_count == 0) {
+            return;
+        }
+        const bool soc = has_feature(Feature::kSoCReporting);
+        for (uint8_t i = 0; i < m_schedule_count; i++) {
+            for (uint8_t j = 0; j < m_target_count[i]; j++) {
+                const Structs::ChargingTargetStruct::Type &t = m_targets[i][j];
+                if (soc ? !t.targetSoC.HasValue()
+                        : (t.targetSoC.HasValue() && t.targetSoC.Value() != 100)) {
+                    LOG_ERR("ep %u: the stored charging schedule was written for the other "
+                            "SOC variant and cannot be served here; not serving it (the "
+                            "stored blob is left alone). A controller would otherwise be "
+                            "handed a schedule its own SetTargets would be refused",
+                            (unsigned)mEndpointId);
+                    clear_store();
+                    return;
+                }
+            }
+        }
     }
 
     /* Write the store to the KV. Returns false on any failure. */
@@ -7747,6 +7822,11 @@ public:
             return Status::Failure;
         }
         m_loaded = true;
+        /* The apply path's retry and GetTargets()'s lazy retry both land
+         * here, which is what covers them (the helper's own comment); the
+         * boot load reaches the helper through mt_matter_evse_register()
+         * instead, because the variant is not knowable yet at this point. */
+        drop_store_if_variant_mismatch();
         LOG_INF("ep %u: loaded %u charging target schedule(s)", (unsigned)mEndpointId,
                 (unsigned)m_schedule_count);
         return Status::Success;
@@ -7954,6 +8034,12 @@ public:
 
 private:
     uint32_t m_features = 0;
+    /* False until mt_matter_evse_register() stamps the mask, which is the one
+     * window in which this delegate does not know its own variant: the boot
+     * load runs before the endpoint exists. drop_store_if_variant_mismatch()
+     * above is a no-op while it is false, and register() calls that helper
+     * the moment it flips. */
+    bool m_features_known = false;
 };
 
 /*
@@ -8012,10 +8098,12 @@ static size_t s_evse_reserved;
  * id immediately, because LoadTargets() needs to know which endpoint's blob to
  * read (the alloc's own comment). So a delegate whose second half never ran IS
  * matchable here, and what makes that safe is one level up rather than in this
- * function: every bridge that can reach a delegate goes through evse_locate()
- * or through mt_matter_meas_set(), both of which prove the ENDPOINT exists and
- * carries the cluster before this lookup runs, and a create that failed after
- * the alloc never produced an endpoint. The rebuild also stops at the first
+ * function: there are THREE callers, and each proves the endpoint exists and
+ * carries the cluster before this lookup runs. evse_locate() does it for the
+ * row bridges, mt_matter_meas_set() for the 0x0099 push branch, and
+ * attr_locate() for mt_evse_attr_read_live() on the AT+MTATTR carve-out. A
+ * create that failed after the alloc never produced an endpoint, so none of
+ * the three can reach a stranded delegate. The rebuild also stops at the first
  * failure, so there is no later create to re-use the id and alias onto the
  * stranded delegate, which is the specific hazard the DEM and WHM pools'
  * sentinel exists to prevent and this pool does not have.
@@ -8137,10 +8225,14 @@ extern "C" void *mt_matter_evse_delegate_alloc(uint16_t ep)
  *   OptionalCommands: EMPTY, which is what keeps StartDiagnostics out of the
  *     advertised list (the delegate's own note).
  *
- * with_soc is the create path's variant predicate, the single source shared
- * with the FeatureMap seed in mt_devtypes_zephyr.cpp, and it is recorded on
- * the delegate for the 0x99 push branch's existence gates and the merge's
- * SOC-variant rule.
+ * with_soc is READ FROM THE DECLARED CLUSTER LIST by the create path
+ * (type_has_attr for StateOfCharge), not from the variant, and it is recorded
+ * on the delegate for the 0x99 push branch's existence gates, the merge's
+ * SOC-variant rule and drop_store_if_variant_mismatch(). The FeatureMap seed
+ * in mt_devtypes_zephyr.cpp is NOT the shared source, and this comment used
+ * to say it was: the seed is a variant-keyed table row, so it is the derived
+ * copy, and it is an inert shadow (the Instance serves FeatureMap from
+ * mFeature), which is what would make it the one to go wrong quietly.
  */
 extern "C" void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_soc)
 {
@@ -8151,59 +8243,13 @@ extern "C" void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_s
         mask |= chip::to_underlying(Feature::kSoCReporting);
     }
     d->set_features(mask);
-
-    /*
-     * THE SOC RULE APPLIES TO WHAT WAS LOADED, NOT ONLY TO WHAT ARRIVES, and
-     * this is the first moment both facts are known: the alloc loaded the
-     * blob before any variant was stamped, and the stamp happens on the line
-     * above.
-     *
-     * The case it closes. The blob is keyed on the endpoint id alone
-     * ("t<ep>"), and endpoint ids are assigned 1..N in composition order, so
-     * re-declaring an EVSE at the same index with the other variant hands the
-     * new endpoint the old one's schedule. Nothing in decode() can catch it:
-     * every target in that schedule is well formed, in range, and was legal
-     * for the variant that wrote it. Served unchanged, a variant-0 schedule
-     * on a variant-1 endpoint answers GetTargets with targets carrying a
-     * targetSoC the cluster's own SOC conformance says may only be absent or
-     * 100, and the reverse serves targets with no targetSoC on an endpoint
-     * whose ValidateTargets() makes it mandatory. In both directions
-     * GetTargets would hand a controller a schedule its own SetTargets would
-     * have been refused, which is the one thing the AT-side enforcement in
-     * evse_targets_apply_locked() exists to prevent on the other path.
-     *
-     * Dropping it is the honest answer, and it is the decoder's existing
-     * stance one step out: a schedule that cannot be represented on THIS
-     * endpoint is no schedule, exactly as a corrupt blob is. m_loaded stays
-     * true because the store is now authoritative and empty rather than
-     * unknown, so a later merge does not refuse itself. The log is loud
-     * because this discards user data, and the trigger is an ordinary host
-     * action rather than a fault.
-     *
-     * The C6 carries the same hole and the same fix; neither platform can
-     * express this check in decode(), which is why it is here.
-     */
-    {
-        const bool soc = d->has_feature(Feature::kSoCReporting);
-        bool       ok  = true;
-        for (uint8_t i = 0; ok && i < d->m_schedule_count; i++) {
-            for (uint8_t j = 0; j < d->m_target_count[i]; j++) {
-                const Structs::ChargingTargetStruct::Type &t = d->m_targets[i][j];
-                if (soc ? !t.targetSoC.HasValue()
-                        : (t.targetSoC.HasValue() && t.targetSoC.Value() != 100)) {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if (!ok) {
-            LOG_ERR("ep %u: the stored charging schedule was written for the other SOC "
-                    "variant and cannot be served here; discarding it. A controller would "
-                    "otherwise be handed a schedule its own SetTargets would be refused",
-                    (unsigned)ep);
-            d->clear_store();
-        }
-    }
+    /* The boot load ran before this endpoint existed, so the delegate could
+     * not check its stored schedule against its own variant until now. The
+     * helper is a no-op until set_features() above flips m_features_known,
+     * which is exactly why it is called here and once; the other two load
+     * sites reach it from inside LoadTargets(). Its own comment carries the
+     * three-loads argument and why the discard is RAM-only. */
+    d->drop_store_if_variant_mismatch();
 
     auto *inst = new (obj_inst_storage<HearthEvseDelegate, Instance>(d))
         Instance(ep, *d, static_cast<Feature>(mask), static_cast<OptionalAttributes>(0),
@@ -8358,16 +8404,17 @@ static int evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage, u
      * instead, because esp-matter's FeatureMap copy is authoritative there
      * and this port's is a seed shadow; the two questions are the same one.)
      *
-     * A DISCLOSED SPEC GAP, named here because a host hits it before anyone
-     * reads this file: AT_MT_SPEC.md 3.28's kind-1 field table says only that
-     * at least one of <soc> and <energy> must be present, and its error table
-     * names no variant rule, so a host staging a row that is legal by 3.28
-     * and illegal by this rule gets a +MTERR:1 the published contract does
-     * not explain. The rule itself is not optional: without it a host could
-     * install over AT exactly the schedule a controller's SetTargets would
-     * have been refused, and GetTargets would then hand that schedule back to
-     * the controller. It is exact C6 parity, so the fix is a spec sentence
-     * rather than a change on either platform.
+     * THE SPEC SAYS THIS NOW, and it did not when the check was written.
+     * AT_MT_SPEC.md 3.28's kind-1 rules carried only the choice-of-one rule
+     * ("at least one of <soc> and <energy>"), so a host staging a row that
+     * was legal by 3.28 and illegal by this one met an unexplained +MTERR:1.
+     * The sentence was missing, not the check: 3.28 now carries a paragraph
+     * of its own for the variant rule, naming the same +MTERR:1, the same
+     * all-or-nothing timing, and AT+MTEP?'s fourth field as where a host
+     * reads the variant back. The rule was never optional, because without it
+     * a host could install over AT exactly the schedule a controller's
+     * SetTargets would have been refused and GetTargets would hand that
+     * schedule back to the controller; what was missing was saying so.
      */
     bool soc_feature = d->has_feature(Feature::kSoCReporting);
 
@@ -9089,7 +9136,7 @@ static int mt_evse_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool
  * one:
  *
  *   family                  delegate  Instance  payload   heap cost
- *   EnergyEvse                  1968        48     2016        2024
+ *   EnergyEvse                  1976        48     2024        2032
  *   OperationalState              16       240      256         264
  *   RvcOperationalState           12       248      264         272
  *   DeviceEnergyManagement       240        40      280         288
@@ -9114,7 +9161,7 @@ static int mt_evse_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool
  * 1), which is the only way to keep it honest; four rows were wrong before.
  *
  *   obj  device types (registry id, variant)          families claimed
- *  2696  energy EVSE               0x050C v0 and v1   EnergyEvse + DEM + 2 x ModeBase
+ *  2704  energy EVSE               0x050C v0 and v1   EnergyEvse + DEM + 2 x ModeBase
  *                                                     + EPM + PowerTopology
  *   584  battery storage v0        0x0018 v0          DEM + ModeBase + EPM + PowerTopology
  *   440  microwave oven            0x0079             OperationalState + ModeBase + MWOC
@@ -9177,18 +9224,18 @@ static int mt_evse_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool
  * THE EVSE ROUND MOVED IT AGAIN, and by much the largest step this heap has
  * taken. An EVSE endpoint draws SIX per-endpoint objects at once (EnergyEvse,
  * DeviceEnergyManagement, two ModeBase aliases, EPM and PowerTopology) and
- * one of them carries the whole charging-target store, so it is 2,696 object
- * bytes on a 1,128 B block: 2.39 object bytes per block byte, against the
+ * one of them carries the whole charging-target store, so it is 2,704 object
+ * bytes on a 1,128 B block: 2.40 object bytes per block byte, against the
  * microwave's 0.82 and the utility meter's 2.44. It is capped at two
  * (MT_EVSE_MAX), and the maximising composition takes both:
  *
- *    2 x energy EVSE (v1)     5,392 B   block 2,256   EVSE 2/2, DEM 2, MB 4
+ *    2 x energy EVSE (v1)     5,408 B   block 2,256   EVSE 2/2, DEM 2, MB 4
  *    8 x microwave oven       3,520 B   block 4,288   OpState 8, MWOC 8, MB 8
  *    3 x washer/dishwasher/dryer 792 B  block   432   OpState 11/16
  *    2 x utility meter          624 B   block   256   METER 2/2
  *    1 x battery storage v0     584 B   block   856   DEM 3/4, EPM 3/8, MB 13
  *   ---------------------------------------------------------------------
- *   16 endpoints            10,912 B   block 8,088 of 8,112 B
+ *   16 endpoints            10,928 B   block 8,088 of 8,112 B
  *
  * VARIANT 1 IS THE EVSE THE SEARCH PICKS, not variant 0, and the reason is
  * worth stating because it looks like an oversight: the two variants draw
@@ -9234,9 +9281,9 @@ static int mt_evse_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool
  * uniform compositions worth naming separately, so a future delegate or
  * Instance that grows fails the build here rather than a bench run later:
  *
- *   worst mixed composition  10,912   fits, 272 B spare
+ *   worst mixed composition  10,928   fits, 256 B spare
  *   2 x energy EVSE (MT_EVSE_MAX, the cap the create path enforces)
- *                             5,392   fits
+ *                             5,408   fits
  *   16 x laundry washer       4,224   fits
  *   9 x RVC (the block heap's own limit for that type)   4,032   fits
  *   15 x microwave oven (the block heap's own limit)     6,600   fits
@@ -9293,17 +9340,27 @@ constexpr size_t kObjMeter =
     kObjCostOf(sizeof(chip::app::Clusters::MeterIdentification::Instance));
 constexpr size_t kObjValve = kObjCostOf(sizeof(HearthValveDelegate));
 /* The EVSE round, and the largest single object in the port by a factor of
- * six. PINNED BY sizeof like the MWOC pair, and for a sharper reason: 1,968 B
+ * six. PINNED BY sizeof like the MWOC pair, and for a sharper reason: 1,976 B
  * of delegate is 1,680 B of charging-target store (7 days x 10 targets x a
  * 24-byte ChargingTargetStruct) plus 84 B of schedule views plus the scalar
  * cache, so ANY change to the SDK's own struct layout moves the worst mix
  * below, and the assert is what stops that happening quietly. The batch 7
  * audit's estimate was "about 1,730 B including the store"; the compiler says
- * 1,968, and the difference is the eight nullable scalars the audit did not
- * count. */
+ * 1,976, and the difference is the eight nullable scalars the audit did not
+ * count.
+ *
+ * It was 1,968 until the fix round added m_features_known, one bool that costs
+ * eight bytes after alignment and moves this pair 2,024 to 2,032 and the worst
+ * mix 10,912 to 10,928. That is the assertion earning its keep rather than a
+ * regression: the flag is what lets drop_store_if_variant_mismatch() know
+ * whether this delegate's variant is knowable yet, and the alternative
+ * (treating m_features == 0 as "not stamped") would have cost nothing and
+ * silently stopped validating the day PREF stopped being unconditional.
+ * Sixteen bytes of object heap across the two slots, against a 256 B
+ * margin. */
 constexpr size_t kObjEvse = kObjCostOf(
     obj_pair_bytes<HearthEvseDelegate, chip::app::Clusters::EnergyEvse::Instance>());
-static_assert(kObjEvse == 2024,
+static_assert(kObjEvse == 2032,
               "the EnergyEvse delegate-plus-Instance pair changed size; re-run the "
               "worst-composition search before touching the assertions below");
 
@@ -9344,6 +9401,9 @@ constexpr size_t kObjWorstMixBytes = 2 * kObjPerEvse +
                                      3 * kObjPerWasherTrio +
                                      2 * kObjPerUtilityMeter +
                                      1 * kObjPerBatteryStorageV0;
+static_assert(kObjPerEvse == 2704,
+              "the EVSE's per-endpoint object cost moved; re-run the worst-composition "
+              "search before touching the assertions below");
 
 /* Not in the worst mix, but its cost feeds the search that found the mix,
  * so it is pinned here: if the water heater grows, the search has to be
@@ -9381,8 +9441,8 @@ static_assert(kObjPerMicrowaveOven * kObjMicrowaveEndpointLimit <= kObjHeapUsabl
 /* Pinned so a delegate or Instance that changes size fails the build here
  * and forces the table above to be re-read, rather than silently moving the
  * worst case. */
-static_assert(kObjWorstMixBytes == 10912,
-              "the worst-composition arithmetic moved off 10,912 B");
+static_assert(kObjWorstMixBytes == 10928,
+              "the worst-composition arithmetic moved off 10,928 B");
 
 /* The EVSE round's own uniform composition, the RVC and microwave rows'
  * reason: MT_EVSE_MAX is the wall a host hits first for this type, so the

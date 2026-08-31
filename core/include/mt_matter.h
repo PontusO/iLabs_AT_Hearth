@@ -454,13 +454,30 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  * cluster's SupportedModes list, host-fed, never persisted, the same
  * re-sent-every-boot contract as the ModeSelect form
  * (mt_matter_modes_set() above) and every other host-fed list in this
- * header. cluster must be one of the ModeBase cluster ids (RvcRunMode,
- * RvcCleanMode, MicrowaveOvenMode, and - composed appliance round -
- * RefrigeratorAndTemperatureControlledCabinetMode from task 3 and OvenMode
- * from task 4); this bridge is the sole
- * place that validates it, since mt_at.c stays free of any esp_matter/CHIP
- * header and cannot read those ids itself (see this file's own top
- * comment). modes[0..count-1]/tags[0..count-1]/labels[0..count-1] are
+ * header. cluster must be one of the EIGHT ModeBase cluster ids, in the order
+ * they arrived: RvcRunMode, RvcCleanMode and MicrowaveOvenMode (RVC and
+ * microwave batch), RefrigeratorAndTemperatureControlledCabinetMode and
+ * OvenMode (composed appliance round, tasks 3 and 4), WaterHeaterMode (energy
+ * round B), DeviceEnergyManagementMode (energy round C1) and EnergyEvseMode
+ * (added 2026-08-31; the cluster shipped with the EVSE but AT+MTMODES refused
+ * it until then, so its SupportedModes was the firmware placeholder for ever
+ * while ChangeToMode still forwarded for adjudication). AT_MT_SPEC.md 3.20.1
+ * is the published list and this comment tracks it.
+ *
+ * THIS IS ONE OF FOUR WRITTEN COPIES OF THAT ID SET, and the count is here so
+ * the next round does not find a fifth. THE SPEC IS CANONICAL; the other
+ * three are the ones that have to follow it. Two are guards on the nRF54L15
+ * port (mt_matter_modebase_set()'s accept set, and mt_dyn_mb_store()'s
+ * store-offset guard, which is a DIFFERENT question and cannot be derived
+ * from the first), one is the C6's accept set, and this comment is the
+ * fourth. It went two rounds stale before anyone noticed, and the same class
+ * of drift in the second guard left an EVSE's mode store allocated and
+ * unreachable for a whole round. A fifth copy should be derived rather than
+ * written.
+ *
+ * This bridge is the sole place that validates the id, since mt_at.c stays
+ * free of any esp_matter/CHIP header and cannot read those ids itself (see
+ * this file's own top comment). modes[0..count-1]/tags[0..count-1]/labels[0..count-1] are
  * parallel arrays; the handler has already checked count, mode-value
  * uniqueness, tag range (<= 0xFFFF) and every label against
  * MT_MB_MAX_COUNT/MT_MB_MAX_LABEL_LEN, printable ASCII and no double quote,
@@ -468,13 +485,19 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  *
  * tags[i] == 0 is substituted at STORE time (not read time) with the
  * cluster's conformance-required default, design spec section 9's exact
- * policy: RvcRunMode's first declared mode gets kIdle, every later one
- * kCleaning; RvcCleanMode gets kVacuum on every mode; MicrowaveOvenMode gets
- * kNormal on every mode; RefrigeratorAndTemperatureControlledCabinetMode gets
- * kAuto (0x00, the ModeBase common tag every mode gets, Mode_Refrigerator.xml)
- * on every mode; OvenMode gets kBake (0x4000, Mode_Oven.xml's first
- * oven-specific tag) on every mode. Substituting at store time rather than
- * in the delegate's
+ * policy, and AT_MT_SPEC.md 3.20's tag-0 table is the canonical statement of
+ * it: RvcRunMode's first declared mode gets kIdle, every later one kCleaning;
+ * RvcCleanMode gets kVacuum on every mode; MicrowaveOvenMode gets kNormal on
+ * every mode; RefrigeratorAndTemperatureControlledCabinetMode gets kAuto
+ * (0x00, the ModeBase common tag every mode gets, Mode_Refrigerator.xml) on
+ * every mode; OvenMode gets kBake (0x4000, Mode_Oven.xml's first
+ * oven-specific tag) on every mode; WaterHeaterMode gets kManual (0x4001,
+ * energy round B) on every mode; DeviceEnergyManagementMode gets
+ * kNoOptimization (0x4000, energy round C1) on every mode; and EnergyEvseMode
+ * gets kManual (0x4000, Mode_EVSE.xml's first cluster-specific tag) on every
+ * mode. The last three were missing from this list for two rounds, which is
+ * the staleness the copy-count note above exists to stop repeating.
+ * Substituting at store time rather than in the delegate's
  * GetModeTagsByIndex() keeps every read branch-free. A nonzero tag passes
  * through unvalidated beyond the u16 range check mt_at.c already performed:
  * tag semantics beyond that are the host's business.

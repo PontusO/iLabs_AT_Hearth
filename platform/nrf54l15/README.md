@@ -424,25 +424,25 @@ and meter families. It replaced fourteen fixed pools, and the per-family
 caps those pools carried (`MT_MEAS_MAX` 8, `MT_DEM_MAX` 4, `MT_WHM_MAX` 4,
 `MT_METER_MAX` 2, `MT_EVSE_MAX` 2, `kModeBasePoolSlots` 20) are unchanged
 and are still what a composition hits first. 11,184 usable bytes against a
-worst reachable draw of **10,912 B**, a margin of 272 B, which is the
+worst reachable draw of **10,928 B**, a margin of 256 B, which is the
 maximum over every composition the other two walls admit, found by
 exhaustive search rather than by a greedy fill:
 
 | Count | Device type | Object bytes | Block bytes |
 |---|---|---|---|
-| 2 | `0x050C` Energy EVSE (v1) | 5,392 | 2,256 |
+| 2 | `0x050C` Energy EVSE (v1) | 5,408 | 2,256 |
 | 8 | `0x0079` Microwave Oven | 3,520 | 4,288 |
 | 3 | `0x0073` / `0x0075` / `0x007C` washer, dishwasher, dryer | 792 | 432 |
 | 2 | `0x0511` Electrical Utility Meter | 624 | 256 |
 | 1 | `0x0018` Battery Storage (v0) | 584 | 856 |
-| **16** | | **10,912** | **8,088** of 8,112 |
+| **16** | | **10,928** | **8,088** of 8,112 |
 
 `MT_EVSE_MAX` and `MT_METER_MAX` are both saturated, the endpoint count is
 saturated and the block heap is 24 B from its own wall. The arithmetic is at the end of
 `port/mt_matter_zephyr.cpp` and a `static_assert` pins it, so the claim
 cannot go stale. Exhaustion, if a future round ever makes it possible, is
 the same loud stop-at-failure prefix as either older wall.
-Note that 10,912 is a function of the block budget: raising
+Note that 10,928 is a function of the block budget: raising
 `HEARTH_EP_HEAP_BYTES` for the LM20 tier admits object-heavier compositions
 and this heap has to be re-derived with it.
 
@@ -451,7 +451,7 @@ and this heap has to be re-derived with it.
 draws **six** per-endpoint objects at once, EnergyEvse,
 DeviceEnergyManagement, two ModeBase aliases, ElectricalPowerMeasurement and
 PowerTopology, and the first of them carries the whole charging-target store:
-2,696 object bytes on a 1,128 B block, 2.39 per block byte against the
+2,704 object bytes on a 1,128 B block, 2.40 per block byte against the
 microwave's 0.82. It is capped at two, which is exactly why it needs a
 bigger OBJECT heap and not a bigger endpoint heap: the cap bounds how many
 blocks a composition holds and does nothing about how heavy each one's
@@ -943,8 +943,8 @@ a table. Pristine builds, 2026-08-31:
 | RAM used, `nrf54l15dk` | 215,796 B (82.32%) | **220,780 B (84.22%)** |
 | RAM free, `ophelia_cpico` | 46,572 B | **41,596 B** |
 | RAM free, `nrf54l15dk` | 46,348 B | **41,364 B** |
-| Flash, `ophelia_cpico` | 884,100 B (64.34%) | **896,872 B (65.26%)** |
-| Flash, `nrf54l15dk` | 892,004 B (61.00%) | **904,772 B (61.87%)** |
+| Flash, `ophelia_cpico` | 884,100 B (64.34%) | **897,272 B (65.29%)** |
+| Flash, `nrf54l15dk` | 892,004 B (61.00%) | **905,172 B (61.90%)** |
 
 RAM `+4,976 B` on `ophelia_cpico` and `+4,984 B` on the DK, per symbol with
 `nm -S`:
@@ -954,8 +954,9 @@ RAM `+4,976 B` on `ophelia_cpico` and `+4,984 B` on the DK, per symbol with
 | `HEARTH_OBJ_HEAP_BYTES` 7168 to 11264 | **+4,096 B** |
 | `s_evse_blob`, the one encode/decode scratch buffer | **+856 B** |
 | the pool table and its two counters | +16 B |
+| generated ember growth (`ATTRIBUTE_MAX_SIZE` 462 to 466, the data-version count 58 to 60) and section alignment | +8 B |
 
-and 8 bytes of section alignment. Flash `+12,772 B` is the
+Flash `+13,172 B` is the
 `energy-evse-server` translation unit, the port's own delegate and store, and
 the const catalogue rows; `EnergyEvseMode` rides the already-compiled
 mode-base server. `HEARTH_EP_HEAP_BYTES` is unchanged at 8 KB, which is the
