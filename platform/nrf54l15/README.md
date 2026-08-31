@@ -31,12 +31,8 @@ Utility Meter, `0x050D` Device Energy Management; and catalogue batch 7b
 Battery Storage; and catalogue batch 8 (the composed appliances): `0x0078`
 Cooktop, `0x007B` Oven, `0x007A` Extractor Hood, `0x0070` Refrigerator,
 `0x0071` Temperature Controlled Cabinet, `0x0077` Cook Surface, `0x0079`
-Microwave Oven. **Fifty-one device types**, the whole C6 catalogue except
-one. Anything else answers
-`+MTERR:6`; the Energy EVSE
-(`0x050C`) is the single remaining row and is deliberately out of the 256 KB
-tier by ruling DE408 (its delegate store and block size are LM20-tier costs,
-batch 7 audit 5.2 and 5.4).
+Microwave Oven; and the EVSE round: `0x050C` Energy EVSE. **Fifty-two device
+types, the whole C6 catalogue.** Anything else answers `+MTERR:6`.
 
 Batch 7a boundaries worth knowing before a bench session:
 
@@ -94,6 +90,54 @@ Batch 7b boundaries on top of those:
   device-type span: the water heater's variant 1 loses the sensor graft
   and its `0x0510` id together, battery storage's variant 1 the DEM pair
   and `0x050D`.
+
+EVSE boundaries, the last device type and the only one with its own capacity
+cap:
+
+- **An `AT+MTEP` composition may carry at most TWO Energy EVSE endpoints**
+  (`MT_EVSE_MAX`, the C6's own constant). A third fails its create loudly at
+  the next boot and the composition serves the prefix before it, the standing
+  stop-at-failure semantics, exactly as the measurement pools do. The cap
+  exists because the charging-target store lives in the delegate: 1,968 bytes
+  of it, against the catalogue's next largest per-endpoint object at 304.
+- Ruling DE408 put this device type out of tier when the board sat at 96.67
+  percent of RAM. The memory reclaim rounds lifted it: the exclusion is gone
+  and the cap is what replaces it.
+- The **charging schedule is USER DATA**. It survives `AT+MTRESET` and a power
+  cycle and only `AT+MTFRESET` erases it, the exact opposite of the endpoint
+  composition, which survives a factory reset because it is a product
+  definition. Both live in the same `settings_storage` partition with
+  deliberately opposite lifetimes. The stored blob format is byte-for-byte the
+  C6's.
+- **`AT+MTROW` has a consumer here for the first time.** A host stages rows,
+  `AT+MTROWAPPLY` MERGES them by day (days the set names replace those days
+  entirely, days it does not name are untouched) and a count of 0 clears the
+  whole schedule, which is the AT surface's only clear verb. A controller's
+  `SetTargets` is adjudicated: the firmware stages the proposal, raises
+  `+MTCMD` with the row count and the affected-day mask, the host pulls the
+  rows with `AT+MTROWGET=<ep>,1,,<seq>` and answers, and only then is anything
+  merged. The affected-day mask is on the wire because a day being EMPTIED
+  carries no row to pull.
+- **Two variants split on SOC reporting**, and it is wire-visible rather than
+  decorative: on variant 0 every charging target must carry a SoC, on variant
+  1 a target's SoC must be absent or exactly 100. The same rule is enforced on
+  both the fabric path (by the SDK) and the AT path (by the port), so a host
+  cannot install a schedule a controller would have been refused.
+- `AT+MTMEAS` `0x0099` is the ONLY way to set any EnergyEvse attribute: all 23
+  are served by the cluster's own Instance from the delegate cache, none of
+  them ever raises a `+MTATTR` URC, and `AT+MTATTR` reads answer the live
+  cache through the carve-out while writes answer `+MTERR:11`. Fields 7, 8 and
+  13 (`UserMaximumChargeCurrent`, `RandomizationDelayWindow`,
+  `ApproximateEVEfficiency`) answer `+MTERR:4` on every variant, because
+  esp-matter creates none of the three and this port declares none of them
+  either; fields 14 and 15 answer `+MTERR:4` on variant 1.
+- **V2X, RFID and Plug-and-Charge are never built and the EVSE advertises no
+  `EnableDischarging` and no `StartDiagnostics`.** The Instance derives its
+  advertised command list from the feature mask this port hands it, so the
+  mask and the declared attribute list are one decision.
+- The EVSE draws SIX per-endpoint cluster objects at once, more than any other
+  device type, and 1,144 B of endpoint block, the widest in the catalogue.
+  Both consequences are in "Endpoint capacity" below.
 
 Batch 8 boundaries, the first COMPOSED appliances on this platform:
 
@@ -372,42 +416,56 @@ extended colour lights exhaust the heap with headers to spare.
 
 A third resource exists since memory reclaim round A and is **deliberately
 sized so it can never be the first to run out**: the **cluster-object
-heap**, `HEARTH_OBJ_HEAP_BYTES` (7,168 B since catalogue batch 8, 6,528 B
-before it), a second
+heap**, `HEARTH_OBJ_HEAP_BYTES` (11,264 B since the EVSE round, 7,168 B
+since catalogue batch 8, 6,528 B before it), a second
 `K_HEAP_DEFINE(hearth_obj_heap)` holding the per-endpoint CHIP Delegate
 objects and their Instances for the appliance, mode, chime, valve, energy
 and meter families. It replaced fourteen fixed pools, and the per-family
 caps those pools carried (`MT_MEAS_MAX` 8, `MT_DEM_MAX` 4, `MT_WHM_MAX` 4,
-`MT_METER_MAX` 2, `kModeBasePoolSlots` 20) are unchanged and are still what
-a composition hits first. 7,088 usable bytes against a worst reachable draw
-of **6,928 B**, a margin of 160 B, which is the maximum over every
-composition the other two walls admit, found by exhaustive search rather
-than by a greedy fill:
+`MT_METER_MAX` 2, `MT_EVSE_MAX` 2, `kModeBasePoolSlots` 20) are unchanged
+and are still what a composition hits first. 11,184 usable bytes against a
+worst reachable draw of **10,912 B**, a margin of 272 B, which is the
+maximum over every composition the other two walls admit, found by
+exhaustive search rather than by a greedy fill:
 
 | Count | Device type | Object bytes | Block bytes |
 |---|---|---|---|
-| 13 | `0x0079` Microwave Oven | 5,720 | 6,968 |
+| 2 | `0x050C` Energy EVSE (v1) | 5,392 | 2,256 |
+| 8 | `0x0079` Microwave Oven | 3,520 | 4,288 |
+| 3 | `0x0073` / `0x0075` / `0x007C` washer, dishwasher, dryer | 792 | 432 |
 | 2 | `0x0511` Electrical Utility Meter | 624 | 256 |
 | 1 | `0x0018` Battery Storage (v0) | 584 | 856 |
-| **16** | | **6,928** | **8,080** of 8,112 |
+| **16** | | **10,912** | **8,088** of 8,112 |
 
-`MT_METER_MAX` is saturated, the endpoint count is saturated and the block
-heap is 32 B from its own wall. The arithmetic is at the end of
+`MT_EVSE_MAX` and `MT_METER_MAX` are both saturated, the endpoint count is
+saturated and the block heap is 24 B from its own wall. The arithmetic is at the end of
 `port/mt_matter_zephyr.cpp` and a `static_assert` pins it, so the claim
 cannot go stale. Exhaustion, if a future round ever makes it possible, is
 the same loud stop-at-failure prefix as either older wall.
-Note that 6,928 is a function of the block budget: raising
+Note that 10,912 is a function of the block budget: raising
 `HEARTH_EP_HEAP_BYTES` for the LM20 tier admits object-heavier compositions
 and this heap has to be re-derived with it.
 
-Catalogue batch 8 moved this maximum and the heap with it (6,528 to
-7,168 B). A Microwave Oven endpoint draws **three** per-endpoint object
-pairs at once, OperationalState, MicrowaveOvenMode and MicrowaveOvenControl,
-for a 536 B block: 0.82 object bytes per block byte, against Battery
-Storage's 0.68 and the RVC's 0.52, so a composition of microwaves now
-dominates where a mix of the heaviest energy types used to. The pre-batch-8
-maximum of 6,336 B (4 Battery Storage + 4 RVC + 2 meter + 6 washer) is
-still admissible; it is simply no longer the largest.
+**The EVSE round moved this maximum and the heap with it (7,168 to
+11,264 B), by much the largest step it has taken.** An Energy EVSE endpoint
+draws **six** per-endpoint objects at once, EnergyEvse,
+DeviceEnergyManagement, two ModeBase aliases, ElectricalPowerMeasurement and
+PowerTopology, and the first of them carries the whole charging-target store:
+2,696 object bytes on a 1,128 B block, 2.39 per block byte against the
+microwave's 0.82. It is capped at two, which is exactly why it needs a
+bigger OBJECT heap and not a bigger endpoint heap: the cap bounds how many
+blocks a composition holds and does nothing about how heavy each one's
+objects are. **Variant 1 is the EVSE the search picks**, because the two
+variants draw identical objects (SOC changes two attributes, not an object)
+while variant 1's block is 16 bytes narrower.
+
+Catalogue batch 8 moved it before (6,528 to 7,168 B), and the Microwave Oven
+was that reason: **three** per-endpoint object pairs at once,
+OperationalState, MicrowaveOvenMode and MicrowaveOvenControl, for a 536 B
+block. The pre-batch-8 maximum of 6,336 B (4 Battery Storage + 4 RVC + 2
+meter + 6 washer) and the batch-8 maximum of 6,928 B (13 microwave + 2 meter
++ 1 battery) are both still admissible; they are simply no longer the
+largest.
 
 ### Per-endpoint cost
 
@@ -416,6 +474,8 @@ Block payload is `4 x clusters + 16 x slots`; Zephyr charges
 
 | Device type | Clusters | Slots | Heap cost |
 |---|---|---|---|
+| `0x050C` Energy EVSE (v0; 528 B payload + two 306 B mode stores) | 8 | 31 | 1,144 B |
+| `0x050C` Energy EVSE (v1, no SOC pair; 512 B payload + both stores) | 8 | 30 | 1,128 B |
 | `0x0074` Robotic Vacuum Cleaner (244 B payload + two 306 B mode stores) | 5 | 14 | 864 B |
 | `0x0018` Battery Storage (v0; 540 B payload + one 306 B mode store) | 7 | 32 | 856 B |
 | `0x050F` Water Heater (v0; 492 B payload + one 306 B mode store) | 7 | 29 | 808 B |
@@ -479,6 +539,8 @@ bucket table) and 16 header slots:
 | 1 oven + 10 Heater cabinets (v1, both stores in-block each) | 7,680 B | **yes**, 11 of the 16 endpoints |
 | 1 oven + 4 Heater cabinets (v0), a four-cavity oven | 2,224 B | **yes**, 5 of the 16 endpoints |
 | 1 cooktop + 4 cook surfaces (v0) | 704 B | **yes**, 5 of the 16 endpoints |
+| 2 energy EVSEs (v0), the `MT_EVSE_MAX` cap | 2,288 B | **yes**, 2 of the 16 endpoints |
+| 3 energy EVSEs | 3,432 B | **no**, the third fails on `MT_EVSE_MAX`, not on a heap |
 
 **A composed appliance costs two or more of the 16 endpoints**, and that is
 the capacity consequence catalogue batch 8 introduced. An Oven or a
@@ -489,15 +551,24 @@ five `AT+MTEP` rows.
 
 So every device type in the catalogue reaches the full 16 **except** the two
 colour lights (15 and 13), mode select (13, since the store reclaim round
-moved its host-fed mode store into the endpoint block), and the robotic
-vacuum cleaner (9: its block carries TWO host-fed ModeBase stores, making
-it the catalogue's widest type at 864 B; dropping the optional RvcCleanMode
-would have doubled that capacity and was ruled out, DE404, as a real
-cross-platform data-model divergence). Sizing the
+moved its host-fed mode store into the endpoint block), the robotic
+vacuum cleaner (9: its block carries TWO host-fed ModeBase stores; dropping
+the optional RvcCleanMode would have doubled that capacity and was ruled
+out, DE404, as a real cross-platform data-model divergence) and the Energy
+EVSE. The EVSE is the one whose limit is NOT a heap: at 1,144 B it is the
+catalogue's widest block and seven of them would fit, but `MT_EVSE_MAX`
+stops the third, because its delegate carries the charging-target store and
+two of those against 41 KB of free RAM is the trade that let the device type
+exist at all. Sizing the
 heap for 16 extended colour lights would want 9,600 B and buy a composition
 nobody builds; the RAM is worth more elsewhere. A compile-time assertion
-keeps the heap holding at least eight of whatever the widest device type
-happens to be, so this table cannot go stale unnoticed.
+keeps the heap holding at least eight of whatever the widest UNCAPPED device
+type happens to be, and `min(cap, 8)` of a capped one, so this table cannot
+go stale unnoticed. The EVSE round is what made that assertion cap-aware:
+demanding eight EVSE blocks would have demanded 9,152 bytes of an 8,112-byte
+heap for a composition the create path refuses to build, and the reasoning is
+written at the assertion in `port/mt_devtypes_zephyr.cpp`, because a floor
+nobody understands is the one the next person weakens.
 
 ### The LM20 tier
 
@@ -769,8 +840,11 @@ alignment. Flash rises 980 B.
    and `s_row_inbound` for the ones a controller's `SetTargets` brings in.
    The host's is now allocated when a staging session opens and released
    when it ends; the fabric's is committed once, when a composition declares
-   an endpoint whose fabric commands carry rows, which on this platform is
-   never, because the EVSE is LM20-tier (DE408).
+   an endpoint whose fabric commands carry rows, which on this platform
+   means an Energy EVSE. That was never, when this round shipped and the
+   EVSE was out of tier (DE408); the EVSE round below took the device type
+   back with a cap, and `mt_matter_evse_reserve()` is what commits the
+   fabric stage now.
 
    **The capacity and the wire contract are unchanged**: a host still stages
    `MT_ROW_MAX_ROWS` rows and still gets every error code `AT_MT_SPEC.md`
@@ -858,6 +932,47 @@ alignment. Flash rises 980 B.
    is built and stops the rebuild naming the macro (what every other pool
    here does), and a `static_assert` keeps the two from drifting apart.
 
+### The EVSE round (2026-08-31)
+
+The last device type, and the only round whose cost is one object rather than
+a table. Pristine builds, 2026-08-31:
+
+| | Memory reclaim B (`7f69b44`) | EVSE round |
+|---|---|---|
+| RAM used, `ophelia_cpico` | 215,572 B (82.23%) | **220,548 B (84.13%)** |
+| RAM used, `nrf54l15dk` | 215,796 B (82.32%) | **220,780 B (84.22%)** |
+| RAM free, `ophelia_cpico` | 46,572 B | **41,596 B** |
+| RAM free, `nrf54l15dk` | 46,348 B | **41,364 B** |
+| Flash, `ophelia_cpico` | 884,100 B (64.34%) | **896,872 B (65.26%)** |
+| Flash, `nrf54l15dk` | 892,004 B (61.00%) | **904,772 B (61.87%)** |
+
+RAM `+4,976 B` on `ophelia_cpico` and `+4,984 B` on the DK, per symbol with
+`nm -S`:
+
+| Item | `.bss` |
+|---|---|
+| `HEARTH_OBJ_HEAP_BYTES` 7168 to 11264 | **+4,096 B** |
+| `s_evse_blob`, the one encode/decode scratch buffer | **+856 B** |
+| the pool table and its two counters | +16 B |
+
+and 8 bytes of section alignment. Flash `+12,772 B` is the
+`energy-evse-server` translation unit, the port's own delegate and store, and
+the const catalogue rows; `EnergyEvseMode` rides the already-compiled
+mode-base server. `HEARTH_EP_HEAP_BYTES` is unchanged at 8 KB, which is the
+whole point of the cap: the EVSE's 1,144 B block is the catalogue's widest,
+and two of them fit comfortably where eight would not have.
+
+**The object heap is the round's real cost, and 4,096 B of it buys margin
+rather than capability.** 2,024 B of the raise is the two pool slots
+themselves; the rest is what keeps this heap from ever being the wall a
+composition hits first, which is the property ruling DE413 chose and this
+round preserves.
+
+**What is still not proven:** every figure above is a build measurement. The
+charging-target store's persistence path (Zephyr settings over ZMS, an
+856-byte blob per endpoint) has not been exercised on hardware in this round,
+and neither has the row apply path end to end. Both are bench work.
+
 **The patch mechanism is `west patch`, documented in
 `sdk-patches/README.md`.** It is not this project's first: the C6 arm has
 carried `platform/esp32c6/sdk-patches` with its own apply script since the
@@ -872,17 +987,30 @@ invisible. Read `sdk-patches/README.md` before an SDK bump; `west update`
 does not carry a patch forward.
 
 **What this means for the EVSE.** Ruling DE408 put the Energy EVSE in the
-LM20 tier and this round does not change that. What it changes is the price
-of asking. The 11,216 B of row machinery is no longer standing cost on a
-platform that never stages a row, and the two buffers the EVSE needs, host
-staging and fabric staging live at once, now come out of a 46,572 B arena
-rather than out of `.bss`: about 35.2 KB still free with both of them open,
-allowing for the heap's own per-block bookkeeping. The
-earlier claim that there is "no row-transfer tax to pay first" was wrong in
-an important way and is withdrawn. There is a tax, it is 11,216 B, and it is
-now paid out of the pool with the most room in it rather than reserved on
-every boot. Bringing the EVSE back is a question about its Instance, delegate
-and store cost, on a platform with 46 KB free.
+LM20 tier; the round after this one took it back with a cap, so this
+paragraph is the arithmetic that made that possible rather than a forecast.
+The 11,216 B of row machinery is no longer standing cost on a platform that
+never stages a row, and the two buffers an EVSE composition needs, host
+staging and fabric staging live at once, come out of the arena rather than
+out of `.bss`. The earlier claim that there is "no row-transfer tax to pay
+first" was wrong in an important way and is withdrawn. There is a tax, it is
+11,216 B, and it is now paid out of the pool with the most room in it rather
+than reserved on every boot.
+
+**The arena, re-measured after the EVSE round**, since that round spent
+4,976 B of it on the object heap and the blob buffer:
+
+| | `ophelia_cpico` | `nrf54l15dk` |
+|---|---|---|
+| Arena (`_end` to the end of SRAM) | 41,596 B | 41,364 B |
+| An EVSE composition loaded (the fabric stage committed) | about 35.1 KB | about 34.9 KB |
+| ... plus a host staging session open | about 29.5 KB | about 29.3 KB |
+
+The arena figure is exact, being a linker span. The two below it are
+deliberately approximate: they are that span less the 5,608-byte payloads,
+and a `sys_heap` also spends a chunk header and a rounding-up per live block,
+on the order of 150 to 200 bytes across two blocks. Read the last row as
+"about 29.5 KB with everything open", which is the number that matters.
 
 ## Dev board wiring
 
