@@ -32,9 +32,9 @@
  *
  * The RRAM is also left at its 1940 KB default rather than reclaimed to
  * 2036 KB: the 96 KB tail belongs to the cpuflpr, nothing here runs on
- * it, and the partition map beside this file already leaves 30 percent
- * of the app slot unused. Reclaiming it is a decision for the round
- * that needs the space.
+ * it, and the partition map beside this file already leaves 52.9 percent
+ * of the 1854 KB app slot unused (894,904 B used, measured 2026-08-31).
+ * Reclaiming it is a decision for the round that needs the space.
  */
 / {
     chosen {
