@@ -572,8 +572,8 @@ nobody understands is the one the next person weakens.
 
 ### The LM20 tier
 
-The nRF54LM20 (511 KB RAM, supported upstream in this NCS) is where the 16
-goes back up. Raising `kServiceableEndpoints` and `HEARTH_EP_HEAP_BYTES`
+The nRF54LM20 (512 KB of RAM on the part, 511 KB of it spanned by
+`cpuapp_sram`, supported upstream in this NCS) is where the 16 goes back up. Raising `kServiceableEndpoints` and `HEARTH_EP_HEAP_BYTES`
 together in `port/mt_port_ids.h`, and the mirrored literal in
 `src/chip_project_config.h`, is where the change starts: the header table,
 CHIP's per-endpoint pools and the block heap all follow from those two
@@ -597,9 +597,10 @@ The `28 x 600` = 16,800 B sketch for an all-extended-colour block heap that
 used to sit here is wrong twice over. The catalogue's widest block is the
 RVC at 872 B, not 600, so an all-RVC 28 wants 24,416 B. And 16,800 B lands
 past a `sys_heap` bucket band: at a gross size of 16,388 B the heap has
-2,048 chunks, chunk 0 grows from nine to ten, and `kHeapOverheadBytes`
-becomes 88 rather than 80. Nothing checked that until the parity round
-below added the `BUILD_ASSERT` the object heap already had.
+2,048 chunks and chunk 0 grows from nine to ten, so `kHeapOverheadBytes` is
+84 there and 88 from 16,392 B, the first whole-chunk size in that band,
+which is what 16,800 B would be. Nothing checked that until the parity
+round below added the `BUILD_ASSERT` the object heap already had.
 
 #### The board half, done ahead of the tier (2026-08-31)
 
@@ -633,12 +634,37 @@ west build -b nrf54lm20dk/nrf54lm20a/cpuapp -d build_lm20 --pristine \
 Nothing about this target has been on hardware: no LM20 DK exists on this
 bench. The build establishes the link, the partition map and every
 assertion; it establishes nothing about the HFXO, the GRTC, ZMS on this
-part's RRAM, or recovery entry. Two board facts are known to differ and are
-not addressed here: `sysbuild/mcuboot.overlay` points `zephyr,uart-mcumgr`
-at `uart20`, which is this DK's CONSOLE VCOM rather than its AT link, so
-serial recovery would come up on the wrong port of the two; and the DK's
-onboard debugger exposes no DTR-equals-reset or RTS-equals-strap contract,
-so `fw/flash.py` cannot enter recovery on it at all.
+part's RRAM, or recovery entry.
+
+Two board facts are known to differ and are not addressed here.
+
+**Serial recovery answers on the console VCOM, on BOTH DK targets.**
+`sysbuild/mcuboot.overlay` pins `zephyr,uart-mcumgr = &uart20` with no board
+condition. On the Ophelia-IV `uart20` IS the AT link, so the pin is right.
+On both DKs the relationship is inverted: `uart20` is `zephyr,console` and
+the AT link is `uart30`, on the LM20 DK through the overlay above and on the
+nRF54L15 DK through `boards/nrf54l15dk_nrf54l15_cpuapp.overlay`, which has
+been that way since the DK was added. Nothing gated it because the L15 DK
+was built `--no-sysbuild` until this round, so MCUboot was never in that
+build at all; the correction further down retiring that instruction is what
+brings the second instance into view. Consequence today is low, both VCOMs
+surfacing through the same onboard debugger so recovery is merely on the
+other `/dev/serial/by-id` endpoint, and moot in practice because
+`fw/flash.py` cannot enter recovery on either DK. It stops being cosmetic on
+an LM20-based module in the Ophelia's shape, where one UART is brought out
+and recovery on the wrong one is a brick.
+
+**The fix belongs to the round that has the hardware.** A board-conditional
+`zephyr,uart-mcumgr`, or moving the pin into the per-board overlay directory
+sysbuild honours for the MCUboot image, changes which port serial recovery
+answers on, and no build can confirm it answers at all. Shipping an untested
+change to the recovery path of the only board that currently works, for a
+board nobody has yet, is the wrong trade.
+
+**`fw/flash.py` cannot enter recovery on either DK.** Its contract is the
+CPico's DTR-equals-reset and RTS-equals-strap mapping, and neither DK's
+onboard debugger exposes it. Recovery entry there is button0 held plus
+RESET by hand, or SWD.
 
 ### Measured
 
