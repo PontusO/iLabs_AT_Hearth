@@ -4965,6 +4965,48 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * sixteen of the heaviest is precisely the trade this round declined;
  * eight is the point below which the capacity table would be describing a
  * different device.
+ *
+ * THE FLOOR IS CAP-AWARE SINCE THE EVSE ROUND, and the change is worth
+ * understanding before anyone weakens it, because a floor nobody understands
+ * is the one that gets weakened.
+ *
+ * The assertion used to be a single inequality over a single kWidestBlockBytes:
+ * room for eight of whatever the widest candidate happened to be. That was
+ * exactly right while every candidate was a device type a host could declare
+ * sixteen of. It stops being right the moment a device type carries its OWN
+ * capacity cap, because then "eight of it must fit" is a demand no
+ * composition can ever make: the Energy EVSE is capped at MT_EVSE_MAX (2) by
+ * its delegate's charging-target store, so a host cannot ask for a third, let
+ * alone an eighth, and an assertion demanding room for eight would be
+ * demanding 9,152 bytes of an 8,112-byte heap to serve a composition that
+ * cannot exist.
+ *
+ * What the floor MEANS, stated so the arithmetic can be checked against it:
+ * for every candidate, the heap must hold as many blocks of that candidate as
+ * a composition could actually contain, up to the eight the capacity table is
+ * written around. So each candidate's demand is
+ *
+ *     min(that candidate's own cap, kMinWidestEndpoints)
+ *
+ * and an UNCAPPED candidate's cap is kServiceableEndpoints (16), which is
+ * above eight, so its demand is eight, unchanged. Every guarantee the old
+ * single assertion made is therefore still made, byte for byte: the change
+ * only stops the floor asking for compositions the port refuses to build.
+ *
+ * Two things keep it from going vacuous:
+ *
+ *   the capped candidates are asserted SEPARATELY, each against its own cap,
+ *   rather than dropped out of the maximum. A candidate that simply left the
+ *   kMax2 chain would be unguarded, which is the failure mode this whole
+ *   block exists to prevent;
+ *
+ *   a capped candidate must be genuinely capped BELOW kMinWidestEndpoints,
+ *   asserted below. Raise MT_EVSE_MAX to eight or more and the build fails
+ *   telling you to move that candidate back into the uncapped maximum, where
+ *   it will then have to fit eight times over or force a real
+ *   HEARTH_EP_HEAP_BYTES decision. The cap is a promise the create path
+ *   enforces (mt_matter_evse_reserve()), not a wish, so weakening it here
+ *   without weakening it there is the drift this catches.
  */
 #define MT_COUNT(array) (sizeof(array) / sizeof((array)[0]))
 
@@ -5201,7 +5243,7 @@ static_assert(kCabinetHeaterLevelBlockBytes == 755,
 
 /* The microwave oven, the batch's other store-bearing candidate worth naming
  * separately (fix round N3). It loses to the heater cabinet v1 by 225 bytes
- * and so cannot move kWidestBlockBytes, but its block cost is the divisor in
+ * and so cannot move kWidestUncappedBlockBytes, but its block cost is the divisor in
  * a capacity claim the README makes out loud, "15 microwave ovens fit and 16
  * do not", and in kObjMicrowaveEndpointLimit over in mt_matter_zephyr.cpp.
  * Pinning it here is what stops those three drifting apart: this is the only
@@ -5217,7 +5259,14 @@ static_assert(kMicrowaveBlockBytes == 530,
               "the microwave oven block changed size; redo the sizing table row, the "
               "README's 15-of-16 capacity claim and kObjMicrowaveEndpointLimit");
 
-constexpr size_t kWidestBlockBytes =
+/*
+ * The UNCAPPED maximum: every candidate here is a device type a host may
+ * declare as many of as the endpoint table and the block heap allow, so the
+ * floor below demands kMinWidestEndpoints of whichever is widest. This is the
+ * constant the pre-EVSE assertion called kWidestBlockBytes, unchanged in
+ * membership and value; only the name says which half of the floor it feeds.
+ */
+constexpr size_t kWidestUncappedBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
           kMax2(kMax2(kModeSelectBlockBytes, kChimeBlockBytes),
                 kMax2(kMax2(kRvcBlockBytes, kDemBlockBytes),
@@ -5298,9 +5347,56 @@ static_assert(15 * kHeapCostOf(kMicrowaveBlockBytes) <= kHeapUsableBytes &&
               "the endpoint block heap no longer admits exactly fifteen microwave ovens; "
               "redo the README capacity row and kObjMicrowaveEndpointLimit");
 
-static_assert(kHeapCostOf(kWidestBlockBytes) * kMinWidestEndpoints <= kHeapUsableBytes,
-              "the endpoint heap no longer holds eight of the widest device type; redo the "
-              "sizing table beside K_HEAP_DEFINE and raise HEARTH_EP_HEAP_BYTES");
+/*
+ * ---- the floor, in its cap-aware form (the block comment above) ----------
+ *
+ * kFloorDemand(cap) is the whole of the change: how many blocks of a
+ * candidate the heap must hold is the smaller of that candidate's own
+ * capacity cap and kMinWidestEndpoints. Written as a function rather than
+ * spelled out per candidate so the two arms below cannot drift into meaning
+ * different things.
+ */
+constexpr size_t kMin2(size_t a, size_t b) { return a < b ? a : b; }
+
+constexpr size_t kFloorDemand(size_t cap) { return kMin2(cap, kMinWidestEndpoints); }
+
+/*
+ * An uncapped candidate's cap IS kServiceableEndpoints: sixteen is what the
+ * endpoint table allows and nothing else refuses. Spelled out rather than
+ * passing kMinWidestEndpoints straight in, so the expression says why the
+ * demand is eight instead of asserting it.
+ */
+static_assert(kFloorDemand(kServiceableEndpoints) == kMinWidestEndpoints,
+              "kServiceableEndpoints dropped below kMinWidestEndpoints; the uncapped floor is "
+              "no longer eight and the capacity table needs rewriting");
+static_assert(kHeapCostOf(kWidestUncappedBlockBytes) * kFloorDemand(kServiceableEndpoints) <=
+                  kHeapUsableBytes,
+              "the endpoint heap no longer holds eight of the widest uncapped device type; redo "
+              "the sizing table beside K_HEAP_DEFINE and raise HEARTH_EP_HEAP_BYTES");
+
+/*
+ * The capped candidates. One so far: the Energy EVSE, whose delegate carries
+ * the whole charging-target store, which is why MT_EVSE_MAX
+ * (core/include/mt_matter.h) is 2 and why mt_matter_evse_reserve() refuses a
+ * third before anything is built. The block candidate itself arrives with the
+ * device type's declarations; what belongs HERE, ahead of it, is the cap and
+ * the two properties that keep the floor honest.
+ */
+constexpr size_t kEvseEndpointCap = MT_EVSE_MAX;
+
+/* NON-VACUITY, half one: a cap of zero would make this candidate's demand
+ * zero and its floor an assertion about nothing. */
+static_assert(kEvseEndpointCap >= 1,
+              "MT_EVSE_MAX is zero; the EVSE floor below would assert nothing at all");
+/* NON-VACUITY, half two, and the one that matters. A candidate only belongs
+ * in this half while its cap is genuinely BELOW the uncapped demand. Raise
+ * MT_EVSE_MAX to eight or more and this fires, which is the instruction to
+ * move the EVSE candidate into kWidestUncappedBlockBytes above, where it must
+ * then fit eight times over or force a real HEARTH_EP_HEAP_BYTES decision.
+ * Without this, raising the cap would silently keep the weaker floor. */
+static_assert(kEvseEndpointCap < kMinWidestEndpoints,
+              "MT_EVSE_MAX has reached kMinWidestEndpoints; the EVSE is no longer a capped "
+              "candidate and its block must join kWidestUncappedBlockBytes above");
 
 dyn_endpoint s_dyn[kServiceableEndpoints];
 
