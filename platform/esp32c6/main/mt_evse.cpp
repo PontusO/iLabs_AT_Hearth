@@ -1233,6 +1233,62 @@ extern "C" void *mt_matter_evse_delegate_alloc(uint16_t ep)
      * is not a reason to refuse to be an EVSE.
      */
     (void)d->LoadTargets();
+
+    /*
+     * THE SOC RULE APPLIES TO WHAT WAS LOADED, NOT ONLY TO WHAT ARRIVES.
+     *
+     * The blob is keyed on the endpoint id alone ("t<ep>") and endpoint ids
+     * are assigned in composition order, so re-declaring an EVSE at the same
+     * index with the other variant hands the new endpoint the old one's
+     * schedule. decode() cannot catch it: every target in that schedule is
+     * well formed, in range, and was legal for the variant that wrote it.
+     * Served unchanged, a variant-0 schedule on a variant-1 endpoint answers
+     * GetTargets with targets carrying a targetSoC the cluster's SOC
+     * conformance says may only be absent or 100, and the reverse serves
+     * targets with no targetSoC on an endpoint whose ValidateTargets() makes
+     * it mandatory. Either way GetTargets hands a controller a schedule its
+     * own SetTargets would have been refused, which is the one thing
+     * mt_evse_targets_apply_locked()'s SOC check exists to prevent on the
+     * other path.
+     *
+     * The variant is read the same way that function reads it, from this
+     * endpoint's own metadata rather than from an argument: soc_reporting::
+     * add() has already run by the time the thunk reaches this alloc, so the
+     * attribute exists exactly when the feature does.
+     *
+     * Dropping the schedule is the decoder's existing stance one step out: a
+     * schedule that cannot be represented on THIS endpoint is no schedule,
+     * exactly as a corrupt blob is. m_loaded stays true because the store is
+     * now authoritative and empty rather than unknown, so a later merge does
+     * not refuse itself. The log is loud because this discards user data and
+     * the trigger is an ordinary host action rather than a fault.
+     *
+     * The nRF54L15 port carries the identical check, one function later (its
+     * variant is not stamped until the Instance is built).
+     */
+    {
+        const bool soc =
+            (esp_matter::attribute::get(ep, EE::Id, EE::Attributes::StateOfCharge::Id) != nullptr);
+        bool ok = true;
+        for (uint8_t i = 0; ok && i < d->m_schedule_count; i++) {
+            for (uint8_t j = 0; j < d->m_target_count[i]; j++) {
+                const EE::Structs::ChargingTargetStruct::Type &t = d->m_targets[i][j];
+                if (soc ? !t.targetSoC.HasValue()
+                        : (t.targetSoC.HasValue() && t.targetSoC.Value() != 100)) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if (!ok) {
+            ESP_LOGE(TAG,
+                     "ep %u: the stored charging schedule was written for the other SOC "
+                     "variant and cannot be served here; discarding it. A controller would "
+                     "otherwise be handed a schedule its own SetTargets would be refused",
+                     ep);
+            d->clear_store();
+        }
+    }
     return d;
 }
 

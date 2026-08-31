@@ -7017,8 +7017,10 @@ constexpr uint8_t kRowSoC    = 2;
 constexpr uint8_t kRowEnergy = 3;
 constexpr uint8_t kRowFields = 4;
 
-/* Spec-defined store bounds, from the SDK header (energy-evse-server.h:39-40),
- * never transcribed. */
+/* Spec-defined store bounds, from the SDK header (energy-evse-server.h:40-41;
+ * :38 is kMinimumChargeCurrentLimit and :39 kMaxRandomizationDelayWindow,
+ * which the push branch below reads from the same header), never
+ * transcribed. */
 constexpr uint8_t kEvseMaxDays   = chip::app::Clusters::EnergyEvse::kEvseTargetsMaxNumberOfDays;
 constexpr uint8_t kEvseMaxPerDay = chip::app::Clusters::EnergyEvse::kEvseTargetsMaxTargetsPerDay;
 
@@ -8004,9 +8006,20 @@ static size_t             s_evse_next;
  */
 static size_t s_evse_reserved;
 
-/* The by-endpoint lookup every bridge below starts from, the whm_for()
- * shape. A delegate whose second half never ran carries kInvalidEndpointId
- * and so is unmatchable, the id-in-the-second-half discipline. */
+/*
+ * The by-endpoint lookup every bridge below starts from, the whm_for() shape,
+ * WITHOUT that pool's kInvalidEndpointId sentinel: this alloc stamps the real
+ * id immediately, because LoadTargets() needs to know which endpoint's blob to
+ * read (the alloc's own comment). So a delegate whose second half never ran IS
+ * matchable here, and what makes that safe is one level up rather than in this
+ * function: every bridge that can reach a delegate goes through evse_locate()
+ * or through mt_matter_meas_set(), both of which prove the ENDPOINT exists and
+ * carries the cluster before this lookup runs, and a create that failed after
+ * the alloc never produced an endpoint. The rebuild also stops at the first
+ * failure, so there is no later create to re-use the id and alias onto the
+ * stranded delegate, which is the specific hazard the DEM and WHM pools'
+ * sentinel exists to prevent and this pool does not have.
+ */
 static HearthEvseDelegate *evse_for(chip::EndpointId ep)
 {
     for (size_t i = 0; i < s_evse_next; i++) {
@@ -8138,6 +8151,60 @@ extern "C" void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_s
         mask |= chip::to_underlying(Feature::kSoCReporting);
     }
     d->set_features(mask);
+
+    /*
+     * THE SOC RULE APPLIES TO WHAT WAS LOADED, NOT ONLY TO WHAT ARRIVES, and
+     * this is the first moment both facts are known: the alloc loaded the
+     * blob before any variant was stamped, and the stamp happens on the line
+     * above.
+     *
+     * The case it closes. The blob is keyed on the endpoint id alone
+     * ("t<ep>"), and endpoint ids are assigned 1..N in composition order, so
+     * re-declaring an EVSE at the same index with the other variant hands the
+     * new endpoint the old one's schedule. Nothing in decode() can catch it:
+     * every target in that schedule is well formed, in range, and was legal
+     * for the variant that wrote it. Served unchanged, a variant-0 schedule
+     * on a variant-1 endpoint answers GetTargets with targets carrying a
+     * targetSoC the cluster's own SOC conformance says may only be absent or
+     * 100, and the reverse serves targets with no targetSoC on an endpoint
+     * whose ValidateTargets() makes it mandatory. In both directions
+     * GetTargets would hand a controller a schedule its own SetTargets would
+     * have been refused, which is the one thing the AT-side enforcement in
+     * evse_targets_apply_locked() exists to prevent on the other path.
+     *
+     * Dropping it is the honest answer, and it is the decoder's existing
+     * stance one step out: a schedule that cannot be represented on THIS
+     * endpoint is no schedule, exactly as a corrupt blob is. m_loaded stays
+     * true because the store is now authoritative and empty rather than
+     * unknown, so a later merge does not refuse itself. The log is loud
+     * because this discards user data, and the trigger is an ordinary host
+     * action rather than a fault.
+     *
+     * The C6 carries the same hole and the same fix; neither platform can
+     * express this check in decode(), which is why it is here.
+     */
+    {
+        const bool soc = d->has_feature(Feature::kSoCReporting);
+        bool       ok  = true;
+        for (uint8_t i = 0; ok && i < d->m_schedule_count; i++) {
+            for (uint8_t j = 0; j < d->m_target_count[i]; j++) {
+                const Structs::ChargingTargetStruct::Type &t = d->m_targets[i][j];
+                if (soc ? !t.targetSoC.HasValue()
+                        : (t.targetSoC.HasValue() && t.targetSoC.Value() != 100)) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if (!ok) {
+            LOG_ERR("ep %u: the stored charging schedule was written for the other SOC "
+                    "variant and cannot be served here; discarding it. A controller would "
+                    "otherwise be handed a schedule its own SetTargets would be refused",
+                    (unsigned)ep);
+            d->clear_store();
+        }
+    }
+
     auto *inst = new (obj_inst_storage<HearthEvseDelegate, Instance>(d))
         Instance(ep, *d, static_cast<Feature>(mask), static_cast<OptionalAttributes>(0),
                  static_cast<OptionalCommands>(0));
@@ -8285,11 +8352,22 @@ static int evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage, u
      * and GetTargets would then hand that schedule back to the controller.
      *
      * Read from the delegate's stamped feature record, the same honest source
-     * the push branch's gates use: it comes from the identical variant
+     * the push branch's gates use: it comes from the identical declared-list
      * predicate the Instance's own mFeature snapshot does, so this check and
      * ValidateTargets() cannot disagree. (The C6 asks its endpoint metadata
      * instead, because esp-matter's FeatureMap copy is authoritative there
-     * and this port's is a seed shadow.)
+     * and this port's is a seed shadow; the two questions are the same one.)
+     *
+     * A DISCLOSED SPEC GAP, named here because a host hits it before anyone
+     * reads this file: AT_MT_SPEC.md 3.28's kind-1 field table says only that
+     * at least one of <soc> and <energy> must be present, and its error table
+     * names no variant rule, so a host staging a row that is legal by 3.28
+     * and illegal by this rule gets a +MTERR:1 the published contract does
+     * not explain. The rule itself is not optional: without it a host could
+     * install over AT exactly the schedule a controller's SetTargets would
+     * have been refused, and GetTargets would then hand that schedule back to
+     * the controller. It is exact C6 parity, so the fix is a spec sentence
+     * rather than a change on either platform.
      */
     bool soc_feature = d->has_feature(Feature::kSoCReporting);
 

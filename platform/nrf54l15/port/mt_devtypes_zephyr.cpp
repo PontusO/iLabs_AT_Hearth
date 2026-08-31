@@ -4289,10 +4289,15 @@ DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::State::Id, ENUM8, 1, 0),
 /* Variant 1, without SOC reporting: the same list minus StateOfCharge and
  * BatteryCapacity, the two attributes soc_reporting::add() creates. The
  * FeatureMap seed drops the bit with them, and mt_matter_evse_register()
- * builds the Instance's mask from the same predicate, so the declared list,
- * the shadow and the Instance can never disagree (the DEM report-only list's
- * rule: FeatureMap 0 may not advertise what is not declared, and the
- * converse). */
+ * builds the Instance's mask by asking THIS list for StateOfCharge (the
+ * create path's second half), so the declared list and the Instance cannot
+ * disagree: one is derived from the other. The SEED is the one of the three
+ * that is not, being a table row keyed on the variant, and it agrees because
+ * the registry selects the list by that same variant; if a future row ever
+ * breaks that, the seed is the copy that goes wrong, and it is an inert
+ * shadow (the Instance serves FeatureMap from mFeature), so it would go
+ * wrong quietly. That is the DEM report-only list's rule with its one real
+ * weak point named rather than glossed. */
 HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(evseNoSocAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::State::Id, ENUM8, 1, 0),
     DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::SupplyState::Id, ENUM8, 1, 0),
@@ -5280,7 +5285,21 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * So the widest type is still computed at compile time, from the same
  * DECLARE_DYNAMIC_* arrays the registry is built from, and asserted against
  * a floor: the heap must always hold at least kMinWidestEndpoints of the
- * heaviest device type. Eight rather than sixteen because sizing for
+ * heaviest device type.
+ *
+ * WHAT THIS DOES NOT PROTECT, said once and plainly, because everything below
+ * reads more confidently than the mechanism deserves: the candidate set is
+ * HAND-MAINTAINED. Every constant in the kMax2 chain below is one someone
+ * remembered to write, and nothing ties the chain to s_registry. A
+ * fifty-third device type added with no candidate of its own is simply not
+ * guarded, exactly as it was before this block was made cap-aware. What the
+ * assertions do guarantee is that a candidate which IS declared cannot be
+ * quietly weakened: its block is derived from the declarations, its payload
+ * and heap cost are pinned, and a capped one cannot lose its cap without the
+ * build saying so. Deriving the candidate set from s_registry the way
+ * shape_domain_matches_policy() derives the parent universe would close the
+ * gap and is the right shape for whoever needs it next; count_slots() is not
+ * constexpr, which is what has stopped it so far. Eight rather than sixteen because sizing for
  * sixteen of the heaviest is precisely the trade this round declined;
  * eight is the point below which the capacity table would be describing a
  * different device.
@@ -5315,17 +5334,22 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * Two things keep it from going vacuous:
  *
  *   the capped candidates are asserted SEPARATELY, each against its own cap,
- *   rather than dropped out of the maximum. A candidate that simply left the
- *   kMax2 chain would be unguarded, which is the failure mode this whole
- *   block exists to prevent;
+ *   rather than dropped out of the maximum. Dropping one out of the kMax2
+ *   chain and asserting nothing in its place is the obvious way to make a
+ *   failing floor pass, and it is the one this shape refuses;
  *
  *   a capped candidate must be genuinely capped BELOW kMinWidestEndpoints,
  *   asserted below. Raise MT_EVSE_MAX to eight or more and the build fails
  *   telling you to move that candidate back into the uncapped maximum, where
  *   it will then have to fit eight times over or force a real
- *   HEARTH_EP_HEAP_BYTES decision. The cap is a promise the create path
- *   enforces (mt_matter_evse_reserve()), not a wish, so weakening it here
- *   without weakening it there is the drift this catches.
+ *   HEARTH_EP_HEAP_BYTES decision.
+ *
+ * One thing that assertion is NOT, since the shape invites the reading:
+ * kEvseEndpointCap IS MT_EVSE_MAX rather than a copy of it, so there is no
+ * drift between the floor's idea of the cap and the create path's for it to
+ * catch. What makes the cap a promise rather than a wish is
+ * mt_matter_evse_reserve() refusing the third endpoint before anything is
+ * built; this floor depends on that promise and does not verify it.
  */
 #define MT_COUNT(array) (sizeof(array) / sizeof((array)[0]))
 
@@ -8285,12 +8309,23 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * pointer the delegate needs. The ModeBase setter carries the RVC block's
      * panic warning verbatim.
      *
-     * with_soc is the variant predicate, the single source shared with the
-     * FeatureMap seed rows above; unlike the DEM predicate just changed, this
-     * one is genuinely about the variant, because SOC is the EVSE's variant
-     * axis. */
+     * with_soc READS THE DECLARED LIST, the same source and the same argument
+     * as the DEM PowerAdjustment predicate two blocks above, and it was
+     * `variant == 0` until the EVSE round's fix pass. Both answers are
+     * identical today, because the registry selects evseAttrs for variant 0
+     * and evseNoSocAttrs for variant 1 and StateOfCharge is exactly what
+     * separates them. The reason to ask the list anyway is that the identity
+     * is a property of one registry row rather than of anything the compiler
+     * or this call site can see, and the stamped mask feeds THREE consumers
+     * (the Instance's own mFeature, the AT+MTMEAS existence gates, and the
+     * merge's SOC-variant rule), so a future edit that split the variant from
+     * the list would have been silent in all three at once. Asking the list
+     * makes "the declared list and the served feature cannot disagree" true
+     * rather than merely observed. */
     if (evse_delegate != nullptr) {
-        mt_matter_evse_register(evse_delegate, d.ep_id, variant == 0);
+        mt_matter_evse_register(
+            evse_delegate, d.ep_id,
+            type_has_attr(ep_type, EnergyEvse::Id, EnergyEvse::Attributes::StateOfCharge::Id));
     }
     if (evse_mode_delegate != nullptr) {
         mt_matter_modebase_delegate_set_endpoint(evse_mode_delegate, d.ep_id);

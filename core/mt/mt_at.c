@@ -2734,6 +2734,54 @@ static int row_err_to_mterr(int r)
 }
 
 /*
+ * The same mapping for the READ direction, differing in exactly one arm, and
+ * the arm is a published contract rather than a taste.
+ *
+ * AT_MT_SPEC.md 3.28 states flatly that "+MTERR:7 is reachable from
+ * AT+MTROWAPPLY alone" and that "AT+MTROW, AT+MTROWCLEAR and AT+MTROWGET
+ * never touch NVS and so can never answer it". Until this function existed
+ * that held only because no read bridge happened to produce
+ * MT_ROW_ERR_PERSIST, which is a property of two implementations rather than
+ * of the structure, and the structure is what a spec sentence that flat needs
+ * standing under it.
+ *
+ * The proof it holds TODAY, both platforms, so the narrowing below is a
+ * guarantee rather than a change: mt_matter_rows_get() and
+ * mt_matter_rows_total() dispatch kind 1 to the EVSE target reads, which
+ * locate the endpoint, read the in-memory store and return; neither calls the
+ * persistence path at all (nRF: mt_matter_evse_targets_get/_total in
+ * mt_matter_zephyr.cpp, C6: mt_evse_targets_get_locked/_total_locked in
+ * mt_evse.cpp). core/include/mt_matter.h already says so in its contract for
+ * both functions, which name MT_ROW_OK, MT_ROW_ERR_ENDPOINT and
+ * MT_ROW_ERR_NO_PAYLOAD and no persistence code at all. An unknown kind
+ * answers MT_ROW_ERR_KIND.
+ *
+ * So why narrow rather than only assert the proof in a comment: the proof is
+ * about the bridges that exist, and the whole point of a bridge contract is
+ * that the next row kind is written against the header rather than against
+ * this file. A read bridge that returned MT_ROW_ERR_PERSIST anyway would make
+ * AT+MTROWGET answer +MTERR:7, which is not merely an undocumented code on
+ * that verb: it is a code whose MEANING is "the change was applied and may
+ * not survive a reboot", said about a command that changed nothing. A host
+ * following the spec would act on it. Mapping it to a bare ERROR instead
+ * keeps the spec sentence true by construction, and answers with the code
+ * 3.28 already assigns to an unclassified runtime failure, which is what a
+ * bridge violating its own contract is. The bare ERROR at a bench is then the
+ * drift alarm, the same role the port's own "cannot happen" default arms
+ * play.
+ *
+ * Platform-neutral by construction: it is a mapping in shared core, it names
+ * no platform, and both arms' bridges satisfy it today.
+ */
+static int row_read_err_to_mterr(int r)
+{
+    if (r == MT_ROW_ERR_PERSIST) {
+        return MT_R_ERROR;
+    }
+    return row_err_to_mterr(r);
+}
+
+/*
  * AT+MTROW=<ep>,<kind>,<idx>,<field>[,<field>...] -> stage one row of a
  * nested payload (design spec 2.1) into the single global row stage above.
  * Set-only: bare/query forms answer a plain ERROR.
@@ -3297,7 +3345,7 @@ static int cmd_mtrowget(at_type_t type, char *args)
     uint16_t total;
     int r = mt_matter_rows_total((uint16_t)ep, (uint8_t)kind, &total);
     if (r != MT_ROW_OK) {
-        return row_err_to_mterr(r);
+        return row_read_err_to_mterr(r);
     }
 
     if (single) {
@@ -3309,18 +3357,38 @@ static int cmd_mtrowget(at_type_t type, char *args)
         uint16_t t2;
         int rr = mt_matter_rows_get((uint16_t)ep, (uint8_t)kind, (uint16_t)idx, &row, &t2);
         if (rr != MT_ROW_OK) {
-            return row_err_to_mterr(rr);
+            return row_read_err_to_mterr(rr);
         }
         emit_row_line((uint16_t)idx, t2, &row, nfields);
         return AT_R_OK;
     }
 
+    /*
+     * THE BULK READ IS NOT ATOMIC, and the EVSE round is what made this path
+     * reachable for the first time, so it is worth stating rather than
+     * leaving to be discovered. `total` is snapshotted once and each row is
+     * then fetched through its own bridge call, which takes and releases the
+     * platform's stack lock per row and re-walks the stored payload. A fabric
+     * ClearTargets or an adjudicated SetTargets landing between two rows can
+     * therefore make a later index answer MT_ROW_ERR_VALUE, and the host sees
+     * some +MTROW lines followed by +MTERR:1 rather than a short read.
+     *
+     * Left as it is on purpose. Closing it means either holding the stack
+     * lock across the whole stream (which is up to 70 lines, about 300 ms at
+     * 115200, on the lock the CHIP event loop needs) or snapshotting the
+     * payload into a second buffer the size of a staging session. Both cost
+     * more than the failure does: the window needs a concurrent controller
+     * write, the host's own retry recovers completely, and nothing is left
+     * half-applied because a read applies nothing. The seq-qualified form
+     * above is unaffected: it serves the pending inbound set, whose owner is
+     * blocked in the verdict window and touches nothing.
+     */
     for (uint16_t i = 0; i < total; i++) {
         mt_row_t row;
         uint16_t t2;
         int rr = mt_matter_rows_get((uint16_t)ep, (uint8_t)kind, i, &row, &t2);
         if (rr != MT_ROW_OK) {
-            return row_err_to_mterr(rr);
+            return row_read_err_to_mterr(rr);
         }
         emit_row_line(i, t2, &row, nfields);
     }
