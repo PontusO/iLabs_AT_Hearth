@@ -1,0 +1,68 @@
+# Partition map for nrf54lm20dk/nrf54lm20a/cpuapp.
+#
+# Partition Manager picks this file up by NAME, with no build-system
+# change: nrf/cmake/extensions.cmake builds the search list
+# pm_static_<board>_<qualifiers>.yml, then pm_static_<board>.yml, then
+# pm_static.yml, and nrf/cmake/sysbuild/partition_manager.cmake takes the
+# first that exists in the application directory. So the two nRF54L15
+# targets keep using pm_static.yml beside this file, untouched, and this
+# one applies only to the LM20 DK.
+#
+# WHY A SEPARATE FILE AT ALL: pm_static.yml fills the nRF54L15's 1428 KB
+# of RRAM exactly, to 0x165000. This part has 1940 KB (0x1E5000) on
+# cpuapp, the last 96 KB of the 2036 KB die belonging to the cpuflpr, so
+# the L15 map would leave 512 KB of RRAM unmapped and PM would have to
+# invent a use for it.
+#
+# The shape is the L15 map's, stretched at the app slot and nowhere else:
+#
+#   mcuboot           0x000000   48 KB   locked bootloader
+#   mcuboot_pad       0x00C000    2 KB   image header pad
+#   app               0x00C800 1854 KB   primary slot payload
+#   (mcuboot_primary  0x00C000 1856 KB   the span of the two above)
+#   settings_storage  0x1DC000   32 KB   ZMS: heartbeat KV and Matter
+#   factory_data      0x1E4000    4 KB   reserved, unused this round
+#                              = 0x1E5000, the whole cpuapp RRAM
+#
+# settings_storage KEEPS ITS NAME AND ITS SIZE, and both matter.
+#
+# The name is what binds it: hearth_port_zephyr.c reaches the KV store
+# through flash_map_pm.h's storage_partition alias to settings_storage
+# and PM_SETTINGS_STORAGE_ID, never by address and never through
+# devicetree, so a map that keeps the label needs no code change.
+#
+# The size stays 32 KB because CONFIG_ZMS_LOOKUP_CACHE_SIZE=64 in
+# prj.conf is justified against a 32 KB partition, at length. Growing the
+# partition here would silently invalidate that reasoning on a board
+# nobody has measured. This is a parity round; the settings partition is
+# a sizing decision for the round that measures ZMS on this part.
+#
+# Single-slot: sysbuild.conf sets SB_CONFIG_MCUBOOT_MODE_SINGLE_APP, so
+# there is no mcuboot_secondary, the same as the L15 map. 1856 KB of
+# slot0 at a 4096 B erase block is 464 sectors, well inside
+# CONFIG_BOOT_MAX_IMG_SECTORS=2048 in sysbuild/mcuboot.conf.
+mcuboot:
+  address: 0x0
+  size: 0xC000
+  region: flash_primary
+mcuboot_pad:
+  address: 0xC000
+  size: 0x800
+app:
+  address: 0xC800
+  size: 0x1CF800
+mcuboot_primary:
+  orig_span: &id001
+    - mcuboot_pad
+    - app
+  span: *id001
+  address: 0xC000
+  size: 0x1D0000
+settings_storage:
+  address: 0x1DC000
+  size: 0x8000
+  region: flash_primary
+factory_data:
+  address: 0x1E4000
+  size: 0x1000
+  region: flash_primary
