@@ -119,9 +119,29 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * MicrowaveOvenControl) for a 536 B block, the best object-bytes-per-block-byte
  * ratio in the catalogue after the utility meter, and a composition of them
  * pushes the exhaustively-searched worst reachable draw past what 6,448
- * usable bytes cover. The re-derived maximum and the mix that reaches it are
- * beside the heap in mt_matter_zephyr.cpp, pinned by static_assert there as
- * ever. 7168 keeps this heap in the same ten-bucket band the overhead figure
- * is derived for (896 chunks, inside [512, 1023]) and costs 640 B of .bss.
+ * usable bytes cover.
+ *
+ * The EVSE round raised it again, 7168 to 11264, and the Energy EVSE (0x050C)
+ * is that reason. An EVSE endpoint draws SIX per-endpoint objects at once
+ * (EnergyEvse, DeviceEnergyManagement, two ModeBase aliases, EPM and
+ * PowerTopology) and the first of them carries the whole charging-target
+ * store, 1,968 bytes of delegate against the catalogue's next largest at 304:
+ * 2,704 object bytes on a 1,128 B block, 2.40 per block byte. It is capped at
+ * MT_EVSE_MAX (2), which is exactly why it does not need a bigger ENDPOINT
+ * heap and does need a bigger object heap: the cap bounds how many BLOCKS a
+ * composition can hold, and does nothing about how heavy each one's objects
+ * are. The re-derived worst reachable draw is 10,928 B (two EVSEs, eight
+ * microwaves, three appliance-trio endpoints, two utility meters and one
+ * battery storage, 16 endpoints and 8,088 of 8,112 block bytes), and both it
+ * and the mix that reaches it are beside the heap in mt_matter_zephyr.cpp,
+ * pinned by static_assert there as ever.
+ *
+ * 11264 leaves 11,184 usable, a 256 B margin, and costs 4,096 B of .bss over
+ * batch 8's figure. It moves this heap out of the ten-bucket band into the
+ * ELEVEN-bucket one (1,407 chunks, inside [1024, 2047]), which the
+ * BUILD_ASSERT beside kObjHeapOverheadBytes now checks: the overhead figure
+ * is unchanged at 80 bytes anyway, because struct z_heap plus eleven buckets
+ * is 72 bytes and still rounds to the same nine chunks, but the band is
+ * asserted rather than assumed and the assertion had to move with the heap.
  */
-#define HEARTH_OBJ_HEAP_BYTES 7168
+#define HEARTH_OBJ_HEAP_BYTES 11264

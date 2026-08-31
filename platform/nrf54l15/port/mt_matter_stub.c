@@ -127,33 +127,6 @@
  * device type (0x050D) entered the registry: real in mt_matter_zephyr.cpp
  * now, on the MT_DEM_MAX HearthDemDelegate-plus-Instance pool. */
 
-int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
-{
-    (void)ep;
-    (void)kind;
-    (void)stage;
-    return MT_ROW_ERR_ENDPOINT;
-}
-
-int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
-                       mt_row_t *out, uint16_t *total)
-{
-    (void)ep;
-    (void)kind;
-    (void)idx;
-    if (out) memset(out, 0, sizeof(*out));
-    if (total) *total = 0;
-    return MT_ROW_ERR_ENDPOINT;
-}
-
-int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
-{
-    (void)ep;
-    (void)kind;
-    if (total) *total = 0;
-    return MT_ROW_ERR_ENDPOINT;
-}
-
 /* The meter quartet (mt_meter_feature_mask, mt_meter_reserve,
  * mt_meter_register_all, mt_matter_meter_set_identity) left this file in
  * catalogue batch 7a, when the electrical utility meter (0x0511) entered
@@ -161,45 +134,16 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
  * MeterIdentification Instance pool and the post-rebuild registration
  * scan main.cpp runs. */
 
-void *mt_matter_evse_delegate_alloc(uint16_t ep)
-{
-    (void)ep;
-    return NULL;
-}
-
-bool mt_matter_evse_reserve(void) { return false; }
-
-int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value)
-{
-    (void)ep;
-    (void)field;
-    (void)value;
-    return MT_ATTR_ERR_ENDPOINT;
-}
-
-int mt_matter_evse_targets_apply(uint16_t ep, const mt_row_stage_t *stage)
-{
-    (void)ep;
-    (void)stage;
-    return MT_ROW_ERR_ENDPOINT;
-}
-
-int mt_matter_evse_targets_get(uint16_t ep, uint16_t idx, mt_row_t *out, uint16_t *total)
-{
-    (void)ep;
-    (void)idx;
-    if (out) memset(out, 0, sizeof(*out));
-    if (total) *total = 0;
-    return MT_ROW_ERR_ENDPOINT;
-}
-
-int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total)
-{
-    (void)ep;
-    if (total) *total = 0;
-    return MT_ROW_ERR_ENDPOINT;
-}
-
-int mt_matter_evse_targets_erase_all(void) { /* Erasing schedules that cannot exist succeeds vacuously; a -1 here
-     * blocked AT+MTFRESET's completion during bring-up (bench-found). */
-    return 0; }
+/* The whole Energy EVSE slice left this file in the EVSE round, when the
+ * energy EVSE (0x050C) entered the registry and closed the L15 catalogue:
+ * mt_matter_evse_reserve, mt_matter_evse_delegate_alloc, mt_matter_evse_set,
+ * mt_matter_evse_targets_apply/get/total/erase_all and the mt_matter_rows_*
+ * trio that routes AT+MTROW to them are all real in mt_matter_zephyr.cpp now,
+ * on the MT_EVSE_MAX HearthEvseDelegate-plus-Instance pool and the
+ * charging-target store that pool object carries. THIS FILE IS NOW EMPTY OF
+ * mt_matter.h entry points: every one of them is implemented for real
+ * somewhere in the port, which is what the header comment's "the linker
+ * proves completeness" was always working towards. It is kept, rather than
+ * deleted, because that proof is a property of the build and not of any one
+ * round: a header entry point added tomorrow has a place to be stubbed while
+ * its implementation is written. */

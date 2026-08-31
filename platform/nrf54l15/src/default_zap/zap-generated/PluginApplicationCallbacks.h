@@ -59,7 +59,9 @@ void MatterElectricalPowerMeasurementPluginServerInitCallback();
 void MatterElectricalEnergyMeasurementPluginServerInitCallback();
 void MatterWaterHeaterManagementPluginServerInitCallback();
 void MatterDeviceEnergyManagementPluginServerInitCallback();
+void MatterEnergyEvsePluginServerInitCallback();
 void MatterPowerTopologyPluginServerInitCallback();
+void MatterEnergyEvseModePluginServerInitCallback();
 void MatterWaterHeaterModePluginServerInitCallback();
 void MatterDeviceEnergyManagementModePluginServerInitCallback();
 void MatterDoorLockPluginServerInitCallback();
@@ -118,7 +120,9 @@ void MatterMeterIdentificationPluginServerInitCallback();
   MatterElectricalEnergyMeasurementPluginServerInitCallback();                     \
   MatterWaterHeaterManagementPluginServerInitCallback();                           \
   MatterDeviceEnergyManagementPluginServerInitCallback();                          \
+  MatterEnergyEvsePluginServerInitCallback();                                      \
   MatterPowerTopologyPluginServerInitCallback();                                   \
+  MatterEnergyEvseModePluginServerInitCallback();                                  \
   MatterWaterHeaterModePluginServerInitCallback();                                 \
   MatterDeviceEnergyManagementModePluginServerInitCallback();                      \
   MatterDoorLockPluginServerInitCallback();                                        \

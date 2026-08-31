@@ -468,6 +468,73 @@ public:
         return true;
     }
 
+    /*
+     * THE SOC RULE APPLIES TO WHAT WAS LOADED, NOT ONLY TO WHAT ARRIVES, and
+     * it has to run after EVERY load rather than after the first one.
+     *
+     * The case it closes. The blob is keyed on the endpoint id alone
+     * ("t<ep>") and endpoint ids are assigned in composition order, so
+     * re-declaring an EVSE at the same index with the other variant hands the
+     * new endpoint the old one's schedule. decode() cannot see it: every
+     * target in that schedule is well formed, in range, and was legal for the
+     * variant that wrote it. Served unchanged, GetTargets() answers a
+     * controller with targets carrying a targetSoC the cluster's SOC
+     * conformance says may only be absent or 100, or with targets lacking one
+     * where ValidateTargets() makes it mandatory. Either way GetTargets hands
+     * back a schedule its own SetTargets would have been refused, which is
+     * the one thing mt_evse_targets_apply_locked()'s SOC check exists to
+     * prevent on the other path.
+     *
+     * WHY IT LIVES IN LoadTargets() AND NOT AT THE BOOT CALL SITE. There are
+     * THREE loads per endpoint, not one: the boot load from
+     * mt_matter_evse_delegate_alloc(), the apply path's !m_loaded retry, and
+     * GetTargets()'s own lazy retry. A boot load that hits a transient NVS
+     * failure leaves the store empty and m_loaded false, so a check placed at
+     * the boot site passes over nothing; the later retry then succeeds, loads
+     * the cross-variant blob and serves it unchecked, which is the exact
+     * sentence this check is written against, reached by a different door.
+     * Hanging it off the one function all three go through is what makes
+     * "every load is validated" a property rather than a habit.
+     *
+     * The variant is read from this endpoint's OWN metadata, the same source
+     * mt_evse_targets_apply_locked() uses, so the two cannot disagree.
+     * soc_reporting::add() must therefore have run before the first load;
+     * mk_energy_evse() (mt_devtypes.cpp) carries that ordering and a guard
+     * that fails the create loudly if it is ever broken.
+     *
+     * THE DISCARD IS RAM-ONLY. The blob is not rewritten, so the log repeats
+     * on every boot and the schedule returns intact if the endpoint is later
+     * re-declared with its original variant. That is deliberate: a variant
+     * flip is a composition edit, often a mistake, and destroying the user's
+     * schedule to tidy up after it would be the worse failure. The store is
+     * simply not served while it cannot be served correctly.
+     */
+    void drop_store_if_variant_mismatch()
+    {
+        if (m_schedule_count == 0) {
+            return;
+        }
+        const bool soc =
+            (esp_matter::attribute::get(mEndpointId, EE::Id,
+                                        EE::Attributes::StateOfCharge::Id) != nullptr);
+        for (uint8_t i = 0; i < m_schedule_count; i++) {
+            for (uint8_t j = 0; j < m_target_count[i]; j++) {
+                const EE::Structs::ChargingTargetStruct::Type &t = m_targets[i][j];
+                if (soc ? !t.targetSoC.HasValue()
+                        : (t.targetSoC.HasValue() && t.targetSoC.Value() != 100)) {
+                    ESP_LOGE(TAG,
+                             "ep %u: the stored charging schedule was written for the other "
+                             "SOC variant and cannot be served here; not serving it (the "
+                             "stored blob is left alone). A controller would otherwise be "
+                             "handed a schedule its own SetTargets would be refused",
+                             mEndpointId);
+                    clear_store();
+                    return;
+                }
+            }
+        }
+    }
+
     /* Write the store to NVS. Returns false on any NVS failure. */
     bool save()
     {
@@ -899,6 +966,10 @@ public:
             return Status::Failure;
         }
         m_loaded = true;
+        /* Every load goes through here, which is the point (the helper's own
+         * comment): boot, the apply path's retry and GetTargets()'s lazy
+         * retry all land on this line. */
+        drop_store_if_variant_mismatch();
         ESP_LOGI(TAG, "ep %u: loaded %u charging target schedule(s)", mEndpointId,
                  m_schedule_count);
         return Status::Success;
@@ -1232,6 +1303,10 @@ extern "C" void *mt_matter_evse_delegate_alloc(uint16_t ep)
      * schedule; it must not abort the endpoint, because a corrupt schedule
      * is not a reason to refuse to be an EVSE.
      */
+    /* LoadTargets() validates the loaded schedule against this endpoint's SOC
+     * variant itself (drop_store_if_variant_mismatch(), beside the store), so
+     * this call site needs no check of its own and neither do the other two
+     * load sites. */
     (void)d->LoadTargets();
     return d;
 }

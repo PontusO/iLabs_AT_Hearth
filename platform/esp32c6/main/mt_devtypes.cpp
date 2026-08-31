@@ -2465,19 +2465,27 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
      * what create() has just returned. The same post-create attach the
      * water heater's WHM delegate uses, for the same reason.
      *
-     * The ORDER relative to soc_reporting::add() above does not matter, and
-     * nothing here should be read as claiming it does:
-     * set_delegate_and_init_callback() only stores the pointer
+     * THE ORDER RELATIVE TO soc_reporting::add() ABOVE NOW MATTERS, AND THIS
+     * COMMENT USED TO SAY THE OPPOSITE. The old text said in capitals that
+     * the two calls were reorderable, and for the FeatureMap that is still
+     * true: set_delegate_and_init_callback() only stores the pointer
      * (esp_matter_data_model.cpp:1566-1572), and EnergyEvseDelegateInitCB
      * reads the FeatureMap when it news the Instance at endpoint enable
      * (esp_matter_delegate_callbacks.cpp:257-268), driven from
-     * provider::Startup() during esp_matter::start() for endpoints built
-     * before it. That is the same "snapshot at enable" rule the water
-     * heater's hand-set FeatureMap depends on, and it is why esp-matter's
-     * own energy_evse::create() can attach the delegate at
-     * esp_matter_cluster.cpp:3373-3375 and only add charging preferences at
-     * :3396. The variant-0 FeatureMap reaches ValidateTargets() whichever
-     * order the thunk uses.
+     * provider::Startup() during esp_matter::start(), so the variant-0
+     * FeatureMap reaches ValidateTargets() whichever order the thunk uses.
+     *
+     * What broke the old claim is the alloc, not the FeatureMap. The alloc
+     * runs LoadTargets(), and LoadTargets() now asks this endpoint's OWN
+     * METADATA whether StateOfCharge exists, so it can drop a stored schedule
+     * that belongs to the other SOC variant (mt_evse.cpp's
+     * drop_store_if_variant_mismatch()). soc_reporting::add() is what creates
+     * that attribute (esp_matter_feature.cpp:2875). Swap the two calls and a
+     * variant-0 EVSE reads soc == false at boot, every legal SOC schedule is
+     * discarded on every boot, and the log line blames the wrong cause. That
+     * is silent user-data loss, which is why the guard below exists rather
+     * than this paragraph alone: a reorder now fails the create loudly
+     * instead of quietly emptying a schedule.
      *
      * The alloc CONSUMES the reservation taken at the top of this thunk (it
      * refuses a handout with no outstanding reservation), so it can no
@@ -2485,6 +2493,26 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
      * endpoint's stored schedule from NVS, satisfying the SDK's unenforced
      * "LoadTargets before GetTargets" contract.
      */
+    if ((variant == 0) !=
+        (esp_matter::attribute::get(ep_id, chip::app::Clusters::EnergyEvse::Id,
+                                    chip::app::Clusters::EnergyEvse::Attributes::StateOfCharge::Id)
+         != nullptr)) {
+        /* The ordering dependency the comment above describes, made
+         * structural. It cannot fire with the calls in their current order;
+         * it fires immediately if anyone moves the alloc above
+         * soc_reporting::add(), or if a future esp-matter stops creating
+         * StateOfCharge from that feature helper. Aborting the create costs
+         * one endpoint at boot; the alternative it replaces costs the user's
+         * charging schedule with no way to tell. */
+        ESP_LOGE(TAG,
+                 "energy evse variant %u and its StateOfCharge attribute disagree; "
+                 "soc_reporting::add() must run BEFORE mt_matter_evse_delegate_alloc(), "
+                 "whose LoadTargets() reads that attribute to decide whether a stored "
+                 "schedule belongs to this variant",
+                 (unsigned)variant);
+        return nullptr;
+    }
+
     void *evse_delegate = mt_matter_evse_delegate_alloc(ep_id);
     if (evse_delegate == nullptr) {
         ESP_LOGE(TAG, "EVSE delegate pool exhausted (energy evse)");

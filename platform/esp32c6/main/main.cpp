@@ -2596,8 +2596,21 @@ private:
      * Mode_Oven.xml's first oven-specific tag; the cluster also inherits the
      * ModeBase common tags 0x00-0x09, but a cavity whose host has not yet
      * declared a list is more usefully described as a bake cavity than as
-     * "Auto"). mt_matter_modebase_set() below applies the
-     * identical table to real host-declared entries at store time. */
+     * "Auto"), and (2026-08-31) EnergyEvseMode gets kManual (0x4000,
+     * Mode_EVSE.xml's first cluster-specific tag), which is the number
+     * the MicrowaveOvenMode fall-through already returned and is now chosen
+     * rather than inherited. mt_matter_modebase_set() below applies the
+     * identical table to real host-declared entries at store time.
+     *
+     * WaterHeaterMode and DeviceEnergyManagementMode still take theirs from
+     * the fall-through, and the two do NOT land the same way: 0x4000 is
+     * kNoOptimization on DeviceEnergyManagementMode, which is the store-time
+     * default too, but it is kOff on WaterHeaterMode, whose store-time
+     * default is kManual (0x4001). So an unfed water heater's placeholder
+     * says Off where a host-fed one with tag 0 says Manual. Named here
+     * rather than changed, because it predates this line and is a separate
+     * question from the cluster admission this comment is about; the
+     * nRF54L15 port has an explicit kManual arm and does not have it. */
     uint16_t placeholder_tag() const
     {
         using namespace chip::app::Clusters;
@@ -2612,6 +2625,15 @@ private:
         }
         if (m_cluster == OvenMode::Id) {
             return chip::to_underlying(OvenMode::ModeTag::kBake);
+        }
+        if (m_cluster == EnergyEvseMode::Id) {
+            /* Manual (0x4000), AT_MT_SPEC.md 3.20's table row (2026-08-31).
+             * Same number the fall-through below already returned, spelled
+             * out now that the spec names it: kNormal is 0x4000 on
+             * MicrowaveOvenMode's enum and kManual is 0x4000 on this one, so
+             * the old answer was right by coincidence rather than by
+             * choice. */
+            return chip::to_underlying(EnergyEvseMode::ModeTag::kManual);
         }
         return chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
     }
@@ -2689,12 +2711,24 @@ void HearthOvenModeInitCB(void *delegate, uint16_t endpoint_id)
  * enforced by cmd_mtmodes() in mt_at.c before this is ever called; the
  * bounds re-checked here are defensive, the same split as
  * mt_matter_modes_set() above. This bridge is the sole place that validates
- * cluster against the seven ModeBase ids (composed appliance round: task 3
+ * cluster against the eight ModeBase ids (composed appliance round: task 3
  * adds RefrigeratorAndTemperatureControlledCabinetMode and task 4 adds
  * OvenMode to the three from the RVC + Microwave batch; energy round B adds
- * WaterHeaterMode; energy round C1 adds DeviceEnergyManagementMode):
- * mt_at.c stays free of any esp_matter/CHIP header and cannot read those
- * ids itself.
+ * WaterHeaterMode; energy round C1 adds DeviceEnergyManagementMode; and
+ * 2026-08-31 adds EnergyEvseMode): mt_at.c stays free of any
+ * esp_matter/CHIP header and cannot read those ids itself.
+ *
+ * ENERGYEVSEMODE IS THE EIGHTH AND IT ARRIVED LATE, which is worth a line
+ * because the cluster itself has shipped since energy round C2. Its
+ * SupportedModes could never be fed: it was absent from this condition and
+ * from AT_MT_SPEC.md 3.20.1's accept list, so an EVSE endpoint served the
+ * firmware placeholder mode for ever while ChangeToMode still forwarded for
+ * adjudication, a controller being asked to choose between one option. The
+ * spec now names 157/0x9D with a tag-0 default of kManual (0x4000), and
+ * this firmware already produced exactly that value through the
+ * fall-through arms below, so nothing a host or controller could already
+ * observe changes. What changes is that AT+MTMODES=<ep>,157,... answers OK
+ * instead of +MTERR:3: a contract ADDITION, not an alteration.
  */
 extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
                                        const char *const *labels, uint8_t count)
@@ -2706,7 +2740,8 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
     }
     if (cluster != RvcRunMode::Id && cluster != RvcCleanMode::Id && cluster != MicrowaveOvenMode::Id &&
         cluster != RefrigeratorAndTemperatureControlledCabinetMode::Id && cluster != OvenMode::Id &&
-        cluster != WaterHeaterMode::Id && cluster != DeviceEnergyManagementMode::Id) {
+        cluster != WaterHeaterMode::Id && cluster != DeviceEnergyManagementMode::Id &&
+        cluster != EnergyEvseMode::Id) {
         return MT_ATTR_ERR_CLUSTER;
     }
     if (esp_matter::cluster::get(ep, cluster) == nullptr) {
@@ -2802,6 +2837,25 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                  * a mode a host has not described makes no optimization
                  * promise, the honest resting default. */
                 tag = chip::to_underlying(DeviceEnergyManagementMode::ModeTag::kNoOptimization);
+            } else if (cluster == EnergyEvseMode::Id) {
+                /* Manual (0x4000), AT_MT_SPEC.md 3.20's table row, added
+                 * 2026-08-31 with the cluster's admission above and verified
+                 * against Mode_EVSE.xml before this branch was written:
+                 * the XML defines Manual as the first of the four
+                 * cluster-specific tags and encodes no mandatory-tag
+                 * conformance on SupportedModes at all, so nothing in it
+                 * contradicts kManual, which is the everyday "charge when
+                 * plugged in" mode a host that does not care about tags most
+                 * plausibly means, the WaterHeaterMode kManual and OvenMode
+                 * kBake reasoning.
+                 *
+                 * Written out rather than left to the else below even though
+                 * the else produces the same NUMBER: kNormal is 0x4000 on
+                 * MicrowaveOvenMode's enum and kManual is 0x4000 on this
+                 * one, so the old fall-through was right by coincidence.
+                 * placeholder_tag() above gains the same arm for the same
+                 * reason. */
+                tag = chip::to_underlying(EnergyEvseMode::ModeTag::kManual);
             } else {
                 tag = chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
             }
