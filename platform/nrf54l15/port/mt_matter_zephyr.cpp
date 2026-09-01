@@ -3853,10 +3853,12 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
      * because the alternative is a silently dead endpoint, and AT_MT_SPEC.md
      * says so in those terms.
      *
-     * A DELIBERATE DIVERGENCE FROM THE C6, which has the identical gap and
-     * accepts such a list (parked as bug B418). Refusing is the better
-     * behaviour and the divergence is host-visible, so it is disclosed rather
-     * than quietly fixed on one platform.
+     * Introduced here as a deliberate, disclosed divergence from the C6,
+     * which had the identical gap and accepted such a list (B418). The C6
+     * caught up in the parity round of 2026-09-01 and now refuses the same
+     * lists with the same +MTERR:1, so the two platforms agree again; the
+     * label-validation pass runs before this check on both, so a doubly
+     * malformed list returns the same error on either.
      */
     if (cluster == MicrowaveOvenMode::Id) {
         bool has_normal = false;
@@ -6386,12 +6388,12 @@ static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  *     rationale ("a denied Boost never started anything") applies to it
  *     verbatim: without this reset the next genuinely unrelated
  *     host-initiated boost would emit BoostStarted carrying the
- *     CANCELLED command's duration and optionals. DELIBERATE C6
- *     DIVERGENCE: the C6's guard leaves its cache set and has the exact
- *     stale-parameter window, parked as bug B410; AT_MT_SPEC.md is being
- *     amended to this consume-on-guarded-cancel rule (the coordinator's
- *     spec pass), so this port implements the amended rule and the C6
- *     catches up with B410. Only the guarded arm consumes: an ALLOWED
+ *     CANCELLED command's duration and optionals. Introduced here as a
+ *     disclosed C6 divergence while the C6's guard still left its cache
+ *     set (B410); AT_MT_SPEC.md was amended to this
+ *     consume-on-guarded-cancel rule and the C6 caught up in the parity
+ *     round of 2026-09-01, so both ports now consume. Only the guarded
+ *     arm consumes: an ALLOWED
  *     forwarded CancelBoost (Active state) still touches nothing, since
  *     the boost it cancels already consumed the cache at its
  *     BoostStarted.
@@ -6437,11 +6439,12 @@ static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  * SUCCESS and no event sent" for exactly that case (TC_EWATERHTR_2_2 step
  * 26; AT_MT_SPEC.md 3.17:1487-1495). This port mirrors the observable
  * behaviour (Success, no +MTCMD, no event) and ADDS the ruled
- * cache consume the lifecycle block above records (the B410 ruling): the one
- * deliberate divergence from both the C6 and the SDK reference delegate,
- * neither of which clears its cache there (the C6's window is parked as
- * B410). The guard reads the host-pushed BoostState cache, the same
- * value a controller reads.
+ * cache consume the lifecycle block above records (the B410 ruling). It
+ * remains a divergence from the SDK reference delegate, which does not
+ * clear its cache there; the C6 carried the same window until the parity
+ * round of 2026-09-01 closed it, and the two ports now agree. The guard
+ * reads the host-pushed BoostState cache, the same value a controller
+ * reads.
  *
  * The ALLOWED (Active-state) CancelBoost emits no BoostEnded here, BY
  * DESIGN (review M4): the split-ownership rule again, the host owns the
@@ -6586,8 +6589,9 @@ public:
      * AND it consumes the parameter cache (B410 ruling, the lifecycle
      * block's ALSO CONSUMED arm: a cancelled not-yet-started boost is a
      * boost that never started, so its parameters must not survive to
-     * describe some future unrelated one; the C6's identical stale
-     * window is parked as B410). The "no event" half holds by
+     * describe some future unrelated one; the C6 closed its identical
+     * stale window in the 2026-09-01 parity round). The "no event" half
+     * holds by
      * construction: no forward means no host actuation, no BoostState
      * push, no Active-to-Inactive transition, so the derivation never
      * emits BoostEnded. Otherwise forward command 1 payload-less (NULL

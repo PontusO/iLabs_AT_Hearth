@@ -562,9 +562,17 @@ static endpoint_t *mk_mode_select(node_t *n, uint8_t variant)
  * task-C10-evidence/014244-opstate-start-allow.log). Hand-add the four
  * ACCEPTED commands after create(), the same after-create() hand-add shape
  * mk_power_source() below uses for BatPercentRemaining.
- * create_operational_command_response() is NOT added: it is
- * COMMAND_FLAG_GENERATED, the response CHIP sends back on its own once the
- * accepted command exists, not something a controller invokes.
+ * create_operational_command_response() IS added, and the reasoning that
+ * once excluded it was wrong (B400, ruling DE399, found by the batch 4
+ * nRF review). It is COMMAND_FLAG_GENERATED, so no controller invokes it
+ * and adding it changes no dispatch; what it changes is METADATA. A
+ * generated command has to be listed in the cluster's fabric-visible
+ * GeneratedCommandList, and this cluster really does send
+ * OperationalCommandResponse in reply to all four accepted commands. Left
+ * out, the endpoint advertised an empty GeneratedCommandList while
+ * emitting the very response it claimed not to generate: untrue metadata,
+ * and certification reads that list. The nRF54L15 port added its
+ * equivalent in the batch 4 fix round.
  */
 static void mt_opstate_add_commands(endpoint_t *ep)
 {
@@ -574,6 +582,7 @@ static void mt_opstate_add_commands(endpoint_t *ep)
         cluster::operational_state::command::create_stop(cl);
         cluster::operational_state::command::create_start(cl);
         cluster::operational_state::command::create_resume(cl);
+        cluster::operational_state::command::create_operational_command_response(cl);
     }
 }
 

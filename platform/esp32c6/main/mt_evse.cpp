@@ -1325,22 +1325,29 @@ extern "C" void *mt_matter_evse_delegate_alloc(uint16_t ep)
  *
  * Why AT+MTMEAS and not AT+MTATTR, for the three attributes that are also
  * WRITABLE (UserMaximumChargeCurrent, RandomizationDelayWindow,
- * ApproximateEVEfficiency, the delegate's three setters below): those would
- * be the first writable delegate-served (managed-internally + WRITABLE)
- * attributes this project ships. DE270 (firmware 0.10.1) resolved the
+ * ApproximateEVEfficiency, the delegate's three setters below): these are
+ * writable delegate-served (managed-internally + WRITABLE) attributes, the
+ * shape DE270 left half-resolved. DE270 (firmware 0.10.1) fixed the
  * read-only half of that write path (a non-writable managed-internally
- * attribute now answers +MTERR:11 instead of a bare ERROR) but its own
- * resolution note says the writable half is still deferred: none shipped as
- * of that fix, set_val_via_write_attribute() discards the provider's real
- * status regardless of value, and the documented remedy if one ever ships
- * is to call provider::WriteAttribute() from the bridge directly rather than
- * fork the SDK. Routing every EVSE scalar through AT+MTMEAS instead sidesteps
+ * attribute now answers +MTERR:11 instead of a bare ERROR); the writable
+ * half is still open, because set_val_via_write_attribute() discards the
+ * provider's real status regardless of value, and the documented remedy is
+ * to call provider::WriteAttribute() from the bridge directly rather than
+ * fork the SDK.
+ *
+ * DE270's accompanying note that none had shipped was already false when it
+ * was written, and is corrected here (B401): the chime pair, SelectedChime
+ * and Enabled, is created WRITABLE | MANAGED_INTERNALLY | NONVOLATILE
+ * (esp_matter_attribute.cpp:4872-4884) on an endpoint this firmware's
+ * registry ships. The writable branch is therefore already reachable today,
+ * and the discarded-status gap with it, which is an argument for routing
+ * these three through AT+MTMEAS rather than against it. Routing every EVSE scalar through AT+MTMEAS instead sidesteps
  * that gap rather than closing it: this is an AVOIDANCE, not a fix. The
  * irony worth keeping in mind while reading the table below: the three
  * writable attributes are exactly the three esp-matter never creates (see
- * the existence-gate paragraph), so today the avoidance is doubly
- * theoretical, on both the write path it sidesteps and the attributes it
- * would have applied to.
+ * the existence-gate paragraph), so the avoidance is theoretical on the
+ * attributes half, having nothing to apply itself to. The write path it
+ * sidesteps is NOT theoretical, as the chime pair above shows.
  *
  * Existence gate: every field is checked against the endpoint's OWN metadata
  * (esp_matter::attribute::get) rather than against a feature-bit table.

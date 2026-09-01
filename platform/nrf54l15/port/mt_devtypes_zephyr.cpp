@@ -1791,11 +1791,13 @@ constexpr CommandId kOpStateIncoming[] = { OperationalState::Commands::Pause::Id
  * builds an OperationalCommandResponse and AddResponse()s it
  * (operational-state-server.cpp:443-446 for Pause, and identically in the
  * Stop/Start/Resume handlers), and the cluster spec requires that command
- * in GeneratedCommandList when its triggers are supported. This KNOWINGLY
- * diverges from the C6, whose identical nullptr gap is now tracked
- * separately as bug B400: fabric metadata truthfulness beats parity of an
- * untruth, and GeneratedCommandList is not part of the AT contract, so no
- * host-visible behaviour moves. */
+ * in GeneratedCommandList when its triggers are supported. Introduced as a
+ * knowing divergence from the C6, whose identical gap was tracked as bug
+ * B400 (fabric metadata truthfulness beats parity of an untruth, and
+ * GeneratedCommandList is not part of the AT contract, so no host-visible
+ * behaviour moves). The C6 closed B400 in the parity round of 2026-09-01
+ * by adding create_operational_command_response() to its own
+ * mt_opstate_add_commands(), so the two ports agree again. */
 constexpr CommandId kOpStateOutgoing[] = {
     OperationalState::Commands::OperationalCommandResponse::Id, kInvalidCommandId
 };
