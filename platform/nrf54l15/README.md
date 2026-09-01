@@ -1158,10 +1158,17 @@ copy), `nrf54l15dk` and `nrf54lm20dk` (upstream Zephyr boards, which need
 less).
 
 Items 2, 3 and 4 fail the CMake configure with a message naming the file to
-write. Items 5 and 8 fail the build too, less helpfully. The rest fail at
-boot, on the air, or not at all. That divide is not principled, it is
-where a check was cheap, so read the whole list rather than building until
-it stops complaining.
+write. Item 5 fails the build, inside MCUboot, with a message that at least
+names the alias it wants. Item 12 fails the configure unhelpfully,
+complaining about a `runners.yaml` it cannot read.
+
+**Nothing else is checked by anything.** Items 8 and 9 in particular are not:
+item 8's only build-time guard lives in `ophelia_cpico`'s own
+`CMakeLists.txt`, is that board's alone, and fires on an NCS regression rather
+than on a new board omitting the setting. So a new board can get the LFCLK
+source wrong and get either a boot that hangs before any output or a radio
+running on the wrong reference, with a clean build both times. Read the whole
+list rather than building until it stops complaining.
 
 ### The two devicetree facts that have to agree
 
@@ -1229,6 +1236,36 @@ and therefore around the check. Nothing else does.
    reset returns the link to 115200, deliberately, so a host that loses
    sync always has a way back. Serial recovery uses the same rate.
 
+   A custom board writes its own `uartNN_default` and `uartNN_sleep` nodes in
+   its `-pinctrl.dtsi` (the DKs' are given). **Read the rest of this item
+   before choosing which pads to solder**, because the pads and the instance
+   are one decision, not two.
+
+   **The UART instance decides which GPIO ports its pins may come from.** A
+   peripheral on this SoC family belongs to one power domain and can only take
+   pins from the GPIO ports in that same domain. The SoC memory map shows the
+   grouping, each instance sitting beside the ports it can reach:
+
+   - `uart00` (`0x04a000`, `0x04d000` on the LM20) sits with `gpio2`
+     (`0x050400`): **P2**.
+   - `uart20`, `uart21`, `uart22`, and the LM20's `uart23` and `uart24`
+     (`0x0c6000` upward) sit with `gpio1` (`0x0d8200`), and on the LM20 also
+     `gpio3` (`0x0d8600`): **P1, plus P3 on the LM20**.
+   - `uart30` (`0x104000`) sits with `gpio0` (`0x10a000`): **P0**.
+
+   Every UART routing in every nRF54L board file in NCS v3.3.4 obeys it
+   without exception: `uart20` on P1 wherever it appears, `uart30` on P0
+   everywhere, `uart00` on P2. **The consequence that decides a bond-out is
+   that `uart20` cannot reach P0 and `uart30` cannot reach P1.** No amount of
+   editing `pinctrl` fixes that once the iron is down, while moving a pin
+   *within* the instance's own domain is free and costs one different
+   `NRF_PSEL()` line.
+
+   That mapping is derived from the devicetree and from every board that ships
+   in this NCS. It is strong evidence and it is not the specification, so
+   confirm the pads against the module's pad-to-signal table and the SoC
+   product specification's GPIO pin-assignment table before soldering.
+
 3. **MCUboot's recovery UART**, naming the node from item 2:
 
    ```dts
@@ -1250,12 +1287,29 @@ and therefore around the check. Nothing else does.
    `APPLICATION_CONFIG_DIR` to it, so Zephyr stops finding MCUboot's own
    `prj.conf`, `socs/` and `boards/` fragments. `prj.conf` is copied for
    the same reason and is already there. Missing `prj.conf` fails loudly;
-   a missing SoC fragment is *silent* and costs, on the nRF54L15, LTO, the
-   32-byte RRAM write buffer and the watchdog-feed setting. `CMakeLists.txt`
-   asks upstream what it would have supplied for the board being built and
-   fails if the answer is not contained verbatim in the copy, so a new SoC
-   and an NCS bump both surface here with the file named.
+   a missing SoC fragment is *silent* and costs, on the nRF54L15, LTO,
+   `ISR_TABLES_LOCAL_DECLARATION`, the 512-byte RRAM write buffer
+   (`CONFIG_NRF_RRAM_WRITE_BUFFER_SIZE` counts 128-bit words: 32 is 512
+   bytes, and the fallback 1 is 16) and `BOOT_WATCHDOG_FEED=n`.
+   `CMakeLists.txt` asks upstream what it would have supplied for the board
+   being built and fails if the answer is not contained verbatim in the copy,
+   so a new SoC and an NCS bump both surface here with the file named.
    `nrf54l15_cpuapp.conf` and `nrf54lm20a_cpuapp.conf` are present.
+
+   **The redirect moves the devicetree lookups too, and there the build does
+   not help you.** Upstream MCUboot also ships `boot/zephyr/app.overlay`,
+   `boot/zephyr/boards/*.overlay` and `boot/zephyr/socs/*.overlay`, and none
+   of them reaches this bootloader image. That is not a loss: they were
+   already suppressed before this directory existed, because the old
+   `sysbuild/mcuboot.overlay` set `mcuboot_DTC_OVERLAY_FILE`, which makes
+   `DTC_OVERLAY_FILE` defined and skips all three lookups. Which is exactly
+   why the guard does not demand copies of them: carrying `app.overlay` would
+   *apply* `zephyr,code-partition = &boot_partition` for the first time, and
+   this image has always taken that from the board `.dts` with Partition
+   Manager overriding the link region anyway. So if your board target is one
+   upstream MCUboot has a `boards/` or `socs/` overlay for, look at it and
+   fold what you need into your own file in item 3 by hand. None of the three
+   boards here has one.
 
 5. **The recovery strap**, as a `gpio-keys` child aliased to
    `mcuboot-button0`. `sysbuild/mcuboot.conf` sets
@@ -1382,6 +1436,13 @@ from `platform/nrf54l15/`, with the NCS activation block below applied.
 `--no-sysbuild` builds the application alone, which is a faster core-sanity
 path and skips items 3 and 4 along with the bootloader itself.
 
+`--pristine` is not decoration on the commit that introduced this section. A
+build directory created before it points MCUboot's devicetree at the deleted
+`sysbuild/mcuboot.overlay`: `mcuboot_DTC_OVERLAY_FILE` is a `CACHE INTERNAL`
+entry in the sysbuild `CMakeCache.txt` and survives a reconfigure, so it is
+not re-derived and the file it names is gone. Delete such a directory rather
+than reconfiguring it.
+
 ### The host side, which is not devicetree
 
 `fw/flash.py`'s contract is the CPico bridge's CDC control lines: **DTR
@@ -1414,10 +1475,18 @@ an LM20 module does not have:
   `pm_static_nrf54lm20dk_nrf54lm20a_cpuapp.yml` maps the 1940 KB of cpuapp
   RRAM and is the one to copy; the last 96 KB of the 2036 KB die belongs to
   the cpuflpr and is left unmapped.
-- **Items 2 and 3 want `uart20`** if there is a free choice, because that
-  is the instance the Ophelia uses and the one the LM20 DK routes for
-  `uart20`; any UART works, it only changes which node the two overlays
-  name. The DK targets use `uart30` because their `uart20` is the console.
+- **Items 2 and 3 want `uart20`, and that choice is a soldering decision, not
+  a devicetree one.** It is the instance the Ophelia uses and the one the
+  LM20 DK routes, so it keeps the two boards' files the same shape. It also
+  means **the AT link's two pads must both be P1 pins** (or P3, which this
+  part has and the L15 does not), because `uart20` cannot reach P0: item 2's
+  boxed rule. Bring the console out on a P0 pad if
+  you want `uart30` for it, as the LM20 DK does. The reset and
+  recovery-strap lines are plain GPIO, belong to no peripheral and can come
+  from any port; P2 is a reasonable home for the strap, preferring a pad
+  outside P2.00 to P2.05, which is where Nordic's own boards route the
+  high-speed peripherals of that domain (`uart00`, `spi00`). Moving an AT
+  pin to a different P1 pad later is free; moving it off P1 is a rework.
 - Everything else is the Ophelia's, unchanged.
 
 Nothing about the nRF54LM20 has been on hardware. The build establishes the

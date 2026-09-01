@@ -52,17 +52,38 @@ if(NOT HEARTH_AT_UART_NODE)
 endif()
 
 if(CONFIG_BOOTLOADER_MCUBOOT)
-  set(HEARTH_MCUBOOT_BOARDS_DIR ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot/boards)
+  # The same two directories, in the same order, that MCUboot's own
+  # DTC_OVERLAY_FILE discovery reads under its APPLICATION_CONFIG_DIR
+  # (configuration_files.cmake:70-72: socs first, then boards), with the
+  # SUFFIX every Zephyr-side lookup passes. Later entries win in devicetree
+  # application order, and the loop below keeps the last match, so the two
+  # agree about which file decides.
+  set(HEARTH_MCUBOOT_IMAGE_DIR ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot)
+  set(HEARTH_MCUBOOT_BOARDS_DIR ${HEARTH_MCUBOOT_IMAGE_DIR}/boards)
   set(HEARTH_MCUBOOT_OVERLAYS)
-  zephyr_file(CONF_FILES ${HEARTH_MCUBOOT_BOARDS_DIR} DTS HEARTH_MCUBOOT_OVERLAYS)
+  zephyr_file(CONF_FILES ${HEARTH_MCUBOOT_IMAGE_DIR}/socs DTS HEARTH_MCUBOOT_OVERLAYS
+              QUALIFIERS SUFFIX ${FILE_SUFFIX})
+  zephyr_file(CONF_FILES ${HEARTH_MCUBOOT_BOARDS_DIR} DTS HEARTH_MCUBOOT_OVERLAYS
+              SUFFIX ${FILE_SUFFIX})
 
   set(HEARTH_MCUMGR_LABEL)
   set(HEARTH_MCUMGR_FILE)
   foreach(overlay ${HEARTH_MCUBOOT_OVERLAYS})
     file(READ ${overlay} hearth_overlay_text)
+    # Comments come out first. CMake's MATCHES returns the FIRST match in the
+    # string and these files are comment-heavy by house style, so a header
+    # that quotes the property name in prose would otherwise steer the check
+    # at whatever label the prose mentioned, and steer it SILENTLY, which is
+    # the one failure class this whole check exists to remove.
+    string(REGEX REPLACE "/\\*[^*]*\\*+([^/*][^*]*\\*+)*/" "" hearth_overlay_text
+           "${hearth_overlay_text}")
+    string(REGEX REPLACE "//[^\n]*" "" hearth_overlay_text "${hearth_overlay_text}")
     # `[^&]*` cannot cross the ampersand it is looking for, so this matches
-    # the label of the FIRST phandle after the property name and nothing
-    # further. Whitespace and line breaks between the two are free.
+    # the label of the first phandle after the property name and nothing
+    # further. Whitespace and line breaks between the two are free. A value
+    # written as a path phandle, &{/soc/uart@c6000}, matches nothing and
+    # falls through to the "no zephyr,uart-mcumgr" error below, which still
+    # points at the right file.
     if(hearth_overlay_text MATCHES "zephyr,uart-mcumgr[^&]*&([A-Za-z0-9_]+)")
       set(HEARTH_MCUMGR_LABEL ${CMAKE_MATCH_1})
       set(HEARTH_MCUMGR_FILE ${overlay})
@@ -78,6 +99,7 @@ if(CONFIG_BOOTLOADER_MCUBOOT)
       "sets `zephyr,uart-mcumgr` for this board; the file this build looks "
       "for is\n"
       "  ${HEARTH_MCUBOOT_BOARDS_DIR}/${HEARTH_BOARD_FILE}.overlay\n"
+      "(a socs/ overlay for this SoC would do as well, and is read first)\n"
       "and it must name the same node as this board's `hearth,at-uart`, "
       "which is ${HEARTH_AT_UART_NODE}:\n"
       "  / { chosen { zephyr,uart-mcumgr = &uartNN; }; };\n"
@@ -93,7 +115,9 @@ if(CONFIG_BOOTLOADER_MCUBOOT)
       "sets `zephyr,uart-mcumgr = &${HEARTH_MCUMGR_LABEL};`, but no node "
       "labelled ${HEARTH_MCUMGR_LABEL} exists in this board's devicetree. "
       "The two images share the board, so a label MCUboot can resolve is a "
-      "label this image can resolve; check the spelling.")
+      "label this image can resolve. Either the spelling is wrong, or the "
+      "label is one the MCUboot overlay defines itself, which the AT link "
+      "cannot be on: it has to be a node this image has too.")
   endif()
 
   if(NOT HEARTH_MCUMGR_NODE STREQUAL HEARTH_AT_UART_NODE)
@@ -116,26 +140,53 @@ if(CONFIG_BOOTLOADER_MCUBOOT)
   # the MCUboot image, and it is not free: sysbuild redirects the image's
   # APPLICATION_CONFIG_DIR to it (sysbuild_extensions.cmake, the
   # sysbuild_image_name_conf_dir branch), so Zephyr stops looking in
-  # MCUboot's own bootloader/mcuboot/boot/zephyr for the image's Kconfig
-  # inputs and looks here instead. Three of those inputs exist upstream:
+  # MCUboot's own bootloader/mcuboot/boot/zephyr for the image's
+  # configuration inputs and looks here instead. Upstream ships three
+  # Kconfig inputs at the paths that move:
   #
   #   prj.conf                    MCUboot's own base configuration
   #   socs/<soc>_<cluster>.conf   the per-SoC fragment
   #   boards/<board>.conf         a per-board fragment, if upstream has one
   #
   # Missing prj.conf fails the configure outright, which is at least loud.
-  # A missing SoC fragment is SILENT: on the nRF54L15 it costs LTO, the
-  # 32-byte RRAM write buffer and the watchdog-feed setting, and the
-  # bootloader still builds and still boots. So the three are copied under
-  # sysbuild/mcuboot/ (each file says so in its header) and this asks
+  # A missing SoC fragment is SILENT: on the nRF54L15 it costs LTO,
+  # ISR_TABLES_LOCAL_DECLARATION, the 512-byte RRAM write buffer
+  # (NRF_RRAM_WRITE_BUFFER_SIZE counts 128-bit words, so 32 is 512 bytes and
+  # the fallback 1 is 16) and BOOT_WATCHDOG_FEED=n, and the bootloader still
+  # builds and still boots. So the two that exist for these SoCs are copied
+  # under sysbuild/mcuboot/ (each file says so in its header) and this asks
   # upstream what it WOULD have contributed for the board being built, then
   # requires each answer to appear verbatim in the copy. An NCS bump that
   # edits one of them, and a new board whose SoC fragment nobody copied,
   # both fail here with the file to copy named. Same shape as the SDK patch
   # gate below: check the thing the build otherwise cannot see.
   #
-  # Nordic's Matter samples carry the prj.conf copy and not the SoC one,
-  # which is the silent half; that is a reason to guard it, not to imitate.
+  # THE REDIRECT MOVES THE DEVICETREE LOOKUPS TOO, and this guard does not
+  # cover them, deliberately. Upstream also ships boot/zephyr/app.overlay,
+  # boot/zephyr/boards/*.overlay and boot/zephyr/socs/*.overlay, and the
+  # same APPLICATION_CONFIG_DIR redirect moves where those are looked for
+  # (configuration_files.cmake:70-83). Nothing was lost there, because they
+  # were already not applied before this round: sysbuild/mcuboot.overlay set
+  # mcuboot_DTC_OVERLAY_FILE, which makes DTC_OVERLAY_FILE defined and skips
+  # all three lookups outright. Demanding copies would therefore not restore
+  # a lost setting, it would APPLY one for the first time: carrying
+  # app.overlay would put zephyr,code-partition on &boot_partition where
+  # this bootloader's devicetree has taken it from the board .dts since the
+  # image existed, which Partition Manager overrides anyway. So the rule for
+  # a new board is a reading task rather than a check: look in
+  # bootloader/mcuboot/boot/zephyr/{boards,socs}/ for your target and fold
+  # anything you need into your own per-board overlay by hand, because it
+  # will not arrive on its own. README.md, "Adding a board", says so too.
+  #
+  # For the record on who does what upstream, because the first version of
+  # this comment got it wrong: Nordic's Matter samples do NOT copy this
+  # prj.conf. They author a bespoke, size-trimmed one and re-add LTO and
+  # ISR_TABLES_LOCAL_DECLARATION in it and BOOT_WATCHDOG_FEED=n in their
+  # per-board .conf, losing only NRF_RRAM_WRITE_BUFFER_SIZE. The copy-and-
+  # carry-socs pattern used here is the one the SDK's own DFU samples use
+  # (samples/dfu/compressed_update, samples/bluetooth/mesh/dfu/{target,
+  # distributor}), so this is the SDK's other convention, not a departure
+  # from it.
   if(NOT DEFINED ZEPHYR_MCUBOOT_MODULE_DIR)
     message(FATAL_ERROR
       "CONFIG_BOOTLOADER_MCUBOOT is set but the mcuboot Zephyr module is not "
@@ -145,12 +196,30 @@ if(CONFIG_BOOTLOADER_MCUBOOT)
   set(HEARTH_MCUBOOT_UPSTREAM_DIR ${ZEPHYR_MCUBOOT_MODULE_DIR}/boot/zephyr)
   set(HEARTH_MCUBOOT_LOCAL_DIR ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot)
 
-  set(HEARTH_MCUBOOT_UPSTREAM_CONFS ${HEARTH_MCUBOOT_UPSTREAM_DIR}/prj.conf)
+  # prj.conf is named rather than discovered, so unlike every other entry in
+  # this list it is not known to exist. An upstream that ever drops it would
+  # otherwise reach file(READ) and give a raw CMake error instead of this
+  # block's own message.
+  set(HEARTH_MCUBOOT_UPSTREAM_CONFS)
+  if(EXISTS ${HEARTH_MCUBOOT_UPSTREAM_DIR}/prj.conf)
+    list(APPEND HEARTH_MCUBOOT_UPSTREAM_CONFS ${HEARTH_MCUBOOT_UPSTREAM_DIR}/prj.conf)
+  else()
+    message(FATAL_ERROR
+      "MCUboot no longer ships boot/zephyr/prj.conf, which this platform's "
+      "sysbuild/mcuboot/prj.conf is a copy of:\n"
+      "  looked for: ${HEARTH_MCUBOOT_UPSTREAM_DIR}/prj.conf\n"
+      "Re-read how the MCUboot image gets its base configuration in this NCS "
+      "before trusting the copy.")
+  endif()
   zephyr_file(CONF_FILES ${HEARTH_MCUBOOT_UPSTREAM_DIR}/socs
-              KCONF HEARTH_MCUBOOT_UPSTREAM_CONFS QUALIFIERS)
+              KCONF HEARTH_MCUBOOT_UPSTREAM_CONFS QUALIFIERS SUFFIX ${FILE_SUFFIX})
   zephyr_file(CONF_FILES ${HEARTH_MCUBOOT_UPSTREAM_DIR}/boards
-              KCONF HEARTH_MCUBOOT_UPSTREAM_CONFS)
+              KCONF HEARTH_MCUBOOT_UPSTREAM_CONFS SUFFIX ${FILE_SUFFIX})
 
+  # Containment, not equality, because the copies carry a header comment.
+  # The consequence, stated here and in the copies: this sees upstream
+  # changing, and does not see lines ADDED to a copy below the verbatim
+  # block. Those apply silently and are the copies' one soft edge.
   foreach(upstream_conf ${HEARTH_MCUBOOT_UPSTREAM_CONFS})
     file(RELATIVE_PATH hearth_conf_rel ${HEARTH_MCUBOOT_UPSTREAM_DIR} ${upstream_conf})
     set(hearth_local_conf ${HEARTH_MCUBOOT_LOCAL_DIR}/${hearth_conf_rel})
