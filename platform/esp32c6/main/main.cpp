@@ -1442,12 +1442,22 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
      *     type, and the attribute is simply not ours to write.
      * set_val_via_write_attribute() (the WRITABLE sibling branch, taken
      * when MANAGED_INTERNALLY is set together with WRITABLE) returns only
-     * ESP_OK, ESP_FAIL or ESP_ERR_NO_MEM, never ESP_ERR_NOT_SUPPORTED; no
-     * device type this firmware creates today ships such an attribute
-     * (comment above), so that branch's own bare-ERROR collapse is not
-     * disturbed by this change. If one ever ships, the fix is to call
-     * provider::WriteAttribute from this bridge directly rather than fork
-     * the SDK (DE270). */
+     * ESP_OK, ESP_FAIL or ESP_ERR_NO_MEM, never ESP_ERR_NOT_SUPPORTED, so
+     * that branch's own bare-ERROR collapse is not disturbed by this
+     * change.
+     *
+     * DE270's accompanying claim that no device type this firmware creates
+     * ships such an attribute was FALSE, and is corrected here (B401,
+     * caught by the batch 4 round 2 trace). The chime pair is exactly that
+     * shape: create_selected_chime() and create_enabled() are both
+     * ATTRIBUTE_FLAG_WRITABLE | ATTRIBUTE_FLAG_MANAGED_INTERNALLY |
+     * ATTRIBUTE_FLAG_NONVOLATILE (esp_matter_attribute.cpp:4872-4884), and
+     * mk_chime() puts them on a live endpoint (mt_devtypes.cpp's registry).
+     * So that branch IS taken today: an AT+MTATTR write to SelectedChime or
+     * Enabled live-writes through the data-model provider rather than
+     * answering +MTERR:11, which is the intended behaviour and what the
+     * DE397 ruling was amended to say. Nothing depended on the stale
+     * claim; it only made this comment misdescribe the firmware. */
     if (err == ESP_ERR_NOT_SUPPORTED) {
         return MT_ATTR_ERR_READONLY;
     }
@@ -2602,15 +2612,18 @@ private:
      * rather than inherited. mt_matter_modebase_set() below applies the
      * identical table to real host-declared entries at store time.
      *
-     * WaterHeaterMode and DeviceEnergyManagementMode still take theirs from
-     * the fall-through, and the two do NOT land the same way: 0x4000 is
-     * kNoOptimization on DeviceEnergyManagementMode, which is the store-time
-     * default too, but it is kOff on WaterHeaterMode, whose store-time
-     * default is kManual (0x4001). So an unfed water heater's placeholder
-     * says Off where a host-fed one with tag 0 says Manual. Named here
-     * rather than changed, because it predates this line and is a separate
-     * question from the cluster admission this comment is about; the
-     * nRF54L15 port has an explicit kManual arm and does not have it. */
+     * WaterHeaterMode takes kManual (0x4001) from its own arm below as of
+     * this round (B421). It cannot be left to the fall-through: 0x4000 is
+     * kOff on that cluster's enum, so an unfed water heater's placeholder
+     * said Off where a host-fed one with tag 0 says Manual, disagreeing
+     * with both the store-time default and AT_MT_SPEC.md 3.20.1's table
+     * row. The nRF54L15 port has carried the explicit arm since batch 7b.
+     *
+     * DeviceEnergyManagementMode is the one cluster still served by the
+     * fall-through, and it does land correctly: 0x4000 is kNoOptimization
+     * on its enum, which is its store-time default too. Correct by
+     * coincidence rather than by choice, the way EnergyEvseMode was until
+     * the spec named it. */
     uint16_t placeholder_tag() const
     {
         using namespace chip::app::Clusters;
@@ -2634,6 +2647,15 @@ private:
              * the old answer was right by coincidence rather than by
              * choice. */
             return chip::to_underlying(EnergyEvseMode::ModeTag::kManual);
+        }
+        if (m_cluster == WaterHeaterMode::Id) {
+            /* B421: kManual (0x4001), AT_MT_SPEC.md 3.20.1's table row and
+             * the same value mt_matter_modebase_set()'s store-time tag-0
+             * substitution uses. The fall-through's 0x4000 is kOff here, so
+             * this arm is load-bearing rather than spelled-out: without it
+             * the placeholder contradicts the store default on the one
+             * cluster where the two numbers differ. */
+            return chip::to_underlying(WaterHeaterMode::ModeTag::kManual);
         }
         return chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
     }
@@ -2784,11 +2806,65 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         return MT_ATTR_ERR_FAILED;
     }
 
+    /* Label validation is its own pass, ahead of any write, for two
+     * reasons. It matches the nRF54L15 port's ordering, so a doubly
+     * malformed list (bad label AND the microwave rule below) returns the
+     * same error on both platforms; and the loop below writes
+     * slot->entries[i] as it goes while count/used are only committed
+     * after it, so failing mid-loop on a RE-FED (endpoint, cluster) list
+     * used to overwrite the live list's leading entries and still answer
+     * an error. Validating first closes that window. */
     for (uint8_t i = 0; i < count; i++) {
         size_t len = strlen(labels[i]);
         if (len < 1 || len > MT_MB_MAX_LABEL_LEN) {
             return MT_ATTR_ERR_FAILED;
         }
+    }
+
+    /*
+     * THE MICROWAVE'S ONE HOST-REACHABLE WAY TO CRIPPLE ITSELF, refused
+     * here (B418, ruling DE417, brought over from the nRF54L15 port's
+     * batch 8 fix round, which recorded this as a deliberate divergence
+     * from the C6 until the C6 caught up).
+     *
+     * MicrowaveOvenControl resolves an omitted cookMode by asking this
+     * cluster's Instance for the mode carrying the kNormal tag, and
+     * answers InvalidCommand if there is none. A host feed whose entries
+     * all carry EXPLICIT non-zero tags, none of them kNormal, is accepted
+     * verbatim by the substitution loop below (it only rewrites tag 0),
+     * and from that moment every SetCookingParameters on that endpoint
+     * answers InvalidCommand, forever and silently, with no +MTCMD raised.
+     *
+     * A tag of 0 satisfies the rule, because the loop below turns it into
+     * kNormal for this cluster; only a list that is explicitly and
+     * entirely something else is refused.
+     *
+     * THIS IS A FIRMWARE-IMPOSED RULE, NOT A CONFORMANCE CHECK.
+     * Mode_MicrowaveOven.xml lists Normal in its ModeTag enum and
+     * constrains nothing about which tags a SupportedModes list must
+     * carry. The rule is this firmware's, taken because the alternative is
+     * a silently dead endpoint, and AT_MT_SPEC.md says so in those terms.
+     */
+    if (cluster == MicrowaveOvenMode::Id) {
+        bool has_normal = false;
+        for (uint8_t i = 0; i < count && !has_normal; i++) {
+            has_normal = (tags[i] == 0) ||
+                         (tags[i] == chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal));
+        }
+        if (!has_normal) {
+            ESP_LOGE(TAG,
+                     "AT+MTMODES on endpoint %u cluster 0x%08X refused: no mode carries the "
+                     "kNormal tag (0x%04X), and MicrowaveOvenControl resolves an omitted "
+                     "cookMode through it, so every SetCookingParameters would answer "
+                     "InvalidCommand. Send tag 0 on at least one mode, or kNormal explicitly",
+                     (unsigned)ep, (unsigned)cluster,
+                     (unsigned)chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal));
+            return MT_ATTR_ERR_VALUE;
+        }
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(labels[i]);
         /* Tag-0 defaults, design spec section 9's exact policy, substituted
          * at store time so every read (GetModeTagsByIndex above) is
          * branch-free. */
@@ -4573,6 +4649,18 @@ public:
      * host actuation, no BoostState push, no Active-to-Inactive transition,
      * so task 3's derivation never emits BoostEnded. The guard reads the
      * host-pushed BoostState cache, the same value a controller reads.
+     *
+     * The guard also CONSUMES the parameter cache (B410, ruled 2026-08-30).
+     * A Boost the host accepted and a controller then cancelled while
+     * BoostState was still Inactive used to leave m_boost armed, because
+     * only emission consumes it; the next host-initiated Active transition
+     * then emitted BoostStarted carrying the cancelled command's duration
+     * and optionals. The spec's own denied-boost rationale says a boost
+     * that never took effect describes nothing, so the cancel clears it and
+     * a later physical-button boost emits duration 0 with no optionals,
+     * which is what the no-prior-command case means. The nRF54L15 port
+     * carries the identical line; the SDK's reference delegate does not
+     * clear its cache here either.
      * Otherwise forward command 1 payload-less (NULL fields reproduces
      * mt_cmd_forward()'s exact four-field +MTCMD line) and pass the verdict
      * through raw, same as Boost above.
@@ -4583,6 +4671,7 @@ public:
         using chip::app::Clusters::WaterHeaterManagement::BoostStateEnum;
 
         if (m_boost_state == BoostStateEnum::kInactive) {
+            m_boost = BoostParams{};
             return Status::Success;
         }
         bool allow = mt_cmd_forward_fields(mEndpointId, chip::app::Clusters::WaterHeaterManagement::Id,
