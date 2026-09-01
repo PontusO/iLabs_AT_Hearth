@@ -270,7 +270,17 @@ constexpr size_t kObjCostOf(size_t bytes) { return ((bytes + 7) / 8) * 8 + 8; }
  * overhead, 11,184 usable. The middle line's arithmetic is the one that
  * moved: it was "rounding 7164 down" at 7168 and "rounding 6524 down" before
  * that.
+ *
+ * "A whole number of chunks" was a premise this comment stated and nothing
+ * checked, on both heaps, until the nRF54LM20 parity round. It is what makes
+ * the middle line 4 rather than 5 to 7, and off a chunk boundary the overhead
+ * is 76 to 83 instead of 80. Asserted below beside the band, in the same
+ * shape as the endpoint heap's, where the same paragraph says why three
+ * bytes of over-statement could not have admitted a block that does not fit.
  */
+BUILD_ASSERT(HEARTH_OBJ_HEAP_BYTES % 8 == 0,
+             "the object heap is not a whole number of sys_heap chunks, so the round-down "
+             "loss in kObjHeapOverheadBytes is no longer 4");
 BUILD_ASSERT((HEARTH_OBJ_HEAP_BYTES - 8) / 8 >= 1024 && HEARTH_OBJ_HEAP_BYTES / 8 <= 2047,
              "the object heap left the eleven-bucket band kObjHeapOverheadBytes is derived for");
 constexpr size_t kObjHeapOverheadBytes = 80;

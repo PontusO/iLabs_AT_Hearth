@@ -5695,7 +5695,68 @@ constexpr size_t kHeapCostOf(size_t payload) { return ((payload + 4 + 7) / 8) * 
  *
  * leaving 1023 - 9 = 1014 chunks, 8,112 bytes, which is the figure the
  * README's capacity table is built on.
+ *
+ * TWO PREMISES HOLD THAT UP AND NEITHER IS SELF-EVIDENT, so both are
+ * asserted below rather than left to this comment.
+ *
+ * The first is CHUNK 0'S SIZE IN CHUNKS, nine here. min_chunk_size is one
+ * chunk on a small heap (chunksz(4 + 1), heap.h:251-254), so bucket_idx()
+ * (heap.h:261-265) is 31 - clz(heap_sz) and nb_buckets is that plus one
+ * (heap.c:564): one more bucket per doubling of the heap. Chunk 0 holds
+ * struct z_heap plus that table, rounded up to whole chunks, and the
+ * rounding is what decides the answer: 28 + 10 x 4 = 68 and
+ * 28 + 11 x 4 = 72 both round to the same NINE chunks, while
+ * 28 + 12 x 4 = 76 rounds to TEN and 28 + 9 x 4 = 64 rounds to EIGHT. So
+ * the band this constant is derived for is 512 to 2,047 chunks, spanning
+ * two bucket counts and one chunk-0 size. Twelve buckets need 2,048
+ * chunks, which is a gross size of 16,388 B.
+ *
+ * The second is that the GROSS SIZE IS A WHOLE NUMBER OF CHUNKS. The
+ * "4 lost rounding" line above is 4 only because 8,192 is a multiple of
+ * 8. Off a chunk boundary the overhead is 81 to 83 (gross 1 to 3 past a
+ * multiple of 8, so kHeapUsableBytes over-states by up to three bytes) or
+ * 76 to 79 (4 to 7 past, under-stating). The over-stating half is
+ * harmless in itself, since every quantity compared against
+ * kHeapUsableBytes is a multiple of 8 and so is the real usable space, so
+ * three bytes cannot admit a block that does not fit. It is asserted
+ * anyway: the premise is load-bearing for the arithmetic above even where
+ * it is not load-bearing for the capacity.
+ *
+ * TAKEN TOGETHER THEY SAY WHAT THE OVERHEAD REALLY IS PAST THE BAND, and
+ * being exact matters because the two failures are different sizes. At
+ * 16,388 B the heap reaches 2,048 chunks and chunk 0 becomes ten, but
+ * 16,388 is four past a chunk boundary, so the round-down loses nothing
+ * and the overhead is 84. At 16,392 B, the first whole-chunk size in that
+ * band, it is 88. The README's own sketch for a 28-endpoint tier,
+ * 28 x 600 = 16,800 B, is an 88.
+ *
+ * The band assertion is written against heap_sz's own bounds
+ * (gross/8 - 1 <= heap_sz <= gross/8) rather than the gross size, so a
+ * heap one chunk the wrong side of a boundary cannot slip through. Over
+ * whole-chunk sizes that costs exactly one value: 16,384 B is refused
+ * although its overhead is still 80. The low edge costs nothing, 4,104 B
+ * being both the first size the assertion admits and the first whose
+ * overhead is 80.
+ *
+ * WHY THIS IS NOT REDUNDANT WITH THE MICROWAVE BAND BELOW, since that is
+ * the conclusion that would get it deleted. The two-sided static_assert
+ * at the "fifteen microwave ovens fit, sixteen do not" row already fires
+ * on ANY change to HEARTH_EP_HEAP_BYTES, so this heap cannot be resized
+ * quietly and never could. What that assertion cannot do is survive
+ * itself: a capacity round re-derives the microwave row to its new
+ * numbers, and once that edit is made nothing would have looked at the
+ * bucket band again. This one is what is still standing on the far side
+ * of the edit the other one forces. It is the object heap's BUILD_ASSERT
+ * (mt_matter_zephyr.cpp, beside kObjHeapOverheadBytes) in the shape this
+ * heap needs, and it was missing here until the nRF54LM20 parity round
+ * while its sibling had it from the start.
  */
+BUILD_ASSERT(HEARTH_EP_HEAP_BYTES % 8 == 0,
+             "the endpoint block heap is not a whole number of sys_heap chunks, so the "
+             "round-down loss in kHeapOverheadBytes is no longer 4");
+BUILD_ASSERT((HEARTH_EP_HEAP_BYTES - 8) / 8 >= 512 && HEARTH_EP_HEAP_BYTES / 8 <= 2047,
+             "the endpoint block heap left the bucket band kHeapOverheadBytes is derived for; "
+             "chunk 0 is no longer nine chunks and the overhead is not 80");
 constexpr size_t kHeapOverheadBytes = 80;
 constexpr size_t kHeapUsableBytes = HEARTH_EP_HEAP_BYTES - kHeapOverheadBytes;
 

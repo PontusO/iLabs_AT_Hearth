@@ -1,0 +1,48 @@
+/* The AT link on the nRF54LM20 DK. Same shape as the nRF54L15 DK overlay
+ * next to this file: uart20 is the board's console/shell/mcumgr UART
+ * (nrf54lm20_a_b_cpuapp_common.dtsi chooses it), so the AT link takes
+ * uart30, the second VCOM, which the DK's own pinctrl already routes
+ * (P0.06 TX, P0.07 RX, P0.08 RTS, P0.09 CTS in
+ * nrf54lm20dk_nrf54lm20_a_b-pinctrl.dtsi). The board dtsi already gives
+ * uart30 its pinctrl states and a 115200 default; only the chosen node
+ * and the status are ours.
+ *
+ * WHAT THIS OVERLAY DELIBERATELY DOES NOT CARRY, since the nRF54L15
+ * arms carry all three and copying them here would be wrong:
+ *
+ * - No `&cpuapp_sram` reclaim. On the nRF54L15 the SoC dtsi hands cpuapp
+ *   only 188 KB of the 256 KB die and reserves the rest for the cpuflpr
+ *   VPR, so both L15 boards reclaim it by hand. On this part
+ *   nrf54lm20_a_b.dtsi already spans the whole 511 KB with cpuapp_sram
+ *   and nrf54lm20_a_b_cpuapp.dtsi deletes cpuflpr_sram outright, so
+ *   cpuapp owns 523,264 B with no overlay at all. Nordic's own Matter
+ *   template overlay for this board has no &cpuapp_sram block either.
+ *
+ * - No `&hfxo` load-capacitor block. The Ophelia-IV needed one because
+ *   its module carries no capacitor programming of its own, and the
+ *   omission cost a bench session (radio silent, everything else
+ *   healthy). This DK programs the identical 15,000 fF internal caps in
+ *   nrf54lm20_a_b_cpuapp_common.dtsi, and 17,000 fF on the LFXO.
+ *
+ * - No LFCLK source guard. The Ophelia-IV has no 32 kHz crystal, so its
+ *   board CMakeLists.txt fails the build if the RC source is not
+ *   selected. This DK has an LFXO crystal and configures it; carrying
+ *   the guard here would enforce the wrong choice on hardware that has
+ *   the right one.
+ *
+ * The RRAM is also left at its 1940 KB default rather than reclaimed to
+ * 2036 KB: the 96 KB tail belongs to the cpuflpr, nothing here runs on
+ * it, and the partition map beside this file already leaves 52.9 percent
+ * of the 1854 KB app slot unused (894,904 B used, measured 2026-08-31).
+ * Reclaiming it is a decision for the round that needs the space.
+ */
+/ {
+    chosen {
+        hearth,at-uart = &uart30;
+    };
+};
+
+&uart30 {
+    status = "okay";
+    current-speed = <115200>;
+};

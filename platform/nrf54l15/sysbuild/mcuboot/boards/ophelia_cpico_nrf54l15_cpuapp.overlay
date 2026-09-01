@@ -1,0 +1,22 @@
+/* MCUboot's serial-recovery UART on the iLabs CPico + Ophelia-IV carrier.
+ *
+ * uart20 is the AT link on this board (hearth,at-uart in
+ * boards/ilabs/ophelia_cpico/ophelia_cpico_nrf54l15_cpuapp.dts), and the two
+ * must be the same node: fw/flash.py straps the module into recovery,
+ * uploads over SMP and then waits for the application's +MTREADY, all on one
+ * wire, because one wire is all the carrier brings out.
+ *
+ * The node needs no status here. uart20 is enabled in the board's own
+ * devicetree, which every image built for this board reads, MCUboot
+ * included.
+ *
+ * This file replaces the unconditional sysbuild/mcuboot.overlay that used to
+ * pin uart20 for every board. Its content is that file's content unchanged,
+ * which is what keeps this board's bootloader image byte-identical across the
+ * move; the Nordic DKs are the two boards the old file was wrong for.
+ */
+/ {
+    chosen {
+        zephyr,uart-mcumgr = &uart20;
+    };
+};

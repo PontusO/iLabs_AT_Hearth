@@ -23,6 +23,19 @@
 
 LOG_MODULE_REGISTER(hearth, LOG_LEVEL_INF);
 
+/* The AT link is a per-board devicetree fact and there is deliberately no
+ * default: uart20 is the AT link on ophelia_cpico and the CONSOLE on both
+ * Nordic DKs, so a guess would answer AT on the wrong pins without failing.
+ * platform/nrf54l15/CMakeLists.txt says the same thing earlier and at more
+ * length; this is the backstop for a build that reaches the compiler
+ * anyway. Without it, an unresolved DT_CHOSEN() pastes its own macro name
+ * into the device symbol below and the diagnostic is an undeclared
+ * "__device_dts_ord_DT_CHOSEN_..._ORD" with six expansion notes in headers
+ * nobody wrote, naming neither a board nor an overlay. */
+#if !DT_HAS_CHOSEN(hearth_at_uart)
+#error "This board declares no hearth,at-uart chosen node, so nothing says which UART carries the AT link. Add `/ { chosen { hearth,at-uart = &uartNN; }; };` and that UART's status to the board devicetree, and name the same node as zephyr,uart-mcumgr in platform/nrf54l15/sysbuild/mcuboot/boards/<board>.overlay. See platform/nrf54l15/README.md, \"Adding a board\"."
+#endif
+
 static const struct device *s_uart =
     DEVICE_DT_GET(DT_CHOSEN(hearth_at_uart));
 static struct k_mutex s_tx_lock;
