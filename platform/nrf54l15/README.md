@@ -606,7 +606,9 @@ round below added the `BUILD_ASSERT` the object heap already had.
 
 `nrf54lm20dk/nrf54lm20a/cpuapp` is a third board target of this same
 application directory, alongside `ophelia_cpico` and `nrf54l15dk`, and it
-took two files and no code:
+took two files and no code (four files as of the board-pins round the day
+after, which added the bootloader's own per-board overlay and the SoC
+fragment that comes with it; see "Adding a board"):
 
 - `boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay`: the `hearth,at-uart`
   chosen node on `uart30` and that UART's status. No SRAM reclaim (this
@@ -636,35 +638,29 @@ bench. The build establishes the link, the partition map and every
 assertion; it establishes nothing about the HFXO, the GRTC, ZMS on this
 part's RRAM, or recovery entry.
 
-Two board facts are known to differ and are not addressed here.
-
-**Serial recovery answers on the console VCOM, on BOTH DK targets.**
-`sysbuild/mcuboot.overlay` pins `zephyr,uart-mcumgr = &uart20` with no board
-condition. On the Ophelia-IV `uart20` IS the AT link, so the pin is right.
-On both DKs the relationship is inverted: `uart20` is `zephyr,console` and
-the AT link is `uart30`, on the LM20 DK through the overlay above and on the
-nRF54L15 DK through `boards/nrf54l15dk_nrf54l15_cpuapp.overlay`, which has
-been that way since the DK was added. Nothing gated it because the L15 DK
-was built `--no-sysbuild` until this round, so MCUboot was never in that
-build at all; the correction further down retiring that instruction is what
-brings the second instance into view. Consequence today is low, both VCOMs
-surfacing through the same onboard debugger so recovery is merely on the
-other `/dev/serial/by-id` endpoint, and moot in practice because
-`fw/flash.py` cannot enter recovery on either DK. It stops being cosmetic on
-an LM20-based module in the Ophelia's shape, where one UART is brought out
-and recovery on the wrong one is a brick.
-
-**The fix belongs to the round that has the hardware.** A board-conditional
-`zephyr,uart-mcumgr`, or moving the pin into the per-board overlay directory
-sysbuild honours for the MCUboot image, changes which port serial recovery
-answers on, and no build can confirm it answers at all. Shipping an untested
-change to the recovery path of the only board that currently works, for a
-board nobody has yet, is the wrong trade.
+**Serial recovery answered on the console VCOM on both DK targets, and no
+longer does (fixed 2026-09-01, see "Adding a board").**
+`sysbuild/mcuboot.overlay` pinned `zephyr,uart-mcumgr = &uart20` with no
+board condition. On the Ophelia-IV `uart20` IS the AT link, so the pin was
+right. On both DKs the relationship is inverted: `uart20` is
+`zephyr,console` and the AT link is `uart30`, on the LM20 DK through the
+overlay above and on the nRF54L15 DK through
+`boards/nrf54l15dk_nrf54l15_cpuapp.overlay`, which had been that way since
+the DK was added. Nothing gated it because the L15 DK was built
+`--no-sysbuild` until this round, so MCUboot was never in that build at
+all; the correction further down retiring that instruction is what brought
+the second instance into view. The consequence on a DK was low, both VCOMs
+surfacing through the same onboard debugger so recovery was merely on the
+other `/dev/serial/by-id` endpoint. It would stop being cosmetic on an
+LM20-based module in the Ophelia's shape, where one UART is brought out and
+recovery on the wrong one is a brick, which is why it was fixed before that
+board exists rather than after.
 
 **`fw/flash.py` cannot enter recovery on either DK.** Its contract is the
 CPico's DTR-equals-reset and RTS-equals-strap mapping, and neither DK's
 onboard debugger exposes it. Recovery entry there is button0 held plus
-RESET by hand, or SWD.
+RESET by hand, or SWD. So the DK arms of the fix are established by the
+build (the two chosen nodes now name one UART) and by nothing else.
 
 ### Measured
 
@@ -1151,6 +1147,282 @@ The CPico RP2350 dev board carries the module and hosts the bridging firmware. T
 | Power | 3V3, GND | Module supply | 3.3 V and ground |
 
 The Recovery strap and nRESET lines are driven high-impedance (pulled up externally) when the host releases them. The Debug Probe is a Raspberry Pi Debug Probe or CMSIS-DAP compatible.
+
+## Adding a board
+
+Everything a new board has to provide, in one place, so that bringing up a
+carrier is a directory and an overlay rather than an archaeology exercise.
+There are three worked examples in the tree beside this list:
+`ophelia_cpico` (a module on a custom carrier, the shape a new carrier will
+copy), `nrf54l15dk` and `nrf54lm20dk` (upstream Zephyr boards, which need
+less).
+
+Items 2, 3 and 4 fail the CMake configure with a message naming the file to
+write. Items 5 and 8 fail the build too, less helpfully. The rest fail at
+boot, on the air, or not at all. That divide is not principled, it is
+where a check was cheap, so read the whole list rather than building until
+it stops complaining.
+
+### The two devicetree facts that have to agree
+
+**`hearth,at-uart`**, in the application image, is the UART the host speaks
+`AT+MT` on. `port/hearth_port_zephyr.c` reads exactly this chosen node and
+nothing else: no Kconfig, no default, no fallback. A board that omits it
+fails the configure.
+
+**`zephyr,uart-mcumgr`**, in the MCUboot image, is the UART serial recovery
+answers on. It lives in
+`sysbuild/mcuboot/boards/<board>_<soc>_<cluster>.overlay`.
+
+**They must be the same node.** `fw/flash.py` drives one port and does the
+whole cycle on it: strap into recovery, upload the signed image over SMP,
+release the strap, wait for the application's `+MTREADY`. On a module
+carrier that brings out one UART, recovery answering on the other one means
+the board cannot be reflashed over the wire at all, and on a module whose
+SWD pads are a soldering job that is a brick rather than an inconvenience.
+`CMakeLists.txt` compares the two at configure time and fails with both
+node paths printed.
+
+Until 2026-09-01 nothing compared them. `sysbuild/mcuboot.overlay` pinned
+`uart20` for every board, which was right on `ophelia_cpico` by luck and
+was the *console* on both Nordic DKs.
+
+**What that check can and cannot see.** The two images have separate
+devicetrees and neither build can read the other's, so no `static_assert`
+and no devicetree macro spans them. What the check compares is MCUboot's
+*input*: the per-board overlay file in this tree, found with the same
+`zephyr_file()` lookup MCUboot itself will use, with the node label it
+names resolved against the application's devicetree (the two images share
+the board, so a label one can resolve the other can too). A
+`-Dmcuboot_DTC_OVERLAY_FILE=...` on the command line goes around the lookup
+and therefore around the check. Nothing else does.
+
+### The checklist
+
+1. **A board definition, or an overlay for an upstream board.** A custom
+   carrier gets a directory under `boards/<vendor>/<board>/`, and
+   `boards/ilabs/ophelia_cpico/` is the template: `board.yml`,
+   `Kconfig.<board>`, `<board>_<soc>_<cluster>_defconfig`,
+   `<board>_<soc>_<cluster>.dts`, `<board>-pinctrl.dtsi`, `board.cmake`,
+   and optionally `CMakeLists.txt`. `-DBOARD_ROOT=$PWD` on the west
+   command line is what makes this directory visible; it is already in the
+   build lines below. An upstream Zephyr board needs none of that, only an
+   application overlay at `boards/<board>_<soc>_<cluster>.overlay`, which
+   is what both DK targets are.
+
+2. **The AT link.** `hearth,at-uart` in `chosen`, and the UART node itself
+   enabled with its pinctrl states and a speed:
+
+   ```dts
+   / { chosen { hearth,at-uart = &uart20; }; };
+
+   &uart20 {
+       status = "okay";
+       current-speed = <115200>;
+       pinctrl-0 = <&uart20_default>;
+       pinctrl-1 = <&uart20_sleep>;
+       pinctrl-names = "default", "sleep";
+   };
+   ```
+
+   115200 is not negotiable at boot: `AT+MTBAUD` lives in RAM and every
+   reset returns the link to 115200, deliberately, so a host that loses
+   sync always has a way back. Serial recovery uses the same rate.
+
+3. **MCUboot's recovery UART**, naming the node from item 2:
+
+   ```dts
+   /* sysbuild/mcuboot/boards/<board>_<soc>_<cluster>.overlay */
+   / { chosen { zephyr,uart-mcumgr = &uart20; }; };
+   ```
+
+   Add `&uart20 { status = "okay"; };` here too unless the board's own
+   devicetree already enables it. It does for `ophelia_cpico`, whose UART
+   lives in the board `.dts` that every image for that board reads; it does
+   not for either DK, where the enable lives in an *application* overlay
+   the bootloader image never sees. That asymmetry is the one thing about
+   this file that surprises people.
+
+4. **MCUboot's SoC fragment**, copied from upstream into
+   `sysbuild/mcuboot/socs/<soc>_<cluster>.conf`. The
+   `sysbuild/mcuboot/` directory is what gives the bootloader image its
+   per-board overlay, and it is not free: sysbuild redirects that image's
+   `APPLICATION_CONFIG_DIR` to it, so Zephyr stops finding MCUboot's own
+   `prj.conf`, `socs/` and `boards/` fragments. `prj.conf` is copied for
+   the same reason and is already there. Missing `prj.conf` fails loudly;
+   a missing SoC fragment is *silent* and costs, on the nRF54L15, LTO, the
+   32-byte RRAM write buffer and the watchdog-feed setting. `CMakeLists.txt`
+   asks upstream what it would have supplied for the board being built and
+   fails if the answer is not contained verbatim in the copy, so a new SoC
+   and an NCS bump both surface here with the file named.
+   `nrf54l15_cpuapp.conf` and `nrf54lm20a_cpuapp.conf` are present.
+
+5. **The recovery strap**, as a `gpio-keys` child aliased to
+   `mcuboot-button0`. `sysbuild/mcuboot.conf` sets
+   `CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=y`, and without the alias MCUboot
+   fails the build with `#error "Serial recovery/USB DFU button must be
+   declared in device tree as 'mcuboot_button0'"`. Active low with a
+   pull-up, so a released line is not a recovery request:
+
+   ```dts
+   buttons {
+       compatible = "gpio-keys";
+       recovery_strap: button_0 {
+           gpios = <&gpio2 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+           label = "Recovery strap";
+           zephyr,code = <INPUT_KEY_0>;
+       };
+   };
+   aliases { mcuboot-button0 = &recovery_strap; };
+   ```
+
+   Both DKs get this from their own board files, aliased to `button0`.
+
+6. **A console, on a different UART.** `zephyr,console` and
+   `zephyr,shell-uart`. Not required by this firmware, which says nothing
+   on it that matters to a host, and worth every pin it costs during bring-
+   up: it is where the boot log and any panic backtrace appear. Keep it off
+   the AT link; a merged stream interleaves character by character and
+   makes every URC assertion flaky.
+
+7. **A partition map.** Partition Manager looks for
+   `pm_static_<board>_<soc>_<cluster>.yml`, then `pm_static_<board>.yml`,
+   then `pm_static.yml`, in this directory, and takes the first that
+   exists. No build-system change is needed to add one.
+   `pm_static.yml` fills the nRF54L15's 1428 KB exactly and both L15 boards
+   use it; `pm_static_nrf54lm20dk_nrf54lm20a_cpuapp.yml` is the same shape
+   stretched at the app slot for that part's 1940 KB of cpuapp RRAM, and
+   its header comment is the worked example. Two constraints, both
+   load-bearing: `settings_storage` keeps its **name**, because
+   `hearth_port_zephyr.c` reaches the KV store through
+   `PM_SETTINGS_STORAGE_ID` and never by address, and keeps its **32 KB
+   size**, because `CONFIG_ZMS_LOOKUP_CACHE_SIZE=64` in `prj.conf` is
+   argued against that number.
+
+8. **The LFCLK source, and this one hangs the SoC if it is wrong.** A
+   module with no 32.768 kHz crystal must run the LFCLK from the internal
+   RC: `CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y` in the board defconfig, plus
+   `&clock { status = "okay"; };` in the board `.dts`, which is what makes
+   that Kconfig choice visible at all. Get it wrong on such a module and
+   the GRTC clocks from a crystal that is not there and the SoC hangs in
+   `nrf_grtc_sys_counter_low_get()` at boot, before any output.
+   `boards/ilabs/ophelia_cpico/CMakeLists.txt` fails the configure if the
+   symbol stops resolving, because a future NCS bump could make the choice
+   invisible again and the defconfig line would then be ignored silently.
+
+   **A module that HAS the crystal must not inherit any of that.** Use the
+   crystal, and if a guard is wanted, invert it rather than copying the
+   Ophelia's. Running a crystal-equipped module on its internal RC works,
+   less accurately, and nothing fails: the worst kind of wrong.
+
+9. **The HFXO load capacitors, and this one silences the radio.** The
+   Ophelia-IV needs the SoC's internal caps programmed in the board `.dts`:
+
+   ```dts
+   &hfxo {
+       load-capacitors = "internal";
+       load-capacitance-femtofarad = <15000>;
+   };
+   ```
+
+   Without it BLE and 802.15.4 transmit nothing while every non-RF
+   subsystem looks healthy. The tell is CHIP logging that advertising
+   started with nothing on a scanner. That cost a bench session. Both
+   Nordic DKs program the same 15,000 fF in their own board files, so their
+   overlays carry no `&hfxo` block. **A module that integrates its own 32
+   MHz crystal and matching network is a question for the module vendor,
+   not an assumption**: whether the SoC's internal caps should be enabled
+   at all depends on what the module already provides. Ask; the symptom if
+   the guess is wrong is exactly the one above.
+
+10. **The SRAM span, on nRF54L15 only.** That SoC's dtsi gives `cpuapp`
+    188 KB of the 256 KB die and reserves the rest for the cpuflpr VPR,
+    which nothing in this repository uses, so both L15 boards reclaim it:
+
+    ```dts
+    &cpuapp_sram {
+        reg = <0x20000000 DT_SIZE_K(256)>;
+        ranges = <0x0 0x20000000 DT_SIZE_K(256)>;
+    };
+    ```
+
+    Real CHIP bring-up overflows the 188 KB default by about 15 KB, so this
+    is not optional there. **On the nRF54LM20 it is wrong to copy**:
+    `nrf54lm20_a_b.dtsi` already spans all 511 KB with `cpuapp_sram` and
+    `nrf54lm20_a_b_cpuapp.dtsi` deletes `cpuflpr_sram` outright.
+
+11. **The nodes the stack needs enabled.** `&grtc` with the channel split
+    the DKs use (`owned-channels` 0 to 11, `child-owned-channels` 3, 4, 7
+    to 11): without it the kernel timer falls back to a SysTick whose ISR
+    never reaches the vector table and the first tick is a fatal exception.
+    `&temp`, which `NRF_802154_SL` needs for radio temperature
+    compensation and which the SoC dtsi disables. The `&gpioN` and
+    `&gpioteN` instances the board actually uses.
+
+12. **A runner in `board.cmake`.** At least one `board_runner_args()` call,
+    or `RUNNERS` stays empty, Zephyr never writes `zephyr/runners.yaml`,
+    and sysbuild's `partition_manager.cmake` fails at configure time trying
+    to read it. The Ophelia registers `jlink` purely to satisfy this; the
+    actual SWD path for this platform is pyocd.
+
+13. **Nothing else.** No capacity constant moves for a new board.
+    `kServiceableEndpoints`, `HEARTH_EP_HEAP_BYTES` and
+    `HEARTH_OBJ_HEAP_BYTES` are a tier decision with its own round (see
+    "The LM20 tier"), and every `static_assert` in the port is written to
+    read as one unconditional fact.
+
+### Building it
+
+```bash
+west build -b <board>/<soc>/<cluster> -d build_<name> --pristine --sysbuild \
+  -- -DZEPHYR_BASE=$ZEPHYR_BASE -DBOARD_ROOT=$PWD
+```
+
+from `platform/nrf54l15/`, with the NCS activation block below applied.
+`--no-sysbuild` builds the application alone, which is a faster core-sanity
+path and skips items 3 and 4 along with the bootloader itself.
+
+### The host side, which is not devicetree
+
+`fw/flash.py`'s contract is the CPico bridge's CDC control lines: **DTR
+asserted holds the module in reset, RTS asserted pulls the recovery strap
+low**, both released and the module runs. A carrier that wires those two
+lines to the same places works with the flasher unchanged; one that does
+not needs its own entry sequence, and no build will tell you which you
+have. Neither DK's onboard debugger exposes the mapping, which is why
+`flash.py` cannot enter recovery on either of them.
+
+### An nRF54LM20A carrier in the Ophelia's shape
+
+The case this list was written for. What differs from `ophelia_cpico`, all
+of it above but worth having in one place because the temptation is to copy
+that board directory wholesale and two of its settings exist for hardware
+an LM20 module does not have:
+
+- **Item 8 inverts** if the module integrates a 32.768 kHz crystal, which
+  the LM20 modules on the market do. Use the crystal; do not carry the
+  Ophelia's `CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y` or its guard across.
+- **Item 9 is a question for the module vendor**, not a copy. The LM20 DK
+  programs the same 15,000 fF internal load capacitance the Ophelia needs,
+  which suggests the value, but a module that integrates the 32 MHz crystal
+  and its matching network may not want the SoC's internal caps enabled at
+  all.
+- **Item 10 does not apply.** No `&cpuapp_sram` block.
+- **Item 4 is already satisfied**: `socs/nrf54lm20a_cpuapp.conf` is in the
+  tree, put there by the LM20 DK target.
+- **Item 7 needs a new file** unless the carrier's RRAM matches the DK's.
+  `pm_static_nrf54lm20dk_nrf54lm20a_cpuapp.yml` maps the 1940 KB of cpuapp
+  RRAM and is the one to copy; the last 96 KB of the 2036 KB die belongs to
+  the cpuflpr and is left unmapped.
+- **Items 2 and 3 want `uart20`** if there is a free choice, because that
+  is the instance the Ophelia uses and the one the LM20 DK routes for
+  `uart20`; any UART works, it only changes which node the two overlays
+  name. The DK targets use `uart30` because their `uart20` is the console.
+- Everything else is the Ophelia's, unchanged.
+
+Nothing about the nRF54LM20 has been on hardware. The build establishes the
+link, the partition map and every assertion; it establishes nothing about
+the HFXO, the GRTC, ZMS on that part's RRAM, or recovery entry.
 
 ## One-time SWD install
 
