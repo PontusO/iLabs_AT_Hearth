@@ -1,0 +1,25 @@
+/* MCUboot's serial-recovery UART on the nRF54L15 DK.
+ *
+ * The DK inverts the Ophelia-IV's relationship: uart20 is zephyr,console
+ * (nrf54l_05_10_15_cpuapp_common.dtsi) and the AT link is uart30
+ * (boards/nrf54l15dk_nrf54l15_cpuapp.overlay, the app image's overlay).
+ * Recovery has to answer where the AT link is, so uart30 it is.
+ *
+ * Until this file existed, sysbuild/mcuboot.overlay pinned uart20 for every
+ * board, so serial recovery on this DK came up on the console VCOM while
+ * fw/flash.py drove the AT one. Nothing in the build said so.
+ *
+ * The status line is ours and is required: nrf54l15dk_common.dtsi gives
+ * uart30 its pinctrl states and a 115200 default but leaves it disabled, and
+ * the app image's overlay that enables it is not read by this image. 115200
+ * is also what fw/flash.py opens at, so the board default is the right one.
+ */
+/ {
+    chosen {
+        zephyr,uart-mcumgr = &uart30;
+    };
+};
+
+&uart30 {
+    status = "okay";
+};

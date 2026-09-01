@@ -3,6 +3,189 @@ list(APPEND BOARD_ROOT ${CMAKE_CURRENT_LIST_DIR})
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(hearth_nrf54l15)
 
+# ---- the board contract (README.md, "Adding a board") -------------------
+#
+# A board on this platform has to name a UART twice, and it has to be the
+# same UART both times:
+#
+#   the application's  hearth,at-uart      chosen node: where AT is spoken
+#   MCUboot's          zephyr,uart-mcumgr  chosen node: where serial
+#                                          recovery answers
+#
+# fw/flash.py drives ONE port and needs both of them. It straps the module
+# into recovery, uploads the signed image over SMP, releases the strap and
+# then waits for the application's +MTREADY, all on the same wire, because
+# one wire is what a carrier brings out. A board whose two answers differ is
+# not reflashable over that wire at all, and on a module whose SWD pads are a
+# soldering job, that is a brick rather than an inconvenience.
+#
+# The two facts live in two images with two devicetrees, so no static_assert
+# and no devicetree macro can see both. This checks the INPUT instead: it
+# finds MCUboot's per-board overlay in this tree with the same zephyr_file()
+# lookup MCUboot itself will use, reads the node label it names, and resolves
+# that label against THIS image's devicetree. It catches the failure the
+# round it was written for existed to remove (uart20 pinned unconditionally
+# for every board, right on ophelia_cpico and the CONSOLE on both Nordic
+# DKs, with nothing in the build saying so). It does not catch a
+# -Dmcuboot_DTC_OVERLAY_FILE=... on the command line, which goes around the
+# lookup entirely. That is the honest limit of a cross-image check here, and
+# it is still worth having, because the version of this failure that has no
+# check is silent until a board is on the bench.
+string(REPLACE "/" "_" HEARTH_BOARD_FILE "${BOARD}${BOARD_QUALIFIERS}")
+
+dt_chosen(HEARTH_AT_UART_NODE PROPERTY "hearth,at-uart")
+if(NOT HEARTH_AT_UART_NODE)
+  message(FATAL_ERROR
+    "Board ${BOARD}${BOARD_QUALIFIERS} declares no `hearth,at-uart` chosen "
+    "node, so nothing in this build says which UART carries the AT link.\n"
+    "Add it to the board's devicetree, either a board directory under\n"
+    "  ${CMAKE_CURRENT_LIST_DIR}/boards/<vendor>/<board>/\n"
+    "for a board this repository defines, or an application overlay at\n"
+    "  ${CMAKE_CURRENT_LIST_DIR}/boards/${HEARTH_BOARD_FILE}.overlay\n"
+    "for an upstream board:\n"
+    "  / { chosen { hearth,at-uart = &uartNN; }; };\n"
+    "  &uartNN { status = \"okay\"; current-speed = <115200>; };\n"
+    "There is deliberately no default. uart20 is the AT link on "
+    "ophelia_cpico and is the CONSOLE on both Nordic DKs, so a default would "
+    "be a coin toss that answers AT on the wrong pins without failing.\n"
+    "See platform/nrf54l15/README.md, \"Adding a board\".")
+endif()
+
+if(CONFIG_BOOTLOADER_MCUBOOT)
+  set(HEARTH_MCUBOOT_BOARDS_DIR ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot/boards)
+  set(HEARTH_MCUBOOT_OVERLAYS)
+  zephyr_file(CONF_FILES ${HEARTH_MCUBOOT_BOARDS_DIR} DTS HEARTH_MCUBOOT_OVERLAYS)
+
+  set(HEARTH_MCUMGR_LABEL)
+  set(HEARTH_MCUMGR_FILE)
+  foreach(overlay ${HEARTH_MCUBOOT_OVERLAYS})
+    file(READ ${overlay} hearth_overlay_text)
+    # `[^&]*` cannot cross the ampersand it is looking for, so this matches
+    # the label of the FIRST phandle after the property name and nothing
+    # further. Whitespace and line breaks between the two are free.
+    if(hearth_overlay_text MATCHES "zephyr,uart-mcumgr[^&]*&([A-Za-z0-9_]+)")
+      set(HEARTH_MCUMGR_LABEL ${CMAKE_MATCH_1})
+      set(HEARTH_MCUMGR_FILE ${overlay})
+    endif()
+    unset(hearth_overlay_text)
+  endforeach()
+
+  if(NOT HEARTH_MCUMGR_LABEL)
+    message(FATAL_ERROR
+      "Board ${BOARD}${BOARD_QUALIFIERS} has no MCUboot serial-recovery UART.\n"
+      "Nothing under\n"
+      "  ${HEARTH_MCUBOOT_BOARDS_DIR}/\n"
+      "sets `zephyr,uart-mcumgr` for this board; the file this build looks "
+      "for is\n"
+      "  ${HEARTH_MCUBOOT_BOARDS_DIR}/${HEARTH_BOARD_FILE}.overlay\n"
+      "and it must name the same node as this board's `hearth,at-uart`, "
+      "which is ${HEARTH_AT_UART_NODE}:\n"
+      "  / { chosen { zephyr,uart-mcumgr = &uartNN; }; };\n"
+      "  &uartNN { status = \"okay\"; };\n"
+      "(Files found for this board: ${HEARTH_MCUBOOT_OVERLAYS})\n"
+      "See platform/nrf54l15/README.md, \"Adding a board\".")
+  endif()
+
+  dt_nodelabel(HEARTH_MCUMGR_NODE NODELABEL "${HEARTH_MCUMGR_LABEL}")
+  if(NOT HEARTH_MCUMGR_NODE)
+    message(FATAL_ERROR
+      "${HEARTH_MCUMGR_FILE}\n"
+      "sets `zephyr,uart-mcumgr = &${HEARTH_MCUMGR_LABEL};`, but no node "
+      "labelled ${HEARTH_MCUMGR_LABEL} exists in this board's devicetree. "
+      "The two images share the board, so a label MCUboot can resolve is a "
+      "label this image can resolve; check the spelling.")
+  endif()
+
+  if(NOT HEARTH_MCUMGR_NODE STREQUAL HEARTH_AT_UART_NODE)
+    message(FATAL_ERROR
+      "The AT link and MCUboot's serial recovery are on different UARTs on "
+      "board ${BOARD}${BOARD_QUALIFIERS}, and fw/flash.py drives one port:\n"
+      "  hearth,at-uart      ${HEARTH_AT_UART_NODE}\n"
+      "  zephyr,uart-mcumgr  ${HEARTH_MCUMGR_NODE} (&${HEARTH_MCUMGR_LABEL})\n"
+      "                      set in ${HEARTH_MCUMGR_FILE}\n"
+      "Recovery would answer on a port the flasher never opens. Change "
+      "whichever of the two is wrong for the hardware; on a carrier that "
+      "brings out one UART, the AT link is the fixed point and recovery "
+      "follows it.\n"
+      "See platform/nrf54l15/README.md, \"Adding a board\".")
+  endif()
+
+  # ---- what the sysbuild/mcuboot/ directory costs, and its guard --------
+  #
+  # Creating that directory is what makes boards/<board>.overlay work for
+  # the MCUboot image, and it is not free: sysbuild redirects the image's
+  # APPLICATION_CONFIG_DIR to it (sysbuild_extensions.cmake, the
+  # sysbuild_image_name_conf_dir branch), so Zephyr stops looking in
+  # MCUboot's own bootloader/mcuboot/boot/zephyr for the image's Kconfig
+  # inputs and looks here instead. Three of those inputs exist upstream:
+  #
+  #   prj.conf                    MCUboot's own base configuration
+  #   socs/<soc>_<cluster>.conf   the per-SoC fragment
+  #   boards/<board>.conf         a per-board fragment, if upstream has one
+  #
+  # Missing prj.conf fails the configure outright, which is at least loud.
+  # A missing SoC fragment is SILENT: on the nRF54L15 it costs LTO, the
+  # 32-byte RRAM write buffer and the watchdog-feed setting, and the
+  # bootloader still builds and still boots. So the three are copied under
+  # sysbuild/mcuboot/ (each file says so in its header) and this asks
+  # upstream what it WOULD have contributed for the board being built, then
+  # requires each answer to appear verbatim in the copy. An NCS bump that
+  # edits one of them, and a new board whose SoC fragment nobody copied,
+  # both fail here with the file to copy named. Same shape as the SDK patch
+  # gate below: check the thing the build otherwise cannot see.
+  #
+  # Nordic's Matter samples carry the prj.conf copy and not the SoC one,
+  # which is the silent half; that is a reason to guard it, not to imitate.
+  if(NOT DEFINED ZEPHYR_MCUBOOT_MODULE_DIR)
+    message(FATAL_ERROR
+      "CONFIG_BOOTLOADER_MCUBOOT is set but the mcuboot Zephyr module is not "
+      "in this workspace, so the bootloader image's configuration cannot be "
+      "checked against upstream's.")
+  endif()
+  set(HEARTH_MCUBOOT_UPSTREAM_DIR ${ZEPHYR_MCUBOOT_MODULE_DIR}/boot/zephyr)
+  set(HEARTH_MCUBOOT_LOCAL_DIR ${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot)
+
+  set(HEARTH_MCUBOOT_UPSTREAM_CONFS ${HEARTH_MCUBOOT_UPSTREAM_DIR}/prj.conf)
+  zephyr_file(CONF_FILES ${HEARTH_MCUBOOT_UPSTREAM_DIR}/socs
+              KCONF HEARTH_MCUBOOT_UPSTREAM_CONFS QUALIFIERS)
+  zephyr_file(CONF_FILES ${HEARTH_MCUBOOT_UPSTREAM_DIR}/boards
+              KCONF HEARTH_MCUBOOT_UPSTREAM_CONFS)
+
+  foreach(upstream_conf ${HEARTH_MCUBOOT_UPSTREAM_CONFS})
+    file(RELATIVE_PATH hearth_conf_rel ${HEARTH_MCUBOOT_UPSTREAM_DIR} ${upstream_conf})
+    set(hearth_local_conf ${HEARTH_MCUBOOT_LOCAL_DIR}/${hearth_conf_rel})
+    if(NOT EXISTS ${hearth_local_conf})
+      message(FATAL_ERROR
+        "MCUboot has a Kconfig fragment for board "
+        "${BOARD}${BOARD_QUALIFIERS} that this platform does not carry, and "
+        "the bootloader image will be built without it:\n"
+        "  upstream: ${upstream_conf}\n"
+        "  wanted:   ${hearth_local_conf}\n"
+        "Copy it, under a header comment saying it is a copy and why (the "
+        "files already there show the shape). It is not optional: the "
+        "sysbuild/mcuboot/ directory that gives this image its per-board "
+        "recovery-UART overlay also redirects where Zephyr looks for these, "
+        "so what is not copied is simply not applied.")
+    endif()
+    file(READ ${upstream_conf} hearth_conf_upstream_text)
+    file(READ ${hearth_local_conf} hearth_conf_local_text)
+    string(FIND "${hearth_conf_local_text}" "${hearth_conf_upstream_text}"
+           hearth_conf_found)
+    if(hearth_conf_found EQUAL -1)
+      message(FATAL_ERROR
+        "MCUboot's own ${hearth_conf_rel} has changed and this platform's "
+        "copy of it has not:\n"
+        "  upstream: ${upstream_conf}\n"
+        "  copy:     ${hearth_local_conf}\n"
+        "Put upstream's current content back under the header comment in "
+        "the copy, then rebuild the bootloader image and look at what "
+        "moved.")
+    endif()
+    unset(hearth_conf_upstream_text)
+    unset(hearth_conf_local_text)
+  endforeach()
+endif()
+
 include(${CMAKE_CURRENT_LIST_DIR}/../../core/sources.cmake)
 
 target_sources(app PRIVATE

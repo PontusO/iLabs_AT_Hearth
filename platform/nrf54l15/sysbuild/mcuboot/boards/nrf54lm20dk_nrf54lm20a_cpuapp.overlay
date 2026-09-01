@@ -1,0 +1,27 @@
+/* MCUboot's serial-recovery UART on the nRF54LM20 DK.
+ *
+ * Same shape as the nRF54L15 DK file beside it, and for the same reason:
+ * nrf54lm20_a_b_cpuapp_common.dtsi chooses uart20 as zephyr,console, so the
+ * AT link is uart30 (boards/nrf54lm20dk_nrf54lm20a_cpuapp.overlay) and
+ * recovery follows it there.
+ *
+ * The status line is ours: nrf54lm20dk_common.dtsi gives uart30 its pinctrl
+ * states (P0.06 TX, P0.07 RX) and a 115200 default but leaves it disabled,
+ * and the app image's overlay that enables it is not read by this image.
+ *
+ * Nothing about this target has been on hardware; no LM20 DK exists on this
+ * bench. What the build establishes is that recovery and the AT link now
+ * name the same node. It establishes nothing about recovery entry, which on
+ * either DK is button0 plus RESET by hand or SWD anyway: fw/flash.py's
+ * DTR-equals-reset, RTS-equals-strap contract is the CPico bridge's, and no
+ * DK's onboard debugger exposes it.
+ */
+/ {
+    chosen {
+        zephyr,uart-mcumgr = &uart30;
+    };
+};
+
+&uart30 {
+    status = "okay";
+};
