@@ -111,6 +111,16 @@ Phase 3 composition is 47,052 bytes on `build_wifi` and 117,040 on
 `build_thread`, against 87,908 and 157,628 on a single light (firmware
 0.12.0).
 
+**2026-09-01, after the row-staging change: every figure in this section
+is now conservative.** The shared core made the `AT+MTROW` staging buffers
+session-allocated (they exist only while a transfer is open), and the one
+point re-measured since, a single light on `build_wifi` at commit 1976ba7,
+came out at 99,192 bytes free against the 87,908 above: about 11.3 KB
+returned. The curve and the derived per-endpoint costs below have NOT been
+re-run and keep their 2026-08-20 provenance; treat them as a safe floor,
+not as current values, and re-run `test/mt_endpoint_cap.py` before
+tightening any limit that leans on them.
+
 **The combined image is the constrained one, and only when WiFi is the
 active transport.** It links both stacks, and the dormant one is a fixed
 tax of about 32 KB, so it starts about 39.5 KB below `build_wifi`. Measured
