@@ -121,7 +121,7 @@ static int cmd_cgmm(at_type_t type, char *args)
     if (type != AT_EXEC) {
         return MT_R_ERROR;
     }
-    hearth_link_write_line("%s", MT_MODEL);
+    hearth_link_write_line("%s", hearth_port_model());
     return AT_R_OK;
 }
 

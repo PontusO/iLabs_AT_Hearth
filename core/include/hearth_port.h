@@ -16,6 +16,20 @@
 extern "C" {
 #endif
 
+/* ---- identity ---------------------------------------------------- *
+ *
+ * The co-processor model string, answered verbatim by AT+CGMM and AT+GMM
+ * (AT_MT_SPEC.md section 3.1). It names the co-processor, so it is a
+ * PLATFORM fact, not a portable one: an ESP32-C6 build answers
+ * "ESP32-C6 Hearth" and an nRF build answers its own SoC, and a shared
+ * core constant would make one of them lie. The manufacturer string is
+ * portable (iLabs on every build) and stays a core constant
+ * (MT_MANUFACTURER, mt_at_config.h); only the model crosses this
+ * boundary. Returns a stable, NUL-terminated string with static storage
+ * duration; the core does not free it and may hold the pointer.
+ */
+const char *hearth_port_model(void);
+
 /* ---- OS ---------------------------------------------------------- */
 
 void hearth_os_sleep_ms(uint32_t ms);

@@ -14,6 +14,7 @@
 
 void hearth_os_sleep_ms(uint32_t ms) { (void)ms; }
 void hearth_os_restart(void) { abort(); }
+const char *hearth_port_model(void) { return "host-test Hearth"; }
 
 int hearth_os_task_spawn(const char *name, void (*fn)(void *), void *arg,
                          uint32_t stack_bytes, unsigned prio)

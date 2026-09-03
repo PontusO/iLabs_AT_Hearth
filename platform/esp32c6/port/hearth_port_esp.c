@@ -21,6 +21,11 @@
 void hearth_os_sleep_ms(uint32_t ms)  { vTaskDelay(pdMS_TO_TICKS(ms)); }
 void hearth_os_restart(void)          { esp_restart(); }
 
+/* AT+CGMM / AT+GMM model string (hearth_port.h). This is the value the
+ * shared core used to hardcode for every build; kept identical here so the
+ * C6's wire answer does not move. */
+const char *hearth_port_model(void)   { return "ESP32-C6 Hearth"; }
+
 /* ---- bulk working memory (ruling DE419) --------------------------------
  *
  * The ordinary allocator, which on ESP-IDF is the general internal heap and

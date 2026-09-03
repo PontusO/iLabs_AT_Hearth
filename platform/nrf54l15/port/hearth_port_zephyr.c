@@ -43,6 +43,26 @@ static struct k_mutex s_tx_lock;
 void hearth_os_sleep_ms(uint32_t ms) { k_msleep(ms); }
 void hearth_os_restart(void)         { sys_reboot(SYS_REBOOT_WARM); }
 
+/* AT+CGMM / AT+GMM model string (hearth_port.h). Selected from the SoC the
+ * image is built for, so a board sitting on either supported part answers
+ * with its own chip rather than the shared core's old "ESP32-C6" constant.
+ * The choice is on the SoC, not the board (CONFIG_BOARD): the three boards
+ * this port serves are two SoCs (ophelia_cpico and nrf54l15dk are
+ * nRF54L15; nrf54lm20dk is nRF54LM20A), and the model names the
+ * co-processor. A future SoC in this port MUST add its arm here; the
+ * #error makes that a build failure rather than a wrong-but-plausible
+ * answer, the failure mode the board contract exists to avoid. */
+const char *hearth_port_model(void)
+{
+#if defined(CONFIG_SOC_NRF54L15)
+	return "nRF54L15 Hearth";
+#elif defined(CONFIG_SOC_NRF54LM20A)
+	return "nRF54LM20A Hearth";
+#else
+#error "hearth_port_model(): unknown nRF SoC; add its model string arm"
+#endif
+}
+
 /* ---- bulk working memory (ruling DE419) --------------------------------
  *
  * THE ONE THING TO KNOW BEFORE EDITING THIS: on this platform plain

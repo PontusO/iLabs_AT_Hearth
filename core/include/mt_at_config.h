@@ -17,7 +17,10 @@
 
 #define MT_FW_VERSION       "1.1.0"
 #define MT_MANUFACTURER     "iLabs Electronics"
-#define MT_MODEL            "ESP32-C6 Hearth"
+/* The model string is NOT here: it names the co-processor, so it is a
+ * platform fact and each port answers its own via hearth_port_model()
+ * (hearth_port.h). A shared constant used to read "ESP32-C6 Hearth" on
+ * every build, which was wrong on the nRF (bug fixed for 1.1.0). */
 
 /* ------------------------------------------------------------------ */
 /*  AT engine tunables                                                 */
