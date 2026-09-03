@@ -2401,12 +2401,19 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
  * GetModeValueByIndex(0, ...) correctly the moment Instance::Init() asks
  * (below), which happens before set_endpoint() can run.
  *
- * Store: MT_MB_MAX_LISTS slots keyed by (ep, cluster), the same per-entry
+ * Store: mt_mb_store_t (mt_stores.h), one calloc'ed per (endpoint, cluster)
+ * ModeBase list at rebuild time and recorded in mt_store_index.h under
+ * (ep, cluster, MT_STORE_MB), replacing the fixed MT_MB_MAX_LISTS-deep pool
+ * this used to be (pay-per-composition round, task 6). The same per-entry
  * shape as the mode select store above but with a per-entry uint16_t tag
  * alongside the mode value and label (design spec 3.1's mandatory <tag>
- * field; still the fixed pool here pending its own migration task). Full
- * replacement per AT+MTMODES cluster-aware call, RAM only, never persisted:
- * the same not-persisted contract as every other host-fed list in this file
+ * field). The robotic vacuum endpoint gets two of these stores, one for
+ * RvcRunMode and one for RvcCleanMode, which is why the index is sized
+ * 2 * endpoint_count (mt_store_index_init() call at the rebuild loop's
+ * start); every other device type in this firmware attaches at most one
+ * ModeBase cluster and so gets exactly one store. Full replacement per
+ * AT+MTMODES cluster-aware call, RAM only, never persisted: the same
+ * not-persisted contract as every other host-fed list in this file
  * (MTMODES, MTTEMPLEVELS, MTCHIMESOUNDS).
  *
  * Placeholder mode 0: ModeBase::Instance::Init() reads
@@ -2429,25 +2436,16 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
  * passthrough would return it) but is never registered, so reads, writes and
  * commands against that cluster would go unanswered with no diagnostic at
  * all. Quieter, not louder, and correspondingly worse to debug than a boot
- * panic. So an empty slot must still answer index 0: mode 0, the cluster's
- * tag-0 default (design spec section 9's "Tag-0 defaults, exact policy"
- * table), label "Mode0". The moment the host sends the real list the
- * placeholder is superseded; there is no separate "is this the placeholder"
- * flag to clear, find_slot()/the count==0 check below simply prefer a stored
- * entry whenever one exists.
+ * panic. So a nullptr store (no list claimed yet for this (ep, cluster))
+ * must still answer index 0: mode 0, the cluster's tag-0 default (design
+ * spec section 9's "Tag-0 defaults, exact policy" table), label "Mode0".
+ * The moment the host sends the real list the placeholder is superseded;
+ * there is no separate "is this the placeholder" flag to clear, the
+ * delegate methods below simply prefer a stored entry whenever the store
+ * exists and its count is non-zero.
  */
-/* mt_mb_entry_t now comes from mt_stores.h (identical layout: mode, tag,
- * label), pulled in for the mode select store above; the pool this struct
- * backs is unchanged and still local to this port, pending its own
- * migration task. */
-struct mt_mb_slot_t {
-    bool     used;
-    uint16_t ep;
-    uint32_t cluster;
-    uint8_t  count;
-    mt_mb_entry_t entries[MT_MB_MAX_COUNT];
-};
-static mt_mb_slot_t s_mb_slots[MT_MB_MAX_LISTS];
+static_assert(sizeof(mt_mb_store_t) == 306,
+              "mt_mb_store_t size changed; re-check the C6 store budget");
 
 class HearthModeBaseDelegate : public chip::app::Clusters::ModeBase::Delegate
 {
@@ -2468,34 +2466,34 @@ public:
 
     CHIP_ERROR GetModeLabelByIndex(uint8_t modeIndex, chip::MutableCharSpan &label) override
     {
-        mt_mb_slot_t *slot = find_slot();
-        if (slot == nullptr || slot->count == 0) {
+        auto *store = (mt_mb_store_t *)mt_store_index_find(m_ep, m_cluster, MT_STORE_MB);
+        if (store == nullptr || store->count == 0) {
             if (modeIndex != 0) {
                 return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
             }
             return chip::CopyCharSpanToMutableCharSpan(chip::CharSpan::fromCharString("Mode0"), label);
         }
-        if (modeIndex >= slot->count) {
+        if (modeIndex >= store->count) {
             return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        return chip::CopyCharSpanToMutableCharSpan(chip::CharSpan::fromCharString(slot->entries[modeIndex].label),
+        return chip::CopyCharSpanToMutableCharSpan(chip::CharSpan::fromCharString(store->entries[modeIndex].label),
                                                     label);
     }
 
     CHIP_ERROR GetModeValueByIndex(uint8_t modeIndex, uint8_t &value) override
     {
-        mt_mb_slot_t *slot = find_slot();
-        if (slot == nullptr || slot->count == 0) {
+        auto *store = (mt_mb_store_t *)mt_store_index_find(m_ep, m_cluster, MT_STORE_MB);
+        if (store == nullptr || store->count == 0) {
             if (modeIndex != 0) {
                 return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
             }
             value = 0;
             return CHIP_NO_ERROR;
         }
-        if (modeIndex >= slot->count) {
+        if (modeIndex >= store->count) {
             return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        value = slot->entries[modeIndex].mode;
+        value = store->entries[modeIndex].mode;
         return CHIP_NO_ERROR;
     }
 
@@ -2503,18 +2501,18 @@ public:
         uint8_t modeIndex,
         chip::app::DataModel::List<chip::app::Clusters::detail::Structs::ModeTagStruct::Type> &tags) override
     {
-        mt_mb_slot_t *slot = find_slot();
+        auto *store = (mt_mb_store_t *)mt_store_index_find(m_ep, m_cluster, MT_STORE_MB);
         uint16_t tag_value;
-        if (slot == nullptr || slot->count == 0) {
+        if (store == nullptr || store->count == 0) {
             if (modeIndex != 0) {
                 return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
             }
             tag_value = placeholder_tag();
         } else {
-            if (modeIndex >= slot->count) {
+            if (modeIndex >= store->count) {
                 return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
             }
-            tag_value = slot->entries[modeIndex].tag;
+            tag_value = store->entries[modeIndex].tag;
         }
         /* The SDK hands in a buffer sized for kMaxNumOfModeTags (8); this
          * delegate only ever publishes one tag per mode, so size 1 always
@@ -2557,16 +2555,6 @@ public:
     }
 
 private:
-    mt_mb_slot_t *find_slot() const
-    {
-        for (auto &s : s_mb_slots) {
-            if (s.used && s.ep == m_ep && s.cluster == m_cluster) {
-                return &s;
-            }
-        }
-        return nullptr;
-    }
-
     /* Tag-0 defaults, design spec section 9's exact policy, placeholder case
      * only (index 0 of an otherwise-empty list): RvcRunMode gets kIdle,
      * RvcCleanMode gets kVacuum, MicrowaveOvenMode gets kNormal,
@@ -2744,36 +2732,15 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_mb_slot_t *slot = nullptr;
-    for (auto &s : s_mb_slots) {
-        if (s.used && s.ep == ep && s.cluster == cluster) {
-            slot = &s;
-            break;
-        }
-    }
-    if (!slot) {
-        for (auto &s : s_mb_slots) {
-            if (!s.used) {
-                slot = &s;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* MT_MB_MAX_LISTS (mt_matter.h) bounds how many distinct (endpoint,
-         * cluster) ModeBase lists this firmware stores at once; it is
-         * smaller than MT_COMP_MAX_ENDPOINTS (mt_composition.h) - cited by
-         * name rather than value, since both have already moved once across
-         * the RVC/appliance and energy rounds and a number copied into this
-         * comment goes stale exactly when either next changes - so a
-         * composition dense enough in RvcRunMode/RvcCleanMode/
-         * MicrowaveOvenMode/EnergyEvseMode/DeviceEnergyManagementMode
-         * instances CAN exhaust it well under the endpoint cap (the
-         * multiple-ModeBase-clusters-per-endpoint shape several device types
-         * in this firmware use makes that reachable). This return is the
-         * safe fallback for that case: the call is refused with
-         * MT_ATTR_ERR_FAILED rather than silently overwriting an unrelated
-         * (endpoint, cluster) slot. */
+    auto *store = (mt_mb_store_t *)mt_store_index_find(ep, cluster, MT_STORE_MB);
+    if (store == nullptr) {
+        /* Cannot happen in practice: every endpoint whose device type
+         * carries this ModeBase cluster gets a store at rebuild time
+         * (app_main), the cluster::get() check above already having
+         * confirmed the cluster exists on this endpoint, same reasoning as
+         * mt_matter_modes_set() above. Kept as a defensive return rather
+         * than an assert, and the same not-present error the exhausted pool
+         * used to return before this store was indexed by (ep, cluster). */
         return MT_ATTR_ERR_FAILED;
     }
 
@@ -2781,10 +2748,10 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
      * reasons. It matches the nRF54L15 port's ordering, so a doubly
      * malformed list (bad label AND the microwave rule below) returns the
      * same error on both platforms; and the loop below writes
-     * slot->entries[i] as it goes while count/used are only committed
-     * after it, so failing mid-loop on a RE-FED (endpoint, cluster) list
-     * used to overwrite the live list's leading entries and still answer
-     * an error. Validating first closes that window. */
+     * store->entries[i] as it goes while count is only committed after it,
+     * so failing mid-loop on a RE-FED (endpoint, cluster) list used to
+     * overwrite the live list's leading entries and still answer an error.
+     * Validating first closes that window. */
     for (uint8_t i = 0; i < count; i++) {
         size_t len = strlen(labels[i]);
         if (len < 1 || len > MT_MB_MAX_LABEL_LEN) {
@@ -2907,14 +2874,11 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                 tag = chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
             }
         }
-        slot->entries[i].mode = modes[i];
-        slot->entries[i].tag  = tag;
-        memcpy(slot->entries[i].label, labels[i], len + 1);
+        store->entries[i].mode = modes[i];
+        store->entries[i].tag  = tag;
+        memcpy(store->entries[i].label, labels[i], len + 1);
     }
-    slot->ep      = ep;
-    slot->cluster = cluster;
-    slot->count   = count;
-    slot->used    = true;
+    store->count = count;
 
     MatterReportingAttributeChangeCallback(ep, cluster, ModeBase::Attributes::SupportedModes::Id);
 
@@ -2933,7 +2897,7 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         if (d.endpoint() == ep && d.cluster() == cluster) {
             ModeBase::Instance *inst = d.instance();
             if (inst != nullptr && !inst->IsSupportedMode(inst->GetCurrentMode())) {
-                inst->UpdateCurrentMode(slot->entries[0].mode);
+                inst->UpdateCurrentMode(store->entries[0].mode);
             }
             break;
         }
@@ -6699,6 +6663,47 @@ extern "C" void app_main(void)
             auto *store = (mt_chime_store_t *)calloc(1, sizeof(mt_chime_store_t));
             if (store == nullptr || !mt_store_index_add(ep_id, 0, MT_STORE_CHIME, store)) {
                 ESP_LOGE(TAG, "chime store alloc failed at endpoint %u", ep_id);
+                comp.count = 0;
+                break;
+            }
+        }
+
+        /*
+         * Pay-per-composition round task 6: same pattern, for the eight
+         * ModeBase-derived clusters, keyed by (endpoint, cluster) rather than
+         * by endpoint alone because the robotic vacuum endpoint carries two
+         * of them at once (RvcRunMode and RvcCleanMode, this composition's
+         * only two-ModeBase-cluster device type). A plain loop over the
+         * fixed list below instead of eight copy-pasted blocks; every other
+         * device type in this firmware attaches at most one of these eight
+         * clusters, so this loop still adds exactly one store for it, or
+         * zero if the endpoint carries none of them.
+         */
+        {
+            static const uint32_t kModeBaseClusters[] = {
+                chip::app::Clusters::RvcRunMode::Id,
+                chip::app::Clusters::RvcCleanMode::Id,
+                chip::app::Clusters::MicrowaveOvenMode::Id,
+                chip::app::Clusters::OvenMode::Id,
+                chip::app::Clusters::WaterHeaterMode::Id,
+                chip::app::Clusters::EnergyEvseMode::Id,
+                chip::app::Clusters::DeviceEnergyManagementMode::Id,
+                chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id,
+            };
+            bool mb_failed = false;
+            for (uint32_t cluster_id : kModeBaseClusters) {
+                if (esp_matter::cluster::get(ep_id, cluster_id) == nullptr) {
+                    continue;
+                }
+                auto *store = (mt_mb_store_t *)calloc(1, sizeof(mt_mb_store_t));
+                if (store == nullptr || !mt_store_index_add(ep_id, cluster_id, MT_STORE_MB, store)) {
+                    ESP_LOGE(TAG, "modebase store alloc failed at endpoint %u cluster 0x%08X",
+                             ep_id, (unsigned)cluster_id);
+                    mb_failed = true;
+                    break;
+                }
+            }
+            if (mb_failed) {
                 comp.count = 0;
                 break;
             }
