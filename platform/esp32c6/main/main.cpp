@@ -3423,7 +3423,11 @@ static std::vector<HearthRvcOpStateDelegate *> s_rvc_opstate_delegates;
 
 extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
 {
-    return new (std::nothrow) HearthRvcOpStateDelegate();
+    HearthRvcOpStateDelegate *d = new (std::nothrow) HearthRvcOpStateDelegate();
+    if (d != nullptr) {
+        s_rvc_opstate_delegates.push_back(d);
+    }
+    return d;
 }
 
 extern "C" void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
