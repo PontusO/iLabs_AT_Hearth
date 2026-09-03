@@ -206,6 +206,10 @@
 /* Energy round C2 task 9: the lock-held internals of mt_meter.cpp, which
  * mt_matter_meter_set_identity() below wraps in ChipStackLock. */
 #include "mt_meter.h"
+/* Pay-per-composition round task 2/3: the endpoint -> host-fed-store map and
+ * the shared plain-C store shapes it points at. */
+#include "mt_store_index.h"
+#include "mt_stores.h"
 #include "mt_transport.h"
 
 static const char *TAG = "mt_main";
@@ -2229,19 +2233,22 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
  *        ...
  *    };"
  * Nothing in the interface requires static or NVS-backed storage (F2), so a
- * runtime, host-fed store is legal. Backing store: MT_COMP_MAX_ENDPOINTS
- * slots x MT_MODES_MAX_COUNT entries, each holding the u8 mode value, a
- * (MT_MODES_MAX_LABEL_LEN + 1)-byte label buffer, and a ModeOptionStructType
- * whose CharSpan.label points into that same buffer
+ * runtime, host-fed store is legal. Backing store: one mt_mode_store_t per
+ * mode_select endpoint (mt_store_index.h maps endpoint id to it), holding up
+ * to MT_MODES_MAX_COUNT entries, each an mt_mode_entry_t (u8 mode value plus
+ * an (MT_MODES_MAX_LABEL_LEN + 1)-byte label buffer, mt_stores.h) and a
+ * ModeOptionStructType whose CharSpan.label points into that same buffer
  * (ModeSelect/Structs.h:71-81: "chip::CharSpan label; uint8_t mode; ...
  * semanticTags;").
  *
  * CharSpan lifetime: both the label bytes (mt_mode_entry_t::label) and the
- * ModeOptionStructType array (mt_mode_slot_t::structs) are static storage
- * (s_mode_slots below), never heap or stack, so neither is freed while the
- * program runs. The struct array is rebuilt IN PLACE on every AT+MTMODES
- * write to the same slot (mt_matter_modes_set() below), never reallocated or
- * moved, so no CharSpan is ever left pointing at freed memory. The
+ * ModeOptionStructType array (mt_mode_store_t::structs) live in one
+ * calloc'ed allocation made once at endpoint create (app_main's composition
+ * rebuild, before esp_matter::start()) and recorded in the index; the
+ * pointer is never freed and never reallocated while the program runs. The
+ * struct array is rebuilt IN PLACE on every AT+MTMODES write to the same
+ * store (mt_matter_modes_set() below), never reallocated or moved, so no
+ * CharSpan is ever left pointing at freed memory. The
  * two-phase rebuild (copy every entry's bytes first, THEN overwrite the
  * struct array) is still not enough on its own to rule out a reader
  * observing a struct mid-rewrite, pointing at a label only half copied: what
@@ -2266,19 +2273,22 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
  * mDataLen=0, Span.h:46), i.e. List<const SemanticTagStruct::Type>(nullptr,
  * 0).
  */
-struct mt_mode_entry_t {
-    uint8_t mode;
-    char    label[MT_MODES_MAX_LABEL_LEN + 1];
+/* The mode store is the shared plain list (mt_stores.h, mt_mode_list_t) plus
+ * this port's rendered ModeOptionStruct array; the SDK reads structs[] as a
+ * ModeOptionsProvider, and each struct's label CharSpan aliases
+ * list.entries[i].label. Both live in one heap allocation, calloc'ed once at
+ * endpoint create and never freed, so the spans stay valid for the boot
+ * (spec section 5), the same argument the old .bss pool made from static
+ * storage. Looked up per endpoint through mt_store_index_find() rather than
+ * scanned out of a fixed pool; see mt_store_index.h. The former
+ * mt_mode_entry_t local definition is now mt_stores.h's. */
+struct mt_mode_store_t {
+    mt_mode_list_t list;
+    chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type
+        structs[MT_MODES_MAX_COUNT];
 };
-
-struct mt_mode_slot_t {
-    bool     used;
-    uint16_t ep;
-    uint8_t  count;
-    mt_mode_entry_t entries[MT_MODES_MAX_COUNT];
-    chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type structs[MT_MODES_MAX_COUNT];
-};
-static mt_mode_slot_t s_mode_slots[MT_COMP_MAX_ENDPOINTS];
+static_assert(sizeof(mt_mode_store_t) == 436,
+              "mode store size moved; reconcile with mt_stores.h/mt_store_index.h");
 
 class HearthSupportedModesManager : public chip::app::Clusters::ModeSelect::SupportedModesManager
 {
@@ -2299,29 +2309,27 @@ private:
 public:
     ModeOptionsProvider getModeOptionsProvider(chip::EndpointId endpointId) const override
     {
-        for (auto &slot : s_mode_slots) {
-            if (slot.used && slot.ep == endpointId) {
-                return ModeOptionsProvider(slot.structs, slot.structs + slot.count);
-            }
+        auto *store = (mt_mode_store_t *)mt_store_index_find(endpointId, 0, MT_STORE_MODE);
+        if (store == nullptr) {
+            return ModeOptionsProvider();  /* begin == end == nullptr: no entry for this endpoint */
         }
-        return ModeOptionsProvider();  /* begin == end == nullptr: no entry for this endpoint */
+        return ModeOptionsProvider(store->structs, store->structs + store->list.count);
     }
 
     chip::Protocols::InteractionModel::Status getModeOptionByMode(
         chip::EndpointId endpointId, uint8_t mode, const ModeOptionStructType **dataPtr) const override
     {
-        for (auto &slot : s_mode_slots) {
-            if (slot.used && slot.ep == endpointId) {
-                for (uint8_t i = 0; i < slot.count; i++) {
-                    if (slot.structs[i].mode == mode) {
-                        *dataPtr = &slot.structs[i];
-                        return chip::Protocols::InteractionModel::Status::Success;
-                    }
-                }
-                return chip::Protocols::InteractionModel::Status::InvalidCommand;
+        auto *store = (mt_mode_store_t *)mt_store_index_find(endpointId, 0, MT_STORE_MODE);
+        if (store == nullptr) {
+            return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+        }
+        for (uint8_t i = 0; i < store->list.count; i++) {
+            if (store->structs[i].mode == mode) {
+                *dataPtr = &store->structs[i];
+                return chip::Protocols::InteractionModel::Status::Success;
             }
         }
-        return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+        return chip::Protocols::InteractionModel::Status::InvalidCommand;
     }
 };
 static HearthSupportedModesManager s_mode_select_manager;
@@ -2350,23 +2358,10 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_mode_slot_t *slot = nullptr;
-    for (auto &s : s_mode_slots) {
-        if (s.used && s.ep == ep) {
-            slot = &s;
-            break;
-        }
-    }
-    if (!slot) {
-        for (auto &s : s_mode_slots) {
-            if (!s.used) {
-                slot = &s;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* Cannot happen in practice: one slot per MT_COMP_MAX_ENDPOINTS, the
+    auto *store = (mt_mode_store_t *)mt_store_index_find(ep, 0, MT_STORE_MODE);
+    if (store == nullptr) {
+        /* Cannot happen in practice: every endpoint whose device type
+         * carries ModeSelect gets a store at rebuild time (app_main), the
          * same cap the composition itself enforces, same reasoning as
          * mt_matter_temp_levels_set() above. Kept as a defensive return
          * rather than an assert. */
@@ -2378,20 +2373,18 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
         if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
             return MT_ATTR_ERR_FAILED;
         }
-        slot->entries[i].mode = modes[i];
-        memcpy(slot->entries[i].label, labels[i], len + 1);
+        store->list.entries[i].mode = modes[i];
+        memcpy(store->list.entries[i].label, labels[i], len + 1);
     }
-    slot->ep    = ep;
-    slot->count = count;
-    slot->used  = true;
+    store->list.count = count;
 
     /* Rebuild the struct array in place, contiguous, each CharSpan pointing
-     * into the static label buffer above: see the CharSpan-lifetime comment
-     * ahead of this class. */
+     * into the heap-allocated label buffer above: see the CharSpan-lifetime
+     * comment ahead of this class. */
     for (uint8_t i = 0; i < count; i++) {
-        slot->structs[i].mode  = slot->entries[i].mode;
-        slot->structs[i].label = chip::CharSpan::fromCharString(slot->entries[i].label);
-        slot->structs[i].semanticTags =
+        store->structs[i].mode  = store->list.entries[i].mode;
+        store->structs[i].label = chip::CharSpan::fromCharString(store->list.entries[i].label);
+        store->structs[i].semanticTags =
             chip::app::DataModel::List<const chip::app::Clusters::ModeSelect::Structs::SemanticTagStruct::Type>();
     }
 
@@ -2429,9 +2422,10 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
  * GetModeValueByIndex(0, ...) correctly the moment Instance::Init() asks
  * (below), which happens before set_endpoint() can run.
  *
- * Store: MT_MB_MAX_LISTS slots keyed by (ep, cluster), the same shape as
- * s_mode_slots above but with a per-entry uint16_t tag alongside the mode
- * value and label (design spec 3.1's mandatory <tag> field). Full
+ * Store: MT_MB_MAX_LISTS slots keyed by (ep, cluster), the same per-entry
+ * shape as the mode select store above but with a per-entry uint16_t tag
+ * alongside the mode value and label (design spec 3.1's mandatory <tag>
+ * field; still the fixed pool here pending its own migration task). Full
  * replacement per AT+MTMODES cluster-aware call, RAM only, never persisted:
  * the same not-persisted contract as every other host-fed list in this file
  * (MTMODES, MTTEMPLEVELS, MTCHIMESOUNDS).
@@ -2463,12 +2457,10 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
  * flag to clear, find_slot()/the count==0 check below simply prefer a stored
  * entry whenever one exists.
  */
-struct mt_mb_entry_t {
-    uint8_t  mode;
-    uint16_t tag;
-    char     label[MT_MB_MAX_LABEL_LEN + 1];
-};
-
+/* mt_mb_entry_t now comes from mt_stores.h (identical layout: mode, tag,
+ * label), pulled in for the mode select store above; the pool this struct
+ * backs is unchanged and still local to this port, pending its own
+ * migration task. */
 struct mt_mb_slot_t {
     bool     used;
     uint16_t ep;
@@ -6005,11 +5997,9 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
  * so no +MTCMD is raised for either; a host that has set Enabled false will
  * see PlayChimeSound invokes stop reaching +MTCMD entirely, not fail it.
  */
-struct mt_chime_entry_t {
-    uint8_t id;
-    char    name[MT_CHIME_MAX_NAME_LEN + 1];
-};
-
+/* mt_chime_entry_t now comes from mt_stores.h (identical layout: id, name),
+ * pulled in for the mode select store above; the pool this struct backs is
+ * unchanged and still local to this port, pending its own migration task. */
 struct mt_chime_slot_t {
     bool    used;
     uint16_t ep;
@@ -6663,6 +6653,17 @@ extern "C" void app_main(void)
         comp.count = 0;
     }
 
+    /*
+     * The endpoint -> host-fed-store index (mt_store_index.h), sized 2 per
+     * endpoint: an RVC endpoint carries two ModeBase stores, every other
+     * device type carries at most one store of any kind. Initialised once
+     * here, before any endpoint is created, so every per-endpoint store
+     * allocated below (starting with mode select) has somewhere to go.
+     */
+    if (!mt_store_index_init(2u * comp.count)) {
+        ESP_LOGE(TAG, "store index init failed, aborting rebuild");
+        comp.count = 0;
+    }
 
     for (uint16_t i = 0; i < comp.count; i++) {
         uint16_t ep_id = 0;
@@ -6689,6 +6690,26 @@ extern "C" void app_main(void)
             comp.count = 0;
             break;
         }
+
+        /*
+         * Pay-per-composition round task 3: an endpoint whose device type
+         * attached a ModeSelect cluster gets its host-fed store allocated
+         * right here, calloc'ed once and never freed (see the CharSpan-
+         * lifetime comment ahead of HearthSupportedModesManager above), and
+         * recorded in the index under (ep, MT_STORE_MODE). A failed alloc or
+         * a full index is the same class of failure as a failed endpoint
+         * create: abort the whole rebuild rather than leave a commissioned
+         * device with a ModeSelect cluster and no backing store.
+         */
+        if (esp_matter::cluster::get(ep_id, chip::app::Clusters::ModeSelect::Id) != nullptr) {
+            auto *store = (mt_mode_store_t *)calloc(1, sizeof(mt_mode_store_t));
+            if (store == nullptr || !mt_store_index_add(ep_id, 0, MT_STORE_MODE, store)) {
+                ESP_LOGE(TAG, "mode store alloc failed at endpoint %u", ep_id);
+                comp.count = 0;
+                break;
+            }
+        }
+
         mt_matter_record_endpoint(comp.devtype[i], ep_id, comp.variant[i], comp.parent[i]);
     }
 

@@ -13,6 +13,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     MT_STORE_MODE  = 0,   /* ModeSelect list, one per endpoint            */
     MT_STORE_TEMP  = 1,   /* TemperatureControl levels, one per endpoint  */
@@ -43,4 +47,8 @@ void *mt_store_index_find(uint16_t ep, uint32_t cluster,
 /* Host tests only: free the table and clear state between cases. Never
  * called by firmware, which inits exactly once per boot. */
 void mt_store_index_reset(void);
+#endif
+
+#ifdef __cplusplus
+}
 #endif
