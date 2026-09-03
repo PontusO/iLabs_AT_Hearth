@@ -174,6 +174,25 @@ rather than being nudged by two spot readings, since a boot-to-boot spread
 of a hundred-odd bytes on this bench is normal and the rows record what one
 run produced.
 
+**Re-measured after the pay-per-composition round (2026-09-03).** That round
+moved the C6's host-fed stores and delegate pools from fixed `.bss` to
+per-endpoint allocation (`ARCHITECTURE.md` 8.20), which returned about 42 KB
+of free heap at one endpoint on the single-transport images and about 45 KB
+on the combined image WiFi-active. The per-endpoint costs above are
+unchanged (a light still costs a light's worth of esp_matter objects); the
+round moved the curve's intercept, not its slope, so the whole curve shifts
+up by that reclaim. The consequence for the row that mattered: the combined
+image WiFi-active now serves the **full 28-endpoint table**, measured at
+45,156 to 45,288 bytes free where the 2026-08-20 table recorded 7,608 and a
+double failure. The transport-dependent cap is retired, and the "about 20 of
+a typical mix" proxy with it; the 24,000-byte floor still governs, and the
+combined image now clears it at 28 with about 21 KB to spare. The
+2026-08-20 table is left with its date rather than redrawn from one
+measured count, since only the full 28 was re-swept (by the Phase 3
+acceptance run, which drives real controller traffic, the criterion the rig
+uses). These figures ship with the firmware; the library's `fw/README.md`
+and its bundled images move to them when a release is cut.
+
 Heap moves with the SDK, with cluster gates and with any
 `sdkconfig.defaults*` edit, so re-measure with the rig rather than
 re-deriving. The user-facing version of this, aimed at somebody choosing a
