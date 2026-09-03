@@ -3591,7 +3591,7 @@ private:
  * stand up. Exhaustion aborts the create before anything is spent, so a
  * tenth RVC fails on whichever wall it hits first (this pool or the
  * heap), loudly either way. MT_MB_MAX_LISTS is gone from core/include/
- * mt_matter.h (pay-per-composition round, task 6): the C6 no longer has a
+ * mt_matter.h (pay-per-composition round, task 7): the C6 no longer has a
  * fixed ModeBase pool at all, it allocates its mt_mb_store_t per
  * (endpoint, cluster) through its store index (mt_store_index.c) against
  * the runtime heap floor. This pool is unrelated to that: it is this
