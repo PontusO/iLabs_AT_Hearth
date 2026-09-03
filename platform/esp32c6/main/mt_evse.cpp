@@ -94,6 +94,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <new>
+#include <vector>
 
 #include <esp_err.h>
 #include <esp_log.h>
@@ -1173,13 +1175,16 @@ public:
 };
 
 /*
- * The pool, MT_EVSE_MAX slots (mt_matter.h documents the sizing), the
- * HearthWhmDelegate array-plus-next-counter shape with the endpoint id taken
- * at handout. Each slot carries the ~1680-byte target store, which is the
- * whole reason MT_EVSE_MAX is 2 and not 8.
+ * One HearthEvseDelegate per EVSE endpoint, heap-allocated and boot-long,
+ * with the endpoint id taken at handout. Each delegate carries the
+ * ~1680-byte target store, so it is only paid for when an EVSE endpoint
+ * actually exists. The two-endpoint EVSE cap is NOT this registry: it lives
+ * in mt_matter_evse_reserve()'s MT_EVSE_MAX check below, and s_evse_next
+ * (the consumption counter) still tracks handouts against that reservation.
+ * The registry is the by-endpoint lookup evse_for() walks.
  */
-HearthEvseDelegate s_evse_delegates[MT_EVSE_MAX];
-size_t             s_evse_next = 0;
+std::vector<HearthEvseDelegate *> s_evse_delegates;
+size_t                            s_evse_next = 0;
 
 /*
  * Reservations claimed by mt_matter_evse_reserve(), the count-only gate
@@ -1221,9 +1226,9 @@ size_t             s_evse_reserved = 0;
 /* The by-endpoint lookup every bridge below starts from, the whm_for() shape. */
 HearthEvseDelegate *evse_for(chip::EndpointId ep)
 {
-    for (size_t i = 0; i < s_evse_next; i++) {
-        if (s_evse_delegates[i].endpoint() == ep) {
-            return &s_evse_delegates[i];
+    for (auto *d : s_evse_delegates) {
+        if (d->endpoint() == ep) {
+            return d;
         }
     }
     return nullptr;
@@ -1291,7 +1296,12 @@ extern "C" void *mt_matter_evse_delegate_alloc(uint16_t ep)
     if (s_evse_next >= MT_EVSE_MAX) {
         return nullptr;
     }
-    HearthEvseDelegate *d = &s_evse_delegates[s_evse_next++];
+    HearthEvseDelegate *d = new (std::nothrow) HearthEvseDelegate();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_evse_delegates.push_back(d);
+    s_evse_next++;
     d->SetEndpointId(ep);
 
     /*
@@ -1918,8 +1928,8 @@ int mt_evse_targets_erase_all_locked(void)
     /* RAM first, so a failing NVS erase still leaves the running device with
      * no schedule rather than one it cannot forget. AT+MTFRESET reboots
      * immediately afterwards either way. */
-    for (size_t i = 0; i < s_evse_next; i++) {
-        s_evse_delegates[i].clear_store();
+    for (auto *d : s_evse_delegates) {
+        d->clear_store();
     }
 
     nvs_handle_t h;

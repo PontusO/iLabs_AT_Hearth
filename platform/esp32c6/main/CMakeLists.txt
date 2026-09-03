@@ -32,6 +32,7 @@ idf_component_register(
         "mt_devtypes.cpp"
         "mt_evse.cpp"
         "mt_meter.cpp"
+        "mt_store_index.c"
     INCLUDE_DIRS
         "include"
     PRIV_REQUIRES

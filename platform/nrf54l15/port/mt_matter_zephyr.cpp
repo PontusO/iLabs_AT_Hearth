@@ -2634,8 +2634,8 @@ public:
     ModeOptionsProvider getModeOptionsProvider(chip::EndpointId endpointId) const override
     {
         mt_mode_store_t *store = mt_dyn_mode_store(endpointId);
-        if (store != nullptr && store->count > 0) {
-            return ModeOptionsProvider(store->structs, store->structs + store->count);
+        if (store != nullptr && store->list.count > 0) {
+            return ModeOptionsProvider(store->structs, store->structs + store->list.count);
         }
         /* begin == end == nullptr: no store on this endpoint, or the host
          * has not fed a list yet (count 0, what the pool's unclaimed slot
@@ -2647,7 +2647,7 @@ public:
         chip::EndpointId endpointId, uint8_t mode, const ModeOptionStructType **dataPtr) const override
     {
         mt_mode_store_t *store = mt_dyn_mode_store(endpointId);
-        if (store == nullptr || store->count == 0) {
+        if (store == nullptr || store->list.count == 0) {
             /* count 0 lands here, NOT in the InvalidCommand arm below:
              * before the reclaim round an endpoint the host had not fed
              * had no used pool slot at all and answered UnsupportedCluster,
@@ -2655,7 +2655,7 @@ public:
              * keep answering exactly that. */
             return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
         }
-        for (uint8_t i = 0; i < store->count; i++) {
+        for (uint8_t i = 0; i < store->list.count; i++) {
             if (store->structs[i].mode == mode) {
                 *dataPtr = &store->structs[i];
                 return chip::Protocols::InteractionModel::Status::Success;
@@ -2732,10 +2732,10 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
         }
     }
     for (uint8_t i = 0; i < count; i++) {
-        slot->entries[i].mode = modes[i];
-        memcpy(slot->entries[i].label, labels[i], strlen(labels[i]) + 1);
+        slot->list.entries[i].mode = modes[i];
+        memcpy(slot->list.entries[i].label, labels[i], strlen(labels[i]) + 1);
     }
-    slot->count = count;
+    slot->list.count = count;
 
     /* Rebuild the struct array in place, each CharSpan pointing into the
      * store's own label buffer (block-resident, never freed; the section
@@ -2744,8 +2744,8 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
      * (see the section comment). SemanticTags publishes a
      * default-constructed empty List per entry, mandatory-but-empty-legal. */
     for (uint8_t i = 0; i < count; i++) {
-        slot->structs[i].mode = slot->entries[i].mode;
-        slot->structs[i].label = chip::CharSpan::fromCharString(slot->entries[i].label);
+        slot->structs[i].mode = slot->list.entries[i].mode;
+        slot->structs[i].label = chip::CharSpan::fromCharString(slot->list.entries[i].label);
         slot->structs[i].semanticTags = chip::app::DataModel::List<
             const chip::app::Clusters::ModeSelect::Structs::SemanticTagStruct::Type>();
     }
@@ -3590,10 +3590,12 @@ private:
  * (2 x 16) would reserve Instances for seven endpoints the heap can never
  * stand up. Exhaustion aborts the create before anything is spent, so a
  * tenth RVC fails on whichever wall it hits first (this pool or the
- * heap), loudly either way. MT_MB_MAX_LISTS (16, core) bounds the C6's
- * flat store, not this pool: on this platform the stores are
- * block-resident per endpoint and the core constant only shapes the
- * entry layout (the mt_matter.h staleness note batch 4 already logged).
+ * heap), loudly either way. MT_MB_MAX_LISTS is gone from core/include/
+ * mt_matter.h (pay-per-composition round, task 7): the C6 no longer has a
+ * fixed ModeBase pool at all, it allocates its mt_mb_store_t per
+ * (endpoint, cluster) through its store index (mt_store_index.c) against
+ * the runtime heap floor. This pool is unrelated to that: it is this
+ * nRF port's own ModeBase Instance/delegate pool, sized as above.
  *
  * The Instance pool is alignas raw storage (the four-argument ctor needs
  * create-time values), placement-constructed exactly once per slot in

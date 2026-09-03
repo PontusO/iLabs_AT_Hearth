@@ -67,12 +67,11 @@
  *      std::unique_ptr<Instance>, because its example app hardcodes a
  *      single endpoint. This firmware's endpoint ids are dynamic
  *      (host-declared over AT+MTEP, NVS-persisted) and a composition can
- *      carry more than one meter, so this is a pool of MT_METER_MAX
- *      (mt_matter.h) slots keyed by endpoint id: aligned storage plus
- *      placement-new, the same shape main.cpp's
- *      mt_air_quality_register_all() uses for the identical "Instance has
- *      no default constructor" problem (BitMask<Feature> must be supplied
- *      at construction).
+ *      carry more than one meter, so each meter endpoint gets its own
+ *      heap Instance keyed by endpoint id in an MT_METER_MAX (mt_matter.h)
+ *      lookup table, the same shape main.cpp's mt_air_quality_register_all()
+ *      uses for the identical "Instance has no default constructor" problem
+ *      (BitMask<Feature> must be supplied at construction).
  *   2. Nothing calls the reference's own
  *      emberAfMeterIdentificationClusterInitCallback() either (see above),
  *      so mt_meter_register_all() below is invoked by the firmware itself,
@@ -105,19 +104,21 @@
  *
  * ---- STORAGE ----
  *
- * Same reasoning as AirQuality's s_air_quality_storage (main.cpp): Instance
- * has no default constructor, so a plain array is not an option, and raw
- * aligned storage plus placement-new gives static allocation with no heap
- * churn. UNLIKE AirQuality's pool, which is sized MT_COMP_MAX_ENDPOINTS and
- * indexed directly by composition position, this pool is sized the much
- * smaller MT_METER_MAX (2, deliberate headroom over the one meter endpoint
- * Phase 3 adds, task 3's own note): a live endpoint's composition index can
- * exceed MT_METER_MAX - 1 even when only one or two of the endpoints in the
- * whole composition are meters, so slots are handed out from a separate
- * counter as matching endpoints are found, not by composition index.
+ * Same reasoning as AirQuality (main.cpp): Instance has no default
+ * constructor (BitMask<Feature> must be supplied at construction), so each
+ * live meter endpoint's Instance is heap-allocated per endpoint by
+ * mt_meter_register_all() below, boot-long and never freed. The s_meter[]
+ * table here is just the by-endpoint lookup over them. It stays sized
+ * MT_METER_MAX (2): that is the product's meter cap, enforced by
+ * mt_meter_reserve() before any endpoint is built, so the scan below can
+ * never find more than MT_METER_MAX matching endpoints. Slots are filled from
+ * a separate counter as matching endpoints are found, not by composition
+ * index (a live endpoint's composition index can exceed MT_METER_MAX - 1 even
+ * when only one endpoint is a meter).
  */
 
 #include <cstring>
+#include <new>
 
 #include <esp_log.h>
 #include <esp_matter.h>
@@ -141,8 +142,6 @@ struct mt_meter_entry_t {
 };
 
 mt_meter_entry_t s_meter[MT_METER_MAX];
-
-alignas(Instance) uint8_t s_meter_storage[MT_METER_MAX][sizeof(Instance)];
 
 /*
  * How many electrical_utility_meter endpoints this boot has RESERVED a pool
@@ -299,7 +298,11 @@ extern "C" void mt_meter_register_all(void)
             continue;
         }
 
-        Instance *inst = new (&s_meter_storage[slot]) Instance(ep, features);
+        Instance *inst = new (std::nothrow) Instance(ep, features);
+        if (inst == nullptr) {
+            ESP_LOGE(TAG, "MeterIdentification instance alloc failed for endpoint %u", ep);
+            continue;
+        }
         if (inst->Init() != CHIP_NO_ERROR) {
             /*
              * Logged, not aborted: this is the same shape
@@ -314,7 +317,7 @@ extern "C" void mt_meter_register_all(void)
              * have done differently and no host-facing signal to raise.
              */
             ESP_LOGE(TAG, "MeterIdentification instance init failed for endpoint %u", ep);
-            inst->~Instance();
+            delete inst;
             continue;
         }
         s_meter[slot].used     = true;

@@ -15,6 +15,7 @@
 #include <cstring>
 #include <new>
 #include <stdio.h>
+#include <vector>
 
 #include <esp_err.h>
 #include <esp_log.h>
@@ -206,6 +207,10 @@
 /* Energy round C2 task 9: the lock-held internals of mt_meter.cpp, which
  * mt_matter_meter_set_identity() below wraps in ChipStackLock. */
 #include "mt_meter.h"
+/* Pay-per-composition round task 2/3: the endpoint -> host-fed-store map and
+ * the shared plain-C store shapes it points at. */
+#include "mt_store_index.h"
+#include "mt_stores.h"
 #include "mt_transport.h"
 
 static const char *TAG = "mt_main";
@@ -1062,9 +1067,9 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
  * directly; no shadow value is kept.
  *
  * Storage: Instance has no default constructor (BitMask<Feature> must be
- * supplied at construction), so a plain static array of Instance is not an
- * option the way s_temp_levels above is. Raw aligned storage plus
- * placement-new gives static allocation with no heap churn.
+ * supplied at construction). Each live AirQuality endpoint gets one heap
+ * Instance from mt_air_quality_register_all() below, boot-long and never
+ * freed; the entry table here is just the by-endpoint lookup over them.
  */
 struct mt_air_quality_entry_t {
     bool used;
@@ -1072,9 +1077,6 @@ struct mt_air_quality_entry_t {
     chip::app::Clusters::AirQuality::Instance *instance;
 };
 static mt_air_quality_entry_t s_air_quality[MT_COMP_MAX_ENDPOINTS];
-
-alignas(chip::app::Clusters::AirQuality::Instance)
-    static uint8_t s_air_quality_storage[MT_COMP_MAX_ENDPOINTS][sizeof(chip::app::Clusters::AirQuality::Instance)];
 
 static mt_air_quality_entry_t *mt_air_quality_find(uint16_t ep)
 {
@@ -1123,10 +1125,14 @@ static void mt_air_quality_register_all(void)
         if (esp_matter::cluster::get(ep, chip::app::Clusters::AirQuality::Id) == nullptr) {
             continue;
         }
-        Instance *inst = new (&s_air_quality_storage[i]) Instance(ep, features);
+        Instance *inst = new (std::nothrow) Instance(ep, features);
+        if (inst == nullptr) {
+            ESP_LOGE(TAG, "AirQuality instance alloc failed for endpoint %u", ep);
+            continue;
+        }
         if (inst->Init() != CHIP_NO_ERROR) {
             ESP_LOGE(TAG, "AirQuality instance init failed for endpoint %u", ep);
-            inst->~Instance();
+            delete inst;
             continue;
         }
         s_air_quality[i].used     = true;
@@ -1782,56 +1788,49 @@ extern "C" int mt_matter_switch_click(uint16_t ep)
  * the protected mEndpoint/mIndex this override reads. One instance serves
  * every endpoint: TemperatureControlAttrAccess::Read() calls Reset(endpoint)
  * then only Next() in a loop to encode the list for whichever endpoint a
- * controller just read, so Next() below scans the per-endpoint store
- * for the entry matching mEndpoint, the same pattern
- * chef/common/clusters/temperature-control/static-supported-temperature-
- * levels.cpp's AppSupportedTemperatureLevelsDelegate uses.
+ * controller just read, so Next() below looks the endpoint's store up
+ * in the index (mt_store_index_find(mEndpoint, 0, MT_STORE_TEMP)), the
+ * same pattern chef/common/clusters/temperature-control/static-supported-
+ * temperature-levels.cpp's AppSupportedTemperatureLevelsDelegate uses.
  */
 
 /*
- * Label store, one slot per live endpoint. Filled by AT+MTTEMPLEVELS
- * (mt_matter_temp_levels_set() below); starts empty every boot, deliberately
- * not persisted (mt_matter.h). "used" rather than a sentinel endpoint id
- * because 0 is a legal-looking value to compare against by accident.
+ * Pay-per-composition round task 4: the label store is now one
+ * mt_temp_levels_store_t (mt_stores.h) calloc'ed per TemperatureLevel-variant
+ * endpoint at rebuild time and recorded in mt_store_index.h under
+ * (ep, MT_STORE_TEMP), replacing the fixed MT_COMP_MAX_ENDPOINTS-deep pool
+ * this used to be. Filled by AT+MTTEMPLEVELS (mt_matter_temp_levels_set()
+ * below); starts empty (count 0) every boot, deliberately not persisted
+ * (mt_matter.h).
  */
-struct mt_temp_level_entry_t {
-    bool    used;
-    uint16_t ep;
-    uint8_t  count;
-    char     labels[MT_TEMP_LEVEL_MAX_COUNT][MT_TEMP_LEVEL_MAX_LEN + 1];
-};
-static mt_temp_level_entry_t s_temp_levels[MT_COMP_MAX_ENDPOINTS];
+static_assert(sizeof(mt_temp_levels_store_t) == 273,
+              "mt_temp_levels_store_t size changed; re-check the C6 store budget");
 
 namespace {
 class HearthTempLevelsDelegate : public chip::app::Clusters::TemperatureControl::SupportedTemperatureLevelsIteratorDelegate {
 public:
     uint8_t Size() override
     {
-        for (auto &e : s_temp_levels) {
-            if (e.used && e.ep == mEndpoint) {
-                return e.count;
-            }
+        auto *store = (mt_temp_levels_store_t *)mt_store_index_find(mEndpoint, 0, MT_STORE_TEMP);
+        if (store == nullptr) {
+            return 0;
         }
-        return 0;
+        return store->count;
     }
 
     CHIP_ERROR Next(chip::MutableCharSpan &item) override
     {
-        for (auto &e : s_temp_levels) {
-            if (e.used && e.ep == mEndpoint) {
-                if (mIndex >= e.count) {
-                    return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
-                }
-                chip::CharSpan label(e.labels[mIndex], strlen(e.labels[mIndex]));
-                CHIP_ERROR err = chip::CopyCharSpanToMutableCharSpan(label, item);
-                if (err != CHIP_NO_ERROR) {
-                    return err;
-                }
-                mIndex++;
-                return CHIP_NO_ERROR;
-            }
+        auto *store = (mt_temp_levels_store_t *)mt_store_index_find(mEndpoint, 0, MT_STORE_TEMP);
+        if (store == nullptr || mIndex >= store->count) {
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        chip::CharSpan label(store->labels[mIndex], strlen(store->labels[mIndex]));
+        CHIP_ERROR err = chip::CopyCharSpanToMutableCharSpan(label, item);
+        if (err != CHIP_NO_ERROR) {
+            return err;
+        }
+        mIndex++;
+        return CHIP_NO_ERROR;
     }
 };
 }  // namespace
@@ -1866,26 +1865,13 @@ extern "C" int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels,
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_temp_level_entry_t *slot = nullptr;
-    for (auto &e : s_temp_levels) {
-        if (e.used && e.ep == ep) {
-            slot = &e;
-            break;
-        }
-    }
-    if (!slot) {
-        for (auto &e : s_temp_levels) {
-            if (!e.used) {
-                slot = &e;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* Cannot happen in practice: the store has one slot per
-         * MT_COMP_MAX_ENDPOINTS, the same cap the composition itself
-         * enforces, so there is always a free or matching slot for a live
-         * endpoint. Kept as a defensive return rather than an assert. */
+    auto *store = (mt_temp_levels_store_t *)mt_store_index_find(ep, 0, MT_STORE_TEMP);
+    if (store == nullptr) {
+        /* Cannot happen in practice: every TemperatureLevel-variant endpoint
+         * gets its store allocated at rebuild time, and the attribute check
+         * above already turned away any endpoint that is not that variant.
+         * Kept as a defensive return rather than an assert, the same not-
+         * present verdict the exhausted pool used to return here. */
         return MT_ATTR_ERR_FAILED;
     }
 
@@ -1894,11 +1880,9 @@ extern "C" int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels,
         if (len < 1 || len > MT_TEMP_LEVEL_MAX_LEN) {
             return MT_ATTR_ERR_FAILED;
         }
-        memcpy(slot->labels[i], labels[i], len + 1);
+        memcpy(store->labels[i], labels[i], len + 1);
     }
-    slot->ep    = ep;
-    slot->count = count;
-    slot->used  = true;
+    store->count = count;
 
     /*
      * Mark the attribute dirty so an active subscription sees the new list.
@@ -1909,7 +1893,8 @@ extern "C" int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels,
      * (e.g. service-area-server.cpp:418); there is no esp_matter equivalent
      * here, because esp_matter::attribute::update() only knows how to push
      * its own internally-managed union value, and this attribute's real
-     * content lives in s_temp_levels, read out through the delegate above.
+     * content lives in the per-endpoint mt_temp_levels_store_t, read out
+     * through the delegate above.
      */
     MatterReportingAttributeChangeCallback(
         ep, chip::app::Clusters::TemperatureControl::Id,
@@ -2128,27 +2113,21 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, handed out in composition
- * order by mk_water_valve() (mt_devtypes.cpp). Static rather than heap: the
- * composition rebuild runs once at boot and the objects must outlive the
- * device, the same shape as s_temp_levels_delegate above but per-endpoint
- * instead of singleton. This is the pool-handout pattern the rest of the
- * seven-type batch (chime; washer/dishwasher/dryer's OperationalState
- * instances) copies.
+ * One HearthValveDelegate per water-valve endpoint, allocated on the heap by
+ * mk_water_valve() (mt_devtypes.cpp) as the composition is built. Boot-long
+ * and never freed: the composition rebuild runs once at boot and the objects
+ * must outlive the device, the same shape as s_temp_levels_delegate above but
+ * per-endpoint instead of singleton. This is the per-endpoint handout pattern
+ * the rest of the seven-type batch (chime; washer/dishwasher/dryer's
+ * OperationalState instances) copies.
  *
  * Exposed to mt_devtypes.cpp, a separate C++ translation unit that must stay
  * free of CHIP/esp_matter delegate types (this file's own header comment),
  * through the opaque void* pair declared in mt_matter.h.
  */
-static HearthValveDelegate s_valve_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t              s_valve_delegate_next = 0;
-
 extern "C" void *mt_matter_valve_delegate_alloc(void)
 {
-    if (s_valve_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
-        return nullptr;
-    }
-    return &s_valve_delegates[s_valve_delegate_next++];
+    return new (std::nothrow) HearthValveDelegate();
 }
 
 extern "C" void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep)
@@ -2229,19 +2208,22 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
  *        ...
  *    };"
  * Nothing in the interface requires static or NVS-backed storage (F2), so a
- * runtime, host-fed store is legal. Backing store: MT_COMP_MAX_ENDPOINTS
- * slots x MT_MODES_MAX_COUNT entries, each holding the u8 mode value, a
- * (MT_MODES_MAX_LABEL_LEN + 1)-byte label buffer, and a ModeOptionStructType
- * whose CharSpan.label points into that same buffer
+ * runtime, host-fed store is legal. Backing store: one mt_mode_store_t per
+ * mode_select endpoint (mt_store_index.h maps endpoint id to it), holding up
+ * to MT_MODES_MAX_COUNT entries, each an mt_mode_entry_t (u8 mode value plus
+ * an (MT_MODES_MAX_LABEL_LEN + 1)-byte label buffer, mt_stores.h) and a
+ * ModeOptionStructType whose CharSpan.label points into that same buffer
  * (ModeSelect/Structs.h:71-81: "chip::CharSpan label; uint8_t mode; ...
  * semanticTags;").
  *
  * CharSpan lifetime: both the label bytes (mt_mode_entry_t::label) and the
- * ModeOptionStructType array (mt_mode_slot_t::structs) are static storage
- * (s_mode_slots below), never heap or stack, so neither is freed while the
- * program runs. The struct array is rebuilt IN PLACE on every AT+MTMODES
- * write to the same slot (mt_matter_modes_set() below), never reallocated or
- * moved, so no CharSpan is ever left pointing at freed memory. The
+ * ModeOptionStructType array (mt_mode_store_t::structs) live in one
+ * calloc'ed allocation made once at endpoint create (app_main's composition
+ * rebuild, before esp_matter::start()) and recorded in the index; the
+ * pointer is never freed and never reallocated while the program runs. The
+ * struct array is rebuilt IN PLACE on every AT+MTMODES write to the same
+ * store (mt_matter_modes_set() below), never reallocated or moved, so no
+ * CharSpan is ever left pointing at freed memory. The
  * two-phase rebuild (copy every entry's bytes first, THEN overwrite the
  * struct array) is still not enough on its own to rule out a reader
  * observing a struct mid-rewrite, pointing at a label only half copied: what
@@ -2266,19 +2248,22 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
  * mDataLen=0, Span.h:46), i.e. List<const SemanticTagStruct::Type>(nullptr,
  * 0).
  */
-struct mt_mode_entry_t {
-    uint8_t mode;
-    char    label[MT_MODES_MAX_LABEL_LEN + 1];
+/* The mode store is the shared plain list (mt_stores.h, mt_mode_list_t) plus
+ * this port's rendered ModeOptionStruct array; the SDK reads structs[] as a
+ * ModeOptionsProvider, and each struct's label CharSpan aliases
+ * list.entries[i].label. Both live in one heap allocation, calloc'ed once at
+ * endpoint create and never freed, so the spans stay valid for the boot
+ * (spec section 5), the same argument the old .bss pool made from static
+ * storage. Looked up per endpoint through mt_store_index_find() rather than
+ * scanned out of a fixed pool; see mt_store_index.h. The former
+ * mt_mode_entry_t local definition is now mt_stores.h's. */
+struct mt_mode_store_t {
+    mt_mode_list_t list;
+    chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type
+        structs[MT_MODES_MAX_COUNT];
 };
-
-struct mt_mode_slot_t {
-    bool     used;
-    uint16_t ep;
-    uint8_t  count;
-    mt_mode_entry_t entries[MT_MODES_MAX_COUNT];
-    chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type structs[MT_MODES_MAX_COUNT];
-};
-static mt_mode_slot_t s_mode_slots[MT_COMP_MAX_ENDPOINTS];
+static_assert(sizeof(mt_mode_store_t) == 436,
+              "mode store size moved; reconcile with mt_stores.h/mt_store_index.h");
 
 class HearthSupportedModesManager : public chip::app::Clusters::ModeSelect::SupportedModesManager
 {
@@ -2299,29 +2284,27 @@ private:
 public:
     ModeOptionsProvider getModeOptionsProvider(chip::EndpointId endpointId) const override
     {
-        for (auto &slot : s_mode_slots) {
-            if (slot.used && slot.ep == endpointId) {
-                return ModeOptionsProvider(slot.structs, slot.structs + slot.count);
-            }
+        auto *store = (mt_mode_store_t *)mt_store_index_find(endpointId, 0, MT_STORE_MODE);
+        if (store == nullptr) {
+            return ModeOptionsProvider();  /* begin == end == nullptr: no entry for this endpoint */
         }
-        return ModeOptionsProvider();  /* begin == end == nullptr: no entry for this endpoint */
+        return ModeOptionsProvider(store->structs, store->structs + store->list.count);
     }
 
     chip::Protocols::InteractionModel::Status getModeOptionByMode(
         chip::EndpointId endpointId, uint8_t mode, const ModeOptionStructType **dataPtr) const override
     {
-        for (auto &slot : s_mode_slots) {
-            if (slot.used && slot.ep == endpointId) {
-                for (uint8_t i = 0; i < slot.count; i++) {
-                    if (slot.structs[i].mode == mode) {
-                        *dataPtr = &slot.structs[i];
-                        return chip::Protocols::InteractionModel::Status::Success;
-                    }
-                }
-                return chip::Protocols::InteractionModel::Status::InvalidCommand;
+        auto *store = (mt_mode_store_t *)mt_store_index_find(endpointId, 0, MT_STORE_MODE);
+        if (store == nullptr) {
+            return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+        }
+        for (uint8_t i = 0; i < store->list.count; i++) {
+            if (store->structs[i].mode == mode) {
+                *dataPtr = &store->structs[i];
+                return chip::Protocols::InteractionModel::Status::Success;
             }
         }
-        return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+        return chip::Protocols::InteractionModel::Status::InvalidCommand;
     }
 };
 static HearthSupportedModesManager s_mode_select_manager;
@@ -2350,23 +2333,10 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_mode_slot_t *slot = nullptr;
-    for (auto &s : s_mode_slots) {
-        if (s.used && s.ep == ep) {
-            slot = &s;
-            break;
-        }
-    }
-    if (!slot) {
-        for (auto &s : s_mode_slots) {
-            if (!s.used) {
-                slot = &s;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* Cannot happen in practice: one slot per MT_COMP_MAX_ENDPOINTS, the
+    auto *store = (mt_mode_store_t *)mt_store_index_find(ep, 0, MT_STORE_MODE);
+    if (store == nullptr) {
+        /* Cannot happen in practice: every endpoint whose device type
+         * carries ModeSelect gets a store at rebuild time (app_main), the
          * same cap the composition itself enforces, same reasoning as
          * mt_matter_temp_levels_set() above. Kept as a defensive return
          * rather than an assert. */
@@ -2378,20 +2348,18 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
         if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
             return MT_ATTR_ERR_FAILED;
         }
-        slot->entries[i].mode = modes[i];
-        memcpy(slot->entries[i].label, labels[i], len + 1);
+        store->list.entries[i].mode = modes[i];
+        memcpy(store->list.entries[i].label, labels[i], len + 1);
     }
-    slot->ep    = ep;
-    slot->count = count;
-    slot->used  = true;
+    store->list.count = count;
 
     /* Rebuild the struct array in place, contiguous, each CharSpan pointing
-     * into the static label buffer above: see the CharSpan-lifetime comment
-     * ahead of this class. */
+     * into the heap-allocated label buffer above: see the CharSpan-lifetime
+     * comment ahead of this class. */
     for (uint8_t i = 0; i < count; i++) {
-        slot->structs[i].mode  = slot->entries[i].mode;
-        slot->structs[i].label = chip::CharSpan::fromCharString(slot->entries[i].label);
-        slot->structs[i].semanticTags =
+        store->structs[i].mode  = store->list.entries[i].mode;
+        store->structs[i].label = chip::CharSpan::fromCharString(store->list.entries[i].label);
+        store->structs[i].semanticTags =
             chip::app::DataModel::List<const chip::app::Clusters::ModeSelect::Structs::SemanticTagStruct::Type>();
     }
 
@@ -2429,11 +2397,19 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
  * GetModeValueByIndex(0, ...) correctly the moment Instance::Init() asks
  * (below), which happens before set_endpoint() can run.
  *
- * Store: MT_MB_MAX_LISTS slots keyed by (ep, cluster), the same shape as
- * s_mode_slots above but with a per-entry uint16_t tag alongside the mode
- * value and label (design spec 3.1's mandatory <tag> field). Full
- * replacement per AT+MTMODES cluster-aware call, RAM only, never persisted:
- * the same not-persisted contract as every other host-fed list in this file
+ * Store: mt_mb_store_t (mt_stores.h), one calloc'ed per (endpoint, cluster)
+ * ModeBase list at rebuild time and recorded in mt_store_index.h under
+ * (ep, cluster, MT_STORE_MB), replacing the fixed-depth pool this used to be
+ * (pay-per-composition round, task 6). The same per-entry
+ * shape as the mode select store above but with a per-entry uint16_t tag
+ * alongside the mode value and label (design spec 3.1's mandatory <tag>
+ * field). The robotic vacuum endpoint gets two of these stores, one for
+ * RvcRunMode and one for RvcCleanMode, which is why the index is sized
+ * 2 * endpoint_count (mt_store_index_init() call at the rebuild loop's
+ * start); every other device type in this firmware attaches at most one
+ * ModeBase cluster and so gets exactly one store. Full replacement per
+ * AT+MTMODES cluster-aware call, RAM only, never persisted: the same
+ * not-persisted contract as every other host-fed list in this file
  * (MTMODES, MTTEMPLEVELS, MTCHIMESOUNDS).
  *
  * Placeholder mode 0: ModeBase::Instance::Init() reads
@@ -2456,27 +2432,16 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
  * passthrough would return it) but is never registered, so reads, writes and
  * commands against that cluster would go unanswered with no diagnostic at
  * all. Quieter, not louder, and correspondingly worse to debug than a boot
- * panic. So an empty slot must still answer index 0: mode 0, the cluster's
- * tag-0 default (design spec section 9's "Tag-0 defaults, exact policy"
- * table), label "Mode0". The moment the host sends the real list the
- * placeholder is superseded; there is no separate "is this the placeholder"
- * flag to clear, find_slot()/the count==0 check below simply prefer a stored
- * entry whenever one exists.
+ * panic. So a nullptr store (no list claimed yet for this (ep, cluster))
+ * must still answer index 0: mode 0, the cluster's tag-0 default (design
+ * spec section 9's "Tag-0 defaults, exact policy" table), label "Mode0".
+ * The moment the host sends the real list the placeholder is superseded;
+ * there is no separate "is this the placeholder" flag to clear, the
+ * delegate methods below simply prefer a stored entry whenever the store
+ * exists and its count is non-zero.
  */
-struct mt_mb_entry_t {
-    uint8_t  mode;
-    uint16_t tag;
-    char     label[MT_MB_MAX_LABEL_LEN + 1];
-};
-
-struct mt_mb_slot_t {
-    bool     used;
-    uint16_t ep;
-    uint32_t cluster;
-    uint8_t  count;
-    mt_mb_entry_t entries[MT_MB_MAX_COUNT];
-};
-static mt_mb_slot_t s_mb_slots[MT_MB_MAX_LISTS];
+static_assert(sizeof(mt_mb_store_t) == 306,
+              "mt_mb_store_t size changed; re-check the C6 store budget");
 
 class HearthModeBaseDelegate : public chip::app::Clusters::ModeBase::Delegate
 {
@@ -2497,34 +2462,34 @@ public:
 
     CHIP_ERROR GetModeLabelByIndex(uint8_t modeIndex, chip::MutableCharSpan &label) override
     {
-        mt_mb_slot_t *slot = find_slot();
-        if (slot == nullptr || slot->count == 0) {
+        auto *store = (mt_mb_store_t *)mt_store_index_find(m_ep, m_cluster, MT_STORE_MB);
+        if (store == nullptr || store->count == 0) {
             if (modeIndex != 0) {
                 return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
             }
             return chip::CopyCharSpanToMutableCharSpan(chip::CharSpan::fromCharString("Mode0"), label);
         }
-        if (modeIndex >= slot->count) {
+        if (modeIndex >= store->count) {
             return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        return chip::CopyCharSpanToMutableCharSpan(chip::CharSpan::fromCharString(slot->entries[modeIndex].label),
+        return chip::CopyCharSpanToMutableCharSpan(chip::CharSpan::fromCharString(store->entries[modeIndex].label),
                                                     label);
     }
 
     CHIP_ERROR GetModeValueByIndex(uint8_t modeIndex, uint8_t &value) override
     {
-        mt_mb_slot_t *slot = find_slot();
-        if (slot == nullptr || slot->count == 0) {
+        auto *store = (mt_mb_store_t *)mt_store_index_find(m_ep, m_cluster, MT_STORE_MB);
+        if (store == nullptr || store->count == 0) {
             if (modeIndex != 0) {
                 return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
             }
             value = 0;
             return CHIP_NO_ERROR;
         }
-        if (modeIndex >= slot->count) {
+        if (modeIndex >= store->count) {
             return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        value = slot->entries[modeIndex].mode;
+        value = store->entries[modeIndex].mode;
         return CHIP_NO_ERROR;
     }
 
@@ -2532,18 +2497,18 @@ public:
         uint8_t modeIndex,
         chip::app::DataModel::List<chip::app::Clusters::detail::Structs::ModeTagStruct::Type> &tags) override
     {
-        mt_mb_slot_t *slot = find_slot();
+        auto *store = (mt_mb_store_t *)mt_store_index_find(m_ep, m_cluster, MT_STORE_MB);
         uint16_t tag_value;
-        if (slot == nullptr || slot->count == 0) {
+        if (store == nullptr || store->count == 0) {
             if (modeIndex != 0) {
                 return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
             }
             tag_value = placeholder_tag();
         } else {
-            if (modeIndex >= slot->count) {
+            if (modeIndex >= store->count) {
                 return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
             }
-            tag_value = slot->entries[modeIndex].tag;
+            tag_value = store->entries[modeIndex].tag;
         }
         /* The SDK hands in a buffer sized for kMaxNumOfModeTags (8); this
          * delegate only ever publishes one tag per mode, so size 1 always
@@ -2586,16 +2551,6 @@ public:
     }
 
 private:
-    mt_mb_slot_t *find_slot() const
-    {
-        for (auto &s : s_mb_slots) {
-            if (s.used && s.ep == m_ep && s.cluster == m_cluster) {
-                return &s;
-            }
-        }
-        return nullptr;
-    }
-
     /* Tag-0 defaults, design spec section 9's exact policy, placeholder case
      * only (index 0 of an otherwise-empty list): RvcRunMode gets kIdle,
      * RvcCleanMode gets kVacuum, MicrowaveOvenMode gets kNormal,
@@ -2665,23 +2620,24 @@ private:
 };
 
 /*
- * Pool of MT_MB_MAX_LISTS delegate objects. mt_devtypes.cpp (Tasks 3-4 of
- * this batch) hands one out per (endpoint, cluster) it creates through
- * mt_matter_modebase_delegate_alloc(cluster_id), the same alloc-before-
- * create shape as every other pool in this file; the cluster id is fixed at
+ * One HearthModeBaseDelegate per (endpoint, cluster) ModeBase list.
+ * mt_devtypes.cpp hands one out per list it creates through
+ * mt_matter_modebase_delegate_alloc(cluster_id), the same alloc-before-create
+ * shape as every other delegate in this file; the cluster id is fixed at
  * alloc time (see the class comment above for why), the endpoint id after
- * create() returns it.
+ * create() returns it. Heap-allocated per list and boot-long; the registry
+ * below is the by-(endpoint, cluster) lookup mt_matter_modebase_set() walks.
  */
-static HearthModeBaseDelegate s_mb_delegates[MT_MB_MAX_LISTS];
-static size_t                 s_mb_delegate_next = 0;
+static std::vector<HearthModeBaseDelegate *> s_mb_delegates;
 
 extern "C" void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
 {
-    if (s_mb_delegate_next >= MT_MB_MAX_LISTS) {
+    HearthModeBaseDelegate *d = new (std::nothrow) HearthModeBaseDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    HearthModeBaseDelegate *d = &s_mb_delegates[s_mb_delegate_next++];
     d->set_cluster(cluster_id);
+    s_mb_delegates.push_back(d);
     return d;
 }
 
@@ -2773,36 +2729,15 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_mb_slot_t *slot = nullptr;
-    for (auto &s : s_mb_slots) {
-        if (s.used && s.ep == ep && s.cluster == cluster) {
-            slot = &s;
-            break;
-        }
-    }
-    if (!slot) {
-        for (auto &s : s_mb_slots) {
-            if (!s.used) {
-                slot = &s;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* MT_MB_MAX_LISTS (mt_matter.h) bounds how many distinct (endpoint,
-         * cluster) ModeBase lists this firmware stores at once; it is
-         * smaller than MT_COMP_MAX_ENDPOINTS (mt_composition.h) - cited by
-         * name rather than value, since both have already moved once across
-         * the RVC/appliance and energy rounds and a number copied into this
-         * comment goes stale exactly when either next changes - so a
-         * composition dense enough in RvcRunMode/RvcCleanMode/
-         * MicrowaveOvenMode/EnergyEvseMode/DeviceEnergyManagementMode
-         * instances CAN exhaust it well under the endpoint cap (the
-         * multiple-ModeBase-clusters-per-endpoint shape several device types
-         * in this firmware use makes that reachable). This return is the
-         * safe fallback for that case: the call is refused with
-         * MT_ATTR_ERR_FAILED rather than silently overwriting an unrelated
-         * (endpoint, cluster) slot. */
+    auto *store = (mt_mb_store_t *)mt_store_index_find(ep, cluster, MT_STORE_MB);
+    if (store == nullptr) {
+        /* Cannot happen in practice: every endpoint whose device type
+         * carries this ModeBase cluster gets a store at rebuild time
+         * (app_main), the cluster::get() check above already having
+         * confirmed the cluster exists on this endpoint, same reasoning as
+         * mt_matter_modes_set() above. Kept as a defensive return rather
+         * than an assert, and the same not-present error the exhausted pool
+         * used to return before this store was indexed by (ep, cluster). */
         return MT_ATTR_ERR_FAILED;
     }
 
@@ -2810,10 +2745,10 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
      * reasons. It matches the nRF54L15 port's ordering, so a doubly
      * malformed list (bad label AND the microwave rule below) returns the
      * same error on both platforms; and the loop below writes
-     * slot->entries[i] as it goes while count/used are only committed
-     * after it, so failing mid-loop on a RE-FED (endpoint, cluster) list
-     * used to overwrite the live list's leading entries and still answer
-     * an error. Validating first closes that window. */
+     * store->entries[i] as it goes while count is only committed after it,
+     * so failing mid-loop on a RE-FED (endpoint, cluster) list used to
+     * overwrite the live list's leading entries and still answer an error.
+     * Validating first closes that window. */
     for (uint8_t i = 0; i < count; i++) {
         size_t len = strlen(labels[i]);
         if (len < 1 || len > MT_MB_MAX_LABEL_LEN) {
@@ -2936,14 +2871,11 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
                 tag = chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
             }
         }
-        slot->entries[i].mode = modes[i];
-        slot->entries[i].tag  = tag;
-        memcpy(slot->entries[i].label, labels[i], len + 1);
+        store->entries[i].mode = modes[i];
+        store->entries[i].tag  = tag;
+        memcpy(store->entries[i].label, labels[i], len + 1);
     }
-    slot->ep      = ep;
-    slot->cluster = cluster;
-    slot->count   = count;
-    slot->used    = true;
+    store->count = count;
 
     MatterReportingAttributeChangeCallback(ep, cluster, ModeBase::Attributes::SupportedModes::Id);
 
@@ -2952,17 +2884,17 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
      * entry. UpdateCurrentMode() reports the CurrentMode change itself
      * (mode-base-server.cpp) when it actually changes, so nothing further is
      * needed here. Skipped rather than failed when the Instance is not
-     * (yet) reachable through the pool: the SupportedModes half of this call
-     * has already succeeded, and an unreachable Instance here would mean
-     * esp_matter::start()'s init-callback pass has not finished, which
-     * cannot happen once mt_at_start() lets any AT+MTMODES call reach this
-     * bridge (the same s_at_up boot-ordering this project relies on
-     * elsewhere). */
-    for (auto &d : s_mb_delegates) {
-        if (d.endpoint() == ep && d.cluster() == cluster) {
-            ModeBase::Instance *inst = d.instance();
+     * (yet) reachable through the s_mb_delegates vector: the SupportedModes
+     * half of this call has already succeeded, and an unreachable Instance
+     * here would mean esp_matter::start()'s init-callback pass has not
+     * finished, which cannot happen once mt_at_start() lets any AT+MTMODES
+     * call reach this bridge (the same s_at_up boot-ordering this project
+     * relies on elsewhere). */
+    for (auto *d : s_mb_delegates) {
+        if (d->endpoint() == ep && d->cluster() == cluster) {
+            ModeBase::Instance *inst = d->instance();
             if (inst != nullptr && !inst->IsSupportedMode(inst->GetCurrentMode())) {
-                inst->UpdateCurrentMode(slot->entries[0].mode);
+                inst->UpdateCurrentMode(store->entries[0].mode);
             }
             break;
         }
@@ -3233,26 +3165,27 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, same shape as
- * s_valve_delegates above: dish_washer/laundry_washer/laundry_dryer, the
- * microwave, and (composed appliance round, task 4) the oven cavity each
- * hand out their own object from this SHARED pool (F7: one delegate object
- * per endpoint, never shared between two Instances - VerifyOrDie above).
- * Exposed to mt_devtypes.cpp through the same opaque void* pair pattern as
- * the valve pool, so that file never has to name HearthOpStateDelegate or
- * any CHIP delegate type. The cluster id is fixed at alloc time (task 4),
- * the same reasoning the ModeBase pool above documents; see mt_matter.h.
+ * One HearthOpStateDelegate per endpoint, same shape as s_mb_delegates
+ * above: dish_washer/laundry_washer/laundry_dryer, the microwave, and
+ * (composed appliance round, task 4) the oven cavity each get their own
+ * heap object (F7: one delegate object per endpoint, never shared between
+ * two Instances - VerifyOrDie above). Exposed to mt_devtypes.cpp through the
+ * same opaque void* pair pattern as the valve delegate, so that file never
+ * has to name HearthOpStateDelegate or any CHIP delegate type. The cluster
+ * id is fixed at alloc time (task 4), the same reasoning the ModeBase
+ * delegate above documents; see mt_matter.h. The registry below is the
+ * by-(endpoint, cluster) lookup find_opstate_instance() walks.
  */
-static HearthOpStateDelegate s_opstate_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t                s_opstate_delegate_next = 0;
+static std::vector<HearthOpStateDelegate *> s_opstate_delegates;
 
 extern "C" void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id)
 {
-    if (s_opstate_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
+    HearthOpStateDelegate *d = new (std::nothrow) HearthOpStateDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    HearthOpStateDelegate *d = &s_opstate_delegates[s_opstate_delegate_next++];
     d->set_cluster(cluster_id);
+    s_opstate_delegates.push_back(d);
     return d;
 }
 
@@ -3269,9 +3202,9 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
 static chip::app::Clusters::OperationalState::Instance *find_opstate_instance(chip::EndpointId ep,
                                                                               chip::ClusterId cluster)
 {
-    for (auto &d : s_opstate_delegates) {
-        if (d.endpoint() == ep && d.cluster() == cluster) {
-            return d.instance();
+    for (auto *d : s_opstate_delegates) {
+        if (d->endpoint() == ep && d->cluster() == cluster) {
+            return d->instance();
         }
     }
     return nullptr;
@@ -3480,21 +3413,21 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, same sizing rationale as
+ * One HearthRvcOpStateDelegate per endpoint, same rationale as
  * s_opstate_delegates above: one delegate OBJECT per endpoint (F7's
  * VerifyOrDie), and an RVC endpoint carries exactly one RvcOperationalState
- * cluster, so the pool is sized by endpoint count, not by the
- * (endpoint, cluster) pair shape the ModeBase pool needs.
+ * cluster. Heap-allocated per endpoint and boot-long; the registry is the
+ * by-endpoint lookup mt_matter_opstate_set()'s RVC branch walks.
  */
-static HearthRvcOpStateDelegate s_rvc_opstate_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t                   s_rvc_opstate_delegate_next = 0;
+static std::vector<HearthRvcOpStateDelegate *> s_rvc_opstate_delegates;
 
 extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
 {
-    if (s_rvc_opstate_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
-        return nullptr;
+    HearthRvcOpStateDelegate *d = new (std::nothrow) HearthRvcOpStateDelegate();
+    if (d != nullptr) {
+        s_rvc_opstate_delegates.push_back(d);
     }
-    return &s_rvc_opstate_delegates[s_rvc_opstate_delegate_next++];
+    return d;
 }
 
 extern "C" void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
@@ -3620,9 +3553,9 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
             return MT_ATTR_ERR_VALUE;
         }
         OperationalState::Instance *inst = nullptr;
-        for (auto &d : s_rvc_opstate_delegates) {
-            if (d.endpoint() == ep) {
-                inst = d.instance();
+        for (auto *d : s_rvc_opstate_delegates) {
+            if (d->endpoint() == ep) {
+                inst = d->instance();
                 break;
             }
         }
@@ -3854,20 +3787,15 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, the same shape as
- * s_opstate_delegates/s_chime_delegates above. Exposed to mt_devtypes.cpp
- * through the same opaque void* pair pattern, so that file never has to name
- * HearthMwocDelegate or any CHIP delegate type.
+ * One HearthMwocDelegate per microwave-oven-control endpoint, heap-allocated
+ * and boot-long, the same shape as s_opstate_delegates/s_chime_delegates
+ * above. Exposed to mt_devtypes.cpp through the same opaque void* pair
+ * pattern, so that file never has to name HearthMwocDelegate or any CHIP
+ * delegate type.
  */
-static HearthMwocDelegate s_mwoc_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t             s_mwoc_delegate_next = 0;
-
 extern "C" void *mt_matter_mwoc_delegate_alloc(void)
 {
-    if (s_mwoc_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
-        return nullptr;
-    }
-    return &s_mwoc_delegates[s_mwoc_delegate_next++];
+    return new (std::nothrow) HearthMwocDelegate();
 }
 
 extern "C" void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
@@ -4118,55 +4046,58 @@ private:
 };
 
 /*
- * The two pools, MT_MEAS_MAX each (mt_matter.h documents the sizing), same
- * alloc-before-create shape as every other pool in this file. One setter
- * serves both pools: the void* the thunk hands back is matched against each
- * pool's own objects, so mt_devtypes.cpp needs neither a second name nor
- * any knowledge of which class it is holding.
+ * One delegate per measurement endpoint, heap-allocated and boot-long, same
+ * alloc-before-create shape as every other delegate in this file. One setter
+ * serves both registries: the void* the thunk hands back is matched against
+ * each registry's own objects, so mt_devtypes.cpp needs neither a second name
+ * nor any knowledge of which class it is holding. The registries are the
+ * by-endpoint lookups the setter and meas_epm_for() walk.
  */
-static HearthEpmDelegate  s_meas_epm_delegates[MT_MEAS_MAX];
-static size_t             s_meas_epm_next = 0;
-static HearthPtopDelegate s_meas_ptop_delegates[MT_MEAS_MAX];
-static size_t             s_meas_ptop_next = 0;
+static std::vector<HearthEpmDelegate *>  s_meas_epm_delegates;
+static std::vector<HearthPtopDelegate *> s_meas_ptop_delegates;
 
 extern "C" void *mt_matter_epm_delegate_alloc(void)
 {
-    if (s_meas_epm_next >= MT_MEAS_MAX) {
+    HearthEpmDelegate *d = new (std::nothrow) HearthEpmDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    return &s_meas_epm_delegates[s_meas_epm_next++];
+    s_meas_epm_delegates.push_back(d);
+    return d;
 }
 
 extern "C" void *mt_matter_ptop_delegate_alloc(void)
 {
-    if (s_meas_ptop_next >= MT_MEAS_MAX) {
+    HearthPtopDelegate *d = new (std::nothrow) HearthPtopDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    return &s_meas_ptop_delegates[s_meas_ptop_next++];
+    s_meas_ptop_delegates.push_back(d);
+    return d;
 }
 
 extern "C" void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep)
 {
-    for (auto &d : s_meas_epm_delegates) {
-        if (&d == delegate) {
-            d.SetEndpointId(ep);
+    for (auto *d : s_meas_epm_delegates) {
+        if (d == delegate) {
+            d->SetEndpointId(ep);
             return;
         }
     }
-    for (auto &d : s_meas_ptop_delegates) {
-        if (&d == delegate) {
-            d.set_endpoint(ep);
+    for (auto *d : s_meas_ptop_delegates) {
+        if (d == delegate) {
+            d->set_endpoint(ep);
             return;
         }
     }
 }
 
-/* The pool lookup mt_matter_meas_set() uses for the EPM branch. */
+/* The registry lookup mt_matter_meas_set() uses for the EPM branch. */
 static HearthEpmDelegate *meas_epm_for(chip::EndpointId ep)
 {
-    for (size_t i = 0; i < s_meas_epm_next; i++) {
-        if (s_meas_epm_delegates[i].endpoint() == ep) {
-            return &s_meas_epm_delegates[i];
+    for (auto *d : s_meas_epm_delegates) {
+        if (d->endpoint() == ep) {
+            return d;
         }
     }
     return nullptr;
@@ -4696,35 +4627,35 @@ public:
 };
 
 /*
- * The pool, MT_WHM_MAX slots (mt_matter.h documents the sizing), same
- * array-plus-next-counter shape as s_meas_epm_delegates above. The one
- * difference from the measurement handout is that the endpoint id is a
- * parameter of the alloc itself: the task brief pins this interface for
- * tasks 2/3, and stamping the id at handout keeps task 3's by-endpoint
- * lookup independent of init-CB timing. The Instance constructor later
- * calls SetEndpointId() with the identical value (see the class comment
- * above); task 2's thunk calls this after create() has returned the real
- * id.
+ * One HearthWhmDelegate per water-heater endpoint, heap-allocated and
+ * boot-long, same per-endpoint handout shape as s_meas_epm_delegates above.
+ * The one difference from the measurement handout is that the endpoint id is
+ * a parameter of the alloc itself: the task brief pins this interface for
+ * tasks 2/3, and stamping the id at handout keeps task 3's by-endpoint lookup
+ * independent of init-CB timing. The Instance constructor later calls
+ * SetEndpointId() with the identical value (see the class comment above);
+ * task 2's thunk calls this after create() has returned the real id. The
+ * registry is the by-endpoint lookup whm_for() walks.
  */
-static HearthWhmDelegate s_whm_delegates[MT_WHM_MAX];
-static size_t            s_whm_next = 0;
+static std::vector<HearthWhmDelegate *> s_whm_delegates;
 
 extern "C" void *mt_matter_whm_delegate_alloc(uint16_t ep)
 {
-    if (s_whm_next >= MT_WHM_MAX) {
+    HearthWhmDelegate *d = new (std::nothrow) HearthWhmDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    HearthWhmDelegate *d = &s_whm_delegates[s_whm_next++];
     d->SetEndpointId(ep);
+    s_whm_delegates.push_back(d);
     return d;
 }
 
-/* The pool lookup mt_meas_whm_apply() uses, the meas_epm_for() shape. */
+/* The registry lookup mt_meas_whm_apply() uses, the meas_epm_for() shape. */
 static HearthWhmDelegate *whm_for(chip::EndpointId ep)
 {
-    for (size_t i = 0; i < s_whm_next; i++) {
-        if (s_whm_delegates[i].endpoint() == ep) {
-            return &s_whm_delegates[i];
+    for (auto *d : s_whm_delegates) {
+        if (d->endpoint() == ep) {
+            return d;
         }
     }
     return nullptr;
@@ -5409,36 +5340,36 @@ private:
 };
 
 /*
- * The pool, MT_DEM_MAX slots (mt_matter.h documents the sizing), the
- * HearthWhmDelegate pool's exact shape: array plus next-counter, endpoint
- * id stamped at handout (the alloc(ep) reasoning in mt_matter.h; the
- * Instance constructor later calls SetEndpointId() with the identical
- * value, see the class comment above). The SDK init CB's static
- * single-Instance pointer (esp_matter_delegate_callbacks.cpp:368-376) is
- * overwritten per endpoint with no Shutdown handle for earlier Instances:
- * benign, delegate lifetimes are boot-long. Task 3's thunk consumes the
- * alloc; task 2's push bridge finds the slot again with dem_for() below.
+ * One HearthDemDelegate per DEM endpoint, heap-allocated and boot-long, the
+ * HearthWhmDelegate handout's exact shape: endpoint id stamped at handout
+ * (the alloc(ep) reasoning in mt_matter.h; the Instance constructor later
+ * calls SetEndpointId() with the identical value, see the class comment
+ * above). The SDK init CB's static single-Instance pointer
+ * (esp_matter_delegate_callbacks.cpp:368-376) is overwritten per endpoint
+ * with no Shutdown handle for earlier Instances: benign, delegate lifetimes
+ * are boot-long. Task 3's thunk consumes the alloc; task 2's push bridge
+ * finds it again with dem_for() below over the registry.
  */
-static HearthDemDelegate s_dem_delegates[MT_DEM_MAX];
-static size_t            s_dem_next = 0;
+static std::vector<HearthDemDelegate *> s_dem_delegates;
 
 extern "C" void *mt_matter_dem_delegate_alloc(uint16_t ep)
 {
-    if (s_dem_next >= MT_DEM_MAX) {
+    HearthDemDelegate *d = new (std::nothrow) HearthDemDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    HearthDemDelegate *d = &s_dem_delegates[s_dem_next++];
     d->SetEndpointId(ep);
+    s_dem_delegates.push_back(d);
     return d;
 }
 
-/* The pool lookup the 0x98 branch and the AT+MTDEMCAP bridge use, the
+/* The registry lookup the 0x98 branch and the AT+MTDEMCAP bridge use, the
  * whm_for() shape. */
 static HearthDemDelegate *dem_for(chip::EndpointId ep)
 {
-    for (size_t i = 0; i < s_dem_next; i++) {
-        if (s_dem_delegates[i].endpoint() == ep) {
-            return &s_dem_delegates[i];
+    for (auto *d : s_dem_delegates) {
+        if (d->endpoint() == ep) {
+            return d;
         }
     }
     return nullptr;
@@ -5965,10 +5896,10 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
  * esp_matter_cluster.cpp: "VerifyOrReturnValue(config != NULL &&
  * config->delegate != nullptr, NULL, ...)") - a trap by pointer, not a
  * VALIDATE_FEATURES macro like the smoke/co alarm's or power source's. The
- * thunk (mt_devtypes.cpp's mk_chime()) hands out a pool slot before create()
- * and fixes its endpoint after, the same before/after shape mk_water_valve()/
- * the OperationalState trio use above; see mt_matter_chime_delegate_alloc()'s
- * doc comment in mt_matter.h.
+ * thunk (mt_devtypes.cpp's mk_chime()) hands out a per-endpoint delegate
+ * before create() and fixes its endpoint after, the same before/after
+ * shape mk_water_valve()/the OperationalState trio use above; see
+ * mt_matter_chime_delegate_alloc()'s doc comment in mt_matter.h.
  *
  * ChimeDelegate has three pure virtuals (ChimeCluster.h, connectedhomeip
  * vendored under esp-matter release/v1.5.1):
@@ -6005,28 +5936,12 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
  * so no +MTCMD is raised for either; a host that has set Enabled false will
  * see PlayChimeSound invokes stop reaching +MTCMD entirely, not fail it.
  */
-struct mt_chime_entry_t {
-    uint8_t id;
-    char    name[MT_CHIME_MAX_NAME_LEN + 1];
-};
-
-struct mt_chime_slot_t {
-    bool    used;
-    uint16_t ep;
-    uint8_t  count;
-    mt_chime_entry_t entries[MT_CHIME_MAX_SOUNDS];
-};
-static mt_chime_slot_t s_chime_slots[MT_COMP_MAX_ENDPOINTS];
-
-static mt_chime_slot_t *mt_chime_find_slot(uint16_t ep)
-{
-    for (auto &s : s_chime_slots) {
-        if (s.used && s.ep == ep) {
-            return &s;
-        }
-    }
-    return nullptr;
-}
+/* mt_chime_entry_t and mt_chime_store_t come from mt_stores.h; the store is
+ * calloc'ed per Chime endpoint and recorded in the index under
+ * (ep, MT_STORE_CHIME), replacing the fixed MT_COMP_MAX_ENDPOINTS-deep pool
+ * this port used to scan (pay-per-composition round task 5). */
+static_assert(sizeof(mt_chime_store_t) == 273,
+             "mt_chime_store_t layout changed; re-check the wire tables");
 
 class HearthChimeDelegate : public chip::app::Clusters::ChimeDelegate
 {
@@ -6036,22 +5951,22 @@ public:
 
     CHIP_ERROR GetChimeSoundByIndex(uint8_t chimeIndex, uint8_t &chimeID, chip::MutableCharSpan &name) override
     {
-        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
-        if (slot == nullptr || chimeIndex >= slot->count) {
+        auto *store = (mt_chime_store_t *)mt_store_index_find(m_ep, 0, MT_STORE_CHIME);
+        if (store == nullptr || chimeIndex >= store->count) {
             return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        chimeID = slot->entries[chimeIndex].id;
-        chip::CharSpan src(slot->entries[chimeIndex].name, strlen(slot->entries[chimeIndex].name));
+        chimeID = store->entries[chimeIndex].id;
+        chip::CharSpan src(store->entries[chimeIndex].name, strlen(store->entries[chimeIndex].name));
         return chip::CopyCharSpanToMutableCharSpan(src, name);
     }
 
     CHIP_ERROR GetChimeIDByIndex(uint8_t chimeIndex, uint8_t &chimeID) override
     {
-        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
-        if (slot == nullptr || chimeIndex >= slot->count) {
+        auto *store = (mt_chime_store_t *)mt_store_index_find(m_ep, 0, MT_STORE_CHIME);
+        if (store == nullptr || chimeIndex >= store->count) {
             return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        chimeID = slot->entries[chimeIndex].id;
+        chimeID = store->entries[chimeIndex].id;
         return CHIP_NO_ERROR;
     }
 
@@ -6073,20 +5988,22 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, the same shape as
- * s_valve_delegates/s_opstate_delegates above. Exposed to mt_devtypes.cpp
- * through the same opaque void* pair pattern, so that file never has to name
- * HearthChimeDelegate or any CHIP delegate type.
+ * One HearthChimeDelegate per chime endpoint, heap-allocated and boot-long,
+ * the same shape as s_opstate_delegates above. Exposed to
+ * mt_devtypes.cpp through the same opaque void* pair pattern, so that file
+ * never has to name HearthChimeDelegate or any CHIP delegate type. The
+ * registry is the by-endpoint lookup mt_chime_register_all() walks.
  */
-static HearthChimeDelegate s_chime_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t              s_chime_delegate_next = 0;
+static std::vector<HearthChimeDelegate *> s_chime_delegates;
 
 extern "C" void *mt_matter_chime_delegate_alloc(void)
 {
-    if (s_chime_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
+    HearthChimeDelegate *d = new (std::nothrow) HearthChimeDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    return &s_chime_delegates[s_chime_delegate_next++];
+    s_chime_delegates.push_back(d);
+    return d;
 }
 
 extern "C" void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep)
@@ -6157,9 +6074,9 @@ static void mt_chime_register_all(void)
             continue;
         }
         HearthChimeDelegate *delegate = nullptr;
-        for (auto &d : s_chime_delegates) {
-            if (d.endpoint() == ep) {
-                delegate = &d;
+        for (auto *d : s_chime_delegates) {
+            if (d->endpoint() == ep) {
+                delegate = d;
                 break;
             }
         }
@@ -6191,20 +6108,13 @@ extern "C" int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_chime_slot_t *slot = mt_chime_find_slot(ep);
-    if (!slot) {
-        for (auto &s : s_chime_slots) {
-            if (!s.used) {
-                slot = &s;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* Cannot happen in practice: one slot per MT_COMP_MAX_ENDPOINTS, the
-         * same cap the composition itself enforces, same reasoning as
-         * mt_matter_temp_levels_set()/mt_matter_modes_set() above. Kept as a
-         * defensive return rather than an assert. */
+    auto *store = (mt_chime_store_t *)mt_store_index_find(ep, 0, MT_STORE_CHIME);
+    if (store == nullptr) {
+        /* Cannot happen in practice: every Chime endpoint gets its store
+         * allocated at rebuild time, and the cluster check above already
+         * turned away any endpoint without one. Kept as a defensive return
+         * rather than an assert, the same not-present verdict the exhausted
+         * pool used to return here. */
         return MT_ATTR_ERR_FAILED;
     }
 
@@ -6213,12 +6123,10 @@ extern "C" int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const
         if (len < 1 || len > MT_CHIME_MAX_NAME_LEN) {
             return MT_ATTR_ERR_FAILED;
         }
-        slot->entries[i].id = ids[i];
-        memcpy(slot->entries[i].name, names[i], len + 1);
+        store->entries[i].id = ids[i];
+        memcpy(store->entries[i].name, names[i], len + 1);
     }
-    slot->ep    = ep;
-    slot->count = count;
-    slot->used  = true;
+    store->count = count;
 
     /*
      * Mark InstalledChimeSounds dirty so an active subscription sees the new
@@ -6663,6 +6571,17 @@ extern "C" void app_main(void)
         comp.count = 0;
     }
 
+    /*
+     * The endpoint -> host-fed-store index (mt_store_index.h), sized 2 per
+     * endpoint: an RVC endpoint carries two ModeBase stores, every other
+     * device type carries at most one store of any kind. Initialised once
+     * here, before any endpoint is created, so every per-endpoint store
+     * allocated below (starting with mode select) has somewhere to go.
+     */
+    if (!mt_store_index_init(2u * comp.count)) {
+        ESP_LOGE(TAG, "store index init failed, aborting rebuild");
+        comp.count = 0;
+    }
 
     for (uint16_t i = 0; i < comp.count; i++) {
         uint16_t ep_id = 0;
@@ -6689,6 +6608,105 @@ extern "C" void app_main(void)
             comp.count = 0;
             break;
         }
+
+        /*
+         * Pay-per-composition round task 3: an endpoint whose device type
+         * attached a ModeSelect cluster gets its host-fed store allocated
+         * right here, calloc'ed once and never freed (see the CharSpan-
+         * lifetime comment ahead of HearthSupportedModesManager above), and
+         * recorded in the index under (ep, MT_STORE_MODE). A failed alloc or
+         * a full index is the same class of failure as a failed endpoint
+         * create: abort the whole rebuild rather than leave a commissioned
+         * device with a ModeSelect cluster and no backing store.
+         */
+        if (esp_matter::cluster::get(ep_id, chip::app::Clusters::ModeSelect::Id) != nullptr) {
+            auto *store = (mt_mode_store_t *)calloc(1, sizeof(mt_mode_store_t));
+            if (store == nullptr || !mt_store_index_add(ep_id, 0, MT_STORE_MODE, store)) {
+                ESP_LOGE(TAG, "mode store alloc failed at endpoint %u", ep_id);
+                comp.count = 0;
+                break;
+            }
+        }
+
+        /*
+         * Pay-per-composition round task 4: same pattern, for the
+         * TemperatureLevel-variant TemperatureControl cabinets (0x0071
+         * variant 1, 0x0077 variant 1). The SupportedTemperatureLevels
+         * attribute only exists on that branch (attribute::
+         * create_supported_temperature_levels() runs only under
+         * feature::temperature_level::add(), esp_matter_feature.cpp; a
+         * TemperatureNumber-variant cabinet has the cluster but not this
+         * attribute), so checking for the attribute rather than the cluster
+         * is what mt_matter_temp_levels_set() already relies on above.
+         */
+        if (esp_matter::attribute::get(ep_id, chip::app::Clusters::TemperatureControl::Id,
+                chip::app::Clusters::TemperatureControl::Attributes::SupportedTemperatureLevels::Id)
+            != nullptr) {
+            auto *store = (mt_temp_levels_store_t *)calloc(1, sizeof(mt_temp_levels_store_t));
+            if (store == nullptr || !mt_store_index_add(ep_id, 0, MT_STORE_TEMP, store)) {
+                ESP_LOGE(TAG, "temp levels store alloc failed at endpoint %u", ep_id);
+                comp.count = 0;
+                break;
+            }
+        }
+
+        /*
+         * Pay-per-composition round task 5: same pattern, for the Chime
+         * cluster (device type 0x0146). mt_chime_register_all() runs later,
+         * during the same pre-start window as the mode select and
+         * temperature level delegates, so the store below is already in the
+         * index by the time HearthChimeDelegate's callbacks can be reached.
+         */
+        if (esp_matter::cluster::get(ep_id, chip::app::Clusters::Chime::Id) != nullptr) {
+            auto *store = (mt_chime_store_t *)calloc(1, sizeof(mt_chime_store_t));
+            if (store == nullptr || !mt_store_index_add(ep_id, 0, MT_STORE_CHIME, store)) {
+                ESP_LOGE(TAG, "chime store alloc failed at endpoint %u", ep_id);
+                comp.count = 0;
+                break;
+            }
+        }
+
+        /*
+         * Pay-per-composition round task 6: same pattern, for the eight
+         * ModeBase-derived clusters, keyed by (endpoint, cluster) rather than
+         * by endpoint alone because the robotic vacuum endpoint carries two
+         * of them at once (RvcRunMode and RvcCleanMode, this composition's
+         * only two-ModeBase-cluster device type). A plain loop over the
+         * fixed list below instead of eight copy-pasted blocks; every other
+         * device type in this firmware attaches at most one of these eight
+         * clusters, so this loop still adds exactly one store for it, or
+         * zero if the endpoint carries none of them.
+         */
+        {
+            static const uint32_t kModeBaseClusters[] = {
+                chip::app::Clusters::RvcRunMode::Id,
+                chip::app::Clusters::RvcCleanMode::Id,
+                chip::app::Clusters::MicrowaveOvenMode::Id,
+                chip::app::Clusters::OvenMode::Id,
+                chip::app::Clusters::WaterHeaterMode::Id,
+                chip::app::Clusters::EnergyEvseMode::Id,
+                chip::app::Clusters::DeviceEnergyManagementMode::Id,
+                chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id,
+            };
+            bool mb_failed = false;
+            for (uint32_t cluster_id : kModeBaseClusters) {
+                if (esp_matter::cluster::get(ep_id, cluster_id) == nullptr) {
+                    continue;
+                }
+                auto *store = (mt_mb_store_t *)calloc(1, sizeof(mt_mb_store_t));
+                if (store == nullptr || !mt_store_index_add(ep_id, cluster_id, MT_STORE_MB, store)) {
+                    ESP_LOGE(TAG, "modebase store alloc failed at endpoint %u cluster 0x%08X",
+                             ep_id, (unsigned)cluster_id);
+                    mb_failed = true;
+                    break;
+                }
+            }
+            if (mb_failed) {
+                comp.count = 0;
+                break;
+            }
+        }
+
         mt_matter_record_endpoint(comp.devtype[i], ep_id, comp.variant[i], comp.parent[i]);
     }
 
