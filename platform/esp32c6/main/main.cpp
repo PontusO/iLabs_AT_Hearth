@@ -1788,10 +1788,10 @@ extern "C" int mt_matter_switch_click(uint16_t ep)
  * the protected mEndpoint/mIndex this override reads. One instance serves
  * every endpoint: TemperatureControlAttrAccess::Read() calls Reset(endpoint)
  * then only Next() in a loop to encode the list for whichever endpoint a
- * controller just read, so Next() below scans the per-endpoint store
- * for the entry matching mEndpoint, the same pattern
- * chef/common/clusters/temperature-control/static-supported-temperature-
- * levels.cpp's AppSupportedTemperatureLevelsDelegate uses.
+ * controller just read, so Next() below looks the endpoint's store up
+ * in the index (mt_store_index_find(mEndpoint, 0, MT_STORE_TEMP)), the
+ * same pattern chef/common/clusters/temperature-control/static-supported-
+ * temperature-levels.cpp's AppSupportedTemperatureLevelsDelegate uses.
  */
 
 /*
@@ -2884,12 +2884,12 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
      * entry. UpdateCurrentMode() reports the CurrentMode change itself
      * (mode-base-server.cpp) when it actually changes, so nothing further is
      * needed here. Skipped rather than failed when the Instance is not
-     * (yet) reachable through the pool: the SupportedModes half of this call
-     * has already succeeded, and an unreachable Instance here would mean
-     * esp_matter::start()'s init-callback pass has not finished, which
-     * cannot happen once mt_at_start() lets any AT+MTMODES call reach this
-     * bridge (the same s_at_up boot-ordering this project relies on
-     * elsewhere). */
+     * (yet) reachable through the s_mb_delegates vector: the SupportedModes
+     * half of this call has already succeeded, and an unreachable Instance
+     * here would mean esp_matter::start()'s init-callback pass has not
+     * finished, which cannot happen once mt_at_start() lets any AT+MTMODES
+     * call reach this bridge (the same s_at_up boot-ordering this project
+     * relies on elsewhere). */
     for (auto *d : s_mb_delegates) {
         if (d->endpoint() == ep && d->cluster() == cluster) {
             ModeBase::Instance *inst = d->instance();
@@ -3165,7 +3165,7 @@ private:
 };
 
 /*
- * One HearthOpStateDelegate per endpoint, same shape as s_valve_delegates
+ * One HearthOpStateDelegate per endpoint, same shape as s_mb_delegates
  * above: dish_washer/laundry_washer/laundry_dryer, the microwave, and
  * (composed appliance round, task 4) the oven cavity each get their own
  * heap object (F7: one delegate object per endpoint, never shared between
@@ -5896,10 +5896,10 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
  * esp_matter_cluster.cpp: "VerifyOrReturnValue(config != NULL &&
  * config->delegate != nullptr, NULL, ...)") - a trap by pointer, not a
  * VALIDATE_FEATURES macro like the smoke/co alarm's or power source's. The
- * thunk (mt_devtypes.cpp's mk_chime()) hands out a pool slot before create()
- * and fixes its endpoint after, the same before/after shape mk_water_valve()/
- * the OperationalState trio use above; see mt_matter_chime_delegate_alloc()'s
- * doc comment in mt_matter.h.
+ * thunk (mt_devtypes.cpp's mk_chime()) hands out a per-endpoint delegate
+ * before create() and fixes its endpoint after, the same before/after
+ * shape mk_water_valve()/the OperationalState trio use above; see
+ * mt_matter_chime_delegate_alloc()'s doc comment in mt_matter.h.
  *
  * ChimeDelegate has three pure virtuals (ChimeCluster.h, connectedhomeip
  * vendored under esp-matter release/v1.5.1):
@@ -5989,7 +5989,7 @@ private:
 
 /*
  * One HearthChimeDelegate per chime endpoint, heap-allocated and boot-long,
- * the same shape as s_valve_delegates/s_opstate_delegates above. Exposed to
+ * the same shape as s_opstate_delegates above. Exposed to
  * mt_devtypes.cpp through the same opaque void* pair pattern, so that file
  * never has to name HearthChimeDelegate or any CHIP delegate type. The
  * registry is the by-endpoint lookup mt_chime_register_all() walks.
