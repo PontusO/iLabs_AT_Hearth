@@ -1,14 +1,14 @@
 {
   "header": {
     "cgmr": "1.1.0",
-    "fw_repo_head": "0e2d222e6748f441f1425ba5cb0907180e6cb93e",
+    "fw_repo_head": "e5c8ce827d7797eaac3c1c9162b8835227f71c9f",
     "manual_code": "34970112332",
     "net": "+MTNET:WIFI,1,0,0",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-09-03T08:18:39+00:00",
+    "timestamp": "2026-09-03T16:24:01+00:00",
     "transport": "WIFI"
   },
   "results": {
