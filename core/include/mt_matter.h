@@ -815,9 +815,13 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep);
 /*
  * The EPM and PowerTopology delegates are allocated per measurement endpoint
  * as the composition is built (pay-per-composition round, task 7), so there
- * is no fixed measurement-endpoint depth any more: the count is bounded only
- * by the composition itself (MT_COMP_MAX_ENDPOINTS, mt_composition.h).
+ * is no fixed measurement-endpoint depth any more on the ESP32-C6: the count
+ * is bounded only by the composition itself (MT_COMP_MAX_ENDPOINTS,
+ * mt_composition.h). The nRF port did not get that round's delegate reclaim
+ * and still enforces MT_MEAS_MAX below as a real family acceptance cap on its
+ * own fixed EPM/PowerTopology delegate pools (mt_matter_zephyr.cpp).
  */
+#define MT_MEAS_MAX 8  /* nRF-only: measurement-capable endpoints per composition */
 
 /*
  * AT+MTMEAS field ids, the wire contract task 3 documents in AT_MT_SPEC.md
@@ -933,10 +937,14 @@ void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
  * The WaterHeaterManagement delegate is allocated per water-heater endpoint
  * as the composition is built (pay-per-composition round, task 7): each is a
  * HearthWhmDelegate (six cached attribute values plus the cached Boost
- * parameters plus vtable), paid for only when the endpoint exists. There is
- * no fixed depth any more; the count is bounded only by the composition
- * itself (MT_COMP_MAX_ENDPOINTS, mt_composition.h).
+ * parameters plus vtable), paid for only when the endpoint exists on the
+ * ESP32-C6. There is no fixed depth any more there; the count is bounded
+ * only by the composition itself (MT_COMP_MAX_ENDPOINTS, mt_composition.h).
+ * The nRF port did not get that round's delegate reclaim and still enforces
+ * MT_WHM_MAX below as a real family acceptance cap on its own fixed WHM
+ * delegate pool (mt_matter_zephyr.cpp).
  */
+#define MT_WHM_MAX 4  /* nRF-only: WaterHeaterManagement endpoints per composition */
 
 /*
  * AT+MTMEAS field ids for the WaterHeaterManagement cluster (0x0094), the
@@ -1009,11 +1017,15 @@ void *mt_matter_whm_delegate_alloc(uint16_t ep);
  * composition is built (pay-per-composition round, task 7): each is a
  * HearthDemDelegate (main.cpp), the largest delegate object here (the cached
  * attribute values plus an owned PowerAdjustCapabilityStruct with a
- * MT_DEM_CAP_MAX_ENTRIES backing array), so allocating per endpoint is the
- * biggest memory win of the round. There is no fixed depth any more; the
- * count is bounded only by the composition itself (MT_COMP_MAX_ENDPOINTS,
- * mt_composition.h).
+ * MT_DEM_CAP_MAX_ENTRIES backing array), so allocating per endpoint on the
+ * ESP32-C6 is the biggest memory win of the round. There is no fixed depth
+ * any more there; the count is bounded only by the composition itself
+ * (MT_COMP_MAX_ENDPOINTS, mt_composition.h). The nRF port did not get that
+ * round's delegate reclaim and still enforces MT_DEM_MAX below as a real
+ * family acceptance cap on its own fixed DEM delegate pool
+ * (mt_matter_zephyr.cpp).
  */
+#define MT_DEM_MAX 4  /* nRF-only: DeviceEnergyManagement endpoints per composition */
 
 /*
  * AT+MTMEAS field ids for the DeviceEnergyManagement cluster (0x0098), the

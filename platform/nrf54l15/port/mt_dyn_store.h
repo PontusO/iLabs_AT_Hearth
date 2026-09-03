@@ -37,6 +37,14 @@
  * sized by. mt_matter.h carries its own extern "C" guards. */
 #include "mt_matter.h"
 
+/* mt_mode_list_t, mt_chime_store_t, mt_mb_store_t and mt_temp_levels_store_t:
+ * the plain-C store shapes, one definition shared with the C6 port. This
+ * header wraps mt_mode_list_t with the CHIP structs[] tail below (that half
+ * is C++ and cannot live in the shared header); the chime, ModeBase and
+ * temperature stores need no wrapping and are used exactly as mt_stores.h
+ * defines them. */
+#include "mt_stores.h"
+
 /*
  * Threading and reporting contract
  * --------------------------------
@@ -94,34 +102,24 @@ bool mt_dyn_attr_slot(chip::EndpointId ep, chip::ClusterId cluster, chip::Attrib
  * wire cannot tell the storage moved.
  *
  * CharSpan lifetime: mt_mode_store_t's structs[] members point at its own
- * entries[] label bytes. Both live in the endpoint's block, which is
+ * list.entries[] label bytes. Both live in the endpoint's block, which is
  * allocated once at boot and never freed (the allocate-only invariant
  * beside K_HEAP_DEFINE), so the spans stay valid for the life of the boot,
  * the same argument the .bss store made from static storage. The in-place
  * rebuild discipline is unchanged: mt_matter_modes_set() rebuilds
  * structs[] under the StackLock it holds across its whole body, and the
  * CHIP-task readers run under that same lock.
+ *
+ * mt_mode_entry_t and mt_mode_list_t (the count + entries[] half) come from
+ * mt_stores.h, the shared plain-C definition; this header wraps that list
+ * with the CHIP structs[] tail, which is C++ and cannot live there.
+ * mt_chime_entry_t and mt_chime_store_t come from mt_stores.h unchanged:
+ * the nRF chime store carries no CHIP-typed half, so it needs no wrapper.
  */
 
-struct mt_mode_entry_t {
-    uint8_t mode;
-    char label[MT_MODES_MAX_LABEL_LEN + 1];
-};
-
 struct mt_mode_store_t {
-    uint8_t count;
-    mt_mode_entry_t entries[MT_MODES_MAX_COUNT];
+    mt_mode_list_t list;
     chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type structs[MT_MODES_MAX_COUNT];
-};
-
-struct mt_chime_entry_t {
-    uint8_t id;
-    char name[MT_CHIME_MAX_NAME_LEN + 1];
-};
-
-struct mt_chime_store_t {
-    uint8_t count;
-    mt_chime_entry_t entries[MT_CHIME_MAX_SOUNDS];
 };
 
 /*
@@ -148,17 +146,11 @@ struct mt_chime_store_t {
  * exists because ModeBase::Instance::Init() reads index 0 before the host
  * could possibly have fed anything. See the delegate in
  * mt_matter_zephyr.cpp.
+ *
+ * mt_mb_entry_t and mt_mb_store_t come from mt_stores.h, the shared
+ * plain-C definition; unchanged here since ModeBase carries no CHIP-typed
+ * half to wrap.
  */
-struct mt_mb_entry_t {
-    uint8_t mode;
-    uint16_t tag;
-    char label[MT_MB_MAX_LABEL_LEN + 1];
-};
-
-struct mt_mb_store_t {
-    uint8_t count;
-    mt_mb_entry_t entries[MT_MB_MAX_COUNT];
-};
 
 /*
  * Catalogue batch 8: the TemperatureControl label store, one per
@@ -167,17 +159,18 @@ struct mt_mb_store_t {
  * port's SupportedTemperatureLevelsIteratorDelegate (mt_matter_zephyr.cpp)
  * iterates it for the SupportedTemperatureLevels attribute.
  *
- * THE NUMBER THAT MUST NOT BE COPIED FROM THE C6. Its store is
- * `mt_temp_level_entry_t s_temp_levels[MT_COMP_MAX_ENDPOINTS]`
+ * THE NUMBER THAT WAS NOT TO BE COPIED FROM THE C6, now acted on: the C6's
+ * pool-era store was `mt_temp_level_entry_t s_temp_levels[MT_COMP_MAX_ENDPOINTS]`
  * (platform/esp32c6/main/main.cpp:1786-1793), 28 slots x (used + ep + count
  * + 16 x 17 label bytes), about 7,728 B of .bss, paid by every composition
  * whether or not it contains a single cabinet. That is roughly a quarter of
- * this port's whole post-reclaim free RAM. This shape is the store-reclaim
- * round's instead: the pool bookkeeping is gone (a store IS its endpoint's,
- * found through the endpoint's block), it is 273 B, and only the endpoints
- * that actually carry the TemperatureLevel variant pay for it. Identical
- * size and shape to mt_chime_store_t above, by coincidence of the bounds
- * rather than by sharing: both are a count byte plus 16 x 17.
+ * this port's whole post-reclaim free RAM. mt_temp_levels_store_t now comes
+ * from mt_stores.h, the single shared definition both ports build against:
+ * the pool bookkeeping is gone (a store IS its endpoint's, found through
+ * the endpoint's block), it is 273 B, and only the endpoints that actually
+ * carry the TemperatureLevel variant pay for it. Identical size and shape
+ * to mt_chime_store_t, by coincidence of the bounds rather than by sharing:
+ * both are a count byte plus 16 x 17.
  *
  * count 0 means the host has not fed a list yet, and unlike the ModeBase
  * store there is no placeholder: an empty list is a legitimate steady state
@@ -187,10 +180,6 @@ struct mt_mb_store_t {
  * index is >= Size(). Not persisted, by the same contract as every other
  * host-fed store here.
  */
-struct mt_temp_levels_store_t {
-    uint8_t count;
-    char labels[MT_TEMP_LEVEL_MAX_COUNT][MT_TEMP_LEVEL_MAX_LEN + 1];
-};
 
 /*
  * Locate ep's mode store / chime store through its block. Returns nullptr
