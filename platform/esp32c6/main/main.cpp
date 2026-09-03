@@ -5976,26 +5976,12 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
  * so no +MTCMD is raised for either; a host that has set Enabled false will
  * see PlayChimeSound invokes stop reaching +MTCMD entirely, not fail it.
  */
-/* mt_chime_entry_t now comes from mt_stores.h (identical layout: id, name),
- * pulled in for the mode select store above; the pool this struct backs is
- * unchanged and still local to this port, pending its own migration task. */
-struct mt_chime_slot_t {
-    bool    used;
-    uint16_t ep;
-    uint8_t  count;
-    mt_chime_entry_t entries[MT_CHIME_MAX_SOUNDS];
-};
-static mt_chime_slot_t s_chime_slots[MT_COMP_MAX_ENDPOINTS];
-
-static mt_chime_slot_t *mt_chime_find_slot(uint16_t ep)
-{
-    for (auto &s : s_chime_slots) {
-        if (s.used && s.ep == ep) {
-            return &s;
-        }
-    }
-    return nullptr;
-}
+/* mt_chime_entry_t and mt_chime_store_t come from mt_stores.h; the store is
+ * calloc'ed per Chime endpoint and recorded in the index under
+ * (ep, MT_STORE_CHIME), replacing the fixed MT_COMP_MAX_ENDPOINTS-deep pool
+ * this port used to scan (pay-per-composition round task 5). */
+static_assert(sizeof(mt_chime_store_t) == 273,
+             "mt_chime_store_t layout changed; re-check the wire tables");
 
 class HearthChimeDelegate : public chip::app::Clusters::ChimeDelegate
 {
@@ -6005,22 +5991,22 @@ public:
 
     CHIP_ERROR GetChimeSoundByIndex(uint8_t chimeIndex, uint8_t &chimeID, chip::MutableCharSpan &name) override
     {
-        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
-        if (slot == nullptr || chimeIndex >= slot->count) {
+        auto *store = (mt_chime_store_t *)mt_store_index_find(m_ep, 0, MT_STORE_CHIME);
+        if (store == nullptr || chimeIndex >= store->count) {
             return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        chimeID = slot->entries[chimeIndex].id;
-        chip::CharSpan src(slot->entries[chimeIndex].name, strlen(slot->entries[chimeIndex].name));
+        chimeID = store->entries[chimeIndex].id;
+        chip::CharSpan src(store->entries[chimeIndex].name, strlen(store->entries[chimeIndex].name));
         return chip::CopyCharSpanToMutableCharSpan(src, name);
     }
 
     CHIP_ERROR GetChimeIDByIndex(uint8_t chimeIndex, uint8_t &chimeID) override
     {
-        mt_chime_slot_t *slot = mt_chime_find_slot(m_ep);
-        if (slot == nullptr || chimeIndex >= slot->count) {
+        auto *store = (mt_chime_store_t *)mt_store_index_find(m_ep, 0, MT_STORE_CHIME);
+        if (store == nullptr || chimeIndex >= store->count) {
             return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        chimeID = slot->entries[chimeIndex].id;
+        chimeID = store->entries[chimeIndex].id;
         return CHIP_NO_ERROR;
     }
 
@@ -6160,20 +6146,13 @@ extern "C" int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_chime_slot_t *slot = mt_chime_find_slot(ep);
-    if (!slot) {
-        for (auto &s : s_chime_slots) {
-            if (!s.used) {
-                slot = &s;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* Cannot happen in practice: one slot per MT_COMP_MAX_ENDPOINTS, the
-         * same cap the composition itself enforces, same reasoning as
-         * mt_matter_temp_levels_set()/mt_matter_modes_set() above. Kept as a
-         * defensive return rather than an assert. */
+    auto *store = (mt_chime_store_t *)mt_store_index_find(ep, 0, MT_STORE_CHIME);
+    if (store == nullptr) {
+        /* Cannot happen in practice: every Chime endpoint gets its store
+         * allocated at rebuild time, and the cluster check above already
+         * turned away any endpoint without one. Kept as a defensive return
+         * rather than an assert, the same not-present verdict the exhausted
+         * pool used to return here. */
         return MT_ATTR_ERR_FAILED;
     }
 
@@ -6182,12 +6161,10 @@ extern "C" int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const
         if (len < 1 || len > MT_CHIME_MAX_NAME_LEN) {
             return MT_ATTR_ERR_FAILED;
         }
-        slot->entries[i].id = ids[i];
-        memcpy(slot->entries[i].name, names[i], len + 1);
+        store->entries[i].id = ids[i];
+        memcpy(store->entries[i].name, names[i], len + 1);
     }
-    slot->ep    = ep;
-    slot->count = count;
-    slot->used  = true;
+    store->count = count;
 
     /*
      * Mark InstalledChimeSounds dirty so an active subscription sees the new
@@ -6706,6 +6683,22 @@ extern "C" void app_main(void)
             auto *store = (mt_temp_levels_store_t *)calloc(1, sizeof(mt_temp_levels_store_t));
             if (store == nullptr || !mt_store_index_add(ep_id, 0, MT_STORE_TEMP, store)) {
                 ESP_LOGE(TAG, "temp levels store alloc failed at endpoint %u", ep_id);
+                comp.count = 0;
+                break;
+            }
+        }
+
+        /*
+         * Pay-per-composition round task 5: same pattern, for the Chime
+         * cluster (device type 0x0146). mt_chime_register_all() runs later,
+         * during the same pre-start window as the mode select and
+         * temperature level delegates, so the store below is already in the
+         * index by the time HearthChimeDelegate's callbacks can be reached.
+         */
+        if (esp_matter::cluster::get(ep_id, chip::app::Clusters::Chime::Id) != nullptr) {
+            auto *store = (mt_chime_store_t *)calloc(1, sizeof(mt_chime_store_t));
+            if (store == nullptr || !mt_store_index_add(ep_id, 0, MT_STORE_CHIME, store)) {
+                ESP_LOGE(TAG, "chime store alloc failed at endpoint %u", ep_id);
                 comp.count = 0;
                 break;
             }
