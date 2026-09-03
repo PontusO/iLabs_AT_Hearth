@@ -18,8 +18,8 @@ the other end of the UART.
 
 | Platform | Module | Transports | Status |
 |---|---|---|---|
-| [`platform/esp32c6/`](platform/esp32c6/) | ESP32-C6 | WiFi, Thread, or runtime-selected combined | **Released 1.0.0**, feature complete, hardware-verified |
-| [`platform/nrf54l15/`](platform/nrf54l15/) | Wurth Ophelia-IV (nRF54L15) | Thread | In development: UART bootloader, persistence, and the Matter commissioning core are bench-proven; the device-type catalogue is growing |
+| [`platform/esp32c6/`](platform/esp32c6/) | ESP32-C6 | WiFi, Thread, or runtime-selected combined | **Released 1.1.0**, feature complete, hardware-verified |
+| [`platform/nrf54l15/`](platform/nrf54l15/) | Wurth Ophelia-IV (nRF54L15), Nordic nRF54L15 DK and nRF54LM20 DK | Thread | In development, not yet released: UART bootloader, persistence, the Matter commissioning core and the full 52-type catalogue are bench-proven on the Ophelia-IV; the two DKs are build targets |
 
 Each platform directory is self-contained and carries its own README with
 requirements, build instructions, flashing, platform-specific measurements
@@ -30,7 +30,7 @@ library, [`iLabs_Hearth`](https://github.com/PontusO/iLabs_Hearth).
 
 ## Status, stated plainly
 
-1.0.0 (ESP32-C6) is released and hardware-verified: the device commissions,
+1.1.0 (ESP32-C6) is released and hardware-verified: the device commissions,
 is controllable from a Matter controller, and the host drives the whole
 lifecycle over `AT+MT`. It is **not** a stability contract (the wire surface
 is not frozen), **not** a product claim (the firmware is uncertified and
@@ -80,12 +80,10 @@ C6's combined image only, runtime stack selection (`AT+MTTRANSPORT`).
 ## Supported device types
 
 `AT+MTEP=<id>` accepts these 52 device type IDs on the ESP32-C6 (firmware
-1.0.0); anything else answers `+MTERR:6`. The nRF54L15 currently serves 20
-of the same catalogue (the lights including the two colour ones, the plugs,
-the simple sensor rows, and the thermostat, fan, window covering and air
-quality sensor; its README carries the exact list and known issues) and
-grows toward parity. `AT_MT_SPEC.md` section 3.9 in the docs repository
-is the authoritative copy.
+1.1.0); anything else answers `+MTERR:6`. The nRF54L15 serves the same 52
+(its README carries the per-batch list, the capacity rules and known
+issues). `AT_MT_SPEC.md` section 3.9 in the docs repository is the
+authoritative copy.
 
 | ID | Device type | | ID | Device type |
 |---|---|---|---|---|

@@ -2,7 +2,7 @@
 
 The original Hearth platform: the ESP-IDF project that implements the two
 port contracts (`hearth_port.h`, `mt_matter.h`) against esp_matter, released
-at 1.0.0. Ships three images: WiFi only, Thread only, and a combined image
+at 1.1.0 (1.0.0 was the feature-complete milestone). Ships three images: WiFi only, Thread only, and a combined image
 that picks its stack at runtime with `AT+MTTRANSPORT`.
 
 The C6 shares its lineage with
