@@ -1067,7 +1067,7 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
  *
  * Storage: Instance has no default constructor (BitMask<Feature> must be
  * supplied at construction), so a plain static array of Instance is not an
- * option the way s_temp_levels above is. Raw aligned storage plus
+ * option the way a POD struct array would be. Raw aligned storage plus
  * placement-new gives static allocation with no heap churn.
  */
 struct mt_air_quality_entry_t {
@@ -1793,49 +1793,42 @@ extern "C" int mt_matter_switch_click(uint16_t ep)
  */
 
 /*
- * Label store, one slot per live endpoint. Filled by AT+MTTEMPLEVELS
- * (mt_matter_temp_levels_set() below); starts empty every boot, deliberately
- * not persisted (mt_matter.h). "used" rather than a sentinel endpoint id
- * because 0 is a legal-looking value to compare against by accident.
+ * Pay-per-composition round task 4: the label store is now one
+ * mt_temp_levels_store_t (mt_stores.h) calloc'ed per TemperatureLevel-variant
+ * endpoint at rebuild time and recorded in mt_store_index.h under
+ * (ep, MT_STORE_TEMP), replacing the fixed MT_COMP_MAX_ENDPOINTS-deep pool
+ * this used to be. Filled by AT+MTTEMPLEVELS (mt_matter_temp_levels_set()
+ * below); starts empty (count 0) every boot, deliberately not persisted
+ * (mt_matter.h).
  */
-struct mt_temp_level_entry_t {
-    bool    used;
-    uint16_t ep;
-    uint8_t  count;
-    char     labels[MT_TEMP_LEVEL_MAX_COUNT][MT_TEMP_LEVEL_MAX_LEN + 1];
-};
-static mt_temp_level_entry_t s_temp_levels[MT_COMP_MAX_ENDPOINTS];
+static_assert(sizeof(mt_temp_levels_store_t) == 273,
+              "mt_temp_levels_store_t size changed; re-check the C6 store budget");
 
 namespace {
 class HearthTempLevelsDelegate : public chip::app::Clusters::TemperatureControl::SupportedTemperatureLevelsIteratorDelegate {
 public:
     uint8_t Size() override
     {
-        for (auto &e : s_temp_levels) {
-            if (e.used && e.ep == mEndpoint) {
-                return e.count;
-            }
+        auto *store = (mt_temp_levels_store_t *)mt_store_index_find(mEndpoint, 0, MT_STORE_TEMP);
+        if (store == nullptr) {
+            return 0;
         }
-        return 0;
+        return store->count;
     }
 
     CHIP_ERROR Next(chip::MutableCharSpan &item) override
     {
-        for (auto &e : s_temp_levels) {
-            if (e.used && e.ep == mEndpoint) {
-                if (mIndex >= e.count) {
-                    return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
-                }
-                chip::CharSpan label(e.labels[mIndex], strlen(e.labels[mIndex]));
-                CHIP_ERROR err = chip::CopyCharSpanToMutableCharSpan(label, item);
-                if (err != CHIP_NO_ERROR) {
-                    return err;
-                }
-                mIndex++;
-                return CHIP_NO_ERROR;
-            }
+        auto *store = (mt_temp_levels_store_t *)mt_store_index_find(mEndpoint, 0, MT_STORE_TEMP);
+        if (store == nullptr || mIndex >= store->count) {
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
         }
-        return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        chip::CharSpan label(store->labels[mIndex], strlen(store->labels[mIndex]));
+        CHIP_ERROR err = chip::CopyCharSpanToMutableCharSpan(label, item);
+        if (err != CHIP_NO_ERROR) {
+            return err;
+        }
+        mIndex++;
+        return CHIP_NO_ERROR;
     }
 };
 }  // namespace
@@ -1870,26 +1863,13 @@ extern "C" int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels,
         return MT_ATTR_ERR_FAILED;
     }
 
-    mt_temp_level_entry_t *slot = nullptr;
-    for (auto &e : s_temp_levels) {
-        if (e.used && e.ep == ep) {
-            slot = &e;
-            break;
-        }
-    }
-    if (!slot) {
-        for (auto &e : s_temp_levels) {
-            if (!e.used) {
-                slot = &e;
-                break;
-            }
-        }
-    }
-    if (!slot) {
-        /* Cannot happen in practice: the store has one slot per
-         * MT_COMP_MAX_ENDPOINTS, the same cap the composition itself
-         * enforces, so there is always a free or matching slot for a live
-         * endpoint. Kept as a defensive return rather than an assert. */
+    auto *store = (mt_temp_levels_store_t *)mt_store_index_find(ep, 0, MT_STORE_TEMP);
+    if (store == nullptr) {
+        /* Cannot happen in practice: every TemperatureLevel-variant endpoint
+         * gets its store allocated at rebuild time, and the attribute check
+         * above already turned away any endpoint that is not that variant.
+         * Kept as a defensive return rather than an assert, the same not-
+         * present verdict the exhausted pool used to return here. */
         return MT_ATTR_ERR_FAILED;
     }
 
@@ -1898,11 +1878,9 @@ extern "C" int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels,
         if (len < 1 || len > MT_TEMP_LEVEL_MAX_LEN) {
             return MT_ATTR_ERR_FAILED;
         }
-        memcpy(slot->labels[i], labels[i], len + 1);
+        memcpy(store->labels[i], labels[i], len + 1);
     }
-    slot->ep    = ep;
-    slot->count = count;
-    slot->used  = true;
+    store->count = count;
 
     /*
      * Mark the attribute dirty so an active subscription sees the new list.
@@ -1913,7 +1891,8 @@ extern "C" int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels,
      * (e.g. service-area-server.cpp:418); there is no esp_matter equivalent
      * here, because esp_matter::attribute::update() only knows how to push
      * its own internally-managed union value, and this attribute's real
-     * content lives in s_temp_levels, read out through the delegate above.
+     * content lives in the per-endpoint mt_temp_levels_store_t, read out
+     * through the delegate above.
      */
     MatterReportingAttributeChangeCallback(
         ep, chip::app::Clusters::TemperatureControl::Id,
@@ -6705,6 +6684,28 @@ extern "C" void app_main(void)
             auto *store = (mt_mode_store_t *)calloc(1, sizeof(mt_mode_store_t));
             if (store == nullptr || !mt_store_index_add(ep_id, 0, MT_STORE_MODE, store)) {
                 ESP_LOGE(TAG, "mode store alloc failed at endpoint %u", ep_id);
+                comp.count = 0;
+                break;
+            }
+        }
+
+        /*
+         * Pay-per-composition round task 4: same pattern, for the
+         * TemperatureLevel-variant TemperatureControl cabinets (0x0071
+         * variant 1, 0x0077 variant 1). The SupportedTemperatureLevels
+         * attribute only exists on that branch (attribute::
+         * create_supported_temperature_levels() runs only under
+         * feature::temperature_level::add(), esp_matter_feature.cpp; a
+         * TemperatureNumber-variant cabinet has the cluster but not this
+         * attribute), so checking for the attribute rather than the cluster
+         * is what mt_matter_temp_levels_set() already relies on above.
+         */
+        if (esp_matter::attribute::get(ep_id, chip::app::Clusters::TemperatureControl::Id,
+                chip::app::Clusters::TemperatureControl::Attributes::SupportedTemperatureLevels::Id)
+            != nullptr) {
+            auto *store = (mt_temp_levels_store_t *)calloc(1, sizeof(mt_temp_levels_store_t));
+            if (store == nullptr || !mt_store_index_add(ep_id, 0, MT_STORE_TEMP, store)) {
+                ESP_LOGE(TAG, "temp levels store alloc failed at endpoint %u", ep_id);
                 comp.count = 0;
                 break;
             }
