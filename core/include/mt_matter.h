@@ -313,12 +313,14 @@ uint8_t mt_matter_lock_source_max(void);
  * never names HearthValveDelegate (main.cpp) or any CHIP type, the same
  * separation mt_air_quality_feature_mask() below keeps for a scalar value.
  *
- * mt_matter_valve_delegate_alloc() returns nullptr once
- * MT_COMP_MAX_ENDPOINTS slots are handed out, so the caller can abort the
- * boot rebuild the same way a failed create() itself would: a failed
- * endpoint create consumes no id, and this firmware aborts the whole
- * composition on any single failure rather than silently skip an entry
- * (see CLAUDE.md, "A failed endpoint::create() consumes no endpoint ID").
+ * mt_matter_valve_delegate_alloc() heap-allocates one delegate per endpoint
+ * (new (std::nothrow), so a genuine heap-exhaustion at boot returns nullptr
+ * rather than aborting: exceptions are disabled) and returns nullptr only on
+ * that allocation failure, so the caller can abort the boot rebuild the same
+ * way a failed create() itself would: a failed endpoint create consumes no
+ * id, and this firmware aborts the whole composition on any single failure
+ * rather than silently skip an entry (see CLAUDE.md, "A failed
+ * endpoint::create() consumes no endpoint ID").
  */
 void *mt_matter_valve_delegate_alloc(void);
 void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep);
@@ -398,30 +400,17 @@ int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *la
 /* ---- ModeBase: RVC run/clean mode, microwave mode (RVC + Microwave batch, task 2) --- */
 
 /*
- * Bounds for AT+MTMODES's cluster-aware form (AT_MT_SPEC.md 3.20). Shared
- * between the handler (mt_at.c, which enforces them before calling the
+ * Grammar bounds for AT+MTMODES's cluster-aware form (AT_MT_SPEC.md 3.20).
+ * Shared between the handler (mt_at.c, which enforces them before calling the
  * bridge below) and the per-(endpoint, cluster) store the bridge writes into
  * (main.cpp), so the two cannot drift apart. MT_MB_MAX_COUNT/
- * MT_MB_MAX_LABEL_LEN mirror MT_MODES_MAX_COUNT/MT_MODES_MAX_LABEL_LEN
- * above; MT_MB_MAX_LISTS is the number of (endpoint, cluster) lists this
- * firmware can store, a distinct axis from MT_COMP_MAX_ENDPOINTS because a
- * single RVC endpoint carries TWO ModeBase clusters at once (RvcRunMode and
- * RvcCleanMode, design spec section 2.1), so the store is keyed by the pair,
- * not by endpoint alone.
+ * MT_MB_MAX_LABEL_LEN mirror MT_MODES_MAX_COUNT/MT_MODES_MAX_LABEL_LEN above.
  *
- * Raised 8 -> 12 for energy round C1 (design spec 2.1): the round's Phase 3
- * composition adds two ModeBase slots (battery storage's DEM Mode and the
- * standalone DEM device's DEM Mode) on top of the eight the RVC/appliance
- * rounds consume. Round C2's EVSE draws two more of its own (EnergyEvseMode
- * plus its DEM Mode), which would have landed the pool at exactly zero
- * headroom. B247 established that exact fit is a defect waiting to happen
- * and C1 deliberately ended the exact-fit era, so this raises to 16 instead
- * of leaving a future round to discover it the hard way. Measured cost
- * (build_b4, WiFi image, this raise in isolation): 12 -> 16 cost 1264 bytes
- * of .bss (316 bytes/slot) and 64 bytes of .data, diffed before and after
- * the constant change with nothing else touched.
+ * There is no separate "lists this firmware can store" bound any more: both
+ * the ModeBase store and the ModeBase delegate are now allocated per
+ * (endpoint, cluster) as the composition is built (pay-per-composition round,
+ * tasks 6-7), so the count of lists is bounded only by the composition itself.
  */
-#define MT_MB_MAX_LISTS     16  /* (endpoint, cluster) lists this firmware can store */
 #define MT_MB_MAX_COUNT     8   /* mode/tag/label triples per list, 1..this many     */
 #define MT_MB_MAX_LABEL_LEN 32  /* bytes per label, excluding the NUL                */
 
@@ -441,10 +430,10 @@ int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *la
  * GetModeValueByIndex(0, ...) before set_endpoint() has any chance to run
  * (see the placeholder-mode reasoning on mt_matter_modebase_set() below).
  *
- * mt_matter_modebase_delegate_alloc() returns nullptr once MT_MB_MAX_LISTS
- * slots are handed out, so the caller aborts the boot rebuild the same way a
- * failed create() itself would (see mt_matter_valve_delegate_alloc()'s
- * comment above for the full reasoning).
+ * mt_matter_modebase_delegate_alloc() heap-allocates one delegate per list
+ * and returns nullptr only if that allocation fails, so the caller aborts the
+ * boot rebuild the same way a failed create() itself would (see
+ * mt_matter_valve_delegate_alloc()'s comment above for the full reasoning).
  */
 void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id);
 void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
@@ -510,14 +499,9 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep);
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
  * MT_ATTR_ERR_CLUSTER when cluster is not one of the ModeBase ids above, or
  * ep has no such cluster, MT_ATTR_ERR_FAILED for a bad count or an internal
- * failure (store exhaustion: MT_MB_MAX_LISTS is smaller than
- * MT_COMP_MAX_ENDPOINTS (mt_composition.h) - cited by name rather than
- * value here, since both have already moved once (8 -> 12 -> 16 across
- * energy rounds C1/C2, 24 -> 28 in the same span) and a number copied into
- * this sentence goes stale exactly when either constant next changes - so a
- * composition with enough ModeBase cluster instances CAN exhaust the store
- * before running out of endpoints; refused with this code rather than
- * silently overwriting an unrelated (endpoint, cluster) slot).
+ * failure (e.g. the per-(endpoint, cluster) store could not be allocated at
+ * composition time; the store is now allocated per composition rather than
+ * drawn from a fixed pool, pay-per-composition round task 6).
  */
 int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
                             const char *const *labels, uint8_t count);
@@ -552,11 +536,11 @@ int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, 
  * RvcOperationalState is NOT in this pool: it needs its own Delegate
  * subclass for GoHome, so it keeps the separate pool below.
  *
- * mt_matter_opstate_delegate_alloc() returns nullptr once
- * MT_COMP_MAX_ENDPOINTS slots are handed out, so the caller aborts the boot
- * rebuild the same way a failed create() itself would (see
+ * mt_matter_opstate_delegate_alloc() heap-allocates one delegate per endpoint
+ * and returns nullptr only if that allocation fails, so the caller aborts the
+ * boot rebuild the same way a failed create() itself would (see
  * mt_matter_valve_delegate_alloc()'s doc comment above for the full
- * reasoning).
+ * reasoning, including the new (std::nothrow) heap-floor contract).
  */
 void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id);
 void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep);
@@ -630,9 +614,11 @@ int mt_matter_opstate_set(uint16_t ep, uint8_t state);
  * OperationalStateDelegateInitCB does for the base OperationalState
  * cluster.
  *
- * mt_matter_rvc_opstate_delegate_alloc() returns nullptr once
- * MT_COMP_MAX_ENDPOINTS slots are handed out, same abort-the-boot-rebuild
- * contract as every other pool in this file.
+ * mt_matter_rvc_opstate_delegate_alloc() heap-allocates one delegate per
+ * endpoint and returns nullptr only if that allocation fails, the same
+ * abort-the-boot-rebuild contract as every other delegate in this file
+ * (new (std::nothrow), so the boot heap floor degrades gracefully rather
+ * than aborting under disabled exceptions).
  */
 void *mt_matter_rvc_opstate_delegate_alloc(void);
 void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep);
@@ -726,10 +712,10 @@ int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value);
  * comment) hands out a slot first with mt_matter_chime_delegate_alloc(),
  * passes it through config.chime.delegate, calls create(), then fixes the
  * real endpoint with mt_matter_chime_delegate_set_endpoint() once it is
- * known. Opaque void*, the same shape as every other pool pair in this
- * header. mt_matter_chime_delegate_alloc() returns nullptr once
- * MT_COMP_MAX_ENDPOINTS slots are handed out, so the caller aborts the boot
- * rebuild the same way a failed create() itself would.
+ * known. Opaque void*, the same shape as every other delegate pair in this
+ * header. mt_matter_chime_delegate_alloc() heap-allocates one delegate per
+ * endpoint and returns nullptr only if that allocation fails, so the caller
+ * aborts the boot rebuild the same way a failed create() itself would.
  */
 void *mt_matter_chime_delegate_alloc(void);
 void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep);
@@ -817,9 +803,9 @@ int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value);
  * above) - the same three-non-null precondition the class comment on
  * HearthMwocDelegate (main.cpp) documents in full.
  *
- * mt_matter_mwoc_delegate_alloc() returns nullptr once MT_COMP_MAX_ENDPOINTS
- * slots are handed out, same abort-the-boot-rebuild contract as every other
- * pool in this file.
+ * mt_matter_mwoc_delegate_alloc() heap-allocates one delegate per endpoint
+ * and returns nullptr only if that allocation fails, same abort-the-boot-
+ * rebuild contract as every other delegate in this file.
  */
 void *mt_matter_mwoc_delegate_alloc(void);
 void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep);
@@ -827,19 +813,11 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep);
 /* ---- electrical measurement (energy round A, task 2) -------------------- */
 
 /*
- * How many measurement-capable endpoints one composition can carry. A
- * deliberate step down from MT_COMP_MAX_ENDPOINTS (28): each slot pairs an
- * ElectricalPowerMeasurement delegate (seven Nullable<int64_t> values plus
- * vtable) with a PowerTopology delegate, the same sizing reasoning
- * MT_MB_MAX_LISTS documents above.
- *
- * Raised 4 -> 8 for energy round C1 (design spec 2.1): Phase 3's four EPM/PT
- * pairs from the electrical rounds consumed the pool exactly, and this round
- * adds two more (solar, battery storage), with one for C2's EVSE and one
- * slot of headroom. Unlike Round B's exact fit, the headroom is deliberate:
- * the pools are proven and the exact-fit experiment is concluded.
+ * The EPM and PowerTopology delegates are allocated per measurement endpoint
+ * as the composition is built (pay-per-composition round, task 7), so there
+ * is no fixed measurement-endpoint depth any more: the count is bounded only
+ * by the composition itself (MT_COMP_MAX_ENDPOINTS, mt_composition.h).
  */
-#define MT_MEAS_MAX 8  /* measurement-capable endpoints per composition */
 
 /*
  * AT+MTMEAS field ids, the wire contract task 3 documents in AT_MT_SPEC.md
@@ -939,11 +917,11 @@ int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
  * esp_matter::cluster::set_delegate_and_init_callback() itself with a null
  * delegate pointer, the HearthOvenModeInitCB precedent.
  *
- * mt_matter_meas_delegate_set_endpoint() accepts a pointer from EITHER pool
- * (it recognises which pool the pointer came from), so the thunk needs no
- * second setter name. Both allocs return nullptr once MT_MEAS_MAX slots are
- * handed out, the same abort-the-boot-rebuild contract as every other pool
- * in this file.
+ * mt_matter_meas_delegate_set_endpoint() accepts a pointer from EITHER
+ * registry (it recognises which one the pointer came from), so the thunk
+ * needs no second setter name. Both allocs heap-allocate one delegate per
+ * endpoint and return nullptr only if that allocation fails, the same
+ * abort-the-boot-rebuild contract as every other delegate in this file.
  */
 void *mt_matter_epm_delegate_alloc(void);
 void *mt_matter_ptop_delegate_alloc(void);
@@ -952,14 +930,13 @@ void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
 /* ---- water heater management (energy round B, task 1) ------------------- */
 
 /*
- * How many WaterHeaterManagement-bearing endpoints one composition can
- * carry. Same deliberate step down from MT_COMP_MAX_ENDPOINTS as MT_MEAS_MAX
- * above, and the same reasoning: each slot is a HearthWhmDelegate (six cached
- * attribute values plus the cached Boost parameters plus vtable), and four
- * water heaters per composition is already beyond any host this firmware
- * targets.
+ * The WaterHeaterManagement delegate is allocated per water-heater endpoint
+ * as the composition is built (pay-per-composition round, task 7): each is a
+ * HearthWhmDelegate (six cached attribute values plus the cached Boost
+ * parameters plus vtable), paid for only when the endpoint exists. There is
+ * no fixed depth any more; the count is bounded only by the composition
+ * itself (MT_COMP_MAX_ENDPOINTS, mt_composition.h).
  */
-#define MT_WHM_MAX 4  /* WaterHeaterManagement endpoints per composition */
 
 /*
  * AT+MTMEAS field ids for the WaterHeaterManagement cluster (0x0094), the
@@ -1018,26 +995,25 @@ void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
  * post-create precedent: esp_matter invokes the callback whenever it is
  * set, esp_matter_data_model.cpp:264-266).
  *
- * Returns nullptr once MT_WHM_MAX slots are handed out, the same
- * abort-the-boot-rebuild contract as every other pool in this file. Task 3's
- * push bridge finds the slot again by endpoint id; task 2 consumes only this
- * alloc.
+ * Heap-allocates one delegate per endpoint and returns nullptr only if that
+ * allocation fails, the same abort-the-boot-rebuild contract as every other
+ * delegate in this file. Task 3's push bridge finds it again by endpoint id;
+ * task 2 consumes only this alloc.
  */
 void *mt_matter_whm_delegate_alloc(uint16_t ep);
 
 /* ---- device energy management (energy round C1, task 1) ------------------ */
 
 /*
- * How many DeviceEnergyManagement-bearing endpoints one composition can
- * carry. Same deliberate step down from MT_COMP_MAX_ENDPOINTS as MT_MEAS_MAX
- * and MT_WHM_MAX above, and the same reasoning: each slot is a
- * HearthDemDelegate (main.cpp), the largest pooled object yet (the cached
+ * The DeviceEnergyManagement delegate is allocated per DEM endpoint as the
+ * composition is built (pay-per-composition round, task 7): each is a
+ * HearthDemDelegate (main.cpp), the largest delegate object here (the cached
  * attribute values plus an owned PowerAdjustCapabilityStruct with a
- * MT_DEM_CAP_MAX_ENTRIES backing array). Sizing (design spec 2.1): battery
- * storage variant 0 and the standalone DEM device each take one in this
- * round's Phase 3, round C2's EVSE pair takes a third, headroom 1.
+ * MT_DEM_CAP_MAX_ENTRIES backing array), so allocating per endpoint is the
+ * biggest memory win of the round. There is no fixed depth any more; the
+ * count is bounded only by the composition itself (MT_COMP_MAX_ENDPOINTS,
+ * mt_composition.h).
  */
-#define MT_DEM_MAX 4  /* DeviceEnergyManagement endpoints per composition */
 
 /*
  * AT+MTMEAS field ids for the DeviceEnergyManagement cluster (0x0098), the
@@ -1096,8 +1072,9 @@ void *mt_matter_whm_delegate_alloc(uint16_t ep);
  * feature::X::add() beforehand, never a FeatureMap write (the iron rule,
  * see HearthDemDelegate's class comment in main.cpp).
  *
- * Returns nullptr once MT_DEM_MAX slots are handed out, the same
- * abort-the-boot-rebuild contract as every other pool in this file.
+ * Heap-allocates one delegate per endpoint and returns nullptr only if that
+ * allocation fails, the same abort-the-boot-rebuild contract as every other
+ * delegate in this file.
  *
  * Consumed-by-task-2 entry points (all main.cpp-side, C++; listed here so
  * the names are pinned): task 2's mt_matter_meas_set() 0x98 branch finds the
@@ -1282,28 +1259,29 @@ int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
  */
 int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total);
 
-/* ---- Energy EVSE / Electrical Utility Meter pools (energy round C2, task 3) --- */
+/* ---- Energy EVSE / Electrical Utility Meter caps (energy round C2, task 3) --- */
 
 /*
- * How many Energy EVSE endpoints one composition can carry. Task 4 sizes
- * HearthEvseDelegate's pool by this constant (main.cpp); this task only
- * reserves the name so mt_devtypes.cpp's thunk can be reviewed against a
- * pool that is already accounted for in mt_matter.h, the same order C1's
- * MT_DEM_MAX shipped in task 1 ahead of task 2's delegate. Headroom over the
- * one EVSE endpoint Phase 3 adds, the C1 policy of deliberate headroom
- * rather than an exact fit (B247).
+ * The Energy EVSE endpoint cap: how many EnergyEvse endpoints one composition
+ * may carry. Unlike the delegate depths the pay-per-composition round (task 7)
+ * retired, this is a real product cap and stays: mt_matter_evse_reserve()
+ * (mt_evse.cpp) rejects the third EVSE endpoint with a clean +MTERR before
+ * anything is built, and the delegate itself is now heap-allocated per
+ * endpoint. Two, the C1 policy of deliberate headroom over the one EVSE
+ * endpoint Phase 3 adds rather than an exact fit (B247).
  */
-#define MT_EVSE_MAX 2  /* EnergyEvse endpoints per composition */
+#define MT_EVSE_MAX 2  /* EnergyEvse endpoints per composition (product cap) */
 
 /*
- * How many Electrical Utility Meter endpoints one composition can carry.
- * Task 8 sizes the MeterIdentification Instance pool this constant bounds
- * (mt_meter.cpp, not main.cpp: reserved by name here in task 3 before task 8
- * decided the implementation earned its own translation unit), the same
- * "name reserved ahead of the consumer" shape as MT_EVSE_MAX above. Headroom
- * over the one meter endpoint Phase 3 adds.
+ * The Electrical Utility Meter endpoint cap, the MT_EVSE_MAX shape one
+ * cluster over: mt_meter_reserve() (mt_meter.cpp) rejects the third meter
+ * endpoint with a clean +MTERR before anything is built, and each meter's
+ * MeterIdentification Instance is now heap-allocated per endpoint (task 7),
+ * looked up through an MT_METER_MAX-sized table. A real product cap, kept for
+ * the same reason MT_EVSE_MAX is. Headroom over the one meter endpoint
+ * Phase 3 adds.
  */
-#define MT_METER_MAX 2  /* Electrical Utility Meter endpoints per composition */
+#define MT_METER_MAX 2  /* Electrical Utility Meter endpoints per composition (product cap) */
 
 /* ---- Meter Identification Instance pool (energy round C2, task 8) ------ */
 

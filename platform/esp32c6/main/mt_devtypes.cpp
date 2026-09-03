@@ -494,7 +494,7 @@ static endpoint_t *mk_water_valve(node_t *n, uint8_t variant)
      */
     void *delegate = mt_matter_valve_delegate_alloc();
     if (delegate == nullptr) {
-        ESP_LOGE(TAG, "water valve delegate pool exhausted");
+        ESP_LOGE(TAG, "water valve delegate allocation failed");
         return nullptr;
     }
     water_valve::config_t c;
@@ -591,7 +591,7 @@ static endpoint_t *mk_laundry_washer(node_t *n, uint8_t variant)
     (void)variant;
     void *delegate = mt_matter_opstate_delegate_alloc(chip::app::Clusters::OperationalState::Id);
     if (delegate == nullptr) {
-        ESP_LOGE(TAG, "operational state delegate pool exhausted");
+        ESP_LOGE(TAG, "operational state delegate allocation failed");
         return nullptr;
     }
     laundry_washer::config_t c;
@@ -610,7 +610,7 @@ static endpoint_t *mk_dish_washer(node_t *n, uint8_t variant)
     (void)variant;
     void *delegate = mt_matter_opstate_delegate_alloc(chip::app::Clusters::OperationalState::Id);
     if (delegate == nullptr) {
-        ESP_LOGE(TAG, "operational state delegate pool exhausted");
+        ESP_LOGE(TAG, "operational state delegate allocation failed");
         return nullptr;
     }
     dish_washer::config_t c;
@@ -629,7 +629,7 @@ static endpoint_t *mk_laundry_dryer(node_t *n, uint8_t variant)
     (void)variant;
     void *delegate = mt_matter_opstate_delegate_alloc(chip::app::Clusters::OperationalState::Id);
     if (delegate == nullptr) {
-        ESP_LOGE(TAG, "operational state delegate pool exhausted");
+        ESP_LOGE(TAG, "operational state delegate allocation failed");
         return nullptr;
     }
     laundry_dryer::config_t c;
@@ -732,7 +732,7 @@ static endpoint_t *mk_chime(node_t *n, uint8_t variant)
     (void)variant;
     void *delegate = mt_matter_chime_delegate_alloc();
     if (delegate == nullptr) {
-        ESP_LOGE(TAG, "chime delegate pool exhausted");
+        ESP_LOGE(TAG, "chime delegate allocation failed");
         return nullptr;
     }
     chime::config_t c;
@@ -831,17 +831,17 @@ static endpoint_t *mk_rvc(node_t *n, uint8_t variant)
     (void)variant;
     void *run_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::RvcRunMode::Id);
     if (run_delegate == nullptr) {
-        ESP_LOGE(TAG, "modebase delegate pool exhausted (rvc run mode)");
+        ESP_LOGE(TAG, "modebase delegate allocation failed (rvc run mode)");
         return nullptr;
     }
     void *clean_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::RvcCleanMode::Id);
     if (clean_delegate == nullptr) {
-        ESP_LOGE(TAG, "modebase delegate pool exhausted (rvc clean mode)");
+        ESP_LOGE(TAG, "modebase delegate allocation failed (rvc clean mode)");
         return nullptr;
     }
     void *opstate_delegate = mt_matter_rvc_opstate_delegate_alloc();
     if (opstate_delegate == nullptr) {
-        ESP_LOGE(TAG, "rvc operational state delegate pool exhausted");
+        ESP_LOGE(TAG, "rvc operational state delegate allocation failed");
         return nullptr;
     }
 
@@ -925,17 +925,17 @@ static endpoint_t *mk_microwave_oven(node_t *n, uint8_t variant)
     (void)variant;
     void *opstate_delegate = mt_matter_opstate_delegate_alloc(chip::app::Clusters::OperationalState::Id);
     if (opstate_delegate == nullptr) {
-        ESP_LOGE(TAG, "operational state delegate pool exhausted (microwave)");
+        ESP_LOGE(TAG, "operational state delegate allocation failed (microwave)");
         return nullptr;
     }
     void *mode_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::MicrowaveOvenMode::Id);
     if (mode_delegate == nullptr) {
-        ESP_LOGE(TAG, "modebase delegate pool exhausted (microwave oven mode)");
+        ESP_LOGE(TAG, "modebase delegate allocation failed (microwave oven mode)");
         return nullptr;
     }
     void *mwoc_delegate = mt_matter_mwoc_delegate_alloc();
     if (mwoc_delegate == nullptr) {
-        ESP_LOGE(TAG, "microwave oven control delegate pool exhausted");
+        ESP_LOGE(TAG, "microwave oven control delegate allocation failed");
         return nullptr;
     }
 
@@ -998,8 +998,8 @@ static endpoint_t *mk_refrigerator(node_t *n, uint8_t variant)
     void *mode_delegate = mt_matter_modebase_delegate_alloc(
         chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id);
     if (mode_delegate == nullptr) {
-        ESP_LOGE(TAG, "modebase delegate pool exhausted (refrigerator mode)");
-        return nullptr; /* pool exhausted; fail clean, the washer precedent */
+        ESP_LOGE(TAG, "modebase delegate allocation failed (refrigerator mode)");
+        return nullptr; /* allocation failed; fail clean, the washer precedent */
     }
     refrigerator::config_t c;
     endpoint_t *ep = refrigerator::create(n, &c, ENDPOINT_FLAG_NONE, nullptr);
@@ -1090,7 +1090,7 @@ static bool mt_cabinet_add_cooler(endpoint_t *ep)
     void *mode_delegate = mt_matter_modebase_delegate_alloc(
         chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id);
     if (mode_delegate == nullptr) {
-        ESP_LOGE(TAG, "modebase delegate pool exhausted (cooler cabinet mode)");
+        ESP_LOGE(TAG, "modebase delegate allocation failed (cooler cabinet mode)");
         return false;
     }
     /* Unlike the node-level thunks, the endpoint already exists here, so its
@@ -1184,13 +1184,13 @@ static bool mt_cabinet_add_heater(endpoint_t *ep)
 
     void *mode_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::OvenMode::Id);
     if (mode_delegate == nullptr) {
-        ESP_LOGE(TAG, "modebase delegate pool exhausted (oven mode)");
+        ESP_LOGE(TAG, "modebase delegate allocation failed (oven mode)");
         return false;
     }
     void *opstate_delegate =
         mt_matter_opstate_delegate_alloc(chip::app::Clusters::OvenCavityOperationalState::Id);
     if (opstate_delegate == nullptr) {
-        ESP_LOGE(TAG, "operational state delegate pool exhausted (oven cavity)");
+        ESP_LOGE(TAG, "operational state delegate allocation failed (oven cavity)");
         return false;
     }
     /* Endpoint already exists, so both delegates can be fixed up before
@@ -1428,12 +1428,12 @@ static endpoint_t *mk_electrical_sensor(node_t *n, uint8_t variant)
 {
     void *epm_delegate = mt_matter_epm_delegate_alloc();
     if (epm_delegate == nullptr) {
-        ESP_LOGE(TAG, "EPM delegate pool exhausted (electrical sensor)");
+        ESP_LOGE(TAG, "EPM delegate allocation failed (electrical sensor)");
         return nullptr;
     }
     void *ptop_delegate = mt_matter_ptop_delegate_alloc();
     if (ptop_delegate == nullptr) {
-        ESP_LOGE(TAG, "PowerTopology delegate pool exhausted (electrical sensor)");
+        ESP_LOGE(TAG, "PowerTopology delegate allocation failed (electrical sensor)");
         return nullptr;
     }
 
@@ -1486,7 +1486,7 @@ static endpoint_t *mk_electrical_meter(node_t *n, uint8_t variant)
 {
     void *epm_delegate = mt_matter_epm_delegate_alloc();
     if (epm_delegate == nullptr) {
-        ESP_LOGE(TAG, "EPM delegate pool exhausted (electrical meter)");
+        ESP_LOGE(TAG, "EPM delegate allocation failed (electrical meter)");
         return nullptr;
     }
 
@@ -1638,7 +1638,7 @@ static endpoint_t *mk_water_heater(node_t *n, uint8_t variant)
 {
     void *mode_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::WaterHeaterMode::Id);
     if (mode_delegate == nullptr) {
-        ESP_LOGE(TAG, "modebase delegate pool exhausted (water heater mode)");
+        ESP_LOGE(TAG, "modebase delegate allocation failed (water heater mode)");
         return nullptr;
     }
 
@@ -1661,7 +1661,7 @@ static endpoint_t *mk_water_heater(node_t *n, uint8_t variant)
 
     void *whm_delegate = mt_matter_whm_delegate_alloc(ep_id);
     if (whm_delegate == nullptr) {
-        ESP_LOGE(TAG, "WHM delegate pool exhausted (water heater)");
+        ESP_LOGE(TAG, "WHM delegate allocation failed (water heater)");
         return nullptr;
     }
     cluster_t *whm_cl = cluster::get(ep, chip::app::Clusters::WaterHeaterManagement::Id);
@@ -1710,12 +1710,12 @@ static endpoint_t *mk_water_heater(node_t *n, uint8_t variant)
          * mk_electrical_sensor() variant-0 sequence on this endpoint. */
         void *epm_delegate = mt_matter_epm_delegate_alloc();
         if (epm_delegate == nullptr) {
-            ESP_LOGE(TAG, "EPM delegate pool exhausted (water heater)");
+            ESP_LOGE(TAG, "EPM delegate allocation failed (water heater)");
             return nullptr;
         }
         void *ptop_delegate = mt_matter_ptop_delegate_alloc();
         if (ptop_delegate == nullptr) {
-            ESP_LOGE(TAG, "PowerTopology delegate pool exhausted (water heater)");
+            ESP_LOGE(TAG, "PowerTopology delegate allocation failed (water heater)");
             return nullptr;
         }
         electrical_sensor::config_t es;
@@ -1801,12 +1801,12 @@ static endpoint_t *mk_heat_pump(node_t *n, uint8_t variant)
     (void)variant;
     void *epm_delegate = mt_matter_epm_delegate_alloc();
     if (epm_delegate == nullptr) {
-        ESP_LOGE(TAG, "EPM delegate pool exhausted (heat pump)");
+        ESP_LOGE(TAG, "EPM delegate allocation failed (heat pump)");
         return nullptr;
     }
     void *ptop_delegate = mt_matter_ptop_delegate_alloc();
     if (ptop_delegate == nullptr) {
-        ESP_LOGE(TAG, "PowerTopology delegate pool exhausted (heat pump)");
+        ESP_LOGE(TAG, "PowerTopology delegate allocation failed (heat pump)");
         return nullptr;
     }
 
@@ -1932,12 +1932,12 @@ static bool mt_graft_electrical_sensor(endpoint_t *ep, bool with_eem, const char
 {
     void *epm_delegate = mt_matter_epm_delegate_alloc();
     if (epm_delegate == nullptr) {
-        ESP_LOGE(TAG, "EPM delegate pool exhausted (%s)", who);
+        ESP_LOGE(TAG, "EPM delegate allocation failed (%s)", who);
         return false;
     }
     void *ptop_delegate = mt_matter_ptop_delegate_alloc();
     if (ptop_delegate == nullptr) {
-        ESP_LOGE(TAG, "PowerTopology delegate pool exhausted (%s)", who);
+        ESP_LOGE(TAG, "PowerTopology delegate allocation failed (%s)", who);
         return false;
     }
     electrical_sensor::config_t es;
@@ -2038,13 +2038,13 @@ static bool mt_add_dem_triple(endpoint_t *ep, bool with_pa, const char *who)
     uint16_t ep_id = endpoint::get_id(ep);
     void *dem_delegate = mt_matter_dem_delegate_alloc(ep_id);
     if (dem_delegate == nullptr) {
-        ESP_LOGE(TAG, "DEM delegate pool exhausted (%s)", who);
+        ESP_LOGE(TAG, "DEM delegate allocation failed (%s)", who);
         return false;
     }
     void *mode_delegate =
         mt_matter_modebase_delegate_alloc(chip::app::Clusters::DeviceEnergyManagementMode::Id);
     if (mode_delegate == nullptr) {
-        ESP_LOGE(TAG, "modebase delegate pool exhausted (%s DEM mode)", who);
+        ESP_LOGE(TAG, "modebase delegate allocation failed (%s DEM mode)", who);
         return false;
     }
     /* Endpoint already exists: fix the ModeBase slot's endpoint immediately,
@@ -2371,11 +2371,12 @@ static endpoint_t *mk_dem(node_t *n, uint8_t variant)
  * This task is the skeleton only, per its own brief.
  *
  * EnergyEvseMode DOES need a delegate before create(), the water_heater_mode
- * shape every ModeBase-bearing endpoint in this file follows: the pool slot
+ * shape every ModeBase-bearing endpoint in this file follows: the delegate
  * is handed out first, the real endpoint id fixed up after create() returns
- * it. This is one of the two ModeBase slots this device type draws (the
- * other is the DEM triple's DEM Mode below), which is why MT_MB_MAX_LISTS
- * needed raising (task 3's own pool step, mt_matter.h).
+ * it. This is one of the two ModeBase delegates this device type draws (the
+ * other is the DEM triple's DEM Mode below); each is now allocated per
+ * (endpoint, cluster) as the composition is built (pay-per-composition round,
+ * mt_matter.h), so there is no fixed pool depth to account for.
  *
  * The mandatory composed Electrical Sensor (EVSE.xml revision 2: a composed
  * 0x0510 carrying BOTH EPM 0x0090 and EEM 0x0091 as mandatory) is grafted
@@ -2428,14 +2429,14 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
      * is never released is safe within a boot.
      */
     if (!mt_matter_evse_reserve()) {
-        ESP_LOGE(TAG, "EVSE delegate pool exhausted (energy evse, MT_EVSE_MAX=%u)",
+        ESP_LOGE(TAG, "EVSE endpoint cap reached (energy evse, MT_EVSE_MAX=%u)",
                  (unsigned)MT_EVSE_MAX);
         return nullptr;
     }
 
     void *mode_delegate = mt_matter_modebase_delegate_alloc(chip::app::Clusters::EnergyEvseMode::Id);
     if (mode_delegate == nullptr) {
-        ESP_LOGE(TAG, "modebase delegate pool exhausted (energy evse mode)");
+        ESP_LOGE(TAG, "modebase delegate allocation failed (energy evse mode)");
         return nullptr;
     }
 
@@ -2524,7 +2525,7 @@ static endpoint_t *mk_energy_evse(node_t *n, uint8_t variant)
 
     void *evse_delegate = mt_matter_evse_delegate_alloc(ep_id);
     if (evse_delegate == nullptr) {
-        ESP_LOGE(TAG, "EVSE delegate pool exhausted (energy evse)");
+        ESP_LOGE(TAG, "EVSE delegate allocation failed (energy evse)");
         return nullptr;
     }
     esp_matter::cluster::set_delegate_and_init_callback(

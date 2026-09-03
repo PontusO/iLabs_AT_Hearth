@@ -15,6 +15,7 @@
 #include <cstring>
 #include <new>
 #include <stdio.h>
+#include <vector>
 
 #include <esp_err.h>
 #include <esp_log.h>
@@ -1066,9 +1067,9 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
  * directly; no shadow value is kept.
  *
  * Storage: Instance has no default constructor (BitMask<Feature> must be
- * supplied at construction), so a plain static array of Instance is not an
- * option the way a POD struct array would be. Raw aligned storage plus
- * placement-new gives static allocation with no heap churn.
+ * supplied at construction). Each live AirQuality endpoint gets one heap
+ * Instance from mt_air_quality_register_all() below, boot-long and never
+ * freed; the entry table here is just the by-endpoint lookup over them.
  */
 struct mt_air_quality_entry_t {
     bool used;
@@ -1076,9 +1077,6 @@ struct mt_air_quality_entry_t {
     chip::app::Clusters::AirQuality::Instance *instance;
 };
 static mt_air_quality_entry_t s_air_quality[MT_COMP_MAX_ENDPOINTS];
-
-alignas(chip::app::Clusters::AirQuality::Instance)
-    static uint8_t s_air_quality_storage[MT_COMP_MAX_ENDPOINTS][sizeof(chip::app::Clusters::AirQuality::Instance)];
 
 static mt_air_quality_entry_t *mt_air_quality_find(uint16_t ep)
 {
@@ -1127,10 +1125,14 @@ static void mt_air_quality_register_all(void)
         if (esp_matter::cluster::get(ep, chip::app::Clusters::AirQuality::Id) == nullptr) {
             continue;
         }
-        Instance *inst = new (&s_air_quality_storage[i]) Instance(ep, features);
+        Instance *inst = new (std::nothrow) Instance(ep, features);
+        if (inst == nullptr) {
+            ESP_LOGE(TAG, "AirQuality instance alloc failed for endpoint %u", ep);
+            continue;
+        }
         if (inst->Init() != CHIP_NO_ERROR) {
             ESP_LOGE(TAG, "AirQuality instance init failed for endpoint %u", ep);
-            inst->~Instance();
+            delete inst;
             continue;
         }
         s_air_quality[i].used     = true;
@@ -2111,27 +2113,21 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, handed out in composition
- * order by mk_water_valve() (mt_devtypes.cpp). Static rather than heap: the
- * composition rebuild runs once at boot and the objects must outlive the
- * device, the same shape as s_temp_levels_delegate above but per-endpoint
- * instead of singleton. This is the pool-handout pattern the rest of the
- * seven-type batch (chime; washer/dishwasher/dryer's OperationalState
- * instances) copies.
+ * One HearthValveDelegate per water-valve endpoint, allocated on the heap by
+ * mk_water_valve() (mt_devtypes.cpp) as the composition is built. Boot-long
+ * and never freed: the composition rebuild runs once at boot and the objects
+ * must outlive the device, the same shape as s_temp_levels_delegate above but
+ * per-endpoint instead of singleton. This is the per-endpoint handout pattern
+ * the rest of the seven-type batch (chime; washer/dishwasher/dryer's
+ * OperationalState instances) copies.
  *
  * Exposed to mt_devtypes.cpp, a separate C++ translation unit that must stay
  * free of CHIP/esp_matter delegate types (this file's own header comment),
  * through the opaque void* pair declared in mt_matter.h.
  */
-static HearthValveDelegate s_valve_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t              s_valve_delegate_next = 0;
-
 extern "C" void *mt_matter_valve_delegate_alloc(void)
 {
-    if (s_valve_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
-        return nullptr;
-    }
-    return &s_valve_delegates[s_valve_delegate_next++];
+    return new (std::nothrow) HearthValveDelegate();
 }
 
 extern "C" void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep)
@@ -2403,8 +2399,8 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
  *
  * Store: mt_mb_store_t (mt_stores.h), one calloc'ed per (endpoint, cluster)
  * ModeBase list at rebuild time and recorded in mt_store_index.h under
- * (ep, cluster, MT_STORE_MB), replacing the fixed MT_MB_MAX_LISTS-deep pool
- * this used to be (pay-per-composition round, task 6). The same per-entry
+ * (ep, cluster, MT_STORE_MB), replacing the fixed-depth pool this used to be
+ * (pay-per-composition round, task 6). The same per-entry
  * shape as the mode select store above but with a per-entry uint16_t tag
  * alongside the mode value and label (design spec 3.1's mandatory <tag>
  * field). The robotic vacuum endpoint gets two of these stores, one for
@@ -2624,23 +2620,24 @@ private:
 };
 
 /*
- * Pool of MT_MB_MAX_LISTS delegate objects. mt_devtypes.cpp (Tasks 3-4 of
- * this batch) hands one out per (endpoint, cluster) it creates through
- * mt_matter_modebase_delegate_alloc(cluster_id), the same alloc-before-
- * create shape as every other pool in this file; the cluster id is fixed at
+ * One HearthModeBaseDelegate per (endpoint, cluster) ModeBase list.
+ * mt_devtypes.cpp hands one out per list it creates through
+ * mt_matter_modebase_delegate_alloc(cluster_id), the same alloc-before-create
+ * shape as every other delegate in this file; the cluster id is fixed at
  * alloc time (see the class comment above for why), the endpoint id after
- * create() returns it.
+ * create() returns it. Heap-allocated per list and boot-long; the registry
+ * below is the by-(endpoint, cluster) lookup mt_matter_modebase_set() walks.
  */
-static HearthModeBaseDelegate s_mb_delegates[MT_MB_MAX_LISTS];
-static size_t                 s_mb_delegate_next = 0;
+static std::vector<HearthModeBaseDelegate *> s_mb_delegates;
 
 extern "C" void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id)
 {
-    if (s_mb_delegate_next >= MT_MB_MAX_LISTS) {
+    HearthModeBaseDelegate *d = new (std::nothrow) HearthModeBaseDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    HearthModeBaseDelegate *d = &s_mb_delegates[s_mb_delegate_next++];
     d->set_cluster(cluster_id);
+    s_mb_delegates.push_back(d);
     return d;
 }
 
@@ -2893,9 +2890,9 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
      * cannot happen once mt_at_start() lets any AT+MTMODES call reach this
      * bridge (the same s_at_up boot-ordering this project relies on
      * elsewhere). */
-    for (auto &d : s_mb_delegates) {
-        if (d.endpoint() == ep && d.cluster() == cluster) {
-            ModeBase::Instance *inst = d.instance();
+    for (auto *d : s_mb_delegates) {
+        if (d->endpoint() == ep && d->cluster() == cluster) {
+            ModeBase::Instance *inst = d->instance();
             if (inst != nullptr && !inst->IsSupportedMode(inst->GetCurrentMode())) {
                 inst->UpdateCurrentMode(store->entries[0].mode);
             }
@@ -3168,26 +3165,27 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, same shape as
- * s_valve_delegates above: dish_washer/laundry_washer/laundry_dryer, the
- * microwave, and (composed appliance round, task 4) the oven cavity each
- * hand out their own object from this SHARED pool (F7: one delegate object
- * per endpoint, never shared between two Instances - VerifyOrDie above).
- * Exposed to mt_devtypes.cpp through the same opaque void* pair pattern as
- * the valve pool, so that file never has to name HearthOpStateDelegate or
- * any CHIP delegate type. The cluster id is fixed at alloc time (task 4),
- * the same reasoning the ModeBase pool above documents; see mt_matter.h.
+ * One HearthOpStateDelegate per endpoint, same shape as s_valve_delegates
+ * above: dish_washer/laundry_washer/laundry_dryer, the microwave, and
+ * (composed appliance round, task 4) the oven cavity each get their own
+ * heap object (F7: one delegate object per endpoint, never shared between
+ * two Instances - VerifyOrDie above). Exposed to mt_devtypes.cpp through the
+ * same opaque void* pair pattern as the valve delegate, so that file never
+ * has to name HearthOpStateDelegate or any CHIP delegate type. The cluster
+ * id is fixed at alloc time (task 4), the same reasoning the ModeBase
+ * delegate above documents; see mt_matter.h. The registry below is the
+ * by-(endpoint, cluster) lookup find_opstate_instance() walks.
  */
-static HearthOpStateDelegate s_opstate_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t                s_opstate_delegate_next = 0;
+static std::vector<HearthOpStateDelegate *> s_opstate_delegates;
 
 extern "C" void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id)
 {
-    if (s_opstate_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
+    HearthOpStateDelegate *d = new (std::nothrow) HearthOpStateDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    HearthOpStateDelegate *d = &s_opstate_delegates[s_opstate_delegate_next++];
     d->set_cluster(cluster_id);
+    s_opstate_delegates.push_back(d);
     return d;
 }
 
@@ -3204,9 +3202,9 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
 static chip::app::Clusters::OperationalState::Instance *find_opstate_instance(chip::EndpointId ep,
                                                                               chip::ClusterId cluster)
 {
-    for (auto &d : s_opstate_delegates) {
-        if (d.endpoint() == ep && d.cluster() == cluster) {
-            return d.instance();
+    for (auto *d : s_opstate_delegates) {
+        if (d->endpoint() == ep && d->cluster() == cluster) {
+            return d->instance();
         }
     }
     return nullptr;
@@ -3415,21 +3413,17 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, same sizing rationale as
+ * One HearthRvcOpStateDelegate per endpoint, same rationale as
  * s_opstate_delegates above: one delegate OBJECT per endpoint (F7's
  * VerifyOrDie), and an RVC endpoint carries exactly one RvcOperationalState
- * cluster, so the pool is sized by endpoint count, not by the
- * (endpoint, cluster) pair shape the ModeBase pool needs.
+ * cluster. Heap-allocated per endpoint and boot-long; the registry is the
+ * by-endpoint lookup mt_matter_opstate_set()'s RVC branch walks.
  */
-static HearthRvcOpStateDelegate s_rvc_opstate_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t                   s_rvc_opstate_delegate_next = 0;
+static std::vector<HearthRvcOpStateDelegate *> s_rvc_opstate_delegates;
 
 extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
 {
-    if (s_rvc_opstate_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
-        return nullptr;
-    }
-    return &s_rvc_opstate_delegates[s_rvc_opstate_delegate_next++];
+    return new (std::nothrow) HearthRvcOpStateDelegate();
 }
 
 extern "C" void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
@@ -3555,9 +3549,9 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
             return MT_ATTR_ERR_VALUE;
         }
         OperationalState::Instance *inst = nullptr;
-        for (auto &d : s_rvc_opstate_delegates) {
-            if (d.endpoint() == ep) {
-                inst = d.instance();
+        for (auto *d : s_rvc_opstate_delegates) {
+            if (d->endpoint() == ep) {
+                inst = d->instance();
                 break;
             }
         }
@@ -3789,20 +3783,15 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, the same shape as
- * s_opstate_delegates/s_chime_delegates above. Exposed to mt_devtypes.cpp
- * through the same opaque void* pair pattern, so that file never has to name
- * HearthMwocDelegate or any CHIP delegate type.
+ * One HearthMwocDelegate per microwave-oven-control endpoint, heap-allocated
+ * and boot-long, the same shape as s_opstate_delegates/s_chime_delegates
+ * above. Exposed to mt_devtypes.cpp through the same opaque void* pair
+ * pattern, so that file never has to name HearthMwocDelegate or any CHIP
+ * delegate type.
  */
-static HearthMwocDelegate s_mwoc_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t             s_mwoc_delegate_next = 0;
-
 extern "C" void *mt_matter_mwoc_delegate_alloc(void)
 {
-    if (s_mwoc_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
-        return nullptr;
-    }
-    return &s_mwoc_delegates[s_mwoc_delegate_next++];
+    return new (std::nothrow) HearthMwocDelegate();
 }
 
 extern "C" void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
@@ -4053,55 +4042,58 @@ private:
 };
 
 /*
- * The two pools, MT_MEAS_MAX each (mt_matter.h documents the sizing), same
- * alloc-before-create shape as every other pool in this file. One setter
- * serves both pools: the void* the thunk hands back is matched against each
- * pool's own objects, so mt_devtypes.cpp needs neither a second name nor
- * any knowledge of which class it is holding.
+ * One delegate per measurement endpoint, heap-allocated and boot-long, same
+ * alloc-before-create shape as every other delegate in this file. One setter
+ * serves both registries: the void* the thunk hands back is matched against
+ * each registry's own objects, so mt_devtypes.cpp needs neither a second name
+ * nor any knowledge of which class it is holding. The registries are the
+ * by-endpoint lookups the setter and meas_epm_for() walk.
  */
-static HearthEpmDelegate  s_meas_epm_delegates[MT_MEAS_MAX];
-static size_t             s_meas_epm_next = 0;
-static HearthPtopDelegate s_meas_ptop_delegates[MT_MEAS_MAX];
-static size_t             s_meas_ptop_next = 0;
+static std::vector<HearthEpmDelegate *>  s_meas_epm_delegates;
+static std::vector<HearthPtopDelegate *> s_meas_ptop_delegates;
 
 extern "C" void *mt_matter_epm_delegate_alloc(void)
 {
-    if (s_meas_epm_next >= MT_MEAS_MAX) {
+    HearthEpmDelegate *d = new (std::nothrow) HearthEpmDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    return &s_meas_epm_delegates[s_meas_epm_next++];
+    s_meas_epm_delegates.push_back(d);
+    return d;
 }
 
 extern "C" void *mt_matter_ptop_delegate_alloc(void)
 {
-    if (s_meas_ptop_next >= MT_MEAS_MAX) {
+    HearthPtopDelegate *d = new (std::nothrow) HearthPtopDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    return &s_meas_ptop_delegates[s_meas_ptop_next++];
+    s_meas_ptop_delegates.push_back(d);
+    return d;
 }
 
 extern "C" void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep)
 {
-    for (auto &d : s_meas_epm_delegates) {
-        if (&d == delegate) {
-            d.SetEndpointId(ep);
+    for (auto *d : s_meas_epm_delegates) {
+        if (d == delegate) {
+            d->SetEndpointId(ep);
             return;
         }
     }
-    for (auto &d : s_meas_ptop_delegates) {
-        if (&d == delegate) {
-            d.set_endpoint(ep);
+    for (auto *d : s_meas_ptop_delegates) {
+        if (d == delegate) {
+            d->set_endpoint(ep);
             return;
         }
     }
 }
 
-/* The pool lookup mt_matter_meas_set() uses for the EPM branch. */
+/* The registry lookup mt_matter_meas_set() uses for the EPM branch. */
 static HearthEpmDelegate *meas_epm_for(chip::EndpointId ep)
 {
-    for (size_t i = 0; i < s_meas_epm_next; i++) {
-        if (s_meas_epm_delegates[i].endpoint() == ep) {
-            return &s_meas_epm_delegates[i];
+    for (auto *d : s_meas_epm_delegates) {
+        if (d->endpoint() == ep) {
+            return d;
         }
     }
     return nullptr;
@@ -4631,35 +4623,35 @@ public:
 };
 
 /*
- * The pool, MT_WHM_MAX slots (mt_matter.h documents the sizing), same
- * array-plus-next-counter shape as s_meas_epm_delegates above. The one
- * difference from the measurement handout is that the endpoint id is a
- * parameter of the alloc itself: the task brief pins this interface for
- * tasks 2/3, and stamping the id at handout keeps task 3's by-endpoint
- * lookup independent of init-CB timing. The Instance constructor later
- * calls SetEndpointId() with the identical value (see the class comment
- * above); task 2's thunk calls this after create() has returned the real
- * id.
+ * One HearthWhmDelegate per water-heater endpoint, heap-allocated and
+ * boot-long, same per-endpoint handout shape as s_meas_epm_delegates above.
+ * The one difference from the measurement handout is that the endpoint id is
+ * a parameter of the alloc itself: the task brief pins this interface for
+ * tasks 2/3, and stamping the id at handout keeps task 3's by-endpoint lookup
+ * independent of init-CB timing. The Instance constructor later calls
+ * SetEndpointId() with the identical value (see the class comment above);
+ * task 2's thunk calls this after create() has returned the real id. The
+ * registry is the by-endpoint lookup whm_for() walks.
  */
-static HearthWhmDelegate s_whm_delegates[MT_WHM_MAX];
-static size_t            s_whm_next = 0;
+static std::vector<HearthWhmDelegate *> s_whm_delegates;
 
 extern "C" void *mt_matter_whm_delegate_alloc(uint16_t ep)
 {
-    if (s_whm_next >= MT_WHM_MAX) {
+    HearthWhmDelegate *d = new (std::nothrow) HearthWhmDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    HearthWhmDelegate *d = &s_whm_delegates[s_whm_next++];
     d->SetEndpointId(ep);
+    s_whm_delegates.push_back(d);
     return d;
 }
 
-/* The pool lookup mt_meas_whm_apply() uses, the meas_epm_for() shape. */
+/* The registry lookup mt_meas_whm_apply() uses, the meas_epm_for() shape. */
 static HearthWhmDelegate *whm_for(chip::EndpointId ep)
 {
-    for (size_t i = 0; i < s_whm_next; i++) {
-        if (s_whm_delegates[i].endpoint() == ep) {
-            return &s_whm_delegates[i];
+    for (auto *d : s_whm_delegates) {
+        if (d->endpoint() == ep) {
+            return d;
         }
     }
     return nullptr;
@@ -5344,36 +5336,36 @@ private:
 };
 
 /*
- * The pool, MT_DEM_MAX slots (mt_matter.h documents the sizing), the
- * HearthWhmDelegate pool's exact shape: array plus next-counter, endpoint
- * id stamped at handout (the alloc(ep) reasoning in mt_matter.h; the
- * Instance constructor later calls SetEndpointId() with the identical
- * value, see the class comment above). The SDK init CB's static
- * single-Instance pointer (esp_matter_delegate_callbacks.cpp:368-376) is
- * overwritten per endpoint with no Shutdown handle for earlier Instances:
- * benign, delegate lifetimes are boot-long. Task 3's thunk consumes the
- * alloc; task 2's push bridge finds the slot again with dem_for() below.
+ * One HearthDemDelegate per DEM endpoint, heap-allocated and boot-long, the
+ * HearthWhmDelegate handout's exact shape: endpoint id stamped at handout
+ * (the alloc(ep) reasoning in mt_matter.h; the Instance constructor later
+ * calls SetEndpointId() with the identical value, see the class comment
+ * above). The SDK init CB's static single-Instance pointer
+ * (esp_matter_delegate_callbacks.cpp:368-376) is overwritten per endpoint
+ * with no Shutdown handle for earlier Instances: benign, delegate lifetimes
+ * are boot-long. Task 3's thunk consumes the alloc; task 2's push bridge
+ * finds it again with dem_for() below over the registry.
  */
-static HearthDemDelegate s_dem_delegates[MT_DEM_MAX];
-static size_t            s_dem_next = 0;
+static std::vector<HearthDemDelegate *> s_dem_delegates;
 
 extern "C" void *mt_matter_dem_delegate_alloc(uint16_t ep)
 {
-    if (s_dem_next >= MT_DEM_MAX) {
+    HearthDemDelegate *d = new (std::nothrow) HearthDemDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    HearthDemDelegate *d = &s_dem_delegates[s_dem_next++];
     d->SetEndpointId(ep);
+    s_dem_delegates.push_back(d);
     return d;
 }
 
-/* The pool lookup the 0x98 branch and the AT+MTDEMCAP bridge use, the
+/* The registry lookup the 0x98 branch and the AT+MTDEMCAP bridge use, the
  * whm_for() shape. */
 static HearthDemDelegate *dem_for(chip::EndpointId ep)
 {
-    for (size_t i = 0; i < s_dem_next; i++) {
-        if (s_dem_delegates[i].endpoint() == ep) {
-            return &s_dem_delegates[i];
+    for (auto *d : s_dem_delegates) {
+        if (d->endpoint() == ep) {
+            return d;
         }
     }
     return nullptr;
@@ -5992,20 +5984,22 @@ private:
 };
 
 /*
- * Pool of MT_COMP_MAX_ENDPOINTS delegate objects, the same shape as
- * s_valve_delegates/s_opstate_delegates above. Exposed to mt_devtypes.cpp
- * through the same opaque void* pair pattern, so that file never has to name
- * HearthChimeDelegate or any CHIP delegate type.
+ * One HearthChimeDelegate per chime endpoint, heap-allocated and boot-long,
+ * the same shape as s_valve_delegates/s_opstate_delegates above. Exposed to
+ * mt_devtypes.cpp through the same opaque void* pair pattern, so that file
+ * never has to name HearthChimeDelegate or any CHIP delegate type. The
+ * registry is the by-endpoint lookup mt_chime_register_all() walks.
  */
-static HearthChimeDelegate s_chime_delegates[MT_COMP_MAX_ENDPOINTS];
-static size_t              s_chime_delegate_next = 0;
+static std::vector<HearthChimeDelegate *> s_chime_delegates;
 
 extern "C" void *mt_matter_chime_delegate_alloc(void)
 {
-    if (s_chime_delegate_next >= MT_COMP_MAX_ENDPOINTS) {
+    HearthChimeDelegate *d = new (std::nothrow) HearthChimeDelegate();
+    if (d == nullptr) {
         return nullptr;
     }
-    return &s_chime_delegates[s_chime_delegate_next++];
+    s_chime_delegates.push_back(d);
+    return d;
 }
 
 extern "C" void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep)
@@ -6076,9 +6070,9 @@ static void mt_chime_register_all(void)
             continue;
         }
         HearthChimeDelegate *delegate = nullptr;
-        for (auto &d : s_chime_delegates) {
-            if (d.endpoint() == ep) {
-                delegate = &d;
+        for (auto *d : s_chime_delegates) {
+            if (d->endpoint() == ep) {
+                delegate = d;
                 break;
             }
         }
