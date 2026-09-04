@@ -15,7 +15,7 @@
 /*  Firmware identity                                                  */
 /* ------------------------------------------------------------------ */
 
-#define MT_FW_VERSION       "1.1.0"
+#define MT_FW_VERSION       "1.2.0"
 #define MT_MANUFACTURER     "iLabs Electronics"
 /* The model string is NOT here: it names the co-processor, so it is a
  * platform fact and each port answers its own via hearth_port_model()
