@@ -1244,6 +1244,14 @@ extern "C" bool mt_matter_evse_reserve(void)
         return false;
     }
     /*
+     * Move the registry's one growth allocation to this known point: the
+     * push_back in mt_matter_evse_delegate_alloc() below would otherwise
+     * grow the vector mid-rebuild, and a failing grow is abort() under
+     * -fno-exceptions. MT_EVSE_MAX is the hard ceiling, so this reserves
+     * once and is a no-op on the second and third reserve.
+     */
+    s_evse_delegates.reserve(MT_EVSE_MAX);
+    /*
      * Commit the inbound row staging buffer here too (ruling DE419,
      * mt_at.h's mt_rows_inbound_commit()). This endpoint's SetTargets is
      * the only fabric-originated command in this firmware that carries

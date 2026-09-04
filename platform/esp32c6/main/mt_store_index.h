@@ -25,8 +25,11 @@ typedef enum {
 } mt_store_kind_t;
 
 /* Allocate the index for `capacity` entries. Call once at the start of the
- * rebuild with 2 * endpoint_count (an RVC endpoint carries two MB stores;
- * every other type carries at most one store). Returns false if already
+ * rebuild with 2 * endpoint_count: an endpoint carries at most two host-fed
+ * stores (an RVC carries RvcRunMode and RvcCleanMode; an EVSE carries
+ * EnergyEvseMode plus, when it is a DEM endpoint, DeviceEnergyManagementMode;
+ * a level-variant cabinet carries temperature levels plus its cabinet mode),
+ * so 2 * endpoint_count is the ceiling. Returns false if already
  * initialised or the allocation fails. */
 bool mt_store_index_init(size_t capacity);
 

@@ -392,8 +392,9 @@ void *mt_matter_mode_select_manager(void);
  *
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
  * MT_ATTR_ERR_CLUSTER when ep has no ModeSelect cluster, MT_ATTR_ERR_FAILED
- * for an internal failure (store exhaustion; cannot happen in practice, one
- * slot per MT_COMP_MAX_ENDPOINTS, same reasoning as the temp-levels store).
+ * for an internal failure (the per-endpoint mode store was not allocated at
+ * rebuild, i.e. the boot heap floor was hit; every mode-select endpoint the
+ * composition created otherwise has its own store).
  */
 int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels, uint8_t count);
 
@@ -749,9 +750,9 @@ void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep);
  *
  * Returns an mt_attr_result_t: MT_ATTR_ERR_ENDPOINT for an unknown ep,
  * MT_ATTR_ERR_CLUSTER when ep has no Chime cluster, MT_ATTR_ERR_FAILED for a
- * bad count or an internal failure (store exhaustion; cannot happen in
- * practice, one slot per MT_COMP_MAX_ENDPOINTS, same reasoning as the
- * temp-levels/modes stores).
+ * bad count or an internal failure (the per-chime-endpoint store was not
+ * allocated at rebuild, i.e. the boot heap floor was hit; every chime
+ * endpoint the composition created otherwise has its own store).
  */
 int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const char *const *names, uint8_t count);
 
@@ -1137,7 +1138,8 @@ void *mt_matter_dem_delegate_alloc(uint16_t ep);
  * MT_ATTR_ERR_CLUSTER no DeviceEnergyManagement cluster on ep,
  * MT_ATTR_ERR_ATTRIBUTE PowerAdjustment feature absent (variant 1),
  * MT_ATTR_ERR_VALUE cause out of enum range or an entry mis-ordered,
- * MT_ATTR_ERR_FAILED internal (no pool slot serves ep).
+ * MT_ATTR_ERR_FAILED internal (the endpoint's DEM delegate was not
+ * allocated at rebuild).
  */
 int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *quads);
 

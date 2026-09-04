@@ -2295,7 +2295,12 @@ public:
         chip::EndpointId endpointId, uint8_t mode, const ModeOptionStructType **dataPtr) const override
     {
         auto *store = (mt_mode_store_t *)mt_store_index_find(endpointId, 0, MT_STORE_MODE);
-        if (store == nullptr) {
+        if (store == nullptr || store->list.count == 0) {
+            /* count 0 lands here, NOT in the InvalidCommand arm below: an
+             * endpoint the host has not fed yet has an empty SupportedModes
+             * list, and a ChangeToMode against it must answer
+             * UnsupportedCluster, exactly as the pool era did (and the nRF
+             * still does) before the store was allocated at create. */
             return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
         }
         for (uint8_t i = 0; i < store->list.count; i++) {
@@ -6573,8 +6578,10 @@ extern "C" void app_main(void)
 
     /*
      * The endpoint -> host-fed-store index (mt_store_index.h), sized 2 per
-     * endpoint: an RVC endpoint carries two ModeBase stores, every other
-     * device type carries at most one store of any kind. Initialised once
+     * endpoint: an endpoint carries at most two host-fed stores (an RVC
+     * carries two ModeBase stores; an EVSE carries EnergyEvseMode plus, as a
+     * DEM endpoint, DeviceEnergyManagementMode; a level-variant cabinet
+     * carries temperature levels plus its cabinet mode). Initialised once
      * here, before any endpoint is created, so every per-endpoint store
      * allocated below (starting with mode select) has somewhere to go.
      */
@@ -6582,6 +6589,26 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "store index init failed, aborting rebuild");
         comp.count = 0;
     }
+
+    /*
+     * Reserve each per-endpoint delegate registry once, here, so the only
+     * growth allocation each vector would otherwise make (the push_back
+     * beside every new (std::nothrow) delegate below) happens at this known
+     * point instead of racing the boot heap floor mid-rebuild. A push_back
+     * that had to grow calls std::__throw_bad_alloc(), which is abort()
+     * under -fno-exceptions, the exact failure the stop-at-failure rebuild
+     * contract removes for the delegate objects themselves. comp.count is
+     * the endpoint ceiling; s_mb_delegates alone can hold two per endpoint
+     * (an RVC carries both RvcRunMode and RvcCleanMode).
+     */
+    s_mb_delegates.reserve(2u * comp.count);
+    s_opstate_delegates.reserve(comp.count);
+    s_rvc_opstate_delegates.reserve(comp.count);
+    s_meas_epm_delegates.reserve(comp.count);
+    s_meas_ptop_delegates.reserve(comp.count);
+    s_whm_delegates.reserve(comp.count);
+    s_dem_delegates.reserve(comp.count);
+    s_chime_delegates.reserve(comp.count);
 
     for (uint16_t i = 0; i < comp.count; i++) {
         uint16_t ep_id = 0;
