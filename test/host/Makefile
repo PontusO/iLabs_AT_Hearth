@@ -30,7 +30,16 @@ boundary:
 	@! /usr/bin/grep -rnE '#include .*(freertos|FreeRTOS|esp_|nvs|sdkconfig|driver/|zephyr|sl_|em_|gecko|nvm3|SEGGER|rail_)' $(CORE) \
 	  || (echo "SDK header inside core/" && exit 1)
 
-run: all boundary
+SILABS_PORT = ../../platform/silabs/port
+
+# Compile the Silabs skeleton's pure-C files against core/ headers on the
+# host. Catches a signature drift between the stubs and the headers before
+# a toolchain exists to link them.
+silabs-stubs:
+	$(CC) $(CFLAGS) -fsyntax-only -I$(CORE)/include $(SILABS_PORT)/mt_matter_stub.c
+	$(CC) $(CFLAGS) -fsyntax-only -I$(CORE)/include $(SILABS_PORT)/mt_devtypes_stub.c
+
+run: all boundary silabs-stubs
 	./test_mt_composition
 	./test_mt_transport
 	./test_mt_cmdbox
@@ -41,4 +50,4 @@ run: all boundary
 clean:
 	rm -f $(TESTS)
 
-.PHONY: all run clean boundary
+.PHONY: all run clean boundary silabs-stubs
