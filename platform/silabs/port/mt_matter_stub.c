@@ -56,7 +56,7 @@ int mt_matter_transport_mismatch(void) { return 0; }
 int mt_matter_thread_info(mt_thread_info_t *out)
 {
     if (out != NULL) memset(out, 0, sizeof(*out));
-    return -1;
+    return MT_ATTR_ERR_CLUSTER;
 }
 
 const char *mt_thread_role_name(uint8_t role) { (void)role; return NULL; }
