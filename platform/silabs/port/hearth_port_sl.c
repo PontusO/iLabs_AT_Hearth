@@ -2,7 +2,7 @@
  * hearth_port_sl.c - hearth_port.h and hearth_log.h on the Simplicity SDK:
  * FreeRTOS for tasks and semaphores, EUSART0 on PA05/PA06 for the AT link
  * (interrupt-driven RX into hearth_ring, blocking TX), NVM3 for the
- * key-value store, emlib CORE critical sections. Modelled on
+ * key-value store, emlib CORE atomic sections. Modelled on
  * platform/nrf54l15/port/hearth_port_zephyr.c; where this file differs the
  * comment says why.
  */
@@ -28,6 +28,7 @@
 #include "hearth_log.h"
 #include "hearth_port.h"
 #include "hearth_ring.h"
+#include "mt_rows.h"    /* mt_row_stage_t; core header, SDK-free */
 
 /* ---- identity ------------------------------------------------------ *
  * The model names the co-processor the host sees (AT+CGMM). Selected on
@@ -64,37 +65,45 @@ void hearth_os_restart(void)
  * "at most two live" is the pool's size. NULL when both slots are taken. */
 #define STAGE_SLOTS 2
 #define STAGE_BYTES 5632   /* >= sizeof(mt_row_stage_t) (5,608 today); int64 aligned */
+_Static_assert(sizeof(mt_row_stage_t) <= STAGE_BYTES,
+              "grow STAGE_BYTES: mt_row_stage_t no longer fits a staging slot");
 static uint8_t s_stage_pool[STAGE_SLOTS][STAGE_BYTES] __attribute__((aligned(8)));
 static bool    s_stage_used[STAGE_SLOTS];
+
+/* Atomic (BASEPRI), not critical (PRIMASK): this is a radio SoC, and a
+ * critical section masks the RAIL radio interrupt Thread's timing depends
+ * on. These sections are a handful of instructions, well within what an
+ * atomic section is meant to guard, and RAIL keeps running through them. */
 
 void *hearth_stage_alloc(size_t bytes)
 {
     if (bytes > STAGE_BYTES) return NULL;
     void *block = NULL;
-    CORE_DECLARE_IRQ_STATE;
-    CORE_ENTER_CRITICAL();
+    CORE_atomicState_t crit = CORE_EnterAtomic();
     for (int i = 0; i < STAGE_SLOTS; i++) {
         if (!s_stage_used[i]) { s_stage_used[i] = true; block = s_stage_pool[i]; break; }
     }
-    CORE_EXIT_CRITICAL();
+    CORE_ExitAtomic(crit);
     return block;
 }
 
 void hearth_stage_free(void *block)
 {
     if (block == NULL) return;
-    CORE_DECLARE_IRQ_STATE;
-    CORE_ENTER_CRITICAL();
+    CORE_atomicState_t crit = CORE_EnterAtomic();
     for (int i = 0; i < STAGE_SLOTS; i++) {
-        if (block == s_stage_pool[i]) s_stage_used[i] = false;
+        if (block == s_stage_pool[i]) { s_stage_used[i] = false; break; }
     }
-    CORE_EXIT_CRITICAL();
+    CORE_ExitAtomic(crit);
 }
 
 /* ---- tasks / semaphores -------------------------------------------- */
 int hearth_os_task_spawn(const char *name, void (*fn)(void *), void *arg,
                          uint32_t stack_bytes, unsigned prio)
 {
+    /* prio is deliberately ignored: hearth_port.h defines no priority
+     * semantics for a spawned task, and the Zephyr port hardcodes its
+     * own priority the same way. */
     (void)prio;
     BaseType_t ok = xTaskCreate(fn, name, stack_bytes / sizeof(StackType_t), arg,
                                 tskIDLE_PRIORITY + 2, NULL);
@@ -111,15 +120,19 @@ bool hearth_sem_take(hearth_sem_t sem, uint32_t timeout_ms)
 void hearth_sem_give(hearth_sem_t sem) { xSemaphoreGive((SemaphoreHandle_t)sem); }
 
 /* ---- critical sections ------------------------------------------------ *
- * CORE_ENTER_CRITICAL masks interrupts and needs no init, so it is usable
- * from the first instruction, before the scheduler runs, and from an ISR:
- * exactly what the header asks for (URCs can fire from stack callbacks
- * before any init). One saved state per well-known id; the core never
- * nests a section with itself. */
-static CORE_irqState_t s_crit_state[HEARTH_CRIT_COUNT];
+ * CORE_EnterAtomic/CORE_ExitAtomic (BASEPRI), not CORE_EnterCritical
+ * (PRIMASK): this is a radio SoC, and HEARTH_CRIT_ROWS in particular wraps
+ * row-array work, not two instructions, for long enough that masking
+ * PRIMASK would stall the RAIL radio interrupt Thread's timing depends on.
+ * Atomic sections need no init, so they are usable from the first
+ * instruction, before the scheduler runs, and from an ISR: exactly what
+ * the header asks for (URCs can fire from stack callbacks before any
+ * init). One saved state per well-known id; the core never nests a
+ * section with itself. */
+static CORE_atomicState_t s_crit_state[HEARTH_CRIT_COUNT];
 
-void hearth_crit_enter(int id) { s_crit_state[id] = CORE_EnterCritical(); }
-void hearth_crit_exit(int id)  { CORE_ExitCritical(s_crit_state[id]); }
+void hearth_crit_enter(int id) { s_crit_state[id] = CORE_EnterAtomic(); }
+void hearth_crit_exit(int id)  { CORE_ExitAtomic(s_crit_state[id]); }
 
 /* ---- link: EUSART0 on PA05 (TX) / PA06 (RX) ------------------------ *
  * RX is interrupt-driven into a ring: the parser task never touches the
@@ -144,10 +157,16 @@ static int               s_baud = 115200;
 void EUSART0_RX_IRQHandler(void)
 {
     BaseType_t woken = pdFALSE;
+    /* Clear the pending flag before draining (the standard Silabs
+     * ordering), not after: a byte arriving between a last STATUS.RXFL
+     * poll and a trailing IntClear would have its own pending flag wiped
+     * by that clear and sit in the FIFO until the next byte, stalling a
+     * command's terminating newline. Clearing first means a byte that
+     * arrives mid-drain re-sets the flag and this handler runs again. */
+    EUSART_IntClear(AT_EUSART, EUSART_IF_RXFL);
     while (AT_EUSART->STATUS & EUSART_STATUS_RXFL) {
         (void)hearth_ring_put(&s_rx_ring, (uint8_t)AT_EUSART->RXDATA);
     }
-    EUSART_IntClear(AT_EUSART, EUSART_IF_RXFL);
     xSemaphoreGiveFromISR(s_rx_sem, &woken);
     portYIELD_FROM_ISR(woken);
 }
@@ -183,10 +202,15 @@ void hearth_link_init(void)
 void hearth_link_write(const void *data, size_t len)
 {
     const uint8_t *p = data;
-    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    /* hearth_port.h documents that a URC can fire from a stack callback
+     * before hearth_link_init() has run, and s_tx_lock is NULL until it
+     * does; xSemaphoreTake(NULL, ...) is a hard fault, not a no-op, so
+     * write unlocked rather than lock against a mutex that does not
+     * exist yet. */
+    if (s_tx_lock != NULL) xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     for (size_t i = 0; i < len; i++) EUSART_Tx(AT_EUSART, p[i]);
     while (!(AT_EUSART->STATUS & EUSART_STATUS_TXC)) {}   /* off the wire */
-    xSemaphoreGive(s_tx_lock);
+    if (s_tx_lock != NULL) xSemaphoreGive(s_tx_lock);
 }
 
 void hearth_link_write_line(const char *fmt, ...)
@@ -197,7 +221,12 @@ void hearth_link_write_line(const char *fmt, ...)
     int n = vsnprintf(line, sizeof(line) - 2, fmt, ap);
     va_end(ap);
     if (n < 0) return;
-    if ((size_t)n > sizeof(line) - 2) n = sizeof(line) - 2;
+    /* vsnprintf was given a buffer of sizeof(line) - 2, so on truncation it
+     * actually wrote at most sizeof(line) - 3 content bytes before its own
+     * NUL; clamping to sizeof(line) - 2 (one too many) would leave that
+     * stray NUL sitting in line[] and put it on the wire ahead of the
+     * CRLF this appends. */
+    if ((size_t)n > sizeof(line) - 3) n = sizeof(line) - 3;
     line[n] = '\r'; line[n + 1] = '\n';
     hearth_link_write(line, (size_t)n + 2);
 }
@@ -255,10 +284,27 @@ int hearth_link_set_flowctrl(int mode) { return mode == 0 ? 0 : -1; }
  * instance); hearth_kv_id() (hearth_kvid.c, host-tested) hashes (ns, key)
  * to an id inside it. A hash can collide, so every pair the core persists
  * is checked for distinct ids by test_hearth_ring (Task 4 Step 6); a new
- * pair added later must be added there too. */
+ * pair added later must be added there too.
+ *
+ * nvm3_initDefault() is called lazily, on first use, exactly like the
+ * Zephyr port's kv_ensure_init() (hearth_port_zephyr.c): there is no
+ * dedicated boot hook for the KV store here, and Task 6's main.c may or
+ * may not run the SiSDK's own NVM3 init before mt_at_start(). A failed
+ * init does not latch, so a later call retries rather than being wedged
+ * for the life of the process. */
+static bool s_nvm3_ready;
+
+static int nvm3_ensure_init(void)
+{
+    if (s_nvm3_ready) return 0;
+    if (nvm3_initDefault() != ECODE_NVM3_OK) return -1;
+    s_nvm3_ready = true;
+    return 0;
+}
 
 int hearth_kv_get_blob(const char *ns, const char *key, void *buf, size_t *inout_len)
 {
+    if (nvm3_ensure_init() != 0) return -1;
     uint32_t type = 0; size_t len = 0;
     Ecode_t rc = nvm3_getObjectInfo(nvm3_defaultHandle, hearth_kv_id(ns, key), &type, &len);
     if (rc == ECODE_NVM3_ERR_KEY_NOT_FOUND) return 1;
@@ -271,6 +317,7 @@ int hearth_kv_get_blob(const char *ns, const char *key, void *buf, size_t *inout
 
 int hearth_kv_set_blob(const char *ns, const char *key, const void *buf, size_t len)
 {
+    if (nvm3_ensure_init() != 0) return -1;
     return nvm3_writeData(nvm3_defaultHandle, hearth_kv_id(ns, key), buf, len) == ECODE_NVM3_OK ? 0 : -1;
 }
 
@@ -287,6 +334,7 @@ int hearth_kv_set_u8(const char *ns, const char *key, uint8_t val)
 
 int hearth_kv_delete(const char *ns, const char *key)
 {
+    if (nvm3_ensure_init() != 0) return -1;
     Ecode_t rc = nvm3_deleteObject(nvm3_defaultHandle, hearth_kv_id(ns, key));
     if (rc == ECODE_NVM3_ERR_KEY_NOT_FOUND) return 1;
     return rc == ECODE_NVM3_OK ? 0 : -1;

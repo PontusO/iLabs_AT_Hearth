@@ -6,16 +6,19 @@
  * two so index wrap is a mask.
  */
 
-#include <string.h>
-
 #include "hearth_ring.h"
 
-void hearth_ring_init(hearth_ring_t *r, uint8_t *storage, uint32_t cap_pow2)
+int hearth_ring_init(hearth_ring_t *r, uint8_t *storage, uint32_t cap_pow2)
 {
+    /* A zero or non-power-of-two capacity turns the mask arithmetic in
+     * put/get/count into silent index corruption instead of a clean
+     * failure, so reject it here rather than downstream. */
+    if (cap_pow2 == 0 || (cap_pow2 & (cap_pow2 - 1)) != 0) return -1;
     r->buf = storage;
     r->cap = cap_pow2;
     r->head = r->tail = 0;
     r->dropped = 0;
+    return 0;
 }
 
 uint32_t hearth_ring_count(const hearth_ring_t *r)

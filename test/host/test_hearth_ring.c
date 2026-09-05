@@ -29,8 +29,14 @@ int main(void)
 {
     uint8_t storage[16];
     hearth_ring_t r;
-    hearth_ring_init(&r, storage, 16);
+    CHECK(hearth_ring_init(&r, storage, 16) == 0);
     s_ring = &r;
+
+    /* a non-power-of-two (or zero) capacity is rejected, not silently
+     * corrupted by later mask arithmetic */
+    hearth_ring_t bad;
+    CHECK(hearth_ring_init(&bad, storage, 15) == -1);
+    CHECK(hearth_ring_init(&bad, storage, 0) == -1);
 
     /* put/get round trip and count */
     CHECK(hearth_ring_count(&r) == 0);
@@ -44,6 +50,15 @@ int main(void)
     for (int i = 0; i < 15; i++) CHECK(hearth_ring_put(&r, (uint8_t)i));
     CHECK(!hearth_ring_put(&r, 99));
     CHECK(r.dropped == 1);
+    CHECK(hearth_ring_count(&r) == 15);   /* cap - 1: one slot always stays empty */
+    /* head wrapped from index 15 to 0 while filling (tail sits at 1 after
+     * the earlier put/get), so this get crosses the wrap boundary. */
+    uint8_t wrapped[15];
+    CHECK(hearth_ring_get(&r, wrapped, 15) == 15);
+    bool wrap_ok = true;
+    for (int i = 0; i < 15; i++) if (wrapped[i] != (uint8_t)i) wrap_ok = false;
+    CHECK(wrap_ok);
+    CHECK(hearth_ring_count(&r) == 0);
     hearth_ring_reset(&r);
     CHECK(hearth_ring_count(&r) == 0);
 
@@ -101,6 +116,14 @@ int main(void)
     for (size_t i = 0; i < np; i++)
         for (size_t j = i + 1; j < np; j++)
             CHECK(hearth_kv_id(pairs[i][0], pairs[i][1]) != hearth_kv_id(pairs[j][0], pairs[j][1]));
+
+    /* Every id must actually land in the Hearth-owned NVM3 range; a hash
+     * bug that produced ids elsewhere would collide with CHIP's own keys
+     * without ever tripping the distinctness check above. */
+    for (size_t i = 0; i < np; i++) {
+        uint32_t id = hearth_kv_id(pairs[i][0], pairs[i][1]);
+        CHECK(id >= HEARTH_KV_BASE && id < HEARTH_KV_BASE + HEARTH_KV_SPAN);
+    }
 
     printf("test_hearth_ring: %s\n", fails ? "FAILED" : "all passed");
     return fails ? 1 : 0;
