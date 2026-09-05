@@ -27,7 +27,7 @@ test_mt_store_index: test_mt_store_index.c ../../platform/esp32c6/main/mt_store_
 	$(CC) $(CFLAGS) -I../../platform/esp32c6/main -o $@ $^
 
 boundary:
-	@! /usr/bin/grep -rnE '#include .*(freertos|FreeRTOS|esp_|nvs|sdkconfig|driver/|zephyr|sl_|em_|gecko|nvm3|SEGGER|rail_)' $(CORE) \
+	@! /usr/bin/grep -rnE '#include .*(freertos|FreeRTOS|esp_|nvs|sdkconfig|driver/|zephyr|sli?_|em_|gecko|nvm3|SEGGER|rail)' $(CORE) \
 	  || (echo "SDK header inside core/" && exit 1)
 
 SILABS_PORT = ../../platform/silabs/port
@@ -41,6 +41,7 @@ test_hearth_ring: test_hearth_ring.c $(SILABS_PORT)/hearth_ring.c $(SILABS_PORT)
 silabs-stubs:
 	$(CC) $(CFLAGS) -fsyntax-only -I$(CORE)/include $(SILABS_PORT)/mt_matter_stub.c
 	$(CC) $(CFLAGS) -fsyntax-only -I$(CORE)/include $(SILABS_PORT)/mt_devtypes_stub.c
+	python3 check_decls.py
 
 run: all boundary silabs-stubs
 	./test_mt_composition

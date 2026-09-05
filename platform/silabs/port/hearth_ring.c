@@ -34,6 +34,13 @@ bool hearth_ring_put(hearth_ring_t *r, uint8_t b)
         return false;
     }
     r->buf[r->head] = b;
+    /* Publish the byte before the new head: without this barrier a
+     * compiler (or, on some cores, the CPU) is free to reorder the head
+     * store ahead of the data store, and a consumer that observes the new
+     * head before the byte lands would read stale or torn data. This is
+     * the fact the "no lock needed" comment above depends on; it must
+     * hold by construction, not by luck. */
+    __asm volatile("" ::: "memory");
     r->head = next;
     return true;
 }
@@ -43,6 +50,10 @@ uint32_t hearth_ring_get(hearth_ring_t *r, uint8_t *out, uint32_t n)
     uint32_t got = 0;
     while (got < n && r->tail != r->head) {
         out[got++] = r->buf[r->tail];
+        /* Finish the read before the new tail is published: without this
+         * barrier the producer could see the advanced tail and reuse the
+         * slot before this read has actually happened. */
+        __asm volatile("" ::: "memory");
         r->tail = (r->tail + 1) & (r->cap - 1);
     }
     return got;

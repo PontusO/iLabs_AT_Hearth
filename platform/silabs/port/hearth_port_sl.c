@@ -110,11 +110,43 @@ int hearth_os_task_spawn(const char *name, void (*fn)(void *), void *arg,
     return ok == pdPASS ? 0 : -1;
 }
 
+/* ---- monotonic ms clock ---------------------------------------------- *
+ * xTaskGetTickCount() * portTICK_PERIOD_MS is 0 forever once
+ * configTICK_RATE_HZ exceeds 1000 Hz: portTICK_PERIOD_MS is the integer
+ * 1000 / configTICK_RATE_HZ, which truncates to 0 above 1000 Hz, and
+ * Silabs configs commonly tick at 1024 Hz. Multiply before dividing
+ * instead, in 64 bits so the intermediate product cannot overflow across
+ * the full 32-bit tick range at any realistic tick rate. Shared by
+ * hearth_sem_take's timeout slicing and the link's deadline wait. */
+static uint32_t hearth_now_ms(void)
+{
+    return (uint32_t)((uint64_t)xTaskGetTickCount() * 1000u / configTICK_RATE_HZ);
+}
+
+/* pdMS_TO_TICKS(ms) computes ms * configTICK_RATE_HZ / 1000 in whatever
+ * width TickType_t is; for a 32-bit TickType_t that multiply can overflow
+ * before the divide runs once ms is large and configTICK_RATE_HZ is above
+ * roughly 1193 Hz (ms near the header's one-hour ceiling is exactly the
+ * case that matters here). Waiting in bounded slices and re-deriving the
+ * remaining time from hearth_now_ms() avoids ever handing pdMS_TO_TICKS a
+ * value that can overflow, regardless of the project's tick rate. */
+#define HEARTH_WAIT_SLICE_MS 60000u
+
 hearth_sem_t hearth_sem_create_binary(void) { return (hearth_sem_t)xSemaphoreCreateBinary(); }
 
 bool hearth_sem_take(hearth_sem_t sem, uint32_t timeout_ms)
 {
-    return xSemaphoreTake((SemaphoreHandle_t)sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+    if (timeout_ms == 0) {
+        return xSemaphoreTake((SemaphoreHandle_t)sem, 0) == pdTRUE;
+    }
+    uint32_t start = hearth_now_ms();
+    for (;;) {
+        uint32_t elapsed = hearth_now_ms() - start;   /* wraps correctly if it ever does */
+        if (elapsed >= timeout_ms) return false;
+        uint32_t remain = timeout_ms - elapsed;
+        uint32_t slice = remain > HEARTH_WAIT_SLICE_MS ? HEARTH_WAIT_SLICE_MS : remain;
+        if (xSemaphoreTake((SemaphoreHandle_t)sem, pdMS_TO_TICKS(slice)) == pdTRUE) return true;
+    }
 }
 
 void hearth_sem_give(hearth_sem_t sem) { xSemaphoreGive((SemaphoreHandle_t)sem); }
@@ -124,11 +156,17 @@ void hearth_sem_give(hearth_sem_t sem) { xSemaphoreGive((SemaphoreHandle_t)sem);
  * (PRIMASK): this is a radio SoC, and HEARTH_CRIT_ROWS in particular wraps
  * row-array work, not two instructions, for long enough that masking
  * PRIMASK would stall the RAIL radio interrupt Thread's timing depends on.
- * Atomic sections need no init, so they are usable from the first
- * instruction, before the scheduler runs, and from an ISR: exactly what
- * the header asks for (URCs can fire from stack callbacks before any
- * init). One saved state per well-known id; the core never nests a
- * section with itself. */
+ * An atomic section excludes every interrupt whose NVIC priority is at or
+ * below (numerically at or above) CORE_ATOMIC_BASE_PRIORITY_LEVEL; it does
+ * NOT exclude an interrupt configured above that level (a lower number,
+ * i.e. more urgent), which is exactly why link_configure() sets
+ * EUSART0_RX_IRQn's priority down to CORE_ATOMIC_BASE_PRIORITY_LEVEL
+ * before enabling it: with that done, this section's guarantee does cover
+ * the RX ISR too. Atomic sections need no init, so they are usable from
+ * the first instruction, before the scheduler runs, and from an ISR:
+ * exactly what the header asks for (URCs can fire from stack callbacks
+ * before any init). One saved state per well-known id; the core never
+ * nests a section with itself. */
 static CORE_atomicState_t s_crit_state[HEARTH_CRIT_COUNT];
 
 void hearth_crit_enter(int id) { s_crit_state[id] = CORE_EnterAtomic(); }
@@ -187,13 +225,30 @@ static void link_configure(int baud)
     EUSART_UartInitHf(AT_EUSART, &init);
     EUSART_IntClear(AT_EUSART, _EUSART_IF_MASK);
     EUSART_IntEnable(AT_EUSART, EUSART_IEN_RXFL);
+    /* Cortex-M IPR resets to 0 (the highest possible priority), which sits
+     * above configMAX_SYSCALL_INTERRUPT_PRIORITY: a handler running there
+     * cannot safely call an ISR-safe FreeRTOS API (xSemaphoreGiveFromISR
+     * below) since vPortValidateInterruptPriority asserts on that call
+     * with asserts compiled in, or corrupts the ready lists with them
+     * compiled out. It also means CORE_EnterAtomic's BASEPRI mask would
+     * not exclude this ISR, breaking hearth_crit_enter/exit's guarantee
+     * for HEARTH_CRIT_ROWS. Lower the priority to the atomic base level
+     * before enabling the IRQ so both hold. */
+    NVIC_SetPriority(EUSART0_RX_IRQn, CORE_ATOMIC_BASE_PRIORITY_LEVEL);
     NVIC_ClearPendingIRQ(EUSART0_RX_IRQn);
     NVIC_EnableIRQ(EUSART0_RX_IRQn);
 }
 
 void hearth_link_init(void)
 {
-    hearth_ring_init(&s_rx_ring, s_rx_storage, RX_RING_CAP);
+    /* RX_RING_CAP is a compile-time power-of-two constant, so this check
+     * is unreachable in practice; it is here so a future edit to that
+     * constant fails loudly at runtime instead of silently corrupting the
+     * ring's index arithmetic. */
+    if (hearth_ring_init(&s_rx_ring, s_rx_storage, RX_RING_CAP) != 0) {
+        HEARTH_LOGE("link", "hearth_ring_init rejected RX_RING_CAP=%u", (unsigned)RX_RING_CAP);
+        return;
+    }
     s_rx_sem = xSemaphoreCreateBinary();
     s_tx_lock = xSemaphoreCreateMutex();
     link_configure(s_baud);
@@ -233,15 +288,19 @@ void hearth_link_write_line(const char *fmt, ...)
 
 static bool link_wait(uint32_t ms)
 {
-    /* pdMS_TO_TICKS(3,600,000) at 1 kHz tick is 3,600,000 ticks: within
-     * a 32-bit TickType_t, and xSemaphoreTake parks the task, so the
-     * one-hour contract is a real blocking wait. */
-    return xSemaphoreTake(s_rx_sem, pdMS_TO_TICKS(ms)) == pdTRUE;
+    /* xSemaphoreTake parks the task, so this is a real blocking wait, not
+     * a poll; clamped to HEARTH_WAIT_SLICE_MS for the same overflow reason
+     * as hearth_sem_take (see hearth_now_ms's comment). hearth_ring_read_
+     * deadline recomputes the true remaining time and calls this again if
+     * a slice times out before the real deadline, so slicing here is
+     * correct, not just safe, for the header's one-hour ceiling. */
+    uint32_t slice = ms > HEARTH_WAIT_SLICE_MS ? HEARTH_WAIT_SLICE_MS : ms;
+    return xSemaphoreTake(s_rx_sem, pdMS_TO_TICKS(slice)) == pdTRUE;
 }
 
 static uint32_t link_now_ms(void)
 {
-    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    return hearth_now_ms();
 }
 
 int hearth_link_read(uint8_t *buf, size_t len, uint32_t timeout_ms)
@@ -262,16 +321,27 @@ int hearth_link_get_baud(void) { return s_baud; }
 int hearth_link_set_baud(int baud)
 {
     /* cmd_mtbaud writes its OK at the OLD rate; drain, then switch under
-     * the tx lock so nothing queues into the gap (the nRF port's contract). */
-    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+     * the tx lock so nothing queues into the gap (the nRF port's
+     * contract). Guarded against s_tx_lock == NULL the same way
+     * hearth_link_write is: AT+MTBAUD is a command reply, not a stack
+     * callback, so in practice hearth_link_init() has always run by the
+     * time this is reachable, but the guard is one line and keeps both
+     * paths consistent rather than relying on that distinction. */
+    if (s_tx_lock != NULL) xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     while (!(AT_EUSART->STATUS & EUSART_STATUS_TXC)) {}
     NVIC_DisableIRQ(EUSART0_RX_IRQn);
     EUSART_BaudrateSet(AT_EUSART, 0, (uint32_t)baud);
+    /* A byte that landed between NVIC_DisableIRQ and here was received at
+     * the OLD rate, is not yet drained (the ISR that would drain it is
+     * disabled), and would otherwise sit in the FIFO to be read back at
+     * the NEW rate as garbage; discard it before anything downstream can
+     * see it. */
+    while (AT_EUSART->STATUS & EUSART_STATUS_RXFL) (void)AT_EUSART->RXDATA;
     hearth_ring_reset(&s_rx_ring);              /* a byte sampled mid-switch is garbage */
     xQueueReset((QueueHandle_t)s_rx_sem);
     s_baud = baud;
     NVIC_EnableIRQ(EUSART0_RX_IRQn);
-    xSemaphoreGive(s_tx_lock);
+    if (s_tx_lock != NULL) xSemaphoreGive(s_tx_lock);
     return 0;
 }
 

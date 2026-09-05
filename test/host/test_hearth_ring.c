@@ -87,6 +87,18 @@ int main(void)
     CHECK(got == 0 && s_calls == 1);
     s_step_ms = 10;
 
+    /* deadline arithmetic must survive a uint32 tick wrap: now starts near
+     * UINT32_MAX and the deadline (now + timeout) lands just past zero.
+     * Nothing is ever delivered, so this must time out at exactly the
+     * timeout, not early (the wrap corrupting "left" into a huge number)
+     * and not late (spinning past it). */
+    s_now = 0xFFFFFF00u; s_calls = 0; s_deliver_on_call = 9999; s_step_ms = 100;
+    got = hearth_ring_read_deadline(&r, out, 1, 500, fake_wait, fake_now);
+    CHECK(got == 0);
+    CHECK(s_calls == 5);
+    CHECK((uint32_t)(s_now - 0xFFFFFF00u) == 500u);   /* elapsed, wrap-safe */
+    s_step_ms = 10;
+
     /* partial delivery then more: accumulates to len */
     static const uint8_t ab[] = "AB";
     s_now = 0; s_calls = 0; s_deliver = ab; s_deliver_n = 2; s_deliver_on_call = 1;

@@ -1,6 +1,7 @@
 # Hearth on Silicon Labs EFR32MG24 (MGM240P)
 
-Status: **skeleton, round 1 in progress** (graph T446). The third Hearth
+Status: **round 1 software half complete; Tasks 5 to 8 pending the
+MGM240PA32VNA3** (graph T446). The third Hearth
 platform, mimicking the nRF54L15 port: a Thread FTD + BLE co-processor
 serving the `AT+MT` contract over one UART. Design:
 `iLabs_Hearth_docs/superpowers/specs/2026-09-05-silabs-mg24-port-design.md`.
@@ -34,7 +35,12 @@ Pending (Task 7): `fw/flash.py` over the factory UART XMODEM bootloader.
 
 ## Measured
 
-Pending (Task 6): skeleton image size and free RAM at `+MTREADY`.
+Pending (Task 6): skeleton image size and free RAM at `+MTREADY`. Note for
+whoever fills this in: `hearth_log_write` (`hearth_port_sl.c`) discards
+everything it is given until a console UART is wired (Task 8), so the RX
+ring overflow warning it would otherwise print is unobservable until then;
+an absence of overflow warnings in this section is not evidence the ring
+never overflowed.
 
 ## First-compile checklist (Task 6)
 
@@ -67,3 +73,25 @@ and behaviors are unverified. Task 6, the first real compile, must check:
   (`hearth_port_sl.c`) is replaced with the exact part define the SiSDK
   project sets for the MGM240PA32VNA3, once this README records it under
   Toolchain/Board.
+- The RX IRQ's priority (`NVIC_SetPriority(EUSART0_RX_IRQn,
+  CORE_ATOMIC_BASE_PRIORITY_LEVEL)`, `hearth_port_sl.c`, `link_configure`)
+  must be numerically at or below `configMAX_SYSCALL_INTERRUPT_PRIORITY`;
+  confirm `CORE_ATOMIC_BASE_PRIORITY_LEVEL` actually resolves to a value
+  that satisfies that for this project's `FreeRTOSConfig.h`, not just that
+  the macro exists.
+- `configTICK_RATE_HZ`: confirm its actual value (commonly 1024 Hz on
+  Silabs configs, not 1000), and that the header's one-hour timeout ceiling
+  does not overflow `TickType_t` at that rate after the fix that made
+  `hearth_now_ms()` and `hearth_sem_take`/`link_wait`'s wait-slicing
+  (`hearth_port_sl.c`) tick-rate-independent.
+- `nvm3_initDefault()` is called lazily by this port
+  (`nvm3_ensure_init()`, `hearth_port_sl.c`); `sl_system_init()` already
+  initialises NVM3 when the project's `nvm3_default` component is present.
+  Confirm the port's second call is a harmless no-op returning
+  `ECODE_NVM3_OK` in that case (SiSDK's own doc for `nvm3_initDefault()`
+  should say), or drop the lazy init here if the project guarantees the
+  component is always present.
+- `EUSART_BaudrateSet()` (`hearth_link_set_baud`, `hearth_port_sl.c`) is
+  called with the EUSART left enabled, mid-session, not disabled first.
+  Confirm CLKDIV accepts a write in that state on this part, or add a
+  disable/enable cycle around the call if it does not.
