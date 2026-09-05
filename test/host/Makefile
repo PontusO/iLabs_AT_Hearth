@@ -27,7 +27,7 @@ test_mt_store_index: test_mt_store_index.c ../../platform/esp32c6/main/mt_store_
 	$(CC) $(CFLAGS) -I../../platform/esp32c6/main -o $@ $^
 
 boundary:
-	@! /usr/bin/grep -rnE '#include .*(freertos|esp_|nvs|sdkconfig|driver/|zephyr)' $(CORE) \
+	@! /usr/bin/grep -rnE '#include .*(freertos|FreeRTOS|esp_|nvs|sdkconfig|driver/|zephyr|sl_|em_|gecko|nvm3|SEGGER|rail_)' $(CORE) \
 	  || (echo "SDK header inside core/" && exit 1)
 
 run: all boundary
