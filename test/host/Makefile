@@ -4,7 +4,7 @@
 CORE   = ../../core
 CFLAGS = -std=c11 -Wall -Wextra -Werror -g -I$(CORE)/include -DMT_HOST_TEST -DMT_COMBINED_IMAGE=0
 
-TESTS = test_mt_composition test_mt_transport test_mt_cmdbox test_mt_rows test_mt_stores test_mt_store_index
+TESTS = test_mt_composition test_mt_transport test_mt_cmdbox test_mt_rows test_mt_stores test_mt_store_index test_hearth_ring
 
 all: $(TESTS)
 
@@ -32,6 +32,9 @@ boundary:
 
 SILABS_PORT = ../../platform/silabs/port
 
+test_hearth_ring: test_hearth_ring.c $(SILABS_PORT)/hearth_ring.c $(SILABS_PORT)/hearth_kvid.c
+	$(CC) $(CFLAGS) -o $@ $^
+
 # Compile the Silabs skeleton's pure-C files against core/ headers on the
 # host. Catches a signature drift between the stubs and the headers before
 # a toolchain exists to link them.
@@ -46,6 +49,7 @@ run: all boundary silabs-stubs
 	./test_mt_rows
 	./test_mt_stores
 	./test_mt_store_index
+	./test_hearth_ring
 
 clean:
 	rm -f $(TESTS)
