@@ -446,6 +446,28 @@ class TestPhase0(unittest.TestCase):
         problem = phase0(scripted_link({}), {})
         self.assertIn("AT", problem)
 
+    def test_accepts_every_known_hearth_model(self):
+        # The gate is per-platform: an nRF or Silabs image answers its own
+        # chip. Each known model must pass the same gate the C6 passes.
+        from mt_regression import KNOWN_MODELS
+        self.assertIn("ESP32-C6 Hearth", KNOWN_MODELS)
+        self.assertIn("nRF54L15 Hearth", KNOWN_MODELS)
+        self.assertIn("nRF54LM20A Hearth", KNOWN_MODELS)
+        self.assertIn("MGM240P Hearth", KNOWN_MODELS)
+        for model in KNOWN_MODELS:
+            replies = dict(self.HEALTHY)
+            replies[b"AT+CGMM\r\n"] = model.encode() + b"\r\nOK\r\n"
+            header = {}
+            self.assertIsNone(phase0(scripted_link(replies), header), model)
+
+    def test_rejects_a_model_not_in_the_known_set(self):
+        replies = dict(self.HEALTHY)
+        replies[b"AT+CGMM\r\n"] = b"Some Other Radio\r\nOK\r\n"
+        problem = phase0(scripted_link(replies), {})
+        self.assertIsNotNone(problem)
+        self.assertIn("unexpected model", problem)
+        self.assertIn("MGM240P Hearth", problem)  # the message lists what is known
+
 
 from mt_regression import add_test, TESTS, main, exit_code
 from mt_regression import (Suite, StepAbort, Phase2Context, run_phase2,

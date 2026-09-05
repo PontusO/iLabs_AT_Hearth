@@ -6091,6 +6091,18 @@ def operator_power_cycle(port_path, printer=flush_print,
     return True, ""
 
 
+# The AT+CGMM model string is a PLATFORM fact (hearth_port_model(), spec 3.1):
+# each port answers its own chip. The gate accepts exactly these and nothing
+# else, so an ESP-NOW image, a stale build or a board on the wrong port still
+# aborts before any phase runs. A new platform adds its string here in the
+# same change that adds its hearth_port_model() arm.
+KNOWN_MODELS = (
+    "ESP32-C6 Hearth",
+    "nRF54L15 Hearth",
+    "nRF54LM20A Hearth",
+    "MGM240P Hearth",
+)
+
 GATE_REFERENCE_QR = "MT:Y.K9042C00KA0648G00"
 
 
@@ -6206,8 +6218,8 @@ def phase0(link, header):
         return ("wrong personality: this board runs the ESP-NOW firmware; "
                 "reflash Hearth with python3 fw/flash.py --build-dir "
                 "build_wifi --port <port> --bridge espnow")
-    if model != "ESP32-C6 Hearth":
-        return "unexpected model: %r" % model
+    if model not in KNOWN_MODELS:
+        return "unexpected model: %r (known: %s)" % (model, ", ".join(KNOWN_MODELS))
     res, lines = link.command("AT+CGMR")
     if res != 0 or not lines:
         return "AT+CGMR failed"
@@ -6272,8 +6284,9 @@ def register_phase1_positive():
     p("ATE1/ATE0 echo on and off", t_echo_on_off)
     p("CGMI -> iLabs Electronics",
       expect_ok("AT+CGMI", line_re=r"iLabs Electronics"))
-    p("CGMM -> ESP32-C6 Hearth",
-      expect_ok("AT+CGMM", line_re=r"ESP32-C6 Hearth"))
+    p("CGMM -> a known Hearth model",
+      expect_ok("AT+CGMM",
+                line_re=r"^(" + "|".join(re.escape(m) for m in KNOWN_MODELS) + r")$"))
     p("CGMR equals MTVER? field", t_cgmr_matches_mtver)
     p("MTVER? emits +MTVER:", expect_ok("AT+MTVER?", line_re=r"\+MTVER:.+"))
     p("MTSTATE? format", expect_ok("AT+MTSTATE?",
