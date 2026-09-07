@@ -65,8 +65,12 @@ int mt_matter_ota_block_acked(uint32_t seq) { s_acked_last = seq; return s_acked
 int mt_matter_ota_staged(int ok, int reason) { s_staged_ok = ok; s_staged_reason = reason; return s_staged_rc; }
 int mt_matter_swver_set(uint32_t version, const char *str)
 { s_swver_last = version; strncpy(s_swverstr_last, str, sizeof(s_swverstr_last) - 1); return 0; }
+static int s_net_info_rc;
 int mt_matter_net_info(int *transport, int *enabled, int *connected)
-{ *transport = MT_NET_THREAD; *enabled = 1; *connected = 0; return 0; }
+{ *transport = MT_NET_THREAD; *enabled = 1; *connected = 0; return s_net_info_rc; }
+
+/* port_stub.c's one-shot storage-failure switch. */
+extern int port_stub_kv_fail_next;
 
 /* ---- harness ------------------------------------------------------------ */
 
@@ -132,6 +136,43 @@ static void test_swver(void)
     check("a quote inside the version string is a bad parameter",
           run("MTSWVER", AT_SET, "1,\"a\"b\"") == MT_ERR_BAD_PARAM);
     check("exec form is a bare ERROR", run("MTSWVER", AT_EXEC, NULL) == MT_R_ERROR);
+    check("a signed version is a bad parameter", run("MTSWVER", AT_SET, "-1,\"x\"") == MT_ERR_BAD_PARAM);
+    check("a plus-signed version is a bad parameter", run("MTSWVER", AT_SET, "+1,\"x\"") == MT_ERR_BAD_PARAM);
+
+    port_stub_kv_fail_next = 1;
+    check("a failed storage write is +MTERR:7",
+          run("MTSWVER", AT_SET, "999,\"9.9.9\"") == MT_ERR_PERSIST);
+    port_stub_kv_fail_next = 0;
+}
+
+/*
+ * The two ways the stored pair can be inconsistent, written straight into the
+ * stub's key-value table because no command can produce them: only a power cut
+ * between swver_store()'s two non-atomic writes can, and mt_ota_swver_stored()
+ * has to call both -1 (corrupt) rather than reporting a half-truth.
+ */
+static void test_swver_corrupt(void)
+{
+    mt_ota_init();
+    cap_reset();
+    uint32_t v = 0;
+    char s[MT_OTA_SWVER_STR_MAX] = "";
+
+    const uint8_t raw[4] = { 4, 0, 1, 0 };
+    hearth_kv_set_blob("mt_cfg", "swver", raw, sizeof(raw));
+    hearth_kv_delete("mt_cfg", "swverstr");
+    check("a version with no string reads as corrupt",
+          mt_ota_swver_stored(&v, s, sizeof(s)) == -1);
+    check("MTSWVER? over a corrupt pair is +MTERR:7",
+          run("MTSWVER", AT_QUERY, NULL) == MT_ERR_PERSIST);
+
+    hearth_kv_set_blob("mt_cfg", "swverstr", "1.4.0", 5);   /* no NUL */
+    check("a string without its NUL reads as corrupt",
+          mt_ota_swver_stored(&v, s, sizeof(s)) == -1);
+
+    hearth_kv_delete("mt_cfg", "swver");
+    hearth_kv_delete("mt_cfg", "swverstr");
+    check("both keys gone reads as absent", mt_ota_swver_stored(&v, s, sizeof(s)) == 1);
 }
 
 static void test_mode(void)
@@ -151,6 +192,32 @@ static void test_mode(void)
     check("no requestor: MTOTA=1 is +MTERR:8", run("MTOTA", AT_SET, "1") == MT_ERR_UNSUPPORTED && mt_ota_mode() == 0);
     check("MTOTA=0 with no requestor still answers OK", run("MTOTA", AT_SET, "0") == AT_R_OK && mt_ota_mode() == 0);
     s_set_mode_rc = 0;
+
+    /* A query-now only from idle: mid-attempt the platform would decline it
+     * silently, so the host must be told instead of getting a bare OK. */
+    mt_ota_init();
+    run("MTOTA", AT_SET, "1");
+    mt_ota_on_state(MT_OTA_DOWNLOADING, "40");
+    s_set_mode_last = -99;
+    check("MTOTA=2 while downloading is +MTERR:12",
+          run("MTOTA", AT_SET, "2") == MT_ERR_OTA_STATE && s_set_mode_last == -99);
+    mt_ota_on_state(MT_OTA_DOWNLOADED, NULL);
+    check("MTOTA=2 while downloaded is +MTERR:12",
+          run("MTOTA", AT_SET, "2") == MT_ERR_OTA_STATE && s_set_mode_last == -99);
+    mt_ota_on_state(MT_OTA_IDLE, NULL);
+    check("MTOTA=2 once idle again -> OK",
+          run("MTOTA", AT_SET, "2") == AT_R_OK && s_set_mode_last == 2);
+
+    /* The variant token is whatever the platform's net_info says, and
+     * "unknown" when it refuses to say. */
+    cap_reset();
+    s_net_info_rc = -1;
+    check("MTOTA? with no net info answers the unknown variant",
+          run("MTOTA", AT_QUERY, NULL) == AT_R_OK && last_line_is("+MTOTA:1,IDLE,0,unknown"));
+    s_net_info_rc = 0;
+    cap_reset();
+    check("MTOTA? with net info answers the transport",
+          run("MTOTA", AT_QUERY, NULL) == AT_R_OK && last_line_is("+MTOTA:1,IDLE,0,thread"));
 }
 
 static void test_state_urcs(void)
@@ -272,6 +339,12 @@ static void test_staged(void)
     mt_ota_on_state(MT_OTA_DOWNLOADED, NULL);
     check("MTOTASTAGED=0 without a reason is a bad parameter", run("MTOTASTAGED", AT_SET, "0") == MT_ERR_BAD_PARAM);
     check("MTOTASTAGED=0,7 (unknown reason) is a bad parameter", run("MTOTASTAGED", AT_SET, "0,7") == MT_ERR_BAD_PARAM);
+    check("MTOTASTAGED=1,1 (a reason on an acceptance) is a bad parameter",
+          run("MTOTASTAGED", AT_SET, "1,1") == MT_ERR_BAD_PARAM);
+    check("MTOTASTAGED=1, (an empty trailing field) is a bad parameter",
+          run("MTOTASTAGED", AT_SET, "1,") == MT_ERR_BAD_PARAM);
+    check("MTOTASTAGED=-1 (a signed verdict) is a bad parameter",
+          run("MTOTASTAGED", AT_SET, "-1") == MT_ERR_BAD_PARAM);
     s_staged_rc = -1;
     check("platform refusal is +MTERR:12", run("MTOTASTAGED", AT_SET, "1") == MT_ERR_OTA_STATE);
     s_staged_rc = 0;
@@ -282,6 +355,7 @@ int main(void)
     printf("\n===== mt_ota tests =====\n");
     test_table();
     test_swver();
+    test_swver_corrupt();
     test_mode();
     test_state_urcs();
     test_block_relay();

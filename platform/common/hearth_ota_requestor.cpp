@@ -225,6 +225,18 @@ public:
     /* Matter thread, from mt_matter_ota_block_acked(). */
     void BlockAcked(uint32_t seq)
     {
+        /*
+         * Liveness first. The acknowledgement arrives as scheduled work, so it
+         * can still be sitting in the queue when the 5 s timer fires and takes
+         * the attempt down: by the time it runs the host has already had its
+         * ERROR and its IDLE, and carrying on here would emit a DOWNLOADING
+         * (or a DOWNLOADED) after IDLE and walk the state backwards. Release()
+         * is the only thing that nulls mBuf, and every abort, cancel and apply
+         * path reaches it, so a null buffer is exactly "this attempt is over".
+         */
+        if (mBuf == nullptr) {
+            return;
+        }
         if (mDownloader == nullptr || seq != mSeq) {
             return;
         }
@@ -419,10 +431,29 @@ public:
         }
         DefaultOTARequestorDriver::ProcessAnnounceOTAProviders(loc, reason);
     }
+    /*
+     * The base takes the same decision one layer down and says so in its log
+     * ("Query already in progress"): it only starts a query from kIdle or
+     * kDelayedOnQuery, and does nothing at all from any other state. Mirroring
+     * that check is what keeps the line honest, because AT+MTOTA=2 reaches
+     * here through TriggerImmediateQuery() at any moment the host chooses,
+     * mid-download included, and an unconditional +MTOTA:QUERYING would then
+     * announce a query that was never sent and walk a DOWNLOADING attempt
+     * backwards on the host's state machine.
+     */
     void SendQueryImage() override
     {
         if (!hearth::ota_mode_enabled()) {
             return;
+        }
+        OTARequestorInterface *req = GetRequestorInstance();
+        if (req != nullptr) {
+            OTARequestorInterface::OTAUpdateStateEnum st = req->GetCurrentUpdateState();
+            if (st != OTARequestorInterface::OTAUpdateStateEnum::kIdle &&
+                st != OTARequestorInterface::OTAUpdateStateEnum::kDelayedOnQuery) {
+                DefaultOTARequestorDriver::SendQueryImage();
+                return;
+            }
         }
         mt_ota_on_state(MT_OTA_QUERYING, nullptr);
         DefaultOTARequestorDriver::SendQueryImage();
@@ -445,7 +476,21 @@ namespace hearth {
 
 void ota_requestor_init()
 {
-    VerifyOrReturn(GetRequestorInstance() == nullptr);
+    /*
+     * The port is racing its SDK for chip::SetRequestorInstance() (see the
+     * header), and the loser of that race is a silent no-op. Say so out loud
+     * HERE, which is where losing it is actually observable: once
+     * SetRequestorInstance(&sRequestor) below has run there is nobody left to
+     * have beaten us, so a check after it never fires. From this early return
+     * on, the shims below refuse every AT+MTOTA command with -1, which
+     * mt_ota.c turns into +MTERR:8, rather than driving a requestor that is
+     * not ours.
+     */
+    if (GetRequestorInstance() != nullptr) {
+        HEARTH_LOGE(TAG, "another OTA requestor was registered first; the AT relay is off "
+                         "for this boot and AT+MTOTA answers unsupported");
+        return;
+    }
     sProcessor.SetDownloader(&sDownloader);
     sDownloader.SetImageProcessorDelegate(&sProcessor);
     sStorage.Init(Server::GetInstance().GetPersistentStorage());
@@ -460,18 +505,6 @@ void ota_requestor_init()
      * ota_requestor_server_ready() instead. */
     sDriver.SetSendNotifyUpdateApplied(false);
     sDriver.Init(&sRequestor, &sProcessor);
-    /*
-     * The port is racing its SDK for chip::SetRequestorInstance() (see the
-     * header), and the loser of that race is a silent no-op. Say so out loud:
-     * from here on the shims below refuse every AT+MTOTA command with -1,
-     * which mt_ota.c turns into +MTERR:8, rather than driving a requestor that
-     * is not ours.
-     */
-    if (GetRequestorInstance() != &sRequestor) {
-        HEARTH_LOGE(TAG, "another OTA requestor was registered first; the AT relay is off "
-                         "for this boot and AT+MTOTA answers unsupported");
-        return;
-    }
     HEARTH_LOGI(TAG, "OTA requestor wired, mode %d", sModeEnabled ? 1 : 0);
 }
 

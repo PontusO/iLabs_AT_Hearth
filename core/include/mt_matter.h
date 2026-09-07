@@ -1632,19 +1632,27 @@ int mt_matter_evse_targets_erase_all(void);
  * may block.
  *
  * mt_matter_ota_set_mode: 0 disable and abort anything in flight, 1 enable
- * (accept AnnounceOTAProvider, run the periodic query), 2 query the last
- * known provider now. Returns 0, or -1 when this image has no requestor at
- * all (mt_ota.c answers +MTERR:8 to AT+MTOTA then). A mode-2 request with
- * no provider known fails asynchronously as +MTOTA:ERROR,noprovider.
+ * (accept AnnounceOTAProvider, run the periodic query), 2 query now, walking
+ * the requestor's DefaultOTAProviders list (the attribute the commissioner
+ * wrote), not merely the provider last used. Returns 0, or -1 when this image
+ * has no requestor at all (mt_ota.c answers +MTERR:8 to AT+MTOTA then). A
+ * mode-2 request with no provider known fails asynchronously as
+ * +MTOTA:ERROR,noprovider.
  *
  * mt_matter_ota_block_acked: the host acknowledged block <seq>; the platform
  * cancels its acknowledgement timer and asks the downloader for the next
- * block. Returns 0, or -1 if no download is in progress.
+ * block. The work is scheduled onto the Matter thread, so nothing here can
+ * see whether a download is still in progress: returns 0 whenever this image
+ * has a wired requestor, -1 when it has none. A stale <seq>, or an attempt
+ * that ended while the call was in the queue, is dropped on the Matter
+ * thread instead.
  *
  * mt_matter_ota_staged: the host's verdict on the downloaded bundle. ok=1
  * sends ApplyUpdateRequest to the provider; ok=0 cancels the update with
- * <reason> logged (spec 5.4 reason codes). Returns 0, or -1 if the requestor
- * is not in the downloaded state.
+ * <reason> logged (spec 5.4 reason codes). Scheduled the same way, so the
+ * same rule holds: 0 when this image has a wired requestor, -1 when it has
+ * none. mt_ota.c has already refused anything outside DOWNLOADED with
+ * +MTERR:12 before calling.
  *
  * mt_matter_swver_set: the host declared the product version; persistence
  * is the core's, this updates the live Basic Information attributes and the

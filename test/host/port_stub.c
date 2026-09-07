@@ -79,9 +79,16 @@ int hearth_kv_get_blob(const char *ns, const char *key,
     return 0;
 }
 
+/* Test hook, same spirit as PORT_STUB_NO_LINK above: the storage-failure
+ * branches in the units under test are otherwise unreachable, because this
+ * stub never runs out of flash. Set it to 1 and the next set_blob fails once
+ * and clears the flag. */
+int port_stub_kv_fail_next;
+
 int hearth_kv_set_blob(const char *ns, const char *key,
                        const void *buf, size_t len)
 {
+    if (port_stub_kv_fail_next) { port_stub_kv_fail_next = 0; return -1; }
     if (len > sizeof(s_kv[0].blob)) return -1;
     int i = kv_find(ns, key);
     if (i < 0)

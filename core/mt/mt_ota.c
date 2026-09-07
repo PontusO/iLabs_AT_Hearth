@@ -144,6 +144,14 @@ static int parse_u32(const char *s, uint32_t *out)
     if (s == NULL || *s == '\0') {
         return -1;
     }
+    /* strtoul accepts a sign and wraps a negative one round to a huge
+     * unsigned, so "-1" would parse as 4294967295 and the range check below
+     * would not catch it: unsigned long is 32 bits on both targets, which
+     * makes `v > 0xFFFFFFFFul` a no-op there. A sign is not part of the
+     * grammar for any of these fields, so refuse it outright. */
+    if (*s == '-' || *s == '+') {
+        return -1;
+    }
     char *end;
     unsigned long v = strtoul(s, &end, 10);
     if (*end != '\0' || v > 0xFFFFFFFFul) {
@@ -300,7 +308,12 @@ static int cmd_mtota(at_type_t type, char *args)
         return MT_ERR_BAD_PARAM;
     }
     if (m == 2) {
-        if (!s_mode) {
+        /* A query-now is only meaningful from idle. Mid-attempt the platform's
+         * driver would decline it silently (its own "already in progress"
+         * path), so the host would get an OK for a query that never left, and
+         * a state line ordering it could not explain. Refuse it here instead,
+         * where the answer can say so. */
+        if (!s_mode || s_state != MT_OTA_IDLE) {
             return MT_ERR_OTA_STATE;
         }
         return mt_matter_ota_set_mode(2) == 0 ? AT_R_OK : MT_ERR_OTA_STATE;

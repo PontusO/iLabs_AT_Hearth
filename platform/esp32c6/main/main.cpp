@@ -6864,6 +6864,19 @@ extern "C" void app_main(void)
      *
      * ChipStackLock, not ScheduleWork: this is app_main, not the CHIP task,
      * and the race being closed is with a handler that runs under that lock.
+     *
+     * WHY THE SECOND CALL CAN BE DEFERRED to app_event_cb()'s kServerReady
+     * case, which the nRF port could not do (see hearth_ota_nrf.cpp's
+     * InitBasicOTARequestor): DefaultOTARequestorDriver::Init() does not call
+     * ConfirmCurrentImage() inline, it posts a SystemLayer().ScheduleLambda()
+     * that does, and that lambda is what sets the flag
+     * ota_requestor_server_ready() acts on. Winning SetRequestorInstance()
+     * here is precisely the proof that kDnssdInitialized has not been
+     * dispatched yet (esp-matter installs its own requestor from that
+     * handler), and kServerReady is only posted from inside it, by
+     * Server::CheckServerReadyEvent. So the driver's lambda is already in the
+     * event queue before the kServerReady that our hook rides on is posted,
+     * and the queue is ordered: the flag is set by the time the hook reads it.
      */
     {
         ChipStackLock lock;
