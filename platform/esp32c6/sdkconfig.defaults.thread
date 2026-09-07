@@ -76,5 +76,8 @@ CONFIG_BT_NIMBLE_HCI_EVT_BUF_SIZE=70
 # partition stays. The processor never reboots the C6 on apply; the host does
 # the applying. Restated here, like the negative it replaces, so a future edit
 # to the base file cannot quietly change it for the Thread image alone.
+# CONFIG_OTA_AUTO_REBOOT_ON_APPLY governs the STOCK ESP32 image processor,
+# which this firmware does not use; the Hearth processor has no reboot in it
+# at all, so the symbol is belt rather than braces.
 CONFIG_ENABLE_OTA_REQUESTOR=y
 CONFIG_OTA_AUTO_REBOOT_ON_APPLY=n

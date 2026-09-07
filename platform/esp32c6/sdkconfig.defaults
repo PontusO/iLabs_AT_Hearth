@@ -92,7 +92,11 @@ CONFIG_USE_BLE_ONLY_FOR_COMMISSIONING=n
 # Matter OTA Requestor on, for the FOTA relay (docs: 2026-09-07-fota-design):
 # the requestor downloads, the host stores and flashes, so the single app
 # partition stays. The processor never reboots the C6 on apply; the host does
-# the applying.
+# the applying. CONFIG_OTA_AUTO_REBOOT_ON_APPLY governs the STOCK ESP32 image
+# processor, which this firmware does not use; the Hearth processor has no
+# reboot in it at all, so the symbol is belt rather than braces, and it is set
+# so that an accidental fall back to the stock processor could not reboot the
+# co-processor out from under the host either.
 CONFIG_ENABLE_OTA_REQUESTOR=y
 CONFIG_OTA_AUTO_REBOOT_ON_APPLY=n
 

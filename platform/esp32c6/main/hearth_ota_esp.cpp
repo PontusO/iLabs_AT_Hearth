@@ -16,6 +16,7 @@
 
 extern "C" {
 #include "hearth_log.h"
+#include "hearth_port.h"
 #include "mt_matter.h"
 #include "mt_ota.h"
 }
@@ -27,14 +28,29 @@ namespace {
 
 const char *TAG = "hearth_ota_esp";
 
+/*
+ * Two tasks touch hearth::software_version(): the AT parser task writes it
+ * from AT+MTSWVER, and the Matter thread reads it whenever a controller reads
+ * Basic Information. The version is one word and would be safe on its own, but
+ * the STRING is a 32-byte copy, so a reader landing mid-strncpy would encode a
+ * torn value onto the wire. HEARTH_CRIT_OTA covers both sides; it is the OTA
+ * module's own section, it is never held across a blocking call here (a
+ * compare and a copy of at most 32 bytes), and the reads happen on the Matter
+ * thread while the only writer is the AT parser task, so the two can never
+ * deadlock on it.
+ */
 class HearthConfigurationManager : public ConfigurationManagerImpl
 {
 public:
     CHIP_ERROR GetSoftwareVersion(uint32_t &v) override
     {
         auto &sv = hearth::software_version();
-        if (sv.have) {
-            v = sv.version;
+        hearth_crit_enter(HEARTH_CRIT_OTA);
+        bool have = sv.have;
+        uint32_t version = sv.version;
+        hearth_crit_exit(HEARTH_CRIT_OTA);
+        if (have) {
+            v = version;
             return CHIP_NO_ERROR;
         }
         return ConfigurationManagerImpl::GetSoftwareVersion(v);
@@ -42,9 +58,14 @@ public:
     CHIP_ERROR GetSoftwareVersionString(char *buf, size_t bufSize) override
     {
         auto &sv = hearth::software_version();
-        if (sv.have) {
-            VerifyOrReturnError(bufSize > strlen(sv.str), CHIP_ERROR_BUFFER_TOO_SMALL);
-            strcpy(buf, sv.str);
+        char copy[sizeof(sv.str)];
+        hearth_crit_enter(HEARTH_CRIT_OTA);
+        bool have = sv.have;
+        memcpy(copy, sv.str, sizeof(copy));
+        hearth_crit_exit(HEARTH_CRIT_OTA);
+        if (have) {
+            VerifyOrReturnError(bufSize > strlen(copy), CHIP_ERROR_BUFFER_TOO_SMALL);
+            strcpy(buf, copy);
             return CHIP_NO_ERROR;
         }
         return ConfigurationManagerImpl::GetSoftwareVersionString(buf, bufSize);
@@ -58,11 +79,25 @@ HearthConfigurationManager sConfigMgr;
 /* Before any Matter initialisation (app_main, after nvs_flash_init). */
 void hearth_swver_install()
 {
+    /* Read into locals first: mt_ota_swver_stored() goes to the key-value
+     * store, and hearth_port.h forbids a blocking call inside a critical
+     * section. Nothing else is running yet at this point in app_main, so the
+     * section is belt rather than braces, but the shape stays the same as
+     * mt_matter_swver_set()'s so the two cannot drift apart. */
+    uint32_t version = 0;
+    char str[sizeof(hearth::SoftwareVersion::str)] = "";
+    bool have = (mt_ota_swver_stored(&version, str, sizeof(str)) == 0);
+
     auto &sv = hearth::software_version();
-    sv.have = (mt_ota_swver_stored(&sv.version, sv.str, sizeof(sv.str)) == 0);
+    hearth_crit_enter(HEARTH_CRIT_OTA);
+    sv.version = version;
+    memcpy(sv.str, str, sizeof(sv.str));
+    sv.have = have;
+    hearth_crit_exit(HEARTH_CRIT_OTA);
+
     SetConfigurationMgr(&sConfigMgr);
-    if (sv.have) {
-        HEARTH_LOGI(TAG, "product version %lu \"%s\" in force", (unsigned long)sv.version, sv.str);
+    if (have) {
+        HEARTH_LOGI(TAG, "product version %lu \"%s\" in force", (unsigned long)version, str);
     }
 }
 
@@ -86,10 +121,12 @@ void hearth_swver_install()
 extern "C" int mt_matter_swver_set(uint32_t version, const char *str)
 {
     auto &sv = hearth::software_version();
-    sv.have = true;
+    hearth_crit_enter(HEARTH_CRIT_OTA);
     sv.version = version;
     strncpy(sv.str, str, sizeof(sv.str) - 1);
     sv.str[sizeof(sv.str) - 1] = '\0';
+    sv.have = true;
+    hearth_crit_exit(HEARTH_CRIT_OTA);
 
     /* AT parser task: the reporting engine is CHIP-context-only. */
     PlatformMgr().ScheduleWork([](intptr_t) {

@@ -92,8 +92,18 @@ public:
 
     CHIP_ERROR ProcessBlock(ByteSpan &block) override
     {
-        VerifyOrReturnError(mDownloader != nullptr && mBuf != nullptr, CHIP_ERROR_INCORRECT_STATE);
-        VerifyOrReturnError(block.size() <= kBlockSize, CHIP_ERROR_BUFFER_TOO_SMALL);
+        VerifyOrReturnError(mDownloader != nullptr && mBuf != nullptr, Fail(CHIP_ERROR_INCORRECT_STATE));
+        VerifyOrReturnError(block.size() <= kBlockSize, Fail(CHIP_ERROR_BUFFER_TOO_SMALL));
+
+        /* BDX allows an EMPTY BlockEOF, which is what a provider sends for a
+         * file that is an exact multiple of the block size. There is nothing
+         * to relay and nothing to wait for: leave mPendingLen at zero and let
+         * the Finalize() that follows raise DOWNLOADED itself. Relaying it
+         * would fail (mt_ota_on_block refuses len 0) and abort a download that
+         * had in fact just succeeded. */
+        if (block.size() == 0) {
+            return CHIP_NO_ERROR;
+        }
 
         /* The whole file, header included, goes to the host: the host's bundle
          * parser skips the Matter header itself and can check its digest. The
@@ -107,7 +117,8 @@ public:
                 mParams.totalFileBytes = header.mPayloadSize + (block.size() - probe.size());
                 mHeaderParser.Clear();
             } else if (err != CHIP_ERROR_BUFFER_TOO_SMALL) {
-                return err;
+                HEARTH_LOGE(TAG, "malformed OTA image header");
+                return Fail(err);
             }
         }
 
@@ -115,9 +126,16 @@ public:
         mPendingLen = block.size();
         if (mt_ota_on_block(mSeq, mBuf, mPendingLen) != 0) {
             HEARTH_LOGW(TAG, "relay refused block %lu (mode 0 or busy)", (unsigned long)mSeq);
-            return CHIP_ERROR_INCORRECT_STATE;
+            return Fail(CHIP_ERROR_INCORRECT_STATE);
         }
-        return SystemLayer().StartTimer(System::Clock::Milliseconds32(kAckTimeoutMs), OnAckTimeout, this);
+        CHIP_ERROR err = SystemLayer().StartTimer(System::Clock::Milliseconds32(kAckTimeoutMs), OnAckTimeout, this);
+        if (err != CHIP_NO_ERROR) {
+            /* A pending block with no timer behind it: nothing would ever end
+             * the download if the host went quiet. */
+            HEARTH_LOGE(TAG, "no timer for block %lu", (unsigned long)mSeq);
+            return Fail(err);
+        }
+        return CHIP_NO_ERROR;
     }
 
     /*
@@ -260,6 +278,26 @@ private:
     }
 
     /*
+     * Every ProcessBlock() failure path goes through here. Returning an error
+     * to the downloader alone reaches the host as SILENCE: BDXDownloader
+     * propagates it out of HandleBdxEvent and stops, leaving the requestor
+     * mid-download with no state line ever sent. Cancelling the whole update
+     * gives the host its ERROR and then its IDLE. It is SCHEDULED, never
+     * called here: this runs inside BDXDownloader::PollTransferSession(), and
+     * CancelImageUpdate() would re-enter the same transfer session.
+     */
+    static CHIP_ERROR Fail(CHIP_ERROR err)
+    {
+        PlatformMgr().ScheduleWork([](intptr_t) {
+            OTARequestorInterface *req = GetRequestorInstance();
+            if (req != nullptr) {
+                req->CancelImageUpdate();
+            }
+        }, 0);
+        return err;
+    }
+
+    /*
      * mt_ota_block_timeout() first, always: it is the core's only
      * URC-free "forget the pending block" call, and the block it is asked to
      * forget points into mBuf. Freeing first would leave AT+MTOTAGET able to
@@ -297,6 +335,26 @@ public:
         snprintf(d, sizeof(d), "%lu", (unsigned long)update.softwareVersion);
         mt_ota_on_state(MT_OTA_AVAILABLE, d);
         DefaultOTARequestorDriver::UpdateAvailable(update, delay);
+    }
+    /*
+     * Only kBusy gets a line of its own. kUpToDate and kNotAvailable are
+     * followed immediately by RecordNewUpdateState(kIdle) in
+     * DefaultOTARequestor::OnQueryImageResponse, so HandleIdleStateEnter()
+     * below already tells the host, and a second line here would double it.
+     * kBusy is the one that does NOT come back to idle: the base schedules a
+     * retry and the requestor sits in kDelayedOnQuery, silently, which is
+     * exactly the case a host needs told. The seconds reported are the
+     * provider's own delayedActionTime; the base applies a two-minute floor of
+     * its own, so the retry can be later than the number says, never earlier.
+     */
+    CHIP_ERROR UpdateNotFound(UpdateNotFoundReason reason, System::Clock::Seconds32 delay) override
+    {
+        if (reason == UpdateNotFoundReason::kBusy) {
+            char d[16];
+            snprintf(d, sizeof(d), "%lu", (unsigned long)delay.count());
+            mt_ota_on_state(MT_OTA_DEFERRED, d);
+        }
+        return DefaultOTARequestorDriver::UpdateNotFound(reason, delay);
     }
     /* Spec 7.1: the download completing does not apply; the host answers
      * AT+MTOTASTAGED first, which calls ApplyUpdate() or CancelImageUpdate(). */
@@ -402,6 +460,18 @@ void ota_requestor_init()
      * ota_requestor_server_ready() instead. */
     sDriver.SetSendNotifyUpdateApplied(false);
     sDriver.Init(&sRequestor, &sProcessor);
+    /*
+     * The port is racing its SDK for chip::SetRequestorInstance() (see the
+     * header), and the loser of that race is a silent no-op. Say so out loud:
+     * from here on the shims below refuse every AT+MTOTA command with -1,
+     * which mt_ota.c turns into +MTERR:8, rather than driving a requestor that
+     * is not ours.
+     */
+    if (GetRequestorInstance() != &sRequestor) {
+        HEARTH_LOGE(TAG, "another OTA requestor was registered first; the AT relay is off "
+                         "for this boot and AT+MTOTA answers unsupported");
+        return;
+    }
     HEARTH_LOGI(TAG, "OTA requestor wired, mode %d", sModeEnabled ? 1 : 0);
 }
 
@@ -410,12 +480,16 @@ void ota_requestor_server_ready()
     VerifyOrReturn(sNotifyPending);
     sNotifyPending = false;
     /*
-     * Clear the persisted "applying" state first. Nothing else does: this port
-     * has no OTA partition, so it has none of the one-shot
-     * ESP_OTA_IMG_PENDING_VERIFY bookkeeping the stock ESP32 image processor
-     * leans on, and DefaultOTARequestor only rewrites the stored state from
-     * Reset() and ApplyUpdate(). Left alone, every later boot would look like
-     * a first run and re-send the notification.
+     * Clear the persisted "applying" state before trying, not after. When the
+     * notification actually goes out the SDK does it for us, in
+     * SendNotifyUpdateAppliedRequest(): "there is no response for a notify so
+     * consider this OTA complete", then Reset(), which records idle and
+     * persists it (DefaultOTARequestor.cpp:857-859). When it does NOT go out,
+     * because there is no provider or no session, only the RAM state is
+     * reset and the stored one still says applying, so every later boot would
+     * look like a first run and try again forever. This port cannot lean on
+     * the one-shot the stock ESP32 processor uses (ESP_OTA_IMG_PENDING_VERIFY
+     * on an OTA partition it does not have), so it writes its own.
      */
     sStorage.StoreCurrentUpdateState(OTARequestorInterface::OTAUpdateStateEnum::kIdle);
     HEARTH_LOGI(TAG, "first run of the applied bundle confirmed, notifying the provider");
@@ -438,9 +512,17 @@ SoftwareVersion &software_version() { return sSoftwareVersion; }
  * written once at boot.
  */
 
+/* Not "an instance exists" but "the instance is OURS": the port may have lost
+ * the SetRequestorInstance() race to its SDK, and driving somebody else's
+ * requestor through sRequestor would dereference an uninitialised object. */
+static bool relay_is_wired()
+{
+    return GetRequestorInstance() == &sRequestor;
+}
+
 extern "C" int mt_matter_ota_set_mode(int mode)
 {
-    if (GetRequestorInstance() == nullptr) {
+    if (!relay_is_wired()) {
         return -1;
     }
     if (mode == 0) {
@@ -457,13 +539,21 @@ extern "C" int mt_matter_ota_set_mode(int mode)
         return 0;
     }
     PlatformMgr().ScheduleWork([](intptr_t) {
-        mt_ota_on_state(MT_OTA_QUERYING, nullptr);
-        /* kUndefinedFabricIndex spelled out: the default argument lives on
-         * OTARequestorInterface's declaration, and DefaultOTARequestor's
-         * override restates the parameter without it, so a call through the
-         * concrete type does not inherit it. */
+        /*
+         * No +MTOTA:QUERYING here: TriggerImmediateQuery() goes through the
+         * driver ("Go through the driver as it has additional logic to
+         * execute", DefaultOTARequestor.cpp:543), so SendQueryImage() above
+         * raises it, exactly once, and only when a provider was actually
+         * found. kUndefinedFabricIndex is spelled out because the default
+         * argument lives on OTARequestorInterface's declaration and
+         * DefaultOTARequestor's override restates the parameter without it.
+         */
         if (sRequestor.TriggerImmediateQuery(kUndefinedFabricIndex) != CHIP_NO_ERROR) {
+            /* Nothing was started, so nothing will come back to idle on its
+             * own: close the state out here, so IDLE follows this ERROR like
+             * it follows every other one. */
             mt_ota_on_state(MT_OTA_ERROR, "noprovider");
+            mt_ota_on_state(MT_OTA_IDLE, nullptr);
         }
     }, 0);
     return 0;
@@ -471,7 +561,7 @@ extern "C" int mt_matter_ota_set_mode(int mode)
 
 extern "C" int mt_matter_ota_block_acked(uint32_t seq)
 {
-    if (GetRequestorInstance() == nullptr) {
+    if (!relay_is_wired()) {
         return -1;
     }
     PlatformMgr().ScheduleWork([](intptr_t s) { sProcessor.BlockAcked(static_cast<uint32_t>(s)); },
@@ -481,7 +571,7 @@ extern "C" int mt_matter_ota_block_acked(uint32_t seq)
 
 extern "C" int mt_matter_ota_staged(int ok, int reason)
 {
-    if (GetRequestorInstance() == nullptr) {
+    if (!relay_is_wired()) {
         return -1;
     }
     if (ok) {
