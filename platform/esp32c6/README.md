@@ -93,16 +93,17 @@ the active transport: see below.
 (2026-07-28) until the FOTA round turned it back on for all three images. The
 requestor downloads; the host stores and flashes, so the single app partition
 stays and the C6 never reboots itself on apply. Measured on 2026-09-07, before
-at commit `eb28dd1` (requestor off) and after at `e34cf3f` (requestor on plus
-`platform/common/hearth_ota_requestor.cpp` and `main/hearth_ota_esp.cpp`),
-each build directory reconfigured from a clean tree first; the figure is
+at commit `eb28dd1` (requestor off) and after at `843e8b4` (requestor on plus
+`platform/common/hearth_ota_requestor.cpp` and `main/hearth_ota_esp.cpp`, the
+review fixes included), each build directory reconfigured from a clean tree
+first; the figure is
 `idf.py`'s own `ilabs_at_hearth.bin binary size`:
 
-| build directory | before, eb28dd1 | after, e34cf3f | cost |
+| build directory | before, eb28dd1 | after, 843e8b4 | cost |
 |---|---|---|---|
-| `build_wifi` | 1,829,728 | 1,878,640 | +48,912 |
-| `build_thread` | 1,730,992 | 1,780,480 | +49,488 |
-| `build_combined` | 2,125,632 | 2,175,504 | +49,872 |
+| `build_wifi` | 1,829,728 | 1,879,216 | +49,488 |
+| `build_thread` | 1,730,992 | 1,781,056 | +50,064 |
+| `build_combined` | 2,125,632 | 2,176,080 | +50,448 |
 
 The three agree within a kilobyte, which is what you would expect of a cost
 that is entirely CHIP's OTA requestor, BDX downloader and the relay glue, and
@@ -116,9 +117,9 @@ times:
 | | free heap at startup |
 |---|---|
 | before, eb28dd1 | 140,980 |
-| after, e34cf3f | 138,912 and 138,312 on two boots |
+| after, 843e8b4 | 138,960 and 138,976 on two boots |
 
-So about 2.1 to 2.7 KB, against a boot-to-boot spread of 600 bytes on this
+So about 2 KB, against a boot-to-boot spread of a few hundred bytes on this
 bench. The block buffer is NOT in that figure: it is a `hearth_stage_alloc()`
 block taken when a download starts and given back when it ends, so the idle
 cost is the statics only.
