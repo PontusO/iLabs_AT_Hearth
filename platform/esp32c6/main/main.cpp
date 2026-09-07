@@ -195,6 +195,10 @@
 #define MT_OT_PORT_CONFIG()   { .storage_partition_name = "nvs", .netif_queue_size = 10, .task_queue_size = 10 }
 #endif
 
+/* FOTA round task 3: the shared CHIP-level requestor glue
+ * (platform/common/hearth_ota_requestor.cpp), which owns the image
+ * processor, the driver and the three mt_matter_ota_* shims. */
+#include "hearth_ota_requestor.h"
 #include "mt_at.h"
 #include "mt_at_config.h"
 #include "mt_comp_store.h"
@@ -212,6 +216,12 @@
 #include "mt_store_index.h"
 #include "mt_stores.h"
 #include "mt_transport.h"
+
+/* hearth_ota_esp.cpp: reads the persisted product version and installs the
+ * ConfigurationManager that serves it. Declared here rather than in a
+ * header of its own, the way this file already declares the mt_*_register_all
+ * helpers it calls once from app_main. */
+void hearth_swver_install();
 
 static const char *TAG = "mt_main";
 
@@ -660,6 +670,11 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         mt_at_event(MT_EVT_DNSSD_INITIALIZED, nullptr);
         break;
     case DeviceEventType::kServerReady:
+        /* FOTA round task 3: the first point in a boot where the requestor can
+         * actually reach a provider. A first run of a freshly applied bundle
+         * sends its NotifyUpdateApplied from here; every other boot this is a
+         * no-op. */
+        hearth::ota_requestor_server_ready();
         mt_at_event(MT_EVT_SERVER_READY, nullptr);
         break;
 
@@ -6378,12 +6393,6 @@ extern "C" int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity
     return mt_meter_set_identity_locked(ep, id);
 }
 
-/* FOTA: replaced by hearth_ota_esp.cpp in Task 3. */
-extern "C" int mt_matter_ota_set_mode(int mode) { (void)mode; return -1; }
-extern "C" int mt_matter_ota_block_acked(uint32_t seq) { (void)seq; return -1; }
-extern "C" int mt_matter_ota_staged(int ok, int reason) { (void)ok; (void)reason; return -1; }
-extern "C" int mt_matter_swver_set(uint32_t version, const char *str) { (void)version; (void)str; return -1; }
-
 /* --------------------------------------------------------------------------- */
 
 /*
@@ -6496,6 +6505,16 @@ extern "C" void app_main(void)
 {
     /* Platform NVS (fabric/credentials/attribute persistence live here). */
     nvs_flash_init();
+
+    /*
+     * FOTA round task 3: read the host-declared product version out of the
+     * key-value store and install the ConfigurationManager that serves it,
+     * before anything in CHIP can ask. It has to be here, not later:
+     * DefaultOTARequestor::Init() reads the current software version once and
+     * keeps it, and Basic Information answers every SoftwareVersion read from
+     * this same manager. hearth_ota_esp.cpp.
+     */
+    hearth_swver_install();
 
 #if MT_COMBINED_IMAGE
     /*
@@ -6826,6 +6845,29 @@ extern "C" void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start Matter: %d", err);
         return;
+    }
+
+    /*
+     * FOTA round task 3: wire the Hearth OTA requestor, HERE and not from
+     * app_event_cb()'s kServerReady case, which is where an application would
+     * normally do this. esp-matter installs a requestor of its own from its
+     * kDnssdInitialized handler (esp_matter_core.cpp's
+     * device_callback_internal -> esp_matter_ota_requestor_start), and
+     * kServerReady is only POSTED while that handler runs (Server.cpp's
+     * CheckServerReadyEvent), so a kServerReady hook always loses the race and
+     * silently leaves the ESP32 image processor in charge, which would write
+     * to an OTA partition this firmware does not have. Both sides guard on
+     * chip::GetRequestorInstance() being null, so whoever is first wins:
+     * esp_matter::start() returns only once Server::Init() has completed on
+     * the CHIP task (chip_init() blocks on a task notification), so calling it
+     * here is both legal and first by a wide margin.
+     *
+     * ChipStackLock, not ScheduleWork: this is app_main, not the CHIP task,
+     * and the race being closed is with a handler that runs under that lock.
+     */
+    {
+        ChipStackLock lock;
+        hearth::ota_requestor_init();
     }
 
     mt_boot_window_policy(mt_matter_endpoint_count() > 0);

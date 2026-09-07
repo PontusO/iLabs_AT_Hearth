@@ -26,15 +26,23 @@
 #
 # `nvs_flash` stays: main.cpp and mt_evse.cpp still call the NVS API
 # directly (nvs_flash_init(), the EVSE targets store).
+# FOTA round task 3: `../../common` carries hearth_ota_requestor.{h,cpp}, the
+# CHIP-level OTA glue every port shares. It is compiled INTO this component
+# rather than made a component of its own because it is C++ against CHIP and
+# esp_matter's include paths, exactly like main.cpp, and a component would
+# have to restate that whole dependency set to gain nothing.
 idf_component_register(
     SRCS
         "main.cpp"
+        "hearth_ota_esp.cpp"
+        "../../common/hearth_ota_requestor.cpp"
         "mt_devtypes.cpp"
         "mt_evse.cpp"
         "mt_meter.cpp"
         "mt_store_index.c"
     INCLUDE_DIRS
         "include"
+        "../../common"
     PRIV_REQUIRES
         esp_matter
         nvs_flash
