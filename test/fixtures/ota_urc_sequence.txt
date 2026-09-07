@@ -83,6 +83,19 @@
 [staged-apply]
 +MTOTA:APPLY
 
+# Task 3 report fix round 1, item 11a: AT+MTOTA=2 with the
+# DefaultOTAProviders attribute written, after the shim's duplicate QUERYING
+# line was removed. EXACTLY ONE QUERYING for one AT+MTOTA=2 is the point of
+# these lines: the shim used to raise its own beside the one the driver's
+# SendQueryImage() already causes, so mode 2 announced itself twice. The
+# transcript then ran on to ERROR,abort 5 s later because that run never
+# acknowledged the block; row 4.11 cancels with AT+MTOTA=0 instead.
+[mode2]
++MTOTA:QUERYING
++MTOTA:AVAILABLE,65541
++MTOTA:DOWNLOADING,0
++MTOTA:BLOCK,0,1024
+
 # Task 3 report fix round 1, items 3 and 11b: AT+MTOTA=2 with the
 # DefaultOTAProviders list empty. The shim raises the closing IDLE itself,
 # because nothing was started and nothing will come back to idle on its own.

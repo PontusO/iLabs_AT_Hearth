@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import re
 import struct
 import sys
@@ -8929,6 +8930,10 @@ from mt_regression import (parse_ota_block_urc, reassemble_ota_chunks,
                            step_4_7_staged_refuse, step_4_8_staged_apply,
                            step_4_10_disable_during_download,
                            step_4_9_confirm_after_reboot,
+                           step_4_11_query_now, recover_phase4, ota_mode,
+                           ota_link_command, write_default_providers,
+                           OTA_DEFAULT_PROVIDERS, OTA_DEFAULT_PROVIDERS_EMPTY,
+                           OTA_VARIANTS, OTA_STATUS_RE,
                            OTA_TARGET_VERSION, OTA_TARGET_VERSION_STR,
                            OTA_BASE_VERSION, OTA_BASE_VERSION_STR)
 
@@ -9435,8 +9440,16 @@ class TestRunPhase4(unittest.TestCase):
         self.assertEqual(len(ctx.suite.gated), 1)
         self.assertEqual(exit_code(ctx.suite, False), 0)
 
-    def test_an_abort_skips_the_rest_and_still_restores(self):
-        restored = []
+    def test_an_abort_never_factory_resets_and_never_wipes_storage(self):
+        """Fix round 1, item 1. run_phase4 used to call the shared
+        recover_after_abort(), which sends AT+MTRESET (a Matter FACTORY
+        reset) and wipes both chip-tool storage directories. Phase 4 never
+        commissions: it runs against a device that is already on the bench
+        fabric, so that recovery destroyed the one precondition the phase
+        cannot rebuild, on the most likely aborts there are (4.3's provider
+        not listening, +MTERR:8 on AT+MTOTA=1, a reboot that does not come
+        back). What it must do instead is undo its own state only."""
+        stopped = []
 
         def boom(ctx):
             ctx.suite.check("boom", False, tag="P4")
@@ -9445,14 +9458,63 @@ class TestRunPhase4(unittest.TestCase):
         steps = [{"name": "4.1 boom", "fn": boom, "gate": "include_ota"},
                  {"name": "4.2 after", "fn": lambda ctx: None,
                   "gate": "include_ota"}]
-        link = FakeOtaLink({"AT+MTRESET": (0, [])})
-        ctx = fresh_phase4_ctx(link)
-        ctx.provider = types.SimpleNamespace(stop=lambda: restored.append("stop"))
+        cmds = reboot_commands()
+        cmds.update({"AT+MTRESET": (0, []), "AT+MTOTA=0": (0, []),
+                     'AT+MTSWVER=%d,"%s"' % (OTA_BASE_VERSION,
+                                             OTA_BASE_VERSION_STR): (0, [])})
+        link = FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        storage = tempfile.mkdtemp()
+        open(os.path.join(storage, "chip_tool_kvs"), "w").close()
+        ctx = fresh_phase4_ctx(link, chip=ChipTool("/bin/chip-tool", storage))
+        ctx.provider = types.SimpleNamespace(stop=lambda: stopped.append(1))
         with self.patched(steps):
             with contextlib.redirect_stdout(io.StringIO()):
                 run_phase4(ctx)
         self.assertEqual([n for n, _ in ctx.suite.skipped], ["4.2 after"])
-        self.assertEqual(restored, ["stop"])
+        # The fabric survives: no factory reset, and the storage that holds
+        # it is untouched.
+        self.assertNotIn("AT+MTRESET", link.sent)
+        self.assertEqual(os.listdir(storage), ["chip_tool_kvs"])
+        # Phase 4's own state is undone: provider stopped, version rolled
+        # back, rebooted over the AT link.
+        self.assertEqual(stopped, [1])
+        self.assertIn('AT+MTSWVER=%d,"%s"'
+                      % (OTA_BASE_VERSION, OTA_BASE_VERSION_STR), link.sent)
+        self.assertIn("AT+MTEPAPPLY", link.sent)
+
+    def test_the_restoration_runs_once_on_an_abort(self):
+        # The abort path restores and the finally block must then not do it
+        # again: a second AT+MTEPAPPLY is a second reboot for nothing.
+        def boom(ctx):
+            raise StepAbort("dead")
+
+        cmds = reboot_commands()
+        cmds.update({"AT+MTOTA=0": (0, []),
+                     'AT+MTSWVER=%d,"%s"' % (OTA_BASE_VERSION,
+                                             OTA_BASE_VERSION_STR): (0, [])})
+        link = FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase4_ctx(link)
+        ctx.provider = types.SimpleNamespace(stop=lambda: None)
+        with self.patched([{"name": "4.1 boom", "fn": boom,
+                            "gate": "include_ota"}]):
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase4(ctx)
+        self.assertEqual(link.sent.count("AT+MTEPAPPLY"), 1)
+
+    def test_recover_phase4_is_not_the_shared_recovery(self):
+        cmds = reboot_commands()
+        cmds.update({"AT+MTOTA=0": (0, []), "AT+MTRESET": (0, []),
+                     'AT+MTSWVER=%d,"%s"' % (OTA_BASE_VERSION,
+                                             OTA_BASE_VERSION_STR): (0, [])})
+        link = FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase4_ctx(link)
+        ctx.provider = types.SimpleNamespace(stop=lambda: None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(recover_phase4(ctx, "because"))
+        self.assertNotIn("AT+MTRESET", link.sent)
 
     def test_the_step_names_are_unique_and_ordered_for_the_bench(self):
         names = [s["name"] for s in PHASE4_STEPS]
@@ -10141,6 +10203,346 @@ class TestBridgeContract(unittest.TestCase):
         ok, _ = relink(lambda: (True, ""))
         self.assertTrue(ok)
         self.assertFalse(mod.made[0].dtr)
+
+
+class TestStep411QueryNow(unittest.TestCase):
+    """Mode 2, the one path that does not use an announcement: it walks the
+    DefaultOTAProviders attribute and nothing else."""
+
+    def _ctx(self, offer_urcs, empty_urcs, chip_script=None):
+        link = FakeOtaLink({
+            "AT+MTOTA=1": (0, []),
+            "AT+MTOTA=0": (0, []),
+            "AT+MTOTA?": [(0, ["+MTOTA:0,IDLE,0,wifi"]),
+                          (0, ["+MTOTA:1,IDLE,0,wifi"])],
+        })
+        calls = {"n": 0}
+
+        def on_call(argv):
+            calls["n"] += 1
+            # First write arms the list, second empties it. The URCs a
+            # mode-2 query causes are released by AT+MTOTA=2, not here.
+            pass
+
+        runner = FakeChipRunner(chip_script or [(0, ""), (0, "")],
+                                on_call=on_call)
+        link.urcs_on_command["AT+MTOTA=2"] = list(offer_urcs)
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(), runner=runner)
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        ctx._empty_urcs = list(empty_urcs)
+        return ctx
+
+    def test_one_querying_and_the_offer_then_the_negative(self):
+        # Both halves in one scripted run: AT+MTOTA=2 releases the offer the
+        # first time and the refusal the second, which is what the real
+        # attribute write in between changes.
+        offer = ota_urc_section("mode2")
+        empty = ota_urc_section("noprovider")
+        link = FakeOtaLink({
+            "AT+MTOTA=1": (0, []),
+            "AT+MTOTA=0": (0, []),
+            "AT+MTOTA=2": (0, []),
+            "AT+MTOTA?": [(0, ["+MTOTA:0,IDLE,0,wifi"]),
+                          (0, ["+MTOTA:1,IDLE,0,wifi"])],
+        })
+        released = {"n": 0}
+        real_command = link.command
+
+        def command(cmd, expect=None, timeout=None):
+            out = real_command(cmd, expect, timeout)
+            if cmd == "AT+MTOTA=2":
+                released["n"] += 1
+                link.push_urcs(offer if released["n"] == 1 else empty)
+            return out
+
+        link.command = command
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner([(0, ""), (0, "")]))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_11_query_now(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual(released["n"], 2)
+
+    def test_a_second_querying_fails_the_row(self):
+        # The regression this row exists for: the shim used to raise its own
+        # QUERYING beside the one the driver's SendQueryImage() causes, so
+        # mode 2 announced itself twice (task-3 fix round item 2).
+        doubled = ["+MTOTA:QUERYING"] + ota_urc_section("mode2")
+        link = FakeOtaLink({
+            "AT+MTOTA=1": (0, []), "AT+MTOTA=0": (0, []),
+            "AT+MTOTA=2": (0, []),
+            "AT+MTOTA?": [(0, ["+MTOTA:0,IDLE,0,wifi"]),
+                          (0, ["+MTOTA:1,IDLE,0,wifi"])],
+        }, urcs_on_command={"AT+MTOTA=2": doubled})
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner([(0, ""), (0, "")]))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_11_query_now(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("exactly one" in n for n in names), names)
+
+    def test_an_unwritten_attribute_aborts_before_the_query(self):
+        link = FakeOtaLink({"AT+MTOTA=1": (0, [])})
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner([(1, "write failed")]))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_4_11_query_now(ctx)
+        self.assertNotIn("AT+MTOTA=2", link.sent)
+
+    def test_the_attribute_write_argv(self):
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner([(0, "")]))
+        ctx = fresh_phase4_ctx(FakeOtaLink(), chip=chip)
+        write_default_providers(ctx, OTA_DEFAULT_PROVIDERS)
+        argv = chip._runner.calls[0][0]
+        # chip-tool spells it default-otaproviders and rejects an explicit
+        # fabricIndex in the entry.
+        self.assertIn("default-otaproviders", argv)
+        self.assertNotIn("defaultotaproviders", argv)
+        self.assertIn(OTA_DEFAULT_PROVIDERS, argv)
+        self.assertNotIn("fabricIndex", OTA_DEFAULT_PROVIDERS)
+        self.assertIn("57005", OTA_DEFAULT_PROVIDERS)   # 0xDEAD in decimal
+        self.assertIn("0x4845", argv)
+
+    def test_the_row_leaves_the_list_empty(self):
+        # Stated in the step's docstring and pinned here: the negative half
+        # writes the empty list last, so 4.10 and 4.8, which reach the
+        # provider by announcement only, are unaffected, and the platform's
+        # periodic query cannot fire a stray QUERYING into 4.8's relay.
+        offer, empty = ota_urc_section("mode2"), ota_urc_section("noprovider")
+        link = FakeOtaLink({
+            "AT+MTOTA=1": (0, []), "AT+MTOTA=0": (0, []),
+            "AT+MTOTA=2": (0, []),
+            "AT+MTOTA?": [(0, ["+MTOTA:0,IDLE,0,wifi"]),
+                          (0, ["+MTOTA:1,IDLE,0,wifi"])],
+        })
+        seen = {"n": 0}
+        real = link.command
+
+        def command(cmd, expect=None, timeout=None):
+            out = real(cmd, expect, timeout)
+            if cmd == "AT+MTOTA=2":
+                seen["n"] += 1
+                link.push_urcs(offer if seen["n"] == 1 else empty)
+            return out
+
+        link.command = command
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner([(0, ""), (0, "")]))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_11_query_now(ctx)
+        writes = [argv for argv, _ in chip._runner.calls]
+        self.assertEqual(len(writes), 2)
+        self.assertIn(OTA_DEFAULT_PROVIDERS, writes[0])
+        self.assertIn(OTA_DEFAULT_PROVIDERS_EMPTY, writes[1])
+
+
+class TestOtaModeWrites(unittest.TestCase):
+    """Fix round 1, item 4: the AT+MTOTA=<mode> writes go through the same
+    shape sorter as the query. A write answers OK with no response line at
+    all, so any +MTOTA: line inside its window is by definition a URC, and
+    the write that most needs this is AT+MTOTA=0, whose own abort can raise
+    the ERROR/IDLE tail inside its own response window."""
+
+    def test_a_tail_inside_a_mode_write_is_requeued_not_dropped(self):
+        link = FakeOtaLink({"AT+MTOTA=0": (0, ["+MTOTA:ERROR,abort",
+                                               "+MTOTA:IDLE"])})
+        res, status = ota_mode(link, 0)
+        self.assertEqual(res, 0)
+        self.assertIsNone(status)
+        self.assertEqual(link.await_urc(r"^\+MTOTA:ERROR,abort$"),
+                         "+MTOTA:ERROR,abort")
+        self.assertEqual(link.await_urc(r"^\+MTOTA:IDLE$"), "+MTOTA:IDLE")
+
+    def test_every_mode_write_in_the_phase_goes_through_the_helper(self):
+        # A call site is a place to forget: pin that no Phase 4 step sends a
+        # bare link.command("AT+MTOTA=...").
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "mt_regression.py")).read()
+        phase4 = src[src.index("def step_4_1_swver"):
+                     src.index("def phase4_gate")]
+        self.assertNotIn('command("AT+MTOTA=', phase4)
+
+    def test_ota_link_command_is_what_the_query_uses_too(self):
+        link = FakeOtaLink({"AT+MTOTA?": (0, ["+MTOTA:1,IDLE,0,wifi"])})
+        self.assertEqual(ota_link_command(link, "AT+MTOTA?"),
+                         (0, "+MTOTA:1,IDLE,0,wifi"))
+
+
+class TestRequeueKeepsWireOrder(unittest.TestCase):
+    """Fix round 1, item 5. await_urc_ts()'s contract is that queue
+    timestamps are READ times and that reads preserve wire order (2.3
+    compares two of them to prove ordering), so a requeued line must carry
+    the time it really arrived and sit where it really belongs."""
+
+    def _link(self, wire):
+        return link_with_reply(wire)[0]
+
+    def test_the_original_timestamp_is_kept_not_restamped(self):
+        link = self._link(b"+MTOTA:BLOCK,3,1024\r\n+MTOTA:1,DOWNLOADING,37,wifi\r\nOK\r\n")
+        res, lines = link.command("AT+MTOTA?")
+        self.assertEqual(len(lines), 2)
+        before = time.monotonic()
+        link.requeue_urc("+MTOTA:BLOCK,3,1024")
+        got = link.await_urc_ts(r"^\+MTOTA:BLOCK,3,1024$")
+        self.assertIsNotNone(got)
+        # Read during the command, so its stamp predates the requeue call.
+        self.assertLess(got[0], before)
+
+    def test_the_history_gets_exactly_one_entry(self):
+        # 2.6 and 3.14 sweep urc_history "across every URC of the whole
+        # run", so a requeued line must appear there once: not twice, which
+        # would double-count, and not zero times, which would quietly
+        # weaken both sweeps for any URC that happened to race a query.
+        link = self._link(b"+MTOTA:BLOCK,3,1024\r\n"
+                          b"+MTOTA:1,DOWNLOADING,37,wifi\r\nOK\r\n")
+        link.command("AT+MTOTA?")
+        self.assertEqual([ln for _, ln in link.urc_history], [])
+        link.requeue_urc("+MTOTA:BLOCK,3,1024")
+        self.assertEqual([ln for _, ln in link.urc_history],
+                         ["+MTOTA:BLOCK,3,1024"])
+        # And the status line, which was a real response, never enters it.
+        self.assertNotIn("+MTOTA:1,DOWNLOADING,37,wifi",
+                         [ln for _, ln in link.urc_history])
+
+    def test_a_requeued_line_sits_before_a_later_urc(self):
+        link = self._link(b"+MTOTA:BLOCK,3,1024\r\n+MTOTA:1,DOWNLOADING,37,wifi\r\nOK\r\n")
+        link.command("AT+MTOTA?")
+        link._queue_urc("+MTOTA:DOWNLOADED")      # arrives after the command
+        link.requeue_urc("+MTOTA:BLOCK,3,1024")   # but was read before it
+        self.assertEqual([ln for _, ln in link.urcs],
+                         ["+MTOTA:BLOCK,3,1024", "+MTOTA:DOWNLOADED"])
+        stamps = [ts for ts, _ in link.urcs]
+        self.assertEqual(stamps, sorted(stamps))
+
+    def test_a_line_that_was_never_collected_still_requeues(self):
+        link = self._link(b"OK\r\n")
+        link.requeue_urc("+MTOTA:IDLE")
+        self.assertEqual(link.await_urc(r"^\+MTOTA:IDLE$"), "+MTOTA:IDLE")
+
+
+class TestOtaVariantField(unittest.TestCase):
+    """Fix round 1, item 6."""
+
+    def test_the_status_regex_accepts_an_unknown_variant(self):
+        # Baking the three tokens into the regex would make a fourth one
+        # fail as a status line that did not parse, which
+        # ota_link_command() would then put on the URC queue: the symptom
+        # would be queue pollution somewhere later, not "this image reports
+        # a variant nobody knows about".
+        m = OTA_STATUS_RE.match("+MTOTA:1,IDLE,0,zigbee")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(4), "zigbee")
+
+    def test_an_unknown_variant_fails_a_named_check(self):
+        cmds = reboot_commands()
+        cmds.update({
+            'AT+MTSWVER=%d,"%s"' % (OTA_BASE_VERSION, OTA_BASE_VERSION_STR):
+                (0, []),
+            "AT+MTSWVER?": (0, ['+MTSWVER:%d,"%s"'
+                                % (OTA_BASE_VERSION, OTA_BASE_VERSION_STR)]),
+            "AT+MTOTA?": (0, ["+MTOTA:0,IDLE,0,zigbee"]),
+        })
+        link = FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase4_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_1_swver(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("known tokens" in n for n in names), names)
+        self.assertEqual(ctx.link.urcs, [])   # not queue pollution
+
+    def test_the_known_set(self):
+        self.assertEqual(OTA_VARIANTS, ("wifi", "thread", "combined"))
+
+
+class TestPhase4BaselineNeedsTheImageTool(unittest.TestCase):
+    """Fix round 1, item 3: without the tool, 4.2 records ONE N/A name
+    instead of its two scored names, so a committed baseline would carry a
+    third key a later run does not produce."""
+
+    def _refuses(self, argv):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                main(argv)
+        return err.getvalue()
+
+    def test_baseline_refused_without_the_image_tool(self):
+        msg = self._refuses(["--port", "/dev/nope", "--phase", "4",
+                             "--include-ota", "--baseline", "/tmp/x.json"])
+        self.assertIn("--ota-image-tool", msg)
+
+    def test_baseline_accepted_with_both(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--port", "/dev/definitely-not-a-real-port-xyz",
+                       "--phase", "4", "--include-ota",
+                       "--ota-image-tool", "/tmp/tool.py",
+                       "--baseline", "/tmp/x.json"])
+        self.assertEqual(rc, 2)      # reaches the port-open failure
+
+    def test_a_non_baseline_run_still_reports_na(self):
+        ctx = fresh_phase4_ctx(ota_image_tool=None)
+        ctx.payload = ota_test_payload(64)
+        ctx.image = wrap_ota_image(ctx.payload, 0xFFF1, 0x8000,
+                                   OTA_TARGET_VERSION, OTA_TARGET_VERSION_STR)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_2_image_tool(ctx)
+        self.assertEqual(len(ctx.suite.na), 1)
+
+
+class TestRunDirectoryPolicy(unittest.TestCase):
+    """Fix round 1, item 8: the run directory holds the served image and the
+    provider's KVS, which is the only copy of what the provider was serving
+    when a byte comparison failed. Kept when the run is not clean, removed
+    when it is."""
+
+    @contextlib.contextmanager
+    def patched(self, steps):
+        saved = list(PHASE4_STEPS)
+        PHASE4_STEPS[:] = steps
+        try:
+            yield
+        finally:
+            PHASE4_STEPS[:] = saved
+
+    def _run(self, step):
+        cmds = reboot_commands()
+        cmds.update({"AT+MTOTA=0": (0, []),
+                     'AT+MTSWVER=%d,"%s"' % (OTA_BASE_VERSION,
+                                             OTA_BASE_VERSION_STR): (0, [])})
+        link = FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase4_ctx(link)
+        ctx.provider = types.SimpleNamespace(stop=lambda: None)
+        ctx.run_dir = tempfile.mkdtemp(prefix="mt-ota-test-")
+        with self.patched([{"name": "4.1 x", "fn": step,
+                            "gate": "include_ota"}]):
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase4(ctx)
+        return ctx
+
+    def test_a_clean_run_removes_it(self):
+        ctx = self._run(lambda c: c.suite.check("ok", True, tag="P4"))
+        self.assertFalse(os.path.isdir(ctx.run_dir))
+
+    def test_a_failed_run_keeps_it(self):
+        ctx = self._run(lambda c: c.suite.check("bad", False, tag="P4"))
+        self.assertTrue(os.path.isdir(ctx.run_dir))
+        shutil.rmtree(ctx.run_dir, ignore_errors=True)
+
+    def test_an_aborted_run_keeps_it(self):
+        def boom(c):
+            raise StepAbort("dead")
+
+        ctx = self._run(boom)
+        self.assertTrue(os.path.isdir(ctx.run_dir))
+        shutil.rmtree(ctx.run_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
