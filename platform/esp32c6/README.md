@@ -87,6 +87,42 @@ combined image chooses its stack at runtime with `AT+MTTRANSPORT`, stores
 the choice, and reboots into it. Its endpoint capacity is lower when WiFi is
 the active transport: see below.
 
+## What firmware over the air costs
+
+`CONFIG_ENABLE_OTA_REQUESTOR` was `n` from the single-app-partition switch
+(2026-07-28) until the FOTA round turned it back on for all three images. The
+requestor downloads; the host stores and flashes, so the single app partition
+stays and the C6 never reboots itself on apply. Measured on 2026-09-07, before
+at commit `eb28dd1` (requestor off) and after at `e34cf3f` (requestor on plus
+`platform/common/hearth_ota_requestor.cpp` and `main/hearth_ota_esp.cpp`),
+each build directory reconfigured from a clean tree first; the figure is
+`idf.py`'s own `ilabs_at_hearth.bin binary size`:
+
+| build directory | before, eb28dd1 | after, e34cf3f | cost |
+|---|---|---|---|
+| `build_wifi` | 1,829,728 | 1,878,640 | +48,912 |
+| `build_thread` | 1,730,992 | 1,780,480 | +49,488 |
+| `build_combined` | 2,125,632 | 2,175,504 | +49,872 |
+
+The three agree within a kilobyte, which is what you would expect of a cost
+that is entirely CHIP's OTA requestor, BDX downloader and the relay glue, and
+nothing transport-specific. It also matches, in the opposite direction, the
+"~45 KB on its own" the 2026-07-28 note recorded for dropping the requestor.
+
+Free heap at startup on `build_wifi`, the line the firmware logs every boot,
+on the same one-endpoint composition (a single dimmable light, `0x0100`) both
+times:
+
+| | free heap at startup |
+|---|---|
+| before, eb28dd1 | 140,980 |
+| after, e34cf3f | 138,912 and 138,312 on two boots |
+
+So about 2.1 to 2.7 KB, against a boot-to-boot spread of 600 bytes on this
+bench. The block buffer is NOT in that figure: it is a `hearth_stage_alloc()`
+block taken when a download starts and given back when it ends, so the idle
+cost is the statics only.
+
 ## Device type implementation notes
 
 The 52-row catalogue (see the top-level README for the table) is
