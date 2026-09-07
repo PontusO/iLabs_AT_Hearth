@@ -128,12 +128,22 @@ extern "C" int mt_matter_swver_set(uint32_t version, const char *str)
     sv.have = true;
     hearth_crit_exit(HEARTH_CRIT_OTA);
 
-    /* AT parser task: the reporting engine is CHIP-context-only. */
-    PlatformMgr().ScheduleWork([](intptr_t) {
+    /* AT parser task: the reporting engine is CHIP-context-only.
+     * Checked, because the failure is silent: a full event queue would drop the
+     * report and every subscriber would keep the old version until its next
+     * read, with nothing saying why. The stored value is already correct at
+     * this point, so this is a reporting loss and not a data loss, which is why
+     * it logs rather than failing the command. */
+    CHIP_ERROR err = PlatformMgr().ScheduleWork([](intptr_t) {
         MatterReportingAttributeChangeCallback(0, app::Clusters::BasicInformation::Id,
                                                app::Clusters::BasicInformation::Attributes::SoftwareVersion::Id);
         MatterReportingAttributeChangeCallback(0, app::Clusters::BasicInformation::Id,
                                                app::Clusters::BasicInformation::Attributes::SoftwareVersionString::Id);
     }, 0);
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE(TAG, "could not schedule the Basic Information report (%" CHIP_ERROR_FORMAT
+                         "); subscribers keep the old version until their next read",
+                    err.Format());
+    }
     return 0;
 }

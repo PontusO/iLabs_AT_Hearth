@@ -49,9 +49,6 @@
  * forwards those two device types need.
  */
 
-#include <stddef.h>
-#include <string.h>
-
 #include "mt_matter.h"
 
 /* mt_matter_switch_click() left this file in catalogue batch 5, when the

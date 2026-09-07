@@ -1143,14 +1143,21 @@ symbols NCS's common Matter code calls under `CONFIG_CHIP_OTA_REQUESTOR`
 
 Pristine builds, 2026-09-07, all four under sysbuild:
 
-| | Before (`ce0eee3`) | The OTA relay | Plus SLAAC (`615d37c`) |
-|---|---|---|---|
-| RAM used, `ophelia_cpico` | 220,580 B (84.14%) | 221,548 B (84.51%) | **221,692 B (84.57%)** |
-| RAM used, `nrf54l15dk` | 220,804 B (84.23%) | 221,764 B (84.60%) | **221,908 B (84.65%)** |
-| RAM free, `ophelia_cpico` | 41,564 B | 40,596 B | **40,452 B** |
-| RAM free, `nrf54l15dk` | 41,340 B | 40,380 B | **40,236 B** |
-| Flash, `ophelia_cpico` | 898,988 B (65.42%) | 931,300 B (67.77%) | **932,612 B (67.87%)** |
-| Flash, `nrf54l15dk` | 907,436 B (66.03%) | 939,740 B (68.38%) | **941,052 B (68.48%)** |
+| | Before (`ce0eee3`) | The OTA relay (`1b8ea3d`) | Plus SLAAC (`615d37c`) | As shipped |
+|---|---|---|---|---|
+| RAM used, `ophelia_cpico` | 220,580 B (84.14%) | 221,548 B (84.51%) | 221,692 B (84.57%) | **221,692 B (84.57%)** |
+| RAM used, `nrf54l15dk` | 220,804 B (84.23%) | 221,764 B (84.60%) | 221,908 B (84.65%) | **221,908 B (84.65%)** |
+| RAM free, `ophelia_cpico` | 41,564 B | 40,596 B | 40,452 B | **40,452 B** |
+| RAM free, `nrf54l15dk` | 41,340 B | 40,380 B | 40,236 B | **40,236 B** |
+| Flash, `ophelia_cpico` | 898,988 B (65.42%) | 931,300 B (67.77%) | 932,612 B (67.87%) | **932,744 B (67.88%)** |
+| Flash, `nrf54l15dk` | 907,436 B (66.03%) | 939,740 B (68.38%) | 941,052 B (68.48%) | **941,180 B (68.49%)** |
+
+The last column is the round's review fixes on top, and it exists so the middle
+columns keep their attribution: those fixes check the return of the two
+`ScheduleWork` / `ScheduleLambda` calls and log on failure, which costs 132 B of
+flash on `ophelia_cpico` and 128 B on `nrf54l15dk`, and **no RAM at all** on
+either. Every RAM figure below is read from the SLAAC column and is unchanged by
+them.
 
 **The `nrf54l15dk` column is a sysbuild build, and the earlier rounds' DK figures
 are not.** `CONFIG_CHIP_OTA_REQUESTOR` *implies* `BOOTLOADER_MCUBOOT`, which in a
@@ -1166,7 +1173,7 @@ RAM `+968 B` for the relay on `ophelia_cpico` and `+960 B` on the DK, against a
 linked image with `nm -S`, against the same read of the before image: the two
 sets differ in exactly ten symbols and in nothing else.
 
-| Item | `.bss` |
+| Item | RAM (`.bss` + `.data`) |
 |---|---|
 | `sRequestor`, `chip::DefaultOTARequestor` | **+592 B** |
 | `sDownloader`, `chip::BDXDownloader` | **+224 B** |
@@ -1178,6 +1185,10 @@ sets differ in exactly ten symbols and in nothing else.
 | `sNotifyPending`, `sModeEnabled`, `sCauseReported` | +3 B |
 | section alignment | +1 B |
 
+Three of those are `.data` rather than `.bss` and the column is labelled for it:
+`sDriver`, `sStorage` and `sConfigMgr` carry vtable pointers, so they are
+initialised and land in `.data`, 44 B of the 967.
+
 The block buffer is not in that table on purpose. It is a
 `hearth_stage_alloc(1024)` out of the arena, taken at `PrepareDownload` and
 released when the attempt ends, so the in-flight cost is 1,024 B plus the
@@ -1186,8 +1197,9 @@ running. There is no runtime heap query on this platform, so that is arithmetic
 over the linker span rather than a measured figure; the arena row in the EVSE
 round above is the same span, 1,144 B smaller.
 
-Flash `+32,312 B` is the ota-requestor cluster, BDX and the requestor's own
-translation units, none of which were compiled before.
+Flash `+32,312 B` on `ophelia_cpico` and `+32,304 B` on `nrf54l15dk` is the
+ota-requestor cluster, BDX and the requestor's own translation units, none of
+which were compiled before.
 
 **What the Kconfig had to become, and the two attempts that failed.** Recorded
 because none of it is guessable from the design:
@@ -1237,10 +1249,16 @@ with the `a` flag. Without it, `GeneralDiagnostics.NetworkInterfaces` on the
 commissioned device read three addresses and only three:
 
 ```
-[1]: FD82246DF1A3CE7F000000FFFE004400   RLOC
-[2]: FD82246DF1A3CE7FA34182B50A884EC0   mesh-local EID
-[3]: FE8000000000000030732D1169F867C4   link-local
+[1]: <mesh-local prefix redacted>:0000:00ff:fe00:4400   RLOC
+[2]: <mesh-local prefix redacted>:<interface id redacted>   mesh-local EID
+[3]: fe80::<interface id redacted>                         link-local
 ```
+
+(The first two carry the bench fabric's Mesh Local Prefix, which is a field of
+the Thread operational dataset and therefore a credential; the RLOC's
+`0000:00ff:fe00:4400` tail is kept because that shape is the informative part.
+The point stands unredacted: three addresses, none of them routable off the
+mesh.)
 
 Not one of them is routable off the mesh, so the device had no legal source
 address for any off-mesh destination. Every bench row before this one passed

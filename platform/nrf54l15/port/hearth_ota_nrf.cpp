@@ -105,15 +105,22 @@ void hearth_swver_install()
 }
 
 /*
- * main(), between PrepareServer() and StartServer(). Split from the install
- * above because this one reads the key-value store, and unlike the C6 (whose
- * NVS is up after nvs_flash_init()) the settings backend behind hearth_kv_*
- * on this platform is the same Zephyr settings subsystem CHIP initialises in
- * PrepareServer(). It must still land before StartServer(), for two reasons:
- * Basic Information starts answering reads there, and kServerReady (fired
- * from inside StartServer()'s chain) is where the requestor is wired, and
- * DefaultOTARequestor::Init() reads the current software version once and
+ * main(), between PrepareServer() and StartServer().
+ *
+ * Only the UPPER bound binds. It must land before StartServer(), for two
+ * reasons: Basic Information starts answering reads there, and kServerReady
+ * (fired from inside StartServer()'s chain) is where the requestor is wired,
+ * and DefaultOTARequestor::Init() reads the current software version once and
  * keeps it (spec 5.1).
+ *
+ * There is no matching lower bound, and it is worth saying so rather than
+ * leaving a reader to infer one from the placement: hearth_kv_* brings the
+ * settings subsystem up itself, lazily, on its first call
+ * (port/hearth_port_zephyr.c's kv_ensure_init()), so this does not depend on
+ * PrepareServer() having run. It is split from hearth_swver_install() above
+ * because THAT one has a hard upper bound of its own (PrepareServer() runs
+ * ConfigurationMgr().Init() on whichever instance is installed by then), not
+ * because this one needs to come later.
  */
 void hearth_swver_load()
 {
@@ -203,7 +210,15 @@ namespace Nrf::Matter {
 void InitBasicOTARequestor()
 {
     hearth::ota_requestor_init();
-    SystemLayer().ScheduleLambda([] { hearth::ota_requestor_server_ready(); });
+    /* Checked, because the failure is silent and expensive: a full event queue
+     * would drop this and the first run of a freshly applied bundle would never
+     * tell the provider, with nothing anywhere saying why. */
+    CHIP_ERROR err = SystemLayer().ScheduleLambda([] { hearth::ota_requestor_server_ready(); });
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE(TAG, "could not schedule the server-ready hook (%" CHIP_ERROR_FORMAT
+                         "); a pending NotifyUpdateApplied is lost for this boot",
+                    err.Format());
+    }
 }
 
 /*
