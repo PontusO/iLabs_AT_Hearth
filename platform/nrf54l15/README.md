@@ -1316,6 +1316,105 @@ getting them wrong first:
   this one: `DefaultOTARequestor::Init()` reads the current software version once
   and keeps it.
 
+## Firmware over the air
+
+The operator's view of the round recorded above. This port runs the Matter OTA
+Requestor and has **no image store of its own**: every downloaded block is
+announced to the host, pulled over the AT link and acknowledged, and the host
+stages the bundle, judges it, and flashes the module back over MCUboot serial
+recovery. No DFU slot is written and the single-app partition map is unchanged.
+The wire contract is `AT_MT_SPEC.md` sections 3.30 to 3.33; the round record is
+`ARCHITECTURE.md` section 8.21.
+
+**What this port wires.** `sysbuild.conf` sets `SB_CONFIG_MATTER_OTA=y`, which
+forces `CONFIG_CHIP_OTA_REQUESTOR` on the application image;
+`SB_CONFIG_MCUBOOT_MODE_SINGLE_APP=y` is untouched. The requestor, driver,
+downloader and Hearth's image processor are
+`platform/common/hearth_ota_requestor.cpp`, shared with the C6;
+`port/hearth_ota_nrf.cpp` defines the two symbols NCS's common Matter code
+calls under that Kconfig (`Nrf::Matter::InitBasicOTARequestor()` and
+`OtaConfirmNewImage()`), which is why NCS's own `ota_util.cpp` is never
+compiled and no DFU machinery reaches the image. `InitBasicOTARequestor()`
+wires the requestor and then **schedules** the post-apply
+`NotifyUpdateApplied` as its own lambda rather than calling it inline: the
+driver confirms the running image from a scheduled lambda of its own, and the
+platform event queue is FIFO, so posting after it is ordering rather than
+hoping. The `prj.conf` and `Kconfig` side (the four DFU symbols off,
+`UPDATEABLE_IMAGE_NUMBER` declared `default 1`) is argued in the round record
+above; do not "tidy" it without reading that, both obvious alternatives fail
+to compile.
+
+**Where the version comes from: the host, not this image.** `AT+MTSWVER`
+declares it and `core/` persists it; a `ConfigurationManager` subclass answers
+it, installed with `SetConfigurationMgr()` as the **first statement of
+`main()`**, because `Nrf::Matter::PrepareServer()` calls `InitChipStack()`
+immediately and that runs `ConfigurationMgr().Init()` on whichever instance is
+installed at the time. The stored value is read back between `PrepareServer()`
+and `StartServer()`, the window in which the settings backend is up and the
+CHIP event loop is not yet running. Basic Information is served from the same
+source, so a controller reads the declared version live with no reboot, but
+the requestor latches it at `Init()`: a version declared after boot reaches
+`QueryImage` only from the next boot. FOTA is off at every boot as well, since
+the mode is never persisted.
+
+**What a bench operator types.**
+
+```
+AT+MTSWVER=65540,"1.4.0"     declare the running product version, then reboot
+AT+MTOTA=1                   enable; +MTERR:8 means this image has no requestor
+AT+MTOTA?                    -> +MTOTA:1,IDLE,0,thread  (mode,state,percent,variant)
+                             ... announce a provider from chip-tool ...
+                             URC +MTOTA:QUERYING / AVAILABLE,65541 / DOWNLOADING,0
+                             URC +MTOTA:BLOCK,<seq>,<len>
+AT+MTOTAGET=<seq>            -> +MTOTABLK lines (96 bytes each), then OK
+AT+MTOTAACK=<seq>            -> OK, and the next block is requested
+                             URC +MTOTA:DOWNLOADED  (after the LAST ack)
+AT+MTOTASTAGED=1             the bundle verified -> URC +MTOTA:APPLY
+AT+MTOTASTAGED=0,<reason>    refused -> +MTOTA:ERROR,cancelled, then IDLE
+AT+MTOTA=0                   abort anything in flight and go quiet
+```
+
+An unacknowledged block aborts the transfer after 5 s with
+`+MTOTA:ERROR,abort`, and **every terminal `ERROR` is followed by a closing
+`+MTOTA:IDLE`**. `AT+MTOTA=2` walks the `DefaultOTAProviders` attribute and
+nothing else, so it needs `chip-tool otasoftwareupdaterequestor write
+default-otaproviders` first. Two board facts bite any hand-driven session and
+are written out above: opening the AT port resets the module, and the apply,
+the `AT+MTSWVER` and the reboot must happen in one session.
+
+**What it costs, with provenance.** From the round record above, measured
+2026-09-07 on pristine sysbuild builds: idle RAM **+968 B** on `ophelia_cpico`
+(+960 B on `nrf54l15dk`) against the 1,024 B budget, 56 bytes of headroom, with
+`sRequestor` alone taking 592 B; flash **+32,312 B** for the relay, 65.42% to
+67.77%, and 67.88% as shipped once SLAAC and the review fixes are in. The
+block buffer is a `hearth_stage_alloc(1024)` taken at `PrepareDownload` and
+given back when the attempt ends, so it is not in the idle figure. The hand-run
+transfers over Thread were 5.068 s at 115200 and 3.526 s at 921600 for an
+8,274-byte image; the harness's 20,562-byte image (21 blocks) relayed in
+11.824 s at 115200. `CONFIG_OPENTHREAD_SLAAC=y` (+144 B RAM) is a hard
+prerequisite for any of this, for the reason the section above gives.
+
+**Running the bench phase against this port.** Phase 4 of the regression
+harness plays the host and scores the whole procedure (`TESTING.md` section 9).
+The `--bridge cpico` flag is not optional here: on this bridge an asserted DTR
+holds the module in reset, so a default open returns zero bytes and reads
+exactly like dead hardware.
+
+```sh
+export MT_OTA_IMAGE_TOOL=~/esp/esp-matter/connectedhomeip/connectedhomeip/src/app/ota_image_tool.py
+python3 test/mt_regression.py \
+  --port $(ls /dev/serial/by-id/usb-Raspberry_Pi_Pico_2_*-if00) \
+  --bridge cpico --node-id 0x4846 --phase 4 --include-ota \
+  --ota-provider ~/esp/esp-matter/connectedhomeip/connectedhomeip/out/provider/chip-ota-provider-app \
+  --ota-image-tool "$MT_OTA_IMAGE_TOOL"
+```
+
+The device must already be on the bench fabric: Phase 4 never commissions and
+never touches the chip-tool storage, so it cannot rebuild a fabric it would
+destroy. `otbr-agent` is left alone and the Thread dataset is not needed. The
+baseline is `test/baselines/thread-ota.json`, 64 rows, recorded 2026-09-07 and
+identical row for row to the C6's.
+
 ## Dev board wiring
 
 The CPico RP2350 dev board carries the module and hosts the bridging firmware. This table is the soldering contract: a deviation means editing both the board `pinctrl` file and the sketch defines together.
