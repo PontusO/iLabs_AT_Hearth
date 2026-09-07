@@ -1132,6 +1132,172 @@ three images, and the only references to the unwrapped `malloc` and `free`
 in the LM20 disassembly are the tail-call branches out of
 `hearth_stage_alloc` and `hearth_stage_free`.
 
+### The FOTA relay round (2026-09-07)
+
+The Matter OTA requestor is on, and the image store is the HOST: the requestor
+downloads over Thread, the core relay hands every block up over AT, and the host
+flashes the co-processor back over serial recovery. No DFU slot is written and
+the single-app MCUboot partition map is unchanged. The port supplies the two
+symbols NCS's common Matter code calls under `CONFIG_CHIP_OTA_REQUESTOR`
+(`port/hearth_ota_nrf.cpp`), so NCS's own `ota_util.cpp` is not compiled.
+
+Pristine builds, 2026-09-07, all four under sysbuild:
+
+| | Before (`ce0eee3`) | The OTA relay | Plus SLAAC (`615d37c`) |
+|---|---|---|---|
+| RAM used, `ophelia_cpico` | 220,580 B (84.14%) | 221,548 B (84.51%) | **221,692 B (84.57%)** |
+| RAM used, `nrf54l15dk` | 220,804 B (84.23%) | 221,764 B (84.60%) | **221,908 B (84.65%)** |
+| RAM free, `ophelia_cpico` | 41,564 B | 40,596 B | **40,452 B** |
+| RAM free, `nrf54l15dk` | 41,340 B | 40,380 B | **40,236 B** |
+| Flash, `ophelia_cpico` | 898,988 B (65.42%) | 931,300 B (67.77%) | **932,612 B (67.87%)** |
+| Flash, `nrf54l15dk` | 907,436 B (66.03%) | 939,740 B (68.38%) | **941,052 B (68.48%)** |
+
+**The `nrf54l15dk` column is a sysbuild build, and the earlier rounds' DK figures
+are not.** `CONFIG_CHIP_OTA_REQUESTOR` *implies* `BOOTLOADER_MCUBOOT`, which in a
+`--no-sysbuild` build makes the application link into `slot0_partition` rather
+than the whole RRAM: the region drops to 0xa6000 and the link fails, overflowing
+by 261,308 B. The DK core-sanity path is therefore a sysbuild build from this
+round on, and the before column above was rebuilt the same way so the two are
+comparable. MCUboot itself is unmoved at 30,276 B (`ophelia_cpico`) and 30,632 B
+(`nrf54l15dk`).
+
+RAM `+968 B` for the relay on `ophelia_cpico` and `+960 B` on the DK, against a
+1,024 B budget, and every byte of it is this round's own statics. Read from the
+linked image with `nm -S`, against the same read of the before image: the two
+sets differ in exactly ten symbols and in nothing else.
+
+| Item | `.bss` |
+|---|---|
+| `sRequestor`, `chip::DefaultOTARequestor` | **+592 B** |
+| `sDownloader`, `chip::BDXDownloader` | **+224 B** |
+| `sProcessor`, Hearth's own image processor | +64 B |
+| `sSoftwareVersion`, the host-declared product version | +40 B |
+| `sDriver`, `DefaultOTARequestorDriver` | +32 B |
+| `sStorage`, `DefaultOTARequestorStorage` | +8 B |
+| `sConfigMgr`, the ConfigurationManager vtable pointer | +4 B |
+| `sNotifyPending`, `sModeEnabled`, `sCauseReported` | +3 B |
+| section alignment | +1 B |
+
+The block buffer is not in that table on purpose. It is a
+`hearth_stage_alloc(1024)` out of the arena, taken at `PrepareDownload` and
+released when the attempt ends, so the in-flight cost is 1,024 B plus the
+allocator's chunk header off the 40,452 B arena, and zero when no download is
+running. There is no runtime heap query on this platform, so that is arithmetic
+over the linker span rather than a measured figure; the arena row in the EVSE
+round above is the same span, 1,144 B smaller.
+
+Flash `+32,312 B` is the ota-requestor cluster, BDX and the requestor's own
+translation units, none of which were compiled before.
+
+**What the Kconfig had to become, and the two attempts that failed.** Recorded
+because none of it is guessable from the design:
+
+1. `CONFIG_CHIP_OTA_REQUESTOR=y` with `DFU_TARGET`, `DFU_MULTI_IMAGE`,
+   `STREAM_FLASH` and `IMG_MANAGER` all pinned to `n` (an `imply` loses to an
+   explicit assignment). **Fails to compile.** CHIP's own
+   `nrfconnect/OTAImageProcessorImpl.cpp` is built whenever
+   `chip_enable_ota_requestor` is set, whether or not anything instantiates it
+   (`src/platform/nrfconnect/BUILD.gn:133`), and it reads
+   `CONFIG_UPDATEABLE_IMAGE_NUMBER`, which exists only under `IMG_MANAGER`
+   (`zephyr/subsys/dfu/Kconfig:97`), which itself depends on `STREAM_FLASH`.
+2. The same, letting all five stand at their implied `y`. **Fails to compile,
+   three times over**, and all three for one reason: this is a single-app
+   partition map. `IMG_MANAGER`'s only image-manager choice selects
+   `MCUBOOT_BOOTUTIL_LIB`, whose `bootutil_public.c` is compiled in the
+   APPLICATION's Kconfig namespace where `CONFIG_SINGLE_APPLICATION_SLOT` is an
+   MCUboot-image symbol and therefore unset, so `pm_sysflash.h` takes its
+   two-slot branch and wants `PM_MCUBOOT_SECONDARY_ID`; `DFU_TARGET` brings
+   `dfu_target_mcuboot.c`, which wants `PM_MCUBOOT_SECONDARY_SIZE` and
+   `PM_MCUBOOT_SECONDARY_ADDRESS`.
+3. **What held**: the four stay `n`, and the one symbol
+   `OTAImageProcessorImpl.cpp` genuinely needs is declared by this platform's own
+   `Kconfig` as `UPDATEABLE_IMAGE_NUMBER` with `default 1`. That is not a
+   placation value: this device has exactly one updateable image. The
+   unreferenced object file is then never pulled out of `libCHIP.a`, and `nm` on
+   the linked image finds no `OTAImageProcessorImpl`, `dfu_target`,
+   `dfu_multi_image` or `stream_flash` symbol at all.
+
+`sysbuild.conf` moves `SB_CONFIG_MATTER_OTA` from `n` to `y`, because it forces
+`CONFIG_CHIP_OTA_REQUESTOR` on the app image BOTH ways
+(`nrf/sysbuild/CMakeLists.txt:832-837`) and `prj.conf` cannot outvote it.
+`SB_CONFIG_MCUBOOT_MODE_SINGLE_APP=y` is unaffected and stays.
+
+### The device could not speak off-mesh, and had not been able to since it first spoke Thread (2026-09-07)
+
+Found by the bench row above, and the reason it is written up separately is that
+it is not an OTA defect: it is a Thread one, and OTA is merely the first thing
+that ever asked.
+
+`CONFIG_OPENTHREAD_SLAAC` was unset. Zephyr's bridge to OpenThread's build is an
+assignment and not a default, `kconfig_to_ot_option()` forcing `OT_SLAAC=OFF`
+for an unset symbol (`zephyr/modules/openthread/CMakeLists.txt:6-12` and `:125`),
+so the SLAAC module was compiled out. SLAAC is how a Thread device forms an
+address from the border router's OMR prefix, the one the network data advertises
+with the `a` flag. Without it, `GeneralDiagnostics.NetworkInterfaces` on the
+commissioned device read three addresses and only three:
+
+```
+[1]: FD82246DF1A3CE7F000000FFFE004400   RLOC
+[2]: FD82246DF1A3CE7FA34182B50A884EC0   mesh-local EID
+[3]: FE8000000000000030732D1169F867C4   link-local
+```
+
+Not one of them is routable off the mesh, so the device had no legal source
+address for any off-mesh destination. Every bench row before this one passed
+because every one of them was inbound or on-mesh: a commissioner reaches the
+device at its mesh-local EID, and the SRP server it registers with is on-mesh
+too. The OTA requestor is the first conversation this firmware STARTS with
+anything outside the mesh, and it failed in a way that named nothing: the
+provider was discovered, its address and port were in hand, five CASE Sigma1
+retransmissions went out, and the provider process, which was separately proven
+to accept datagrams on that exact address, logged not one byte.
+
+`CONFIG_OPENTHREAD_SLAAC=y` costs **144 B of RAM**, all of it inside
+`ot::gInstanceRaw` (nm-verified: that symbol is the only one in the image that
+moves), and 1,312 B of flash. After it, the same device holds a fourth address,
+`fdec:4b70:3e94:1:…` out of the border router's OMR prefix, and the relay runs
+end to end.
+
+### Bench, over Thread (2026-09-07)
+
+`ophelia_cpico` on the CPico bridge, commissioned into the bench OTBR fabric as
+node `0x4846` with `pairing ble-thread` (`otbr-agent` untouched; the dataset was
+read at run time and never written down). Provider: `chip-ota-provider-app`
+serving an 8,274-byte test image at version 65541, announced from chip-tool. The
+transcripts are in the round's workspace.
+
+| Row | Result |
+|---|---|
+| Announce, query, offer | `+MTOTA:QUERYING`, `+MTOTA:AVAILABLE,65541` |
+| Block relay, host acknowledging | nine blocks, 8,274 B, sha256 identical to the served file |
+| Host goes quiet mid-transfer | `+MTOTA:ERROR,abort` **5.009 s** after the unanswered `BLOCK`, then `+MTOTA:IDLE` |
+| Staged verdict yes | `+MTOTA:APPLY`, state `APPLYING` |
+| Staged verdict no | `+MTOTA:ERROR,cancelled` |
+| Product version declared live | chip-tool reads `SoftwareVersion: 65541` and `SoftwareVersionString: 1.4.1` with no reboot |
+| First run after apply | provider logs `HandleNotifyUpdateApplied … version: 65541`, `update-state` back to Idle |
+| Transfer time, 115200 | **5.068 s**, first `BLOCK` to `DOWNLOADED` |
+| Transfer time, 921600 | **3.526 s**, same nine blocks |
+
+The URC sequence is identical to the C6's, which is the point: the relay is core
+code and the ports only supply the requestor.
+
+**Two ordering facts this board imposes on any host or harness**, both learned by
+getting them wrong first:
+
+- **Opening the AT port reboots the co-processor**, because the CPico bridge's DTR
+  line is wired to nRESET. So a command sent before `+MTREADY` is answered by
+  `+MTREADY` and is otherwise lost, and, more sharply, a session boundary is a
+  reboot. The reboot that follows `+MTOTA:APPLY` is the one the requestor treats
+  as the first run of the applied bundle, so `AT+MTSWVER` must be issued in the
+  SAME session as the apply. Split across two, the version is still the old one
+  at that reboot, `IsFirstImageRun()` finds the target does not match, the
+  requestor resets, and the persisted state is gone before the provider can be
+  told. The bench reboots through an SWD reset on the Debug Probe for exactly
+  this reason: the port stays open across it.
+- **A version declared after boot reaches `QueryImage` from the next boot**, not
+  this one: `DefaultOTARequestor::Init()` reads the current software version once
+  and keeps it.
+
 ## Dev board wiring
 
 The CPico RP2350 dev board carries the module and hosts the bridging firmware. This table is the soldering contract: a deviation means editing both the board `pinctrl` file and the sketch defines together.
@@ -1564,6 +1730,8 @@ The pyocd tool is the SWD path for this platform. Recovery from any state (locke
 2026-08-27: since the bootloader round, `sysbuild.conf` unconditionally sets `SB_CONFIG_BOOTLOADER_MCUBOOT=y`, so any `west build` from this directory pulls in MCUboot by default, sysbuild flag or not (there is no `.west/config` override). The stock `nrf54l15dk/nrf54l15/cpuapp` overlay used for core-sanity builds has no `mcuboot-button0` alias (only `ophelia_cpico`'s own dts wires the recovery strap to it), so MCUboot's serial-recovery build fails there with `#error "Serial recovery/USB DFU button must be declared in device tree as 'mcuboot_button0'"`. Build DK core-sanity targets with `--no-sysbuild` until the DK overlay gains recovery-button wiring or `sysbuild.conf` becomes board-conditional.
 
 2026-08-31, that paragraph is stale and this is the correction. It was written against NCS v3.0.2; the pinned workspace is v3.3.4, where `zephyr/boards/nordic/nrf54l15dk/nrf54l_05_10_15_cpuapp_common.dtsi` aliases `mcuboot-button0` to `button0` and `zephyr/boards/nordic/nrf54lm20dk/nrf54lm20_a_b_cpuapp_common.dtsi` does the same. Both DKs build under sysbuild now, verified by pristine builds of `nrf54l15dk/nrf54l15/cpuapp` and `nrf54lm20dk/nrf54lm20a/cpuapp` with MCUboot and serial recovery on. `--no-sysbuild` is no longer a workaround, only a faster core-sanity path, and the DK figures in the measurement tables above are still `--no-sysbuild` ones because that is how they were taken.
+
+2026-09-07, that last clause stopped being true for the DK from the FOTA relay round onward, and the faster path stopped working at all. `CONFIG_CHIP_OTA_REQUESTOR` implies `BOOTLOADER_MCUBOOT`, and in a `--no-sysbuild` build that makes the application link into `slot0_partition` instead of the whole RRAM: the region becomes 0xa6000 and the link fails with `region FLASH overflowed by 261308 bytes`. Under sysbuild the bootloader is its own image and the application gets the Partition Manager `app` slot, so nothing overflows. Build DK targets with `--sysbuild`; the FOTA round's table gives both boards that way, with its before column rebuilt to match.
 
 After SWD install, all updates go over UART via the serial recovery mechanism. Flashing is driven by the host's `fw/flash.py` script:
 
