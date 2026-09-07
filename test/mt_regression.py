@@ -6031,9 +6031,18 @@ def step_4_11_query_now(ctx):
             available == "+MTOTA:AVAILABLE,%d" % OTA_TARGET_VERSION, tag="P4")
     # Counted out of the history rather than awaited: a second QUERYING is
     # proved absent by counting what arrived, not by waiting for one that
-    # is not coming.
-    querying = [ln for _, ln in link.urc_history[mark:]
-                if ln == "+MTOTA:QUERYING"]
+    # is not coming. The count is bounded at the AVAILABLE line, not taken
+    # over everything since the mark, because a populated
+    # DefaultOTAProviders attribute also arms the platform's PERIODIC query,
+    # and one of those firing later is a different event entirely. The wifi
+    # bench run saw exactly that: a second QUERYING in the tail drained by
+    # the cancel, seconds after the offer. This row is about the shim
+    # raising a duplicate line for ONE AT+MTOTA=2, so it counts inside that
+    # query and nowhere else.
+    window = [ln for _, ln in link.urc_history[mark:]]
+    if available in window:
+        window = window[:window.index(available) + 1]
+    querying = [ln for ln in window if ln == "+MTOTA:QUERYING"]
     if not s.check("4.11 exactly one +MTOTA:QUERYING for one AT+MTOTA=2",
                    len(querying) == 1, tag="P4"):
         print("    (QUERYING lines seen: %d)" % len(querying))

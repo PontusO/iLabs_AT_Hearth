@@ -10283,6 +10283,38 @@ class TestStep411QueryNow(unittest.TestCase):
         names = [n for n, ok, _ in ctx.suite.results if not ok]
         self.assertTrue(any("exactly one" in n for n in names), names)
 
+    def test_a_later_periodic_query_does_not_fail_the_row(self):
+        """A populated DefaultOTAProviders attribute also arms the
+        platform's PERIODIC query. The wifi bench run saw one of those fire
+        seconds after the offer, landing in the tail the cancel drained. It
+        is a different event from the shim raising a duplicate line for one
+        AT+MTOTA=2, so the count is bounded at the AVAILABLE line."""
+        offer = ota_urc_section("mode2") + ["+MTOTA:QUERYING"]
+        empty = ota_urc_section("noprovider")
+        link = FakeOtaLink({
+            "AT+MTOTA=1": (0, []), "AT+MTOTA=0": (0, []),
+            "AT+MTOTA=2": (0, []),
+            "AT+MTOTA?": [(0, ["+MTOTA:0,IDLE,0,wifi"]),
+                          (0, ["+MTOTA:1,IDLE,0,wifi"])],
+        })
+        seen = {"n": 0}
+        real = link.command
+
+        def command(cmd, expect=None, timeout=None):
+            out = real(cmd, expect, timeout)
+            if cmd == "AT+MTOTA=2":
+                seen["n"] += 1
+                link.push_urcs(offer if seen["n"] == 1 else empty)
+            return out
+
+        link.command = command
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner([(0, ""), (0, "")]))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_11_query_now(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
     def test_an_unwritten_attribute_aborts_before_the_query(self):
         link = FakeOtaLink({"AT+MTOTA=1": (0, [])})
         chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
