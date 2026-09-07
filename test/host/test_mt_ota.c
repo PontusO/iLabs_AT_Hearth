@@ -129,6 +129,8 @@ static void test_swver(void)
           run("MTSWVER", AT_SET, "1,\"abcdefghijklmnopqrstuvwxyz01234\"") == AT_R_OK);
     check("32-char string is a bad parameter",
           run("MTSWVER", AT_SET, "1,\"abcdefghijklmnopqrstuvwxyz012345\"") == MT_ERR_BAD_PARAM);
+    check("a quote inside the version string is a bad parameter",
+          run("MTSWVER", AT_SET, "1,\"a\"b\"") == MT_ERR_BAD_PARAM);
     check("exec form is a bare ERROR", run("MTSWVER", AT_EXEC, NULL) == MT_R_ERROR);
 }
 
@@ -147,6 +149,7 @@ static void test_mode(void)
 
     s_set_mode_rc = -1;
     check("no requestor: MTOTA=1 is +MTERR:8", run("MTOTA", AT_SET, "1") == MT_ERR_UNSUPPORTED && mt_ota_mode() == 0);
+    check("MTOTA=0 with no requestor still answers OK", run("MTOTA", AT_SET, "0") == AT_R_OK && mt_ota_mode() == 0);
     s_set_mode_rc = 0;
 }
 
@@ -213,6 +216,47 @@ static void test_block_relay(void)
     check("ERROR drops the pending block", run("MTOTAGET", AT_SET, "10") == MT_ERR_OTA_STATE);
     check("MTOTAGET with no argument is a bad parameter", run("MTOTAGET", AT_SET, "") == MT_ERR_BAD_PARAM);
     check("MTOTAACK query form is a bare ERROR", run("MTOTAACK", AT_QUERY, NULL) == MT_R_ERROR);
+
+    check("block accepted for the acked-refusal case", mt_ota_on_block(11, blk, 5) == 0);
+    s_acked_rc = -1;
+    check("acked but the platform refused is +MTERR:12", run("MTOTAACK", AT_SET, "11") == MT_ERR_OTA_STATE);
+    check("the block is no longer pending after a refused ack", run("MTOTAGET", AT_SET, "11") == MT_ERR_OTA_STATE);
+    s_acked_rc = 0;
+}
+
+static void test_block_chunking(void)
+{
+    static uint8_t blk192[192];
+    static uint8_t blk1024[1024];
+    for (int i = 0; i < 192; i++) blk192[i] = (uint8_t)i;
+    for (int i = 0; i < 1024; i++) blk1024[i] = (uint8_t)i;
+
+    mt_ota_init();
+    run("MTOTA", AT_SET, "1");
+    check("192-byte block accepted", mt_ota_on_block(1, blk192, sizeof(blk192)) == 0);
+    cap_reset();
+    check("MTOTAGET=1 -> OK", run("MTOTAGET", AT_SET, "1") == AT_R_OK);
+    check("a 192-byte block is exactly two full lines", s_nlines == 2);
+    check("second line at offset 96 with 192 hex digits",
+          strncmp(s_lines[1], "+MTOTABLK:1,96,", 15) == 0 &&
+          strlen(s_lines[1]) == strlen("+MTOTABLK:1,96,") + 192);
+
+    mt_ota_init();
+    run("MTOTA", AT_SET, "1");
+    check("1024-byte block accepted", mt_ota_on_block(2, blk1024, sizeof(blk1024)) == 0);
+    cap_reset();
+    check("MTOTAGET=2 -> OK", run("MTOTAGET", AT_SET, "2") == AT_R_OK);
+    check("a 1024-byte block is eleven lines, the last 64 bytes", s_nlines == 11);
+    check("line 10 has offset 960 and 128 hex digits",
+          strncmp(s_lines[10], "+MTOTABLK:2,960,", 16) == 0 &&
+          strlen(s_lines[10]) == strlen("+MTOTABLK:2,960,") + 128);
+    bool all_under_254 = true;
+    for (int i = 0; i < s_nlines; i++) {
+        if (strlen(s_lines[i]) >= 254) {
+            all_under_254 = false;
+        }
+    }
+    check("every line under 254 chars", all_under_254);
 }
 
 static void test_staged(void)
@@ -241,6 +285,7 @@ int main(void)
     test_mode();
     test_state_urcs();
     test_block_relay();
+    test_block_chunking();
     test_staged();
     printf("\n===== RESULT: %d passed, %d failed =====\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
