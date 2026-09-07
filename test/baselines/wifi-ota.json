@@ -2,7 +2,7 @@
   "header": {
     "cgmm": "ESP32-C6 Hearth",
     "cgmr": "1.2.0",
-    "fw_repo_head": "15362e8b0158c2ee7fdedba3a3e474b4b498387a",
+    "fw_repo_head": "ee59d02e96d7ca908ec7276620aeee70495862aa",
     "manual_code": "34970112332",
     "net": "+MTNET:WIFI,1,1,0",
     "node_id": "0x4845",
@@ -14,15 +14,15 @@
       "provider": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/provider/chip-ota-provider-app",
       "provider_sha256": "7ebf85f4 4c3ca6d0 215e79b7 b77950f2 7f71cc2b 22cb62df 62857b1b 593df607",
       "transfer_seconds": {
-        "4.6 full relay": 8.62,
-        "4.8 apply relay": 8.504
+        "4.6 full relay": 8.888,
+        "4.8 apply relay": 9.064
       },
       "vendor_id": "0xFFF1"
     },
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-09-07T12:35:08+00:00",
+    "timestamp": "2026-09-07T13:10:18+00:00",
     "transport": "WIFI"
   },
   "results": {
@@ -31,6 +31,7 @@
     "4.1 AT+MTSWVER? answers what was declared": "PASS",
     "4.1 reboot so the requestor latches that version": "PASS",
     "4.1 the OTA variant agrees with AT+MTNET?'s transport": "PASS",
+    "4.1 the OTA variant is one of the known tokens": "PASS",
     "4.1 the version survived the reboot": "PASS",
     "4.10 AT+MTOTA=0 mid-download -> OK": "PASS",
     "4.10 AT+MTOTA? reads 0,IDLE,0 again": "PASS",
@@ -38,6 +39,19 @@
     "4.10 no further +MTOTA line for 10 s": "PASS",
     "4.10 the image is offered": "PASS",
     "4.10 two blocks relayed before the interruption": "PASS",
+    "4.11 +MTOTA:AVAILABLE within 15 s of AT+MTOTA=2": "PASS",
+    "4.11 AT+MTOTA=0 cancels the mode-2 query -> OK": "PASS",
+    "4.11 AT+MTOTA=1 -> OK": "PASS",
+    "4.11 AT+MTOTA=1 again -> OK": "PASS",
+    "4.11 AT+MTOTA=2 -> OK": "PASS",
+    "4.11 AT+MTOTA=2 with an empty list -> OK": "PASS",
+    "4.11 AT+MTOTA? reads 0,IDLE,0 after the cancel": "PASS",
+    "4.11 AT+MTOTA? reads IDLE after the refused query": "PASS",
+    "4.11 an empty list answers +MTOTA:ERROR,noprovider": "PASS",
+    "4.11 default-otaproviders cleared": "PASS",
+    "4.11 default-otaproviders written": "PASS",
+    "4.11 exactly one +MTOTA:QUERYING for one AT+MTOTA=2": "PASS",
+    "4.11 the closing +MTOTA:IDLE follows noprovider": "PASS",
     "4.2 ota_image_tool.py create -> 0": "PASS",
     "4.2 wrap_ota_image matches ota_image_tool.py byte for byte": "PASS",
     "4.3 provider ACL written": "PASS",
