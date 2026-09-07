@@ -31,6 +31,7 @@
 #include "mt_comp_store.h"
 #include "mt_composition.h"
 #include "mt_devtypes.h"
+#include "mt_err.h"
 #include "mt_matter.h"
 #include "mt_rows.h"
 #include "mt_transport.h"
@@ -81,22 +82,10 @@
 #define MT_CMD_VERDICT_ROWS_MS 3000
 
 /* +MTERR:<n> code space (mirrors the ESP-NOW layout: 1..99 carry a code,
- * >= MT_ERR_GENERIC is a plain "ERROR"). Real codes are assigned in B4. */
-#define MT_ERR_BAD_PARAM    1   /* bad parameter or out of range          */
-#define MT_ERR_NO_ENDPOINT  2   /* unknown endpoint                       */
-#define MT_ERR_NO_CLUSTER   3   /* unknown cluster                        */
-#define MT_ERR_NO_ATTRIBUTE 4   /* unknown attribute                      */
-#define MT_ERR_ATTR_TYPE    5   /* attribute type unsupported here        */
-#define MT_ERR_DEVTYPE      6   /* unknown or unsupported device type     */
-#define MT_ERR_PERSIST      7   /* NVS persistence failure                */
-#define MT_ERR_UNSUPPORTED  8   /* unknown/unsupported command            */
-#define MT_ERR_NOT_READY    9   /* no composition, or stack not started   */
-#define MT_ERR_COMP_REJECT  10  /* nothing staged, or endpoint cap hit    */
-#define MT_ERR_ATTR_READONLY 11 /* attribute exists but is served by a
-                                  * cluster Instance and is not writable
-                                  * over AT (DE270)                        */
-#define MT_ERR_GENERIC      100 /* plain ERROR, no +MTERR line            */
-#define MT_R_ERROR          MT_ERR_GENERIC
+ * >= MT_ERR_GENERIC is a plain "ERROR"). Real codes are assigned in B4.
+ * The codes themselves moved to mt_err.h once the OTA module (mt_ota.c)
+ * needed the same numbers; this comment stays because it explains the
+ * code space, not any one definition in it. */
 
 /* Set once the AT UART (and its TX mutex) exist. See mt_at_urc(). Declared
  * up here, rather than next to mt_at_start() below, because mt_cmd_forward()

@@ -147,3 +147,9 @@
  * deleted, because that proof is a property of the build and not of any one
  * round: a header entry point added tomorrow has a place to be stubbed while
  * its implementation is written. */
+
+/* ---- firmware over the air: stubbed until hearth_ota_nrf.cpp (Task 4) ---- */
+int mt_matter_ota_set_mode(int mode) { (void)mode; return -1; }
+int mt_matter_ota_block_acked(uint32_t seq) { (void)seq; return -1; }
+int mt_matter_ota_staged(int ok, int reason) { (void)ok; (void)reason; return -1; }
+int mt_matter_swver_set(uint32_t version, const char *str) { (void)version; (void)str; return -1; }

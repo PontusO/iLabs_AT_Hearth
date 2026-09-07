@@ -116,7 +116,8 @@ int hearth_link_set_flowctrl(int mode);
  */
 #define HEARTH_CRIT_CMDBOX 0
 #define HEARTH_CRIT_ROWS   1
-#define HEARTH_CRIT_COUNT  2
+#define HEARTH_CRIT_OTA    2
+#define HEARTH_CRIT_COUNT  3
 
 void hearth_crit_enter(int id);
 void hearth_crit_exit(int id);

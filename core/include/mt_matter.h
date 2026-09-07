@@ -1623,6 +1623,38 @@ int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total);
  */
 int mt_matter_evse_targets_erase_all(void);
 
+/* ---- firmware over the air (spec 2026-09-07-fota-design) ------------- */
+
+/*
+ * The core relays Matter OTA blocks to the host (mt_ota.c); the platform
+ * owns the CHIP OTA Requestor. All four run on the AT parser task and must
+ * hop to the Matter thread themselves (PlatformMgr().ScheduleWork); none
+ * may block.
+ *
+ * mt_matter_ota_set_mode: 0 disable and abort anything in flight, 1 enable
+ * (accept AnnounceOTAProvider, run the periodic query), 2 query the last
+ * known provider now. Returns 0, or -1 when this image has no requestor at
+ * all (mt_ota.c answers +MTERR:8 to AT+MTOTA then). A mode-2 request with
+ * no provider known fails asynchronously as +MTOTA:ERROR,noprovider.
+ *
+ * mt_matter_ota_block_acked: the host acknowledged block <seq>; the platform
+ * cancels its acknowledgement timer and asks the downloader for the next
+ * block. Returns 0, or -1 if no download is in progress.
+ *
+ * mt_matter_ota_staged: the host's verdict on the downloaded bundle. ok=1
+ * sends ApplyUpdateRequest to the provider; ok=0 cancels the update with
+ * <reason> logged (spec 5.4 reason codes). Returns 0, or -1 if the requestor
+ * is not in the downloaded state.
+ *
+ * mt_matter_swver_set: the host declared the product version; persistence
+ * is the core's, this updates the live Basic Information attributes and the
+ * value the platform's ConfigurationManager serves. Returns 0, or -1.
+ */
+int mt_matter_ota_set_mode(int mode);
+int mt_matter_ota_block_acked(uint32_t seq);
+int mt_matter_ota_staged(int ok, int reason);
+int mt_matter_swver_set(uint32_t version, const char *str);
+
 #ifdef __cplusplus
 }
 #endif

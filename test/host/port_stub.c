@@ -37,6 +37,7 @@ void hearth_crit_exit(int id)  { (void)id; }
 void *hearth_stage_alloc(size_t bytes) { return malloc(bytes); }
 void  hearth_stage_free(void *block)   { free(block); }
 
+#ifndef PORT_STUB_NO_LINK
 void hearth_link_init(void) {}
 void hearth_link_write(const void *data, size_t len) { (void)data; (void)len; }
 void hearth_link_write_line(const char *fmt, ...) { (void)fmt; }
@@ -46,6 +47,7 @@ int  hearth_link_get_baud(void) { return 115200; }
 int  hearth_link_set_baud(int baud) { (void)baud; return 0; }
 int  hearth_link_get_flowctrl(void) { return 0; }
 int  hearth_link_set_flowctrl(int mode) { (void)mode; return 0; }
+#endif
 
 /* ---- RAM KV ------------------------------------------------------ */
 
