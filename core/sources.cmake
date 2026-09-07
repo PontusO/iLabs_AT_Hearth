@@ -7,6 +7,7 @@ set(HEARTH_CORE_SOURCES
     ${HEARTH_CORE_DIR}/mt/mt_cmdbox.c
     ${HEARTH_CORE_DIR}/mt/mt_composition.c
     ${HEARTH_CORE_DIR}/mt/mt_comp_store.c
+    ${HEARTH_CORE_DIR}/mt/mt_ota.c
     ${HEARTH_CORE_DIR}/mt/mt_rows.c
     ${HEARTH_CORE_DIR}/mt/mt_transport.c)
 set(HEARTH_CORE_INCLUDE_DIRS ${HEARTH_CORE_DIR}/include)

@@ -6378,6 +6378,12 @@ extern "C" int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity
     return mt_meter_set_identity_locked(ep, id);
 }
 
+/* FOTA: replaced by hearth_ota_esp.cpp in Task 3. */
+extern "C" int mt_matter_ota_set_mode(int mode) { (void)mode; return -1; }
+extern "C" int mt_matter_ota_block_acked(uint32_t seq) { (void)seq; return -1; }
+extern "C" int mt_matter_ota_staged(int ok, int reason) { (void)ok; (void)reason; return -1; }
+extern "C" int mt_matter_swver_set(uint32_t version, const char *str) { (void)version; (void)str; return -1; }
+
 /* --------------------------------------------------------------------------- */
 
 /*

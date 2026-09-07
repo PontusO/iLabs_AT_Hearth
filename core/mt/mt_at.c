@@ -33,6 +33,7 @@
 #include "mt_devtypes.h"
 #include "mt_err.h"
 #include "mt_matter.h"
+#include "mt_ota.h"
 #include "mt_rows.h"
 #include "mt_transport.h"
 
@@ -3730,6 +3731,15 @@ void mt_at_start(void)
      */
     mt_cmdbox_init();
     s_cmd_sem = hearth_sem_create_binary();
+
+    /* FOTA relay: boot state is mode 0 (spec 5.2), registered as a second
+     * table so the module stays host-testable without this file. */
+    mt_ota_init();
+    {
+        size_t n_ota;
+        const at_command_t *ota = mt_ota_commands(&n_ota);
+        at_register_commands(ota, n_ota);
+    }
 
     at_register_commands(s_cmds, sizeof(s_cmds) / sizeof(s_cmds[0]));
     at_parser_start(&s_engine_cfg);
