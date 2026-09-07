@@ -34,12 +34,15 @@ steps sequence around this by construction.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -74,9 +77,25 @@ from datetime import datetime, timezone
 # file's module docstring (T1 design section 8, N23): never have an
 # AT+MTATTR command in flight while a +MTATTR URC is expected. Phase 2
 # and Phase 3 sequence around it by construction.
+#
+# The third member arrived with the firmware update relay: AT+MTOTAGET
+# answers "+MTOTABLK:" lines (spec 3.32, cmd_mtotaget() in mt_ota.c). It was
+# found by the same audit, which had to be widened first: the five OTA
+# commands live in mt_ota.c's own s_ota_cmds[] table, registered alongside
+# mt_at.c's s_cmds[], and the audit only ever read the latter, so a whole
+# command family had never been checked at all.
+#
+# AT+MTOTA is a SECOND inherent collision alongside AT+MTATTR's: its query
+# response and the +MTOTA state URCs are both "+MTOTA:" lines. No table row
+# can fix that either. Phase 4 lives with it the way the standing rule lives
+# with AT+MTATTR, plus a shape test: ota_query() keeps the four-field status
+# line and hands every other "+MTOTA:" line back to the URC queue
+# (ATLink.requeue_urc), so a state line that raced the query is delayed
+# rather than lost.
 RESPONSE_PREFIX_EXCEPTIONS = {
     "MTEVT": "+MTEVTMASK:",
     "MTROWGET": "+MTROW:",
+    "MTOTAGET": "+MTOTABLK:",
 }
 
 
@@ -225,6 +244,19 @@ class ATLink:
         """True when nothing matching arrives within the window. This is
         the no-reboot proof for the reset-form negatives."""
         return self.await_urc(pattern, timeout=window) is None
+
+    def requeue_urc(self, line):
+        """Put a line back on the URC queue.
+
+        _collect() has to decide by PREFIX whether a line is this command's
+        response or a URC, and two commands share their prefix with a URC
+        they can race: AT+MTATTR (the standing rule in this module's
+        docstring) and AT+MTOTA (spec 3.31's state lines). ota_query()
+        tells them apart by shape instead and hands the URC back here, so
+        a +MTOTA:BLOCK line that landed inside an AT+MTOTA? response is
+        still there for the step waiting on it. Dropping it would lose the
+        block for good: ATLink.urcs is a queue with no way back."""
+        self._queue_urc(line)
 
     def drain(self, quiet=0.2):
         """Read until the link is quiet, then discard and return every
@@ -5199,8 +5231,932 @@ PHASE3_STEPS[:] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: the firmware update relay (TESTING.md section 8)
+#
+# The co-processor runs the Matter OTA Requestor and has no image store of
+# its own: every downloaded block is announced to the host, pulled with
+# AT+MTOTAGET, acknowledged with AT+MTOTAACK, and only then does the
+# requestor ask the provider for the next one (spec 3.31-3.33). Phase 4 is
+# the harness playing that host against a real chip-ota-provider-app, so the
+# bench procedure Tasks 3 and 4 ran by hand becomes a scored, baselined row
+# set.
+#
+# The whole phase is gated on --include-ota, because it needs a provider
+# binary that is not part of this repository.
+# ---------------------------------------------------------------------------
+
+OTA_BLOCK_RE = re.compile(r"^\+MTOTA:BLOCK,(\d+),(\d+)$")
+OTA_CHUNK_RE = re.compile(r"^\+MTOTABLK:(\d+),(\d+),([0-9A-F]*)$")
+# AT+MTOTA?'s four-field status line (spec 3.31), as opposed to every other
+# line that starts with "+MTOTA:", which is a URC.
+OTA_STATUS_RE = re.compile(
+    r"^\+MTOTA:(\d),([A-Z]+),(\d+),(wifi|thread|combined)$")
+# The lines relay_ota_blocks() stops for. Progress lines are deliberately NOT
+# in it: they stay queued, and the step reads them back out of urc_history so
+# the loop never has to race them.
+OTA_RELAY_RE = r"^\+MTOTA:(BLOCK,\d+,\d+|DOWNLOADED|IDLE|ERROR,[a-z]+)$"
+
+# The image the provider serves, and the version the device declares before
+# it. The device must BOOT with the lower version: DefaultOTARequestor::Init()
+# reads the software version once and keeps it for the life of the boot
+# (task-4-report.md section 5.2), so a version declared after boot only
+# reaches QueryImage from the next one. step_4_1_swver therefore always sets
+# and reboots rather than only doing so when the value differs: a check name
+# that appears in some runs and not others is not a baseline key.
+OTA_BASE_VERSION = 65540
+OTA_BASE_VERSION_STR = "1.4.0"
+OTA_TARGET_VERSION = 65541
+OTA_TARGET_VERSION_STR = "1.4.1"
+# Fallbacks only: run_phase4 asks the device for its real ids first, through
+# chip-tool's setup-payload parser, so a unit provisioned with other ids is
+# still offered an image it will accept.
+OTA_VENDOR_ID = 0xFFF1
+OTA_PRODUCT_ID = 0x8000
+
+OTA_GET_TIMEOUT_S = 10.0     # one AT+MTOTAGET pull: 11 lines at 115200
+OTA_BLOCK_WAIT_S = 20.0      # +MTOTA:BLOCK to +MTOTA:BLOCK
+OTA_QUERY_WAIT_S = 30.0      # announce to +MTOTA:QUERYING
+OTA_OFFER_WAIT_S = 30.0      # +MTOTA:QUERYING to +MTOTA:AVAILABLE
+OTA_ABORT_WAIT_S = 8.0       # the firmware's 5 s block timeout, plus slack
+OTA_APPLY_WAIT_S = 10.0      # AT+MTOTASTAGED=1 to +MTOTA:APPLY
+OTA_QUIET_WINDOW_S = 10.0    # 4.10: no +MTOTA line after AT+MTOTA=0
+OTA_NOTIFY_WAIT_S = 30.0     # post-apply NotifyUpdateApplied at the provider
+OTA_NET_WAIT_S = 60.0        # reboot to <connected> = 1
+OTA_PROVIDER_WAIT_S = 30.0   # provider start to "Server Listening"
+
+
+def parse_ota_block_urc(line):
+    """(seq, len) from a +MTOTA:BLOCK URC, or None for any other line."""
+    m = OTA_BLOCK_RE.match(line)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def reassemble_ota_chunks(seq, lines, length):
+    """The +MTOTABLK lines of one AT+MTOTAGET answer -> bytes. Offsets must
+    be contiguous from 0 and the total must equal the announced length.
+
+    Strict on purpose: a pull interrupted by a drop ends with +MTERR:12
+    after the lines already sent (spec 3.32), so a short or gapped answer is
+    a real event the caller has to see, not something to paper over."""
+    out = bytearray()
+    for line in lines:
+        m = OTA_CHUNK_RE.match(line)
+        if not m:
+            raise ValueError("not a chunk line: %r" % line)
+        if int(m.group(1)) != seq:
+            raise ValueError("chunk for seq %s, wanted %d"
+                             % (m.group(1), seq))
+        if int(m.group(2)) != len(out):
+            raise ValueError("chunk offset %s, expected %d"
+                             % (m.group(2), len(out)))
+        out += bytes.fromhex(m.group(3))
+    if len(out) != length:
+        raise ValueError("block length %d, announced %d" % (len(out), length))
+    return bytes(out)
+
+
+def _tlv_uint(tag, value):
+    # CHIP TLV, context tag, unsigned int in the smallest width
+    for ctl, fmt in ((0x04, "<B"), (0x05, "<H"), (0x06, "<I"), (0x07, "<Q")):
+        try:
+            return bytes([0x20 | ctl, tag]) + struct.pack(fmt, value)
+        except struct.error:
+            continue
+    raise ValueError(value)
+
+
+def _tlv_str(tag, s):
+    b = s.encode()
+    return bytes([0x2C, tag, len(b)]) + b        # UTF-8 string, 1-byte length
+
+
+def _tlv_bytes(tag, b):
+    return bytes([0x30, tag, len(b)]) + b        # octet string, 1-byte length
+
+
+def wrap_ota_image(payload, vendor, product, version, version_str):
+    """The Matter OTA header (ota_image_tool.py's layout) around a payload:
+    magic, total size, header size, then an anonymous TLV structure with
+    context tags 0..9 in ascending order. Digest covers the payload only.
+
+    Reimplemented here rather than imported so the harness needs nothing
+    from the CHIP tree at run time; check 4.2 compares this output byte for
+    byte against the real tool when MT_OTA_IMAGE_TOOL points at it."""
+    digest = hashlib.sha256(payload).digest()
+    tlv = (bytes([0x15]) + _tlv_uint(0, vendor) + _tlv_uint(1, product)
+           + _tlv_uint(2, version) + _tlv_str(3, version_str)
+           + _tlv_uint(4, len(payload)) + _tlv_uint(8, 1)
+           + _tlv_bytes(9, digest) + bytes([0x18]))
+    fixed = struct.pack("<IQI", 0x1BEEF11E,
+                        16 + len(tlv) + len(payload), len(tlv))
+    return fixed + tlv + payload
+
+
+def ota_test_payload(size):
+    """Deterministic filler for the test image: the same bytes every run, so
+    a mismatch is the link's fault and never the payload's."""
+    return bytes(((i * 7 + 3) & 0xFF) for i in range(size))
+
+
+def parse_vendor_product(text):
+    """(vendor, product) from `payload parse-setup-payload` output, or None.
+    The image the provider serves has to name the ids the device actually
+    reports, or QueryImage answers NotAvailable and no URC ever arrives."""
+    v = re.search(r"VendorID:\s*(\d+)", text)
+    p = re.search(r"ProductID:\s*(\d+)", text)
+    return (int(v.group(1)), int(p.group(1))) if v and p else None
+
+
+class OtaProvider:
+    """chip-ota-provider-app as a bench process: started with the image,
+    commissioned into the bench fabric on a discriminator and passcode that
+    cannot collide with the device's, given the ACL that lets the device
+    query it, stopped at the end. Injectable runner for the self-tests.
+
+    Its stdout is piped and drained by a reader thread, for two reasons: an
+    undrained pipe fills and stops the provider mid-download, and check 4.9
+    has to read NotifyUpdateApplied out of that log."""
+
+    NODE_ID = 0xDEAD
+    DISCRIMINATOR = 3841
+    PASSCODE = 20202022
+    SECURED_PORT = 5541
+
+    def __init__(self, binary, image_path, kvs_dir, popen=None):
+        self.binary, self.image_path, self.kvs_dir = binary, image_path, kvs_dir
+        self._popen = popen or subprocess.Popen
+        self.proc = None
+        self.lines = []
+        self._lock = threading.Lock()
+        self._reader = None
+
+    def argv(self):
+        return [self.binary, "--filepath", self.image_path,
+                "--discriminator", str(self.DISCRIMINATOR),
+                "--passcode", str(self.PASSCODE),
+                "--KVS", os.path.join(self.kvs_dir, "kvs"),
+                "--secured-device-port", str(self.SECURED_PORT)]
+
+    def start(self):
+        os.makedirs(self.kvs_dir, exist_ok=True)
+        argv = self.argv()
+        self.proc = self._popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True)
+        self._reader = threading.Thread(target=self._drain, daemon=True)
+        self._reader.start()
+        return argv
+
+    def _drain(self):
+        stream = self.proc.stdout
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                with self._lock:
+                    self.lines.append(line.rstrip("\r\n"))
+        except (ValueError, OSError):
+            pass          # the pipe closed under us at stop(): not an error
+
+    def log_text(self):
+        with self._lock:
+            return "\n".join(self.lines)
+
+    def wait_for_log(self, pattern, timeout=30.0):
+        """The first logged line matching the regex, or None. Scans the
+        whole log each time, so a line that arrived before the call still
+        counts: the provider logs the moment the device talks to it, which
+        can be before the harness gets around to looking."""
+        rx = re.compile(pattern)
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                for line in self.lines:
+                    if rx.search(line):
+                        return line
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.2)
+
+    def stop(self):
+        if self.proc is None:
+            return
+        self.proc.terminate()
+        try:
+            self.proc.wait(5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+
+# The two entries Task 3 pinned on the bench: administer for the commissioner
+# itself (chip-tool's default 112233), and operate on the OTA Provider
+# cluster (0x29 = 41) for everyone, which is what lets the device's QueryImage
+# reach the provider at all.
+OTA_PROVIDER_ACL = (
+    '[{"fabricIndex":1,"privilege":5,"authMode":2,"subjects":[112233],'
+    '"targets":null},'
+    '{"fabricIndex":1,"privilege":3,"authMode":2,"subjects":null,'
+    '"targets":[{"cluster":41,"endpoint":null,"deviceType":null}]}]')
+
+
+class Phase4Context:
+    """Shared state the ordered Phase 4 steps hand each other, the same role
+    Phase2Context and Phase3Context play for their phases."""
+
+    def __init__(self, link, chip, suite, opts):
+        self.link = link
+        self.chip = chip
+        self.suite = suite
+        self.opts = opts
+        self.chip2 = None          # recover_after_abort tolerates None
+        self.node_id = getattr(opts, "node_id", 0x4845)
+        self.provider = None       # OtaProvider, built by run_phase4
+        self.image = None          # the wrapped .ota bytes
+        self.payload = b""         # the bytes inside that wrapper
+        self.image_path = None
+        self.vendor = OTA_VENDOR_ID
+        self.product = OTA_PRODUCT_ID
+        self.variant = None        # wifi / thread / combined, from AT+MTOTA?
+        self.transport = "WIFI"    # set from phase4_gate's detection
+        self.dataset = None        # Thread active dataset hex, if any
+        self.composition = None    # +MTEP? lines, needed by the reboots
+        self.timings = {}          # row -> seconds, for the report table
+        self.image_tool_runner = None   # test seam; None means subprocess
+        self.sleeper = None        # test seam; None means time.sleep
+        self.net_wait_s = OTA_NET_WAIT_S  # test seam: how long a reboot has
+                                    # to get back on the network before the
+                                    # row calls it a failed reboot
+
+    def sleep(self, seconds):
+        (self.sleeper or time.sleep)(seconds)
+
+
+def ota_query(ctx_or_link):
+    """AT+MTOTA? -> (res, status_line or None).
+
+    AT+MTOTA?'s response prefix and the +MTOTA URC prefix are the same
+    string. That is the SECOND inherent collision of the kind
+    RESPONSE_PREFIX_EXCEPTIONS' comment describes, after AT+MTATTR's, and it
+    cannot be fixed by a table row: ATLink._collect() cannot tell a status
+    line from a state URC by prefix. It can be told apart by SHAPE, which is
+    what this does, and any non-status line is put back on the URC queue
+    rather than dropped, so a BLOCK or a progress line that raced the query
+    is still there for the step that awaits it."""
+    link = getattr(ctx_or_link, "link", ctx_or_link)
+    res, lines = link.command("AT+MTOTA?")
+    status = None
+    for ln in lines:
+        if OTA_STATUS_RE.match(ln):
+            status = ln
+        else:
+            link.requeue_urc(ln)
+    return res, status
+
+
+def ota_state(link):
+    """The <state> field of AT+MTOTA?, or None."""
+    res, status = ota_query(link)
+    if res != 0 or status is None:
+        return None
+    return OTA_STATUS_RE.match(status).group(2)
+
+
+def await_network(ctx, timeout=None):
+    """Poll AT+MTNET? until <connected> reads 1 (spec 3.12). A reboot's
+    +MTREADY says the AT parser is up, not that the device is back on the
+    network, and every OTA row needs the network."""
+    deadline = time.monotonic() + (
+        timeout if timeout is not None
+        else getattr(ctx, "net_wait_s", OTA_NET_WAIT_S))
+    while True:
+        res, lines = cmd_retry(ctx.link, "AT+MTNET?")
+        if res == 0 and lines:
+            f = lines[0].split(",")
+            if len(f) >= 3 and f[2] == "1":
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        ctx.sleep(2.0)
+
+
+def reboot_via_epapply(ctx):
+    """Reboot the co-processor WITHOUT dropping the AT link.
+
+    Not a uhubctl power cycle, deliberately (task-3-report.md fix round,
+    item 6's method note): cycling the hub drops the RP2350 too, and
+    re-opening the port pulses the co-processor's reset, so the boot the
+    harness observes is a second one that has already consumed the
+    requestor's first-run state. AT+MTEPAPPLY restarts the co-processor
+    alone: the AT handle, the fabric and the stored composition all survive,
+    and +MTREADY arrives on the link that is already open.
+
+    Re-declares the captured composition first, because AT+MTEPCLEAR opens
+    an empty staging session and AT+MTEPAPPLY persists whatever is staged."""
+    link = ctx.link
+    if ctx.composition is None:
+        res, lines = link.command("AT+MTEP?")
+        ctx.composition = lines if res == 0 else []
+    devtypes = []
+    for ln in ctx.composition or []:
+        m = re.fullmatch(r"\+MTEP:\d+,\d+,(\S+)", ln)
+        if m:
+            devtypes.append(m.group(1))
+    if not stage_composition(link, devtypes):
+        return False
+    link.drain(0.3)
+    if link.command("AT+MTEPAPPLY", timeout=5.0)[0] != 0:
+        return False
+    if link.await_urc(r"\+MTREADY$", timeout=20.0) is None:
+        return False
+    if not await_network(ctx):
+        return False
+    # The reboot restages the composition, so it can also CHANGE it if the
+    # replay is wrong. Phase 4 runs on a bench where other phases' fixtures
+    # live; a reboot that quietly reshapes the device would be found much
+    # later and blamed on something else.
+    res, lines = cmd_retry(link, "AT+MTEP?")
+    return res == 0 and lines == ctx.composition
+
+
+def announce_provider(ctx, timeout=60):
+    """chip-tool otasoftwareupdaterequestor announce-otaprovider: tell the
+    device where the provider is. Spelled announce-otaprovider in this
+    chip-tool. The trailing zeros are vendorId, announcementReason and the
+    optional metadata/endpoint the command takes before the target."""
+    return ctx.chip.run(
+        ["otasoftwareupdaterequestor", "announce-otaprovider",
+         "0x%X" % OtaProvider.NODE_ID, "0", "0", "0",
+         "0x%X" % ctx.node_id, "0"], timeout=timeout)
+
+
+def await_ota_offer(ctx, timeout=OTA_QUERY_WAIT_S):
+    """Wait for QUERYING then AVAILABLE, tolerating one stale-CASE-session
+    recovery.
+
+    A provider restarted since the device last talked to it leaves the
+    device holding a session that no longer exists; the requestor reports
+    ERROR,session, returns to IDLE and retries the same provider on its own
+    (task-3-report.md fix round item 4). That recovery is a legitimate wire
+    sequence a host must survive, so this waits through it once rather than
+    failing the row. Returns (querying, available, recovered)."""
+    querying = ctx.link.await_urc(r"^\+MTOTA:QUERYING$", timeout=timeout)
+    if querying is None:
+        return None, None, False
+    recovered = False
+    for _ in range(2):
+        line = ctx.link.await_urc(
+            r"^\+MTOTA:(AVAILABLE,\d+|ERROR,session)$",
+            timeout=OTA_OFFER_WAIT_S)
+        if line is None:
+            return querying, None, recovered
+        if line.startswith("+MTOTA:AVAILABLE,"):
+            return querying, line, recovered
+        recovered = True
+        ctx.link.await_urc(r"^\+MTOTA:IDLE$", timeout=5.0)
+        if ctx.link.await_urc(r"^\+MTOTA:QUERYING$", timeout=timeout) is None:
+            return querying, None, recovered
+    return querying, None, recovered
+
+
+def relay_ota_blocks(ctx, deadline_s, stop_after=None, ack=True):
+    """The host side of the relay: await +MTOTA:BLOCK, pull it with
+    AT+MTOTAGET, reassemble it, append it, acknowledge it, repeat until
+    +MTOTA:DOWNLOADED, a terminal line, stop_after blocks, or the deadline.
+
+    Returns a dict with the blocks seen, the bytes reassembled, why the loop
+    stopped, and how long the transfer took from the first block. Progress
+    lines are never consumed here; they stay on the URC queue and the caller
+    reads them back out of urc_history."""
+    link = ctx.link
+    out = bytearray()
+    blocks = []
+    started = None
+    terminal = None
+    end = time.monotonic() + deadline_s
+    while True:
+        if stop_after is not None and len(blocks) >= stop_after:
+            terminal = "stopped"
+            break
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            terminal = "deadline"
+            break
+        line = link.await_urc(OTA_RELAY_RE,
+                             timeout=min(OTA_BLOCK_WAIT_S, remaining))
+        if line is None:
+            terminal = "timeout"
+            break
+        if not line.startswith("+MTOTA:BLOCK,"):
+            terminal = line[len("+MTOTA:"):]
+            break
+        seq, length = parse_ota_block_urc(line)
+        if started is None:
+            started = time.monotonic()
+        res, lines = link.command("AT+MTOTAGET=%d" % seq,
+                                  timeout=OTA_GET_TIMEOUT_S)
+        if res != 0:
+            terminal = "get:%d" % res
+            break
+        try:
+            out += reassemble_ota_chunks(seq, lines, length)
+        except ValueError as exc:
+            terminal = "chunks:%s" % exc
+            break
+        blocks.append((seq, length))
+        if not ack:
+            terminal = "unacknowledged"
+            break
+        res, _ = link.command("AT+MTOTAACK=%d" % seq)
+        if res != 0:
+            terminal = "ack:%d" % res
+            break
+    return {"blocks": blocks, "data": bytes(out), "terminal": terminal,
+            "seconds": (time.monotonic() - started
+                        if started is not None else None)}
+
+
+def ota_progress_since(link, mark):
+    """The +MTOTA:DOWNLOADING percentages logged since urc_history index
+    mark. Read out of the history rather than awaited, so the relay loop
+    never has to race them."""
+    pct = []
+    for _, line in link.urc_history[mark:]:
+        m = re.match(r"^\+MTOTA:DOWNLOADING,(\d+)$", line)
+        if m:
+            pct.append(int(m.group(1)))
+    return pct
+
+
+def step_4_1_swver(ctx):
+    """The declared product version, and the requestor's resting state.
+
+    Always sets and reboots, even when AT+MTSWVER? already reads the base
+    version: the requestor latches the software version at Init(), so the
+    only way to KNOW the device booted with it is to make it do so."""
+    link, s = ctx.link, ctx.suite
+    want = '+MTSWVER:%d,"%s"' % (OTA_BASE_VERSION, OTA_BASE_VERSION_STR)
+    res, _ = link.command('AT+MTSWVER=%d,"%s"'
+                          % (OTA_BASE_VERSION, OTA_BASE_VERSION_STR))
+    if not s.check("4.1 AT+MTSWVER set -> OK", res == 0, tag="P4"):
+        raise StepAbort("the device will not accept a product version")
+    res, lines = link.command("AT+MTSWVER?")
+    s.check("4.1 AT+MTSWVER? answers what was declared",
+            res == 0 and lines == [want], tag="P4")
+    ok = reboot_via_epapply(ctx)
+    if not s.check("4.1 reboot so the requestor latches that version",
+                   ok, tag="P4"):
+        raise StepAbort("device did not come back from AT+MTEPAPPLY")
+    res, lines = link.command("AT+MTSWVER?")
+    s.check("4.1 the version survived the reboot",
+            res == 0 and lines == [want], tag="P4")
+    res, status = ota_query(link)
+    m = OTA_STATUS_RE.match(status) if status else None
+    s.check("4.1 AT+MTOTA? reads 0,IDLE,0,<variant> at boot",
+            res == 0 and m is not None and m.group(1) == "0"
+            and m.group(2) == "IDLE" and m.group(3) == "0", tag="P4")
+    ctx.variant = m.group(4) if m else None
+    res, lines = link.command("AT+MTNET?")
+    transport = lines[0].split(":")[1].split(",")[0] if res == 0 and lines \
+        else None
+    s.check("4.1 the OTA variant agrees with AT+MTNET?'s transport",
+            ctx.variant is not None and transport is not None
+            and ctx.variant in (transport.lower(), "combined"), tag="P4")
+
+
+def step_4_2_image_tool(ctx):
+    """wrap_ota_image against the CHIP tree's own ota_image_tool.py.
+
+    The harness builds the Matter OTA header itself so a bench run needs
+    nothing from the CHIP tree; this is the row that keeps that
+    reimplementation honest. N/A when MT_OTA_IMAGE_TOOL is unset, because
+    the tool is not part of this repository."""
+    s = ctx.suite
+    tool = getattr(ctx.opts, "ota_image_tool", None)
+    if not tool:
+        s.not_applicable("4.2 wrap_ota_image matches ota_image_tool.py",
+                         "MT_OTA_IMAGE_TOOL is not set")
+        return
+    tmp = tempfile.mkdtemp(prefix="mt-ota-tool-")
+    src = os.path.join(tmp, "payload.bin")
+    dst = os.path.join(tmp, "reference.ota")
+    with open(src, "wb") as fh:
+        fh.write(ctx.payload)
+    argv = [sys.executable, tool, "create",
+            "-v", "0x%04X" % ctx.vendor, "-p", "0x%04X" % ctx.product,
+            "-vn", str(OTA_TARGET_VERSION), "-vs", OTA_TARGET_VERSION_STR,
+            "-da", "sha256", src, dst]
+    runner = ctx.image_tool_runner or _subprocess_runner
+    rc, out = runner(argv, 120)
+    if not s.check("4.2 ota_image_tool.py create -> 0", rc == 0, tag="P4"):
+        print("    (ota_image_tool: %s)" % (out or "").strip()[-400:])
+        return
+    with open(dst, "rb") as fh:
+        reference = fh.read()
+    s.check("4.2 wrap_ota_image matches ota_image_tool.py byte for byte",
+            reference == ctx.image, tag="P4")
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def step_4_3_provider_up(ctx):
+    """Start chip-ota-provider-app, commission it as node 0xDEAD and give it
+    the ACL the device's QueryImage needs.
+
+    A provider from an earlier run can still be paired in the storage
+    directory, in which case chip-tool refuses the node id as a duplicate.
+    That is bench state, not a defect, so the row unpairs and retries once
+    before scoring."""
+    s, chip = ctx.suite, ctx.chip
+    argv = ctx.provider.start()
+    print("    (provider: %s)" % " ".join(argv))
+    # "the process exists" is not "the provider is up". A provider left
+    # running by an earlier session already owns --secured-device-port 5541,
+    # and the second one dies on the bind while the pairing that follows
+    # quietly commissions the OLD provider instead, serving an image the
+    # relay will then fail to match. Wait for the banner, and say so.
+    listening = ctx.provider.wait_for_log(r"Server Listening",
+                                          timeout=OTA_PROVIDER_WAIT_S)
+    if not s.check("4.3 provider listening", listening is not None, tag="P4"):
+        print("    (provider log tail: %s)"
+              % ctx.provider.log_text()[-400:])
+        raise StepAbort("the OTA provider never came up (is one from an "
+                        "earlier run still holding port %d?)"
+                        % OtaProvider.SECURED_PORT)
+    node = "0x%X" % OtaProvider.NODE_ID
+    pair = ["pairing", "onnetwork-long", node, str(OtaProvider.PASSCODE),
+            str(OtaProvider.DISCRIMINATOR)]
+    rc, out = chip.run(pair, timeout=120)
+    if rc != 0:
+        print("    (pairing failed once, unpairing %s and retrying)" % node)
+        chip.run(["pairing", "unpair", node], timeout=60)
+        rc, out = chip.run(pair, timeout=120)
+    if not s.check("4.3 provider commissioned as 0xDEAD", rc == 0, tag="P4"):
+        print("    (chip-tool: %s)" % (out or "").strip()[-400:])
+        raise StepAbort("the OTA provider would not commission")
+    rc, out = chip.run(["accesscontrol", "write", "acl", OTA_PROVIDER_ACL,
+                        node, "0"], timeout=60)
+    if not s.check("4.3 provider ACL written", rc == 0, tag="P4"):
+        print("    (chip-tool: %s)" % (out or "").strip()[-400:])
+        raise StepAbort("the OTA provider has no usable ACL")
+
+
+def step_4_4_announce(ctx):
+    """AT+MTOTA=1, then an announce, then the query and the offer."""
+    link, s = ctx.link, ctx.suite
+    link.drain(0.3)
+    res, _ = link.command("AT+MTOTA=1")
+    if not s.check("4.4 AT+MTOTA=1 -> OK", res == 0, tag="P4"):
+        raise StepAbort("this image has no OTA requestor wired (+MTERR:8)")
+    rc, out = announce_provider(ctx)
+    if not s.check("4.4 announce-otaprovider -> 0", rc == 0, tag="P4"):
+        print("    (chip-tool: %s)" % (out or "").strip()[-400:])
+        raise StepAbort("the device was never told where the provider is")
+    querying, available, recovered = await_ota_offer(ctx)
+    if recovered:
+        print("    (a stale CASE session was retried: ERROR,session then a "
+              "second QUERYING, recovered without help)")
+    s.check("4.4 +MTOTA:QUERYING after the announce",
+            querying is not None, tag="P4")
+    s.check("4.4 +MTOTA:AVAILABLE names the offered version",
+            available == "+MTOTA:AVAILABLE,%d" % OTA_TARGET_VERSION, tag="P4")
+    first = link.await_urc(r"^\+MTOTA:DOWNLOADING,0$", timeout=OTA_BLOCK_WAIT_S)
+    if not s.check("4.4 +MTOTA:DOWNLOADING,0 starts the transfer",
+                   first is not None, tag="P4"):
+        raise StepAbort("the download never started")
+
+
+def step_4_5_block_timeout(ctx):
+    """One block relayed and deliberately not acknowledged.
+
+    The firmware gives the host 5 s per block (spec 3.32); the transfer then
+    aborts and, per spec 3.31, the terminal ERROR is followed by a closing
+    +MTOTA:IDLE, which is what puts AT+MTOTA? back to IDLE."""
+    link, s = ctx.link, ctx.suite
+    got = relay_ota_blocks(ctx, deadline_s=OTA_BLOCK_WAIT_S + OTA_GET_TIMEOUT_S,
+                           ack=False)
+    s.check("4.5 the first block was announced and pulled",
+            got["terminal"] == "unacknowledged" and len(got["blocks"]) == 1,
+            tag="P4")
+    length = got["blocks"][0][1] if got["blocks"] else 0
+    s.check("4.5 the pulled block matches the image at its offset",
+            bool(got["data"]) and got["data"] == ctx.image[:length], tag="P4")
+    err = link.await_urc(r"^\+MTOTA:ERROR,[a-z]+$", timeout=OTA_ABORT_WAIT_S)
+    s.check("4.5 an unacknowledged block aborts with +MTOTA:ERROR,abort",
+            err == "+MTOTA:ERROR,abort", tag="P4")
+    idle = link.await_urc(r"^\+MTOTA:IDLE$", timeout=5.0)
+    s.check("4.5 the terminal ERROR is followed by a closing +MTOTA:IDLE",
+            idle is not None, tag="P4")
+    s.check("4.5 AT+MTOTA? reads IDLE again",
+            ota_state(link) == "IDLE", tag="P4")
+
+
+def step_4_6_full_relay(ctx):
+    """Every block pulled and acknowledged, through to DOWNLOADED, with the
+    reassembled bytes compared against the served file."""
+    link, s = ctx.link, ctx.suite
+    link.drain(0.3)
+    rc, _ = announce_provider(ctx)
+    s.check("4.6 announce-otaprovider -> 0", rc == 0, tag="P4")
+    _, available, _ = await_ota_offer(ctx)
+    if not s.check("4.6 the image is offered again",
+                   available is not None, tag="P4"):
+        raise StepAbort("no second offer: nothing to relay")
+    mark = len(link.urc_history)
+    deadline = 120.0 + len(ctx.image) / 1000.0
+    got = relay_ota_blocks(ctx, deadline_s=deadline)
+    ctx.timings["4.6 full relay"] = got["seconds"]
+    s.check("4.6 the transfer ends with +MTOTA:DOWNLOADED",
+            got["terminal"] == "DOWNLOADED", tag="P4")
+    s.check("4.6 the reassembled image equals the served file byte for byte",
+            got["data"] == ctx.image, tag="P4")
+    pct = ota_progress_since(link, mark)
+    s.check("4.6 progress percentages rise and never reach 100",
+            bool(pct) and pct == sorted(pct) and max(pct) < 100, tag="P4")
+    res, status = ota_query(link)
+    s.check("4.6 AT+MTOTA? reads DOWNLOADED,100",
+            res == 0 and status == "+MTOTA:1,DOWNLOADED,100,%s" % ctx.variant,
+            tag="P4")
+    if got["seconds"] is not None:
+        print("    (relay: %d blocks, %d bytes, %.3f s)"
+              % (len(got["blocks"]), len(got["data"]), got["seconds"]))
+
+
+def step_4_7_staged_refuse(ctx):
+    """The host refuses the bundle it just downloaded.
+
+    ERROR,cancelled and not ERROR,abort: a transfer that ran to completion
+    leaves the downloader complete, so the cause line comes from the cancel
+    path rather than the abort path (task-3-report.md fix round item 11c)."""
+    link, s = ctx.link, ctx.suite
+    res, _ = link.command("AT+MTOTASTAGED=0,1")
+    s.check("4.7 AT+MTOTASTAGED=0,1 -> OK", res == 0, tag="P4")
+    err = link.await_urc(r"^\+MTOTA:ERROR,[a-z]+$", timeout=OTA_ABORT_WAIT_S)
+    s.check("4.7 a refused bundle ends as +MTOTA:ERROR,cancelled",
+            err == "+MTOTA:ERROR,cancelled", tag="P4")
+    idle = link.await_urc(r"^\+MTOTA:IDLE$", timeout=5.0)
+    s.check("4.7 the closing +MTOTA:IDLE follows it", idle is not None,
+            tag="P4")
+    s.check("4.7 AT+MTOTA? reads IDLE after the refusal",
+            ota_state(link) == "IDLE", tag="P4")
+
+
+def step_4_10_disable_during_download(ctx):
+    """AT+MTOTA=0 in the middle of a transfer.
+
+    Mode 0 aborts what is in flight, drops the pending block, and silences
+    the +MTOTA URCs (spec 3.31), so the proof is that nothing further
+    arrives, not that something does.
+
+    Registered BEFORE 4.8 in PHASE4_STEPS: 4.8 applies the update and 4.9
+    declares the new version, after which the provider's image is no longer
+    an upgrade and no offer would arrive at all."""
+    link, s = ctx.link, ctx.suite
+    link.drain(0.3)
+    rc, _ = announce_provider(ctx)
+    s.check("4.10 announce-otaprovider -> 0", rc == 0, tag="P4")
+    _, available, _ = await_ota_offer(ctx)
+    if not s.check("4.10 the image is offered", available is not None,
+                   tag="P4"):
+        raise StepAbort("no offer: nothing to interrupt")
+    got = relay_ota_blocks(ctx, deadline_s=60.0, stop_after=2)
+    s.check("4.10 two blocks relayed before the interruption",
+            got["terminal"] == "stopped" and len(got["blocks"]) == 2,
+            tag="P4")
+    res, _ = link.command("AT+MTOTA=0")
+    s.check("4.10 AT+MTOTA=0 mid-download -> OK", res == 0, tag="P4")
+    # A line already on the wire when the command was parsed is not a
+    # contract violation: the requestor announces the next block the moment
+    # the previous acknowledgement lands, so one BLOCK or progress line can
+    # legitimately overtake AT+MTOTA=0. What mode 0 promises is that nothing
+    # NEW is emitted afterwards (spec 3.31), so the in-flight tail is drained
+    # and reported, and the quiet window is measured after it.
+    inflight = [u for u in link.drain(0.5) if u.startswith("+MTOTA:")]
+    if inflight:
+        print("    (in flight when the mode changed: %s)" % ", ".join(inflight))
+    s.check("4.10 no further +MTOTA line for %d s" % OTA_QUIET_WINDOW_S,
+            link.assert_no_urc(r"^\+MTOTA:", OTA_QUIET_WINDOW_S), tag="P4")
+    res, status = ota_query(link)
+    s.check("4.10 AT+MTOTA? reads 0,IDLE,0 again",
+            res == 0 and status == "+MTOTA:0,IDLE,0,%s" % ctx.variant,
+            tag="P4")
+
+
+def step_4_8_staged_apply(ctx):
+    """A second full relay, then the host approving the bundle."""
+    link, s = ctx.link, ctx.suite
+    link.drain(0.3)
+    res, _ = link.command("AT+MTOTA=1")
+    s.check("4.8 AT+MTOTA=1 -> OK", res == 0, tag="P4")
+    rc, _ = announce_provider(ctx)
+    s.check("4.8 announce-otaprovider -> 0", rc == 0, tag="P4")
+    _, available, _ = await_ota_offer(ctx)
+    if not s.check("4.8 the image is offered for the apply run",
+                   available is not None, tag="P4"):
+        raise StepAbort("no offer: nothing to apply")
+    deadline = 120.0 + len(ctx.image) / 1000.0
+    got = relay_ota_blocks(ctx, deadline_s=deadline)
+    ctx.timings["4.8 apply relay"] = got["seconds"]
+    if not s.check("4.8 the second transfer also reaches DOWNLOADED",
+                   got["terminal"] == "DOWNLOADED"
+                   and got["data"] == ctx.image, tag="P4"):
+        raise StepAbort("the apply run did not download cleanly")
+    res, _ = link.command("AT+MTOTASTAGED=1")
+    s.check("4.8 AT+MTOTASTAGED=1 -> OK", res == 0, tag="P4")
+    apply_urc = link.await_urc(r"^\+MTOTA:APPLY$", timeout=OTA_APPLY_WAIT_S)
+    s.check("4.8 +MTOTA:APPLY within %d s" % OTA_APPLY_WAIT_S,
+            apply_urc is not None, tag="P4")
+    res, status = ota_query(link)
+    s.check("4.8 AT+MTOTA? reads APPLYING,100",
+            res == 0 and status == "+MTOTA:1,APPLYING,100,%s" % ctx.variant,
+            tag="P4")
+
+
+def step_4_9_confirm_after_reboot(ctx):
+    """The first boot of the applied bundle tells the provider it landed.
+
+    The host declares the version the bundle carries and reboots; the
+    requestor's first-run check then sees its target version in force and
+    sends NotifyUpdateApplied, once. The reboot is AT+MTEPAPPLY and NOT a
+    power cycle: a uhubctl cycle drops the AT link, and re-opening the port
+    pulses the co-processor's reset, which consumes that first-run state
+    before the harness can watch for it (task-3-report.md fix round, item
+    6). That is why this row is not gated on --include-manual."""
+    link, s = ctx.link, ctx.suite
+    res, _ = link.command('AT+MTSWVER=%d,"%s"'
+                          % (OTA_TARGET_VERSION, OTA_TARGET_VERSION_STR))
+    s.check("4.9 the host declares the applied version", res == 0, tag="P4")
+    ok = reboot_via_epapply(ctx)
+    if not s.check("4.9 AT+MTEPAPPLY reboot, +MTREADY, network back",
+                   ok, tag="P4"):
+        raise StepAbort("device did not come back after the apply reboot")
+    res, lines = link.command("AT+MTSWVER?")
+    s.check("4.9 AT+MTSWVER? reads the applied version",
+            res == 0
+            and lines == ['+MTSWVER:%d,"%s"'
+                          % (OTA_TARGET_VERSION, OTA_TARGET_VERSION_STR)],
+            tag="P4")
+    line = ctx.provider.wait_for_log(
+        r"NotifyUpdateApplied", timeout=OTA_NOTIFY_WAIT_S)
+    s.check("4.9 the provider logged NotifyUpdateApplied",
+            line is not None, tag="P4")
+    version = ctx.provider.wait_for_log(
+        r"version:\s*%d" % OTA_TARGET_VERSION, timeout=5.0)
+    s.check("4.9 the notification names the applied version",
+            version is not None, tag="P4")
+    rc, out = ctx.chip.run(["otasoftwareupdaterequestor", "read",
+                            "update-state", "0x%X" % ctx.node_id, "0"],
+                           timeout=60)
+    s.check("4.9 the requestor reads back Idle (1)",
+            rc == 0 and parse_int_attr(out) == 1, tag="P4")
+
+
+PHASE4_STEPS = []
+
+
+def restore_ota_state(ctx):
+    """Leave the bench the way Phase 4 wants to find it: the base version
+    declared and in force from the next boot, mode 0, provider stopped.
+    Unscored, and it must survive a dead link the way recover_after_abort
+    does."""
+    try:
+        ctx.link.command("AT+MTOTA=0")
+        ctx.link.command('AT+MTSWVER=%d,"%s"'
+                         % (OTA_BASE_VERSION, OTA_BASE_VERSION_STR))
+        ok = reboot_via_epapply(ctx)
+    except OSError as exc:
+        print("  (restore: link unavailable: %s)" % exc)
+        ok = False
+    if ctx.provider is not None:
+        ctx.provider.stop()
+    return ok
+
+
+def run_phase4(ctx):
+    """Ordered execution for Phase 4, the same abort/skip/gate/-k semantics
+    run_phase2 and run_phase3 use. The finally block stops the provider and
+    rolls the declared version back unconditionally, so an aborted run does
+    not strand the bench with a version that makes the next run's image look
+    like a downgrade."""
+    abort_reason = None
+    ran = set()
+    kw = getattr(ctx.opts, "keyword", None)
+    gated_out = not getattr(ctx.opts, "include_ota", False)
+    try:
+        for step in PHASE4_STEPS:
+            name, fn = step["name"], step["fn"]
+            if abort_reason is not None:
+                ctx.suite.skip(name, abort_reason)
+                continue
+            gate = step.get("gate")
+            if gate and not getattr(ctx.opts, gate, False):
+                ctx.suite.gate_skip(name, gate)
+                continue
+            if kw and kw not in name:
+                ctx.suite.gate_skip(name, "k=%s" % kw)
+                continue
+            missing = [r for r in step.get("requires", ()) if r not in ran]
+            if missing:
+                ctx.suite.skip(name, "requires step that did not run: %s"
+                               % missing[0])
+                continue
+            try:
+                fn(ctx)
+                ran.add(name)
+            except StepAbort as exc:
+                abort_reason = str(exc)
+                recover_after_abort(ctx, abort_reason)
+    finally:
+        if not gated_out:
+            print("  (bench restoration: %s)"
+                  % ("OK" if restore_ota_state(ctx) else "FAILED"))
+
+
+PHASE4_STEPS[:] = [
+    {"name": "4.1 declared product version", "fn": step_4_1_swver,
+     "gate": "include_ota"},
+    {"name": "4.2 image header matches the CHIP tool",
+     "fn": step_4_2_image_tool, "gate": "include_ota"},
+    {"name": "4.3 provider up", "fn": step_4_3_provider_up,
+     "gate": "include_ota"},
+    {"name": "4.4 enable and announce", "fn": step_4_4_announce,
+     "gate": "include_ota", "requires": ["4.3 provider up"]},
+    {"name": "4.5 relay one block and time out", "fn": step_4_5_block_timeout,
+     "gate": "include_ota", "requires": ["4.4 enable and announce"]},
+    {"name": "4.6 full relay", "fn": step_4_6_full_relay,
+     "gate": "include_ota", "requires": ["4.4 enable and announce"]},
+    {"name": "4.7 staged refuse", "fn": step_4_7_staged_refuse,
+     "gate": "include_ota", "requires": ["4.6 full relay"]},
+    # Before 4.8 on purpose: see step_4_10_disable_during_download's docstring.
+    {"name": "4.10 disable during download",
+     "fn": step_4_10_disable_during_download,
+     "gate": "include_ota", "requires": ["4.6 full relay"]},
+    {"name": "4.8 staged apply", "fn": step_4_8_staged_apply,
+     "gate": "include_ota", "requires": ["4.6 full relay"]},
+    {"name": "4.9 confirm after reboot", "fn": step_4_9_confirm_after_reboot,
+     "gate": "include_ota", "requires": ["4.8 staged apply"]},
+]
+
+
+def build_ota_context(link, chip, suite, args):
+    """Phase 4's context, with the test image built and the provider ready
+    to start. The vendor and product ids come from the DEVICE (its setup
+    payload, parsed by chip-tool) rather than from a constant: an image
+    naming other ids is answered NotAvailable and no URC ever arrives."""
+    ctx = Phase4Context(link, chip, suite, args)
+    res, lines = link.command("AT+MTCODES?")
+    m = re.fullmatch(r"\+MTCODES:(.+),(\d{11})", lines[0]) \
+        if res == 0 and lines else None
+    if m is not None:
+        rc, out = chip.run(["payload", "parse-setup-payload", m.group(1)],
+                           timeout=30)
+        ids = parse_vendor_product(out) if rc == 0 else None
+        if ids:
+            ctx.vendor, ctx.product = ids
+    ctx.payload = ota_test_payload(args.ota_payload_size)
+    ctx.image = wrap_ota_image(ctx.payload, ctx.vendor, ctx.product,
+                               OTA_TARGET_VERSION, OTA_TARGET_VERSION_STR)
+    run_dir = tempfile.mkdtemp(prefix="mt-ota-")
+    ctx.image_path = os.path.join(run_dir, "test.ota")
+    with open(ctx.image_path, "wb") as fh:
+        fh.write(ctx.image)
+    ctx.provider = OtaProvider(args.ota_provider, ctx.image_path,
+                               os.path.join(run_dir, "kvs.d"))
+    print("  [OTA] image %d bytes (payload %d) for 0x%04X/0x%04X at %s"
+          % (len(ctx.image), len(ctx.payload), ctx.vendor, ctx.product,
+             ctx.image_path))
+    return ctx
+
+
+def group_hex(digest, group=8):
+    """A digest split into groups of eight.
+
+    The baseline files are committed, and the project scans every committed
+    file for an unbroken run of 24 or more hex characters, because that is
+    what a Thread operational dataset looks like (CLAUDE.md). A sha256 is
+    not a credential, but it trips the scan, and a scan with exceptions
+    people have to remember is a scan that stops being run. Grouping keeps
+    the whole digest and keeps the scan clean; the task-4 bench report set
+    the precedent. Compare one against a real digest by removing spaces."""
+    if digest is None:
+        return None
+    return " ".join(digest[i:i + group] for i in range(0, len(digest), group))
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
 DEFAULT_CHIPTOOL = os.path.expanduser(
     "~/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool")
+
+DEFAULT_OTA_PROVIDER = os.path.expanduser(
+    "~/esp/esp-matter/connectedhomeip/connectedhomeip/out/provider/"
+    "chip-ota-provider-app")
 
 DEFAULT_OTCTL = "/mnt/f86c891c-33c6-4bb7-afe1-2c8846257177/src/git/ot-br-posix/build/otbr/third_party/openthread/repo/src/posix/ot-ctl"
 
@@ -6089,31 +7045,12 @@ def swd_reset(runner=None, argv=None):
 # On the Challenger's RP2350 (the espnow bridge) DTR asserted is what the
 # firmware expects, and pyserial's default open asserts it, which is why the
 # C6 phases never had to think about it. On the CPico bridge, in front of the
-# nRF54L15 and now in front of the MGM240PA32VNA3 on the iLabs carrier, DTR
-# asserted HOLDS THE MODULE IN RESET and RTS asserted drives the recovery
-# strap: opening the port pyserial's way returns zero bytes and reads exactly
-# like dead hardware.
-#
-# Backported from the FOTA round's branch, dev/fota-firmware at 38f5975,
-# where it was introduced by 15362e8. NOT from main: main is at 1842af3 and
-# carries none of this, because dev/fota-firmware is unmerged. So both
-# branches carry it until that merge.
-#
-# The CODE is byte-identical between the two branches: BRIDGE_LINES,
-# open_at_port, make_relink, the cpico block in main() and KNOWN_MODELS.
-# Three PROSE regions differ and will conflict at the merge: this comment
-# block; the --bridge argparse help text (this branch says "every C6 phase"
-# and names the MGM240P, the FOTA branch says "every phase before Phase 4"
-# and names only the nRF54L15); and wait_boot_marker's docstring (the FOTA
-# version cites a report path under the gitignored SDD workspace, dropped
-# here). Resolve all three by keeping one side whole: neither wording is
-# wrong, and neither describes behaviour the other lacks.
-#
-# The contract itself is written down in fw/flash.py,
-# platform/nrf54l15/README.md "Everyday flashing" and
-# platform/silabs/README.md "Uploading an application: fw/flash.py"; this
-# branch predates all of it, and the MG24 skeleton cannot be reached over
-# the CPico without it.
+# nRF54L15 and of the MGM240PA32VNA3 on the iLabs carrier, DTR asserted HOLDS
+# THE MODULE IN RESET and RTS asserted drives the recovery strap (nRF54L15
+# README, "Everyday flashing"; platform/silabs/README.md, "Uploading an
+# application: fw/flash.py"): opening the port pyserial's way returns zero
+# bytes and reads exactly like dead hardware, so the contract is an option
+# (--bridge) rather than an assumption.
 BRIDGE_LINES = {
     "challenger": {"dtr": True, "rts": True},
     "cpico": {"dtr": False, "rts": False},
@@ -6372,6 +7309,24 @@ def phase3_gate(chip, args, link, otctl=otctl_run, dbus=otbr_dbus_property):
     return _transport_gate(chip, args, link, otctl, dbus=dbus)
 
 
+def phase4_gate(chip, args, link, otctl=otctl_run):
+    """Phase-4-only preflight: the shared transport/chip-tool checks every
+    controller phase runs, plus the provider binary, which is the one thing
+    Phase 4 needs and no other phase does. Only checked when --include-ota
+    is set: without it the whole phase gate-skips and a missing provider is
+    not a reason to refuse the run."""
+    problem, transport, dataset = _transport_gate(chip, args, link, otctl)
+    if problem:
+        return problem, transport, dataset
+    if getattr(args, "include_ota", False):
+        provider = getattr(args, "ota_provider", None)
+        if not (provider and os.path.isfile(provider)
+                and os.access(provider, os.X_OK)):
+            return ("chip-ota-provider-app not executable: %s (set "
+                    "MT_OTA_PROVIDER or --ota-provider)" % provider,
+                    transport, dataset)
+    return None, transport, dataset
+
 def phase0(link, header):
     """Link preflight per TESTING.md 5. A hard gate, not a scored test:
     if this fails, the rest of the report is noise. Returns an abort
@@ -6390,6 +7345,11 @@ def phase0(link, header):
                 "build_wifi --port <port> --bridge espnow")
     if model not in KNOWN_MODELS:
         return "unexpected model: %r (known: %s)" % (model, ", ".join(KNOWN_MODELS))
+    # Recorded, not just checked: a baseline file has to say which platform
+    # produced it. Phase 4's two files carry the same check names and differ
+    # only in the header, so without this a wifi baseline and a Thread one
+    # are told apart by the port path alone.
+    header["cgmm"] = model
     res, lines = link.command("AT+CGMR")
     if res != 0 or not lines:
         return "AT+CGMR failed"
@@ -8241,9 +9201,10 @@ def main(argv=None):
     ap.add_argument("--port", default=os.environ.get("MT_PORT"),
                     help="AT link, REQUIRED; use a /dev/serial/by-id path, "
                          "never /dev/ttyACM<n> (see the module docstring)")
-    ap.add_argument("--phase", type=int, choices=[0, 1, 2, 3], default=None,
+    ap.add_argument("--phase", type=int, choices=[0, 1, 2, 3, 4],
+                    default=None,
                     help="run only this phase (0 runs just the preflight "
-                         "gate; 2 and 3 are stateful and never run by "
+                         "gate; 2, 3 and 4 are stateful and never run by "
                          "default)")
     ap.add_argument("-k", dest="keyword", default=None,
                     help="run only tests whose name contains this substring")
@@ -8254,6 +9215,27 @@ def main(argv=None):
     ap.add_argument("--include-manual", action="store_true",
                     help="include tests needing an operator at the bench "
                          "(2.9 cold boot)")
+    # Phase 4 is gated as a whole rather than row by row: without a
+    # chip-ota-provider-app binary, which this repository does not ship,
+    # not one of its rows can run. The gate is on every PHASE4_STEPS entry
+    # (test_every_step_is_gated_on_include_ota), so a plain --phase 4 run
+    # reports ten gated skips and exits 0 instead of failing for the want
+    # of a build nobody asked the operator to make.
+    ap.add_argument("--include-ota", action="store_true",
+                    help="include phase 4, the firmware update relay; it "
+                         "needs a chip-ota-provider-app binary")
+    ap.add_argument("--ota-provider",
+                    default=os.environ.get("MT_OTA_PROVIDER",
+                                           DEFAULT_OTA_PROVIDER),
+                    help="chip-ota-provider-app, the bench image server")
+    ap.add_argument("--ota-image-tool",
+                    default=os.environ.get("MT_OTA_IMAGE_TOOL"),
+                    help="the CHIP tree's src/app/ota_image_tool.py; check "
+                         "4.2 compares the harness's own Matter OTA header "
+                         "against it, and reports N/A when this is unset")
+    ap.add_argument("--ota-payload-size", type=int, default=20480,
+                    help="payload bytes inside the test image (default "
+                         "20480: twenty blocks)")
     ap.add_argument("--chip-tool",
                     default=os.environ.get("MT_CHIPTOOL", DEFAULT_CHIPTOOL))
     ap.add_argument("--transport", choices=["WIFI", "THREAD"], default=None,
@@ -8301,6 +9283,16 @@ def main(argv=None):
         ap.error("--baseline with --phase 2 requires --include-slow and "
                  "--include-manual: a committed baseline must not contain "
                  "gated-out entries")
+    # The same rule for Phase 4, with the one flag its rows are gated on.
+    # --include-manual is deliberately NOT required here: no Phase 4 row
+    # carries that gate, because the post-apply confirmation reboots with
+    # AT+MTEPAPPLY rather than a power cycle (step_4_9's docstring), and
+    # demanding a flag that gates nothing would be theatre.
+    if args.baseline and args.phase == 4 and not args.include_ota:
+        ap.error("--baseline with --phase 4 requires --include-ota: a "
+                 "committed baseline must not contain gated-out entries")
+    if args.ota_payload_size < 1:
+        ap.error("--ota-payload-size must be positive")
     # Same shape as the gate above, and for the same reason: a request that
     # cannot mean anything must be refused at the door rather than exiting
     # 0 having measured something else. --max-endpoints 0 would declare an
@@ -8324,7 +9316,7 @@ def main(argv=None):
                  "across re-enumeration and may be another device entirely")
 
     chip = None
-    if args.phase in (2, 3):
+    if args.phase in (2, 3, 4):
         chip = ChipTool(args.chip_tool, args.storage)
 
     import serial
@@ -8398,6 +9390,39 @@ def main(argv=None):
                     PHASE3_COMPOSITION[:args.max_endpoints])
                 header["max_endpoints"] = args.max_endpoints
             run_phase3(ctx)
+            capture_header(link, header)
+        elif args.phase == 4:
+            problem, transport, dataset = phase4_gate(chip, args, link)
+            if problem:
+                print("ABORT: " + problem)
+                return 2
+            header["node_id"] = "0x%X" % args.node_id
+            # NOT wiped, unlike Phase 2 and Phase 3: Phase 4 talks to a
+            # device that is already commissioned and to a provider that
+            # may already be paired in this same storage. Wiping here would
+            # throw away the fabric the whole phase runs on.
+            ctx = Phase4Context(link, chip, suite, args)
+            ctx.transport = transport
+            ctx.dataset = dataset
+            if args.include_ota:
+                ctx = build_ota_context(link, chip, suite, args)
+                ctx.transport = transport
+                ctx.dataset = dataset
+                header["ota"] = {
+                    "image_bytes": len(ctx.image),
+                    "payload_bytes": len(ctx.payload),
+                    "vendor_id": "0x%04X" % ctx.vendor,
+                    "product_id": "0x%04X" % ctx.product,
+                    "offered_version": OTA_TARGET_VERSION,
+                    "provider": args.ota_provider,
+                    "provider_sha256": group_hex(
+                        file_sha256(args.ota_provider)),
+                }
+            run_phase4(ctx)
+            if args.include_ota and ctx.timings:
+                header["ota"]["transfer_seconds"] = dict(
+                    (k, None if v is None else round(v, 3))
+                    for k, v in sorted(ctx.timings.items()))
             capture_header(link, header)
         elif args.phase != 0:
             for phase, name, tag, fn, slow in TESTS:

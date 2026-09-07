@@ -1,0 +1,91 @@
+# +MTOTA URC sequences observed on the bench, copied line for line from the
+# transcripts in .superpowers/sdd/2026-09-07-fota-firmware/task-3-report.md
+# (sections 5.1 and 5.2, and fix round 1 items 3, 4 and 11) and
+# task-4-report.md section 5.1. The two boards produce the SAME sequence:
+# the relay is core code and the ports only supply the requestor.
+#
+# These are the lines, not the brief's expectations, and they differ from
+# those in three places worth naming:
+#   - every terminal +MTOTA:ERROR,<code> is followed by a closing
+#     +MTOTA:IDLE (spec 3.31), which is what puts AT+MTOTA? back to IDLE;
+#   - +MTOTA:DOWNLOADED arrives only after the LAST block has been pulled
+#     AND acknowledged, not straight after its BLOCK line;
+#   - the last progress line is 99, never 100: DOWNLOADED replaces it.
+#
+# +MTOTABLK payload lines are not reproduced: they are block bytes, and the
+# self-tests synthesise their own. Sections are [name]; blank lines and
+# lines starting with # are ignored by the reader in test_mt_regression.py.
+#
+# Timings, for the record (both boards, 115200): the abort lands 5.010 s
+# (C6) and 5.009 s (nRF54L15) after the unanswered BLOCK line, against the
+# specified 5 s.
+
+# Task 3 report 5.1 / Task 4 report 5.1, run A: two blocks acknowledged,
+# then the host goes quiet with block 2 pending.
+[abort]
++MTOTA:QUERYING
++MTOTA:AVAILABLE,65541
++MTOTA:DOWNLOADING,0
++MTOTA:BLOCK,0,1024
++MTOTA:DOWNLOADING,12
++MTOTA:BLOCK,1,1024
++MTOTA:DOWNLOADING,24
++MTOTA:BLOCK,2,1024
++MTOTA:ERROR,abort
++MTOTA:IDLE
+
+# Task 3 report 5.2, run B: nine blocks of an 8,274-byte image, every one
+# acknowledged. Progress steps by whole blocks over the total, which is the
+# Matter header parse working.
+[full]
++MTOTA:QUERYING
++MTOTA:AVAILABLE,65541
++MTOTA:DOWNLOADING,0
++MTOTA:BLOCK,0,1024
++MTOTA:DOWNLOADING,12
++MTOTA:BLOCK,1,1024
++MTOTA:DOWNLOADING,24
++MTOTA:BLOCK,2,1024
++MTOTA:DOWNLOADING,37
++MTOTA:BLOCK,3,1024
++MTOTA:DOWNLOADING,49
++MTOTA:BLOCK,4,1024
++MTOTA:DOWNLOADING,61
++MTOTA:BLOCK,5,1024
++MTOTA:DOWNLOADING,74
++MTOTA:BLOCK,6,1024
++MTOTA:DOWNLOADING,86
++MTOTA:BLOCK,7,1024
++MTOTA:DOWNLOADING,99
++MTOTA:BLOCK,8,82
++MTOTA:DOWNLOADED
+
+# Task 3 report fix round 1, item 4: the provider had just been restarted
+# and the device's cached CASE session was stale. The requestor reports it,
+# returns to idle and retries the same provider on its own, unprompted, and
+# the host has to survive that rather than fail on it.
+[stale-session]
++MTOTA:QUERYING
++MTOTA:ERROR,session
++MTOTA:IDLE
++MTOTA:QUERYING
++MTOTA:AVAILABLE,65541
++MTOTA:DOWNLOADING,0
+
+# Task 3 report fix round 1, item 11c: AT+MTOTASTAGED=0,1 after a transfer
+# that ran to completion. ERROR,cancelled and not ERROR,abort, because a
+# completed transfer never reaches the abort path.
+[staged-refuse]
++MTOTA:ERROR,cancelled
++MTOTA:IDLE
+
+# Task 3 report 5.2: AT+MTOTASTAGED=1.
+[staged-apply]
++MTOTA:APPLY
+
+# Task 3 report fix round 1, items 3 and 11b: AT+MTOTA=2 with the
+# DefaultOTAProviders list empty. The shim raises the closing IDLE itself,
+# because nothing was started and nothing will come back to idle on its own.
+[noprovider]
++MTOTA:ERROR,noprovider
++MTOTA:IDLE

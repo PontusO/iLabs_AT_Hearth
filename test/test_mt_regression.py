@@ -6,10 +6,12 @@ mapping and URC handling are pinned without a board on the desk.
 """
 
 import contextlib
+import hashlib
 import io
 import json
 import os
 import re
+import struct
 import sys
 import tempfile
 import threading
@@ -219,12 +221,41 @@ class TestResponsePrefixAudit(unittest.TestCase):
                                           # (MT_COMBINED_IMAGE only)
     }
 
+    # The firmware update relay's five commands are registered from a
+    # SECOND dispatch table, mt_ota.c's s_ota_cmds[], which mt_at_start()
+    # hands to at_register_commands() beside s_cmds[]. The audit read only
+    # s_cmds[] until Phase 4 landed, so this whole family had never been
+    # checked, and AT+MTOTAGET turned out to be a third B267: it answers
+    # "+MTOTABLK:" lines (cmd_mtotaget, mt_ota.c:384), so every one of them
+    # would have gone into the URC queue and every reassembly would have
+    # been handed an empty list.
+    OTA_RESPONSE_PREFIX = {
+        "MTSWVER":     "+MTSWVER:",     # cmd_mtswver, mt_ota.c:255
+        "MTOTA":       "+MTOTA:",       # cmd_mtota, :291
+        "MTOTAGET":    "+MTOTABLK:",    # cmd_mtotaget, :384
+        "MTOTAACK":    None,
+        "MTOTASTAGED": None,
+    }
+
     # Every URC prefix the firmware can raise (spec section 4).
     URC_PREFIXES = ["+MTREADY", "+MTEVT:", "+MTATTR:", "+MTIDENT:",
-                    "+MTCMD:", "+MTCMDTO:"]
+                    "+MTCMD:", "+MTCMDTO:", "+MTOTA:"]
+
+    # AT+MTATTR's read response and the +MTATTR change URC are the same line
+    # shape; so are AT+MTOTA?'s status line and the +MTOTA state URCs. Both
+    # are inherent, neither is fixable by a table row, and each has its own
+    # discipline: the module docstring's standing rule for MTATTR, and
+    # ota_query()'s shape test plus ATLink.requeue_urc() for MTOTA.
+    INHERENT_URC_COLLISIONS = ("MTATTR", "MTOTA")
+
+    @property
+    def ALL_RESPONSE_PREFIX(self):
+        merged = dict(self.RESPONSE_PREFIX)
+        merged.update(self.OTA_RESPONSE_PREFIX)
+        return merged
 
     def test_derived_expect_matches_the_real_response_prefix(self):
-        for name, prefix in sorted(self.RESPONSE_PREFIX.items()):
+        for name, prefix in sorted(self.ALL_RESPONSE_PREFIX.items()):
             if prefix is None or prefix == self.BARE:
                 continue
             for form in ("AT+%s?" % name, "AT+%s=1" % name):
@@ -241,15 +272,15 @@ class TestResponsePrefixAudit(unittest.TestCase):
         # an exception: a row that agrees with the name rule is dead
         # weight that hides the rule from the next reader.
         for name, prefix in RESPONSE_PREFIX_EXCEPTIONS.items():
-            self.assertIn(name, self.RESPONSE_PREFIX,
+            self.assertIn(name, self.ALL_RESPONSE_PREFIX,
                           "%s is not an AT+MT command" % name)
-            self.assertEqual(prefix, self.RESPONSE_PREFIX[name])
+            self.assertEqual(prefix, self.ALL_RESPONSE_PREFIX[name])
             self.assertNotEqual(prefix, "+" + name + ":",
                                "%s agrees with the name rule and needs no "
                                "exception row" % name)
 
     def test_every_command_with_an_odd_prefix_is_in_the_exception_table(self):
-        odd = {n: p for n, p in self.RESPONSE_PREFIX.items()
+        odd = {n: p for n, p in self.ALL_RESPONSE_PREFIX.items()
                if p is not None and p != self.BARE
                and p != "+" + n + ":"}
         self.assertEqual(odd, RESPONSE_PREFIX_EXCEPTIONS)
@@ -263,10 +294,11 @@ class TestResponsePrefixAudit(unittest.TestCase):
         # (T1 design section 8, N23) is how the suite lives with it.
         # AT+MTEVT? used to be a second one ("+MTEVT:" would have
         # swallowed +MTEVT URCs) and the exception table removes it.
-        for name in sorted(self.RESPONSE_PREFIX):
+        for name in sorted(self.ALL_RESPONSE_PREFIX):
             derived = ATLink._derive_expect("AT+%s?" % name)
             for urc in self.URC_PREFIXES:
-                if urc.startswith(derived) and name != "MTATTR":
+                if (urc.startswith(derived)
+                        and name not in self.INHERENT_URC_COLLISIONS):
                     self.fail("AT+%s derives %r, which swallows the %s URC"
                               % (name, derived, urc))
 
@@ -287,6 +319,28 @@ class TestResponsePrefixAudit(unittest.TestCase):
         self.assertEqual(sorted(names), sorted(self.RESPONSE_PREFIX),
                          "the prefix audit and mt_at.c's dispatch table "
                          "disagree about which commands exist")
+
+    def test_table_covers_the_ota_dispatch_table_too(self):
+        # The audit claimed to cover the whole command set while reading one
+        # of the two tables. mt_at_start() registers mt_ota.c's s_ota_cmds[]
+        # as well, and AT+MTOTAGET's odd prefix sat there unchecked from the
+        # day it landed. A new OTA command that lands without a row here
+        # fails this test the same way a new mt_at.c one does.
+        src = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "core", "mt", "mt_ota.c")
+        with open(src) as fh:
+            body = fh.read()
+        table = body.split("static const at_command_t s_ota_cmds[] = {", 1)[1]
+        table = table.split("};", 1)[0]
+        names = re.findall(r'\{\s*"([A-Z0-9]+)"', table)
+        self.assertTrue(names, "could not parse s_ota_cmds[] out of mt_ota.c")
+        self.assertEqual(sorted(names), sorted(self.OTA_RESPONSE_PREFIX),
+                         "the prefix audit and mt_ota.c's dispatch table "
+                         "disagree about which commands exist")
+
+    def test_the_two_dispatch_tables_do_not_overlap(self):
+        self.assertEqual(
+            set(self.RESPONSE_PREFIX) & set(self.OTA_RESPONSE_PREFIX), set())
 
     def test_bare_line_responses_survive_a_mismatched_expect(self):
         # Why BARE rows are not B267s: _collect() appends any line that
@@ -460,6 +514,9 @@ class TestPhase0(unittest.TestCase):
             replies[b"AT+CGMM\r\n"] = model.encode() + b"\r\nOK\r\n"
             header = {}
             self.assertIsNone(phase0(scripted_link(replies), header), model)
+            # The baseline has to say which platform produced it: Phase 4's
+            # two files share every check name and differ in the header.
+            self.assertEqual(header["cgmm"], model)
 
     def test_rejects_a_model_not_in_the_known_set(self):
         replies = dict(self.HEALTHY)
@@ -8858,6 +8915,1138 @@ class TestPhase3EndpointCap(unittest.TestCase):
         self.assertIn("--phase 3 only", msg)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: the firmware update relay
+# ---------------------------------------------------------------------------
+
+from mt_regression import (parse_ota_block_urc, reassemble_ota_chunks,
+                           wrap_ota_image, ota_test_payload,
+                           parse_vendor_product, OtaProvider, Phase4Context,
+                           PHASE4_STEPS, run_phase4, phase4_gate, ota_query,
+                           ota_state, await_ota_offer, relay_ota_blocks,
+                           ota_progress_since, reboot_via_epapply,
+                           step_4_5_block_timeout, step_4_6_full_relay,
+                           step_4_7_staged_refuse, step_4_8_staged_apply,
+                           step_4_10_disable_during_download,
+                           step_4_9_confirm_after_reboot,
+                           OTA_TARGET_VERSION, OTA_TARGET_VERSION_STR,
+                           OTA_BASE_VERSION, OTA_BASE_VERSION_STR)
+
+
+def ota_urc_section(name):
+    """One [section] of test/fixtures/ota_urc_sequence.txt, as a list of
+    URC lines. The fixture is the bench transcript, so a self-test that
+    drifts from what the firmware really emits fails here."""
+    lines, wanted = [], False
+    for raw in fixture("ota_urc_sequence.txt").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            wanted = line == "[%s]" % name
+            continue
+        if wanted:
+            lines.append(line)
+    if not lines:
+        raise AssertionError("no [%s] section in ota_urc_sequence.txt" % name)
+    return lines
+
+
+def chunk_lines(seq, data):
+    """The +MTOTABLK lines the firmware would answer AT+MTOTAGET=<seq>
+    with: 96 payload bytes per line, uppercase hex, running offset."""
+    out = []
+    for off in range(0, len(data), 96):
+        out.append("+MTOTABLK:%d,%d,%s"
+                   % (seq, off, data[off:off + 96].hex().upper()))
+    return out
+
+
+class TestOtaHelpers(unittest.TestCase):
+    def test_parse_block_urc(self):
+        self.assertEqual(parse_ota_block_urc("+MTOTA:BLOCK,7,1024"), (7, 1024))
+        self.assertIsNone(parse_ota_block_urc("+MTOTA:DOWNLOADING,42"))
+
+    def test_reassemble_chunks(self):
+        lines = ["+MTOTABLK:7,0,000102", "+MTOTABLK:7,3,0304"]
+        self.assertEqual(reassemble_ota_chunks(7, lines, 5),
+                         bytes([0, 1, 2, 3, 4]))
+
+    def test_reassemble_rejects_gap(self):
+        lines = ["+MTOTABLK:7,0,0001", "+MTOTABLK:7,3,0304"]
+        with self.assertRaises(ValueError):
+            reassemble_ota_chunks(7, lines, 5)
+
+    def test_reassemble_rejects_wrong_seq(self):
+        with self.assertRaises(ValueError):
+            reassemble_ota_chunks(7, ["+MTOTABLK:8,0,00"], 1)
+
+    def test_reassemble_rejects_a_short_pull(self):
+        # Spec 3.32: a pull interrupted by a drop ends with +MTERR:12 after
+        # the lines already sent. The host must not silently keep them.
+        with self.assertRaises(ValueError):
+            reassemble_ota_chunks(0, ["+MTOTABLK:0,0,0001"], 1024)
+
+    def test_reassemble_rejects_a_non_chunk_line(self):
+        with self.assertRaises(ValueError):
+            reassemble_ota_chunks(0, ["+MTOTA:DOWNLOADING,5"], 0)
+
+    def test_ota_image_wrap_has_matter_header(self):
+        img = wrap_ota_image(b"x" * 100, vendor=0xFFF1, product=0x8000,
+                             version=65541, version_str="1.4.1")
+        self.assertEqual(img[:4], bytes.fromhex("1EF1EE1B"))  # LE 0x1BEEF11E
+        self.assertTrue(img.endswith(b"x" * 100))
+
+    def test_ota_image_header_lengths_are_self_consistent(self):
+        payload = ota_test_payload(2048)
+        img = wrap_ota_image(payload, 0xFFF1, 0x8000, 65541, "1.4.1")
+        total, tlv_len = struct.unpack("<QI", img[4:16])
+        self.assertEqual(total, len(img))
+        self.assertEqual(16 + tlv_len + len(payload), len(img))
+        self.assertEqual(img[16], 0x15)          # anonymous structure opens
+        self.assertEqual(img[16 + tlv_len - 1], 0x18)   # and closes
+
+    def test_ota_image_digest_covers_the_payload_only(self):
+        payload = ota_test_payload(512)
+        img = wrap_ota_image(payload, 0xFFF1, 0x8000, 65541, "1.4.1")
+        self.assertIn(hashlib.sha256(payload).digest(), img)
+
+    def test_test_payload_is_deterministic(self):
+        self.assertEqual(ota_test_payload(64), ota_test_payload(64))
+        self.assertEqual(len(ota_test_payload(20480)), 20480)
+
+    def test_parse_vendor_product(self):
+        self.assertEqual(
+            parse_vendor_product(fixture("chiptool_parse_setup_payload.txt")),
+            (65521, 32768))
+        self.assertIsNone(parse_vendor_product("nothing here"))
+
+
+class TestOtaUrcFixture(unittest.TestCase):
+    """The fixture IS the contract Tasks 3 and 4 measured; these pin the
+    three places it differs from what the brief expected."""
+
+    def test_every_terminal_error_is_followed_by_a_closing_idle(self):
+        for name in ("abort", "staged-refuse", "noprovider"):
+            lines = ota_urc_section(name)
+            for i, line in enumerate(lines):
+                if line.startswith("+MTOTA:ERROR,"):
+                    self.assertEqual(lines[i + 1], "+MTOTA:IDLE",
+                                     "[%s] line %d" % (name, i))
+
+    def test_downloaded_follows_the_last_block_not_a_progress_line(self):
+        lines = ota_urc_section("full")
+        self.assertEqual(lines[-1], "+MTOTA:DOWNLOADED")
+        self.assertTrue(lines[-2].startswith("+MTOTA:BLOCK,"))
+        pct = [int(l.split(",")[1]) for l in lines
+               if l.startswith("+MTOTA:DOWNLOADING,")]
+        self.assertEqual(pct, sorted(pct))
+        self.assertEqual(max(pct), 99)   # never 100: DOWNLOADED replaces it
+
+    def test_the_stale_session_recovery_is_self_healing(self):
+        self.assertEqual(ota_urc_section("stale-session")[:4],
+                         ["+MTOTA:QUERYING", "+MTOTA:ERROR,session",
+                          "+MTOTA:IDLE", "+MTOTA:QUERYING"])
+
+
+class FakePopen:
+    """subprocess.Popen double for OtaProvider: its stdout is a fixture."""
+
+    def __init__(self, text, rc=None):
+        self.stdout = io.StringIO(text)
+        self.returncode = rc
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self.killed = True
+
+
+class TestOtaProvider(unittest.TestCase):
+    def _provider(self, text=""):
+        d = tempfile.mkdtemp()
+        made = []
+
+        def popen(argv, **kw):
+            made.append(argv)
+            return FakePopen(text)
+
+        p = OtaProvider("/bin/chip-ota-provider-app",
+                        os.path.join(d, "test.ota"),
+                        os.path.join(d, "kvs.d"), popen=popen)
+        return p, made
+
+    def test_argv_carries_the_collision_free_identity(self):
+        p, _ = self._provider()
+        argv = p.argv()
+        self.assertIn("--discriminator", argv)
+        self.assertEqual(argv[argv.index("--discriminator") + 1], "3841")
+        self.assertEqual(argv[argv.index("--passcode") + 1], "20202022")
+        self.assertEqual(argv[argv.index("--secured-device-port") + 1], "5541")
+        # The device's own are 3840/20202021 (the bench setup payload); the
+        # provider must not be commissionable on the device's numbers.
+        self.assertNotIn("3840", argv)
+        self.assertNotIn("20202021", argv)
+
+    def test_start_pipes_and_drains_stdout(self):
+        p, made = self._provider(fixture("ota_provider_start.txt"))
+        argv = p.start()
+        self.assertEqual(argv, made[0])
+        self.assertIsNotNone(
+            p.wait_for_log(r"Server Listening", timeout=5.0))
+        self.assertIn("NotifyUpdateApplied", p.log_text())
+
+    def test_wait_for_log_gives_up(self):
+        p, _ = self._provider("nothing interesting\n")
+        self.assertIsNone(p.wait_for_log(r"NotifyUpdateApplied", timeout=0.3))
+
+    def test_kvs_lives_under_the_run_directory(self):
+        p, _ = self._provider()
+        argv = p.argv()
+        self.assertTrue(argv[argv.index("--KVS") + 1].startswith(p.kvs_dir))
+
+    def test_stop_is_safe_before_start(self):
+        p, _ = self._provider()
+        p.stop()          # must not raise
+
+
+class FakeOtaLink(FakeLink):
+    """FakeLink plus the one method Phase 4's helpers need: ATLink can be
+    handed back a line it collected as a response but which was really a
+    URC (ota_query), and the double has to be able to take it back too."""
+
+    def requeue_urc(self, line):
+        self.push_urcs([line])
+
+
+def fresh_phase4_ctx(link=None, chip=None, **kw):
+    if link is None:
+        link = FakeOtaLink()
+    opts = types.SimpleNamespace(
+        node_id=0x4845, include_ota=True, include_slow=False,
+        include_manual=False, keyword=None, ota_provider="/bin/provider",
+        ota_image_tool=None, ota_payload_size=1024, port="/dev/null")
+    for k, v in kw.items():
+        setattr(opts, k, v)
+    ctx = Phase4Context(link=link, chip=chip, suite=Suite(), opts=opts)
+    ctx.sleeper = lambda s: None
+    ctx.net_wait_s = 2.0
+    ctx.variant = "wifi"
+    return ctx
+
+
+class TestOtaQuery(unittest.TestCase):
+    """AT+MTOTA? and the +MTOTA URCs are the same line prefix: the second
+    inherent collision of this kind after AT+MTATTR's."""
+
+    def test_status_line_is_recognised_by_shape(self):
+        link = FakeOtaLink({"AT+MTOTA?": (0, ["+MTOTA:1,DOWNLOADED,100,wifi"])})
+        res, status = ota_query(link)
+        self.assertEqual(res, 0)
+        self.assertEqual(status, "+MTOTA:1,DOWNLOADED,100,wifi")
+        self.assertEqual(ota_state(FakeOtaLink(
+            {"AT+MTOTA?": (0, ["+MTOTA:0,IDLE,0,thread"])})), "IDLE")
+
+    def test_a_urc_that_raced_the_query_is_put_back_not_dropped(self):
+        # ATLink._collect() cannot tell a status line from a state URC by
+        # prefix, so a BLOCK line arriving between AT+MTOTA? and its OK
+        # lands in the response. Dropping it would lose the block for good.
+        link = FakeOtaLink({"AT+MTOTA?": (0, ["+MTOTA:BLOCK,3,1024",
+                                              "+MTOTA:1,DOWNLOADING,37,wifi"])})
+        res, status = ota_query(link)
+        self.assertEqual(status, "+MTOTA:1,DOWNLOADING,37,wifi")
+        self.assertEqual(link.await_urc(r"^\+MTOTA:BLOCK,3,1024$"),
+                         "+MTOTA:BLOCK,3,1024")
+
+    def test_no_status_line_at_all(self):
+        link = FakeOtaLink({"AT+MTOTA?": (-2, [])})
+        self.assertIsNone(ota_state(link))
+
+
+class TestAwaitOtaOffer(unittest.TestCase):
+    def test_plain_offer(self):
+        ctx = fresh_phase4_ctx(FakeOtaLink(
+            urcs=ota_urc_section("abort")[:3], no_reset=True))
+        q, a, recovered = await_ota_offer(ctx)
+        self.assertEqual(q, "+MTOTA:QUERYING")
+        self.assertEqual(a, "+MTOTA:AVAILABLE,65541")
+        self.assertFalse(recovered)
+
+    def test_a_stale_case_session_recovers_on_its_own(self):
+        ctx = fresh_phase4_ctx(FakeOtaLink(
+            urcs=ota_urc_section("stale-session"), no_reset=True))
+        q, a, recovered = await_ota_offer(ctx)
+        self.assertEqual(a, "+MTOTA:AVAILABLE,65541")
+        self.assertTrue(recovered)
+
+    def test_no_query_at_all(self):
+        ctx = fresh_phase4_ctx(FakeOtaLink(urcs=[], no_reset=True))
+        q, a, recovered = await_ota_offer(ctx, timeout=0.1)
+        self.assertIsNone(q)
+        self.assertIsNone(a)
+
+
+def relay_script(image, block=1024, ack_releases_next=True):
+    """A scripted device serving `image` in `block`-sized pieces: the
+    command replies for every AT+MTOTAGET, and the URC each AT+MTOTAACK
+    releases, which is how the real link paces the relay."""
+    seqs = [(i, image[i * block:(i + 1) * block])
+            for i in range((len(image) + block - 1) // block)]
+    commands = {}
+    on_command = {}
+    for seq, data in seqs:
+        commands["AT+MTOTAGET=%d" % seq] = (0, chunk_lines(seq, data))
+        commands["AT+MTOTAACK=%d" % seq] = (0, [])
+        nxt = []
+        if seq + 1 < len(seqs):
+            nxt.append("+MTOTA:DOWNLOADING,%d" % ((seq + 1) * 100 // len(seqs)))
+            nxt.append("+MTOTA:BLOCK,%d,%d" % (seq + 1, len(seqs[seq + 1][1])))
+        else:
+            nxt.append("+MTOTA:DOWNLOADED")
+        if ack_releases_next:
+            on_command["AT+MTOTAACK=%d" % seq] = nxt
+    first = ["+MTOTA:DOWNLOADING,0",
+             "+MTOTA:BLOCK,0,%d" % len(seqs[0][1])]
+    return commands, on_command, first, seqs
+
+
+class TestRelayOtaBlocks(unittest.TestCase):
+    IMAGE = ota_test_payload(3 * 1024)
+
+    def _ctx(self, **kw):
+        commands, on_command, first, _ = relay_script(self.IMAGE)
+        commands.update({"AT+MTOTA?": (0, ["+MTOTA:1,DOWNLOADED,100,wifi"])})
+        link = FakeOtaLink(commands, urcs=first, no_reset=True,
+                           urcs_on_command=on_command)
+        ctx = fresh_phase4_ctx(link, **kw)
+        ctx.image = self.IMAGE
+        return ctx
+
+    def test_three_blocks_reassemble_to_the_image(self):
+        ctx = self._ctx()
+        got = relay_ota_blocks(ctx, deadline_s=30.0)
+        self.assertEqual(got["terminal"], "DOWNLOADED")
+        self.assertEqual(got["data"], self.IMAGE)
+        self.assertEqual([s for s, _ in got["blocks"]], [0, 1, 2])
+        self.assertIsNotNone(got["seconds"])
+
+    def test_every_block_is_pulled_and_acknowledged_in_order(self):
+        ctx = self._ctx()
+        relay_ota_blocks(ctx, deadline_s=30.0)
+        self.assertEqual(
+            [c for c in ctx.link.sent if c.startswith("AT+MTOTA")],
+            ["AT+MTOTAGET=0", "AT+MTOTAACK=0",
+             "AT+MTOTAGET=1", "AT+MTOTAACK=1",
+             "AT+MTOTAGET=2", "AT+MTOTAACK=2"])
+
+    def test_stop_after_leaves_the_rest_undownloaded(self):
+        ctx = self._ctx()
+        got = relay_ota_blocks(ctx, deadline_s=30.0, stop_after=2)
+        self.assertEqual(got["terminal"], "stopped")
+        self.assertEqual(len(got["blocks"]), 2)
+        self.assertEqual(got["data"], self.IMAGE[:2048])
+
+    def test_not_acknowledging_stops_after_the_first_pull(self):
+        ctx = self._ctx()
+        got = relay_ota_blocks(ctx, deadline_s=30.0, ack=False)
+        self.assertEqual(got["terminal"], "unacknowledged")
+        self.assertNotIn("AT+MTOTAACK=0", ctx.link.sent)
+
+    def test_a_terminal_error_stops_the_loop(self):
+        commands, on_command, first, _ = relay_script(self.IMAGE)
+        on_command["AT+MTOTAACK=0"] = ["+MTOTA:ERROR,abort", "+MTOTA:IDLE"]
+        link = FakeOtaLink(commands, urcs=first, no_reset=True,
+                           urcs_on_command=on_command)
+        ctx = fresh_phase4_ctx(link)
+        ctx.image = self.IMAGE
+        got = relay_ota_blocks(ctx, deadline_s=30.0)
+        self.assertEqual(got["terminal"], "ERROR,abort")
+        self.assertEqual(len(got["blocks"]), 1)
+
+    def test_a_garbled_pull_is_not_silently_accepted(self):
+        commands, on_command, first, _ = relay_script(self.IMAGE)
+        commands["AT+MTOTAGET=0"] = (0, ["+MTOTABLK:0,0,00"])   # far too short
+        link = FakeOtaLink(commands, urcs=first, no_reset=True,
+                           urcs_on_command=on_command)
+        ctx = fresh_phase4_ctx(link)
+        ctx.image = self.IMAGE
+        got = relay_ota_blocks(ctx, deadline_s=30.0)
+        self.assertTrue(got["terminal"].startswith("chunks:"), got["terminal"])
+
+    def test_progress_lines_are_read_from_the_history_not_raced(self):
+        ctx = self._ctx()
+        mark = len(ctx.link.urc_history)
+        relay_ota_blocks(ctx, deadline_s=30.0)
+        pct = ota_progress_since(ctx.link, mark)
+        self.assertEqual(pct, sorted(pct))
+        self.assertTrue(pct and max(pct) < 100)
+
+
+class TestStep45BlockTimeout(unittest.TestCase):
+    """The abort row, scripted from the [abort] fixture."""
+
+    IMAGE = ota_test_payload(3 * 1024)
+
+    def _link(self, tail):
+        commands, on_command, first, _ = relay_script(self.IMAGE)
+        commands["AT+MTOTA?"] = (0, ["+MTOTA:1,IDLE,0,wifi"])
+        return FakeOtaLink(commands, urcs=first + tail, no_reset=True)
+
+    def test_abort_and_closing_idle_score(self):
+        # The fixture's tail, which the brief's expected sequence lacked:
+        # ERROR,abort AND the +MTOTA:IDLE behind it.
+        link = self._link(["+MTOTA:ERROR,abort", "+MTOTA:IDLE"])
+        ctx = fresh_phase4_ctx(link)
+        ctx.image = self.IMAGE
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_5_block_timeout(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertNotIn("AT+MTOTAACK=0", link.sent)
+
+    def test_a_missing_closing_idle_fails_the_row(self):
+        link = self._link(["+MTOTA:ERROR,abort"])
+        ctx = fresh_phase4_ctx(link)
+        ctx.image = self.IMAGE
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_5_block_timeout(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("closing" in n for n in names), names)
+
+    def test_a_block_that_does_not_match_the_image_fails(self):
+        link = self._link(["+MTOTA:ERROR,abort", "+MTOTA:IDLE"])
+        link.commands["AT+MTOTAGET=0"] = (0, chunk_lines(0, b"\x00" * 1024))
+        ctx = fresh_phase4_ctx(link)
+        ctx.image = self.IMAGE
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_5_block_timeout(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("matches the image" in n for n in names), names)
+
+
+class TestStep46FullRelay(unittest.TestCase):
+    IMAGE = ota_test_payload(3 * 1024)
+
+    def _ctx(self, chip_rc=0):
+        commands, on_command, first, seqs = relay_script(self.IMAGE)
+        commands["AT+MTOTA?"] = (0, ["+MTOTA:1,DOWNLOADED,100,wifi"])
+        link = FakeOtaLink(commands, no_reset=True,
+                           urcs_on_command=on_command)
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner(
+                            [(chip_rc, "")],
+                            on_call=lambda argv: link.push_urcs(
+                                ota_urc_section("abort")[:2] + first)))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        ctx.image = self.IMAGE
+        return ctx
+
+    def test_full_relay_scores_clean(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_6_full_relay(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertIsNotNone(ctx.timings.get("4.6 full relay"))
+
+    def test_a_short_reassembly_fails_the_byte_comparison(self):
+        ctx = self._ctx()
+        ctx.image = self.IMAGE + b"tail"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_6_full_relay(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("byte for byte" in n for n in names), names)
+
+
+class TestStep47StagedRefuse(unittest.TestCase):
+    def test_cancelled_and_idle_score(self):
+        tail = ota_urc_section("staged-refuse")
+        link = FakeOtaLink({"AT+MTOTASTAGED=0,1": (0, []),
+                            "AT+MTOTA?": (0, ["+MTOTA:1,IDLE,0,wifi"])},
+                           urcs=tail, no_reset=True)
+        ctx = fresh_phase4_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_7_staged_refuse(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_abort_instead_of_cancelled_fails(self):
+        link = FakeOtaLink({"AT+MTOTASTAGED=0,1": (0, []),
+                            "AT+MTOTA?": (0, ["+MTOTA:1,IDLE,0,wifi"])},
+                           urcs=["+MTOTA:ERROR,abort", "+MTOTA:IDLE"],
+                           no_reset=True)
+        ctx = fresh_phase4_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_7_staged_refuse(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep410DisableDuringDownload(unittest.TestCase):
+    IMAGE = ota_test_payload(3 * 1024)
+
+    def test_mode_zero_silences_the_link(self):
+        commands, on_command, first, _ = relay_script(self.IMAGE)
+        commands["AT+MTOTA=0"] = (0, [])
+        commands["AT+MTOTA?"] = (0, ["+MTOTA:0,IDLE,0,wifi"])
+        link = FakeOtaLink(commands, no_reset=True,
+                           urcs_on_command=on_command)
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner(
+                            [(0, "")],
+                            on_call=lambda argv: link.push_urcs(
+                                ota_urc_section("abort")[:2] + first)))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        ctx.image = self.IMAGE
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_10_disable_during_download(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertIn("AT+MTOTA=0", link.sent)
+
+
+class TestRunPhase4(unittest.TestCase):
+    @contextlib.contextmanager
+    def patched(self, steps):
+        saved = list(PHASE4_STEPS)
+        PHASE4_STEPS[:] = steps
+        try:
+            yield
+        finally:
+            PHASE4_STEPS[:] = saved
+
+    def test_every_step_is_gated_on_include_ota(self):
+        # The phase needs a provider binary this repository does not ship,
+        # so a default run must gate the whole thing out rather than fail.
+        for step in PHASE4_STEPS:
+            self.assertEqual(step.get("gate"), "include_ota", step["name"])
+
+    def test_without_include_ota_nothing_runs_and_the_exit_stays_zero(self):
+        calls = []
+        steps = [{"name": "4.1 x", "fn": lambda ctx: calls.append("x"),
+                  "gate": "include_ota"}]
+        ctx = fresh_phase4_ctx(include_ota=False)
+        with self.patched(steps):
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase4(ctx)
+        self.assertEqual(calls, [])
+        self.assertEqual(ctx.suite.skipped, [])
+        self.assertEqual(len(ctx.suite.gated), 1)
+        self.assertEqual(exit_code(ctx.suite, False), 0)
+
+    def test_an_abort_skips_the_rest_and_still_restores(self):
+        restored = []
+
+        def boom(ctx):
+            ctx.suite.check("boom", False, tag="P4")
+            raise StepAbort("dead")
+
+        steps = [{"name": "4.1 boom", "fn": boom, "gate": "include_ota"},
+                 {"name": "4.2 after", "fn": lambda ctx: None,
+                  "gate": "include_ota"}]
+        link = FakeOtaLink({"AT+MTRESET": (0, [])})
+        ctx = fresh_phase4_ctx(link)
+        ctx.provider = types.SimpleNamespace(stop=lambda: restored.append("stop"))
+        with self.patched(steps):
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_phase4(ctx)
+        self.assertEqual([n for n, _ in ctx.suite.skipped], ["4.2 after"])
+        self.assertEqual(restored, ["stop"])
+
+    def test_the_step_names_are_unique_and_ordered_for_the_bench(self):
+        names = [s["name"] for s in PHASE4_STEPS]
+        self.assertEqual(len(names), len(set(names)))
+        # 4.10 runs BEFORE 4.8/4.9: the apply declares the new version, and
+        # after that the provider's image is no longer an upgrade, so an
+        # announce would draw no offer at all.
+        self.assertLess(names.index("4.10 disable during download"),
+                        names.index("4.8 staged apply"))
+        self.assertLess(names.index("4.8 staged apply"),
+                        names.index("4.9 confirm after reboot"))
+
+    def test_no_phase4_row_is_gated_on_include_manual(self):
+        # 4.9 was specified as a manual row because it needed a scripted
+        # power cycle. It reboots with AT+MTEPAPPLY instead, which keeps the
+        # AT handle and therefore the requestor's first-run state, so the
+        # row runs whenever the phase runs.
+        for step in PHASE4_STEPS:
+            self.assertNotEqual(step.get("gate"), "include_manual")
+
+
+class TestPhase4Gate(unittest.TestCase):
+    def _args(self, **kw):
+        a = types.SimpleNamespace(
+            transport="WIFI", ssid="net", psk="secret", ot_ctl="/bin/ot-ctl",
+            dataset=None, include_ota=True, ota_provider=None)
+        for k, v in kw.items():
+            setattr(a, k, v)
+        return a
+
+    def test_missing_provider_binary_is_refused_when_the_phase_runs(self):
+        chip = ChipTool("/bin/sh", tempfile.mkdtemp(),
+                        runner=FakeChipRunner(
+                            [(0, fixture("chiptool_parse_setup_payload.txt"))]))
+        with mock.patch("mt_regression.shutil.which", return_value="/openocd"):
+            problem, _, _ = phase4_gate(
+                chip, self._args(ota_provider="/nope/provider"),
+                FakeOtaLink())
+        self.assertIn("chip-ota-provider-app", problem)
+
+    def test_the_provider_is_not_required_when_the_phase_is_gated_out(self):
+        chip = ChipTool("/bin/sh", tempfile.mkdtemp(),
+                        runner=FakeChipRunner(
+                            [(0, fixture("chiptool_parse_setup_payload.txt"))]))
+        with mock.patch("mt_regression.shutil.which", return_value="/openocd"):
+            problem, _, _ = phase4_gate(
+                chip, self._args(include_ota=False, ota_provider=None),
+                FakeOtaLink())
+        self.assertIsNone(problem)
+
+
+class TestPhase4Plumbing(unittest.TestCase):
+    def _refuses(self, argv):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                main(argv)
+        return err.getvalue()
+
+    def test_phase_4_is_a_valid_phase(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--port", "/dev/definitely-not-a-real-port-xyz",
+                       "--phase", "4"])
+        self.assertEqual(rc, 2)      # reaches the port-open failure
+
+    def test_baseline_for_phase_4_requires_include_ota(self):
+        # A committed baseline whose every row reads "gated" is worse than
+        # no baseline: it looks like a pass. Same rule as --phase 2's.
+        msg = self._refuses(["--port", "/dev/nope", "--phase", "4",
+                             "--baseline", "/tmp/x.json"])
+        self.assertIn("--include-ota", msg)
+
+
+from mt_regression import (step_4_1_swver, step_4_2_image_tool,
+                           step_4_3_provider_up, step_4_4_announce,
+                           build_ota_context, file_sha256, await_network,
+                           group_hex, OTA_PROVIDER_ACL, restore_ota_state)
+
+
+EP_ONE = ["+MTEP:0,1,0x0100"]
+
+
+def reboot_commands(net="+MTNET:WIFI,1,1,0"):
+    """The command replies AT+MTEPAPPLY's reboot needs: the composition
+    capture, the restage, the apply, and a network that comes back."""
+    return {"AT+MTEP?": (0, list(EP_ONE)),
+            "AT+MTEPCLEAR": (0, []),
+            "AT+MTEP=0x0100": (0, []),
+            "AT+MTEPAPPLY": (0, []),
+            "AT+MTNET?": (0, [net])}
+
+
+def variant_reboot_commands():
+    """The nRF54L15's composition, whose +MTEP: lines carry the variant
+    field: the replay has to send AT+MTEP=<devtype>,<variant> (spec 3.9),
+    not just the device type."""
+    eps = ["+MTEP:0,1,0x050C,1", "+MTEP:1,2,0x050C,1", "+MTEP:2,3,0x0510"]
+    cmds = {"AT+MTEP?": (0, list(eps)),
+            "AT+MTEPCLEAR": (0, []),
+            "AT+MTEPAPPLY": (0, []),
+            "AT+MTNET?": (0, ["+MTNET:THREAD,1,1,0"])}
+    for dt in ("0x050C,1", "0x050C,1", "0x0510"):
+        cmds["AT+MTEP=%s" % dt] = (0, [])
+    return cmds, eps
+
+
+class TestRebootViaEpApply(unittest.TestCase):
+    """The reboot Phase 4 uses, and why it is not a power cycle.
+
+    A uhubctl cycle drops the RP2350 too, and re-opening the port pulses the
+    co-processor's reset: the boot the harness would then watch is a second
+    one that has already consumed the requestor's first-run state
+    (task-3-report.md fix round, item 6). AT+MTEPAPPLY restarts the
+    co-processor alone and the AT handle survives."""
+
+    def test_restages_the_composition_and_waits_for_the_network(self):
+        link = FakeOtaLink(reboot_commands(), urcs=["+MTREADY"],
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase4_ctx(link)
+        self.assertTrue(reboot_via_epapply(ctx))
+        self.assertEqual(
+            [c for c in link.sent if c.startswith(("AT+MTEP", "AT+MTNET"))],
+            ["AT+MTEP?", "AT+MTEPCLEAR", "AT+MTEP=0x0100", "AT+MTEPAPPLY",
+             "AT+MTNET?", "AT+MTEP?"])   # the last one verifies the replay
+
+    def test_a_variant_composition_is_replayed_with_its_variant(self):
+        cmds, eps = variant_reboot_commands()
+        link = FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase4_ctx(link)
+        self.assertTrue(reboot_via_epapply(ctx))
+        self.assertEqual([c for c in link.sent if c.startswith("AT+MTEP=")],
+                         ["AT+MTEP=0x050C,1", "AT+MTEP=0x050C,1",
+                          "AT+MTEP=0x0510"])
+        self.assertEqual(ctx.composition, eps)
+
+    def test_a_composition_that_came_back_different_is_a_failed_reboot(self):
+        # The reboot restages the composition, so a wrong replay reshapes
+        # the device. Found here, not three phases later.
+        cmds = reboot_commands()
+        cmds["AT+MTEP?"] = [(0, list(EP_ONE)), (0, ["+MTEP:0,1,0x0042"])]
+        link = FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase4_ctx(link)
+        self.assertFalse(reboot_via_epapply(ctx))
+
+    def test_no_ready_is_a_failed_reboot(self):
+        link = FakeOtaLink(reboot_commands())
+        ctx = fresh_phase4_ctx(link)
+        self.assertFalse(reboot_via_epapply(ctx))
+
+    def test_a_link_that_comes_back_without_the_network_fails(self):
+        # +MTREADY says the AT parser is up, not that the device is back on
+        # the network, and every OTA row needs the network.
+        link = FakeOtaLink(reboot_commands("+MTNET:WIFI,1,0,0"),
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase4_ctx(link)
+        ctx.net_wait_s = 0.2
+        self.assertFalse(reboot_via_epapply(ctx))
+
+    def test_await_network_accepts_thread_too(self):
+        link = FakeOtaLink({"AT+MTNET?": (0, ["+MTNET:THREAD,1,1,0"])})
+        ctx = fresh_phase4_ctx(link)
+        self.assertTrue(await_network(ctx, timeout=1.0))
+
+
+class TestStep41Swver(unittest.TestCase):
+    SWVER = '+MTSWVER:%d,"%s"' % (OTA_BASE_VERSION, OTA_BASE_VERSION_STR)
+
+    def _link(self, **over):
+        cmds = reboot_commands()
+        cmds.update({
+            'AT+MTSWVER=%d,"%s"' % (OTA_BASE_VERSION, OTA_BASE_VERSION_STR):
+                (0, []),
+            "AT+MTSWVER?": (0, [self.SWVER]),
+            "AT+MTOTA?": (0, ["+MTOTA:0,IDLE,0,wifi"]),
+        })
+        cmds.update(over)
+        return FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+
+    def test_sets_and_reboots_unconditionally(self):
+        # The requestor latches the software version at Init(), so the only
+        # way to KNOW the device booted with the base version is to make it
+        # do so. Doing it only on a mismatch would also make the row's check
+        # names come and go, and a check name is a baseline key.
+        ctx = fresh_phase4_ctx(self._link())
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_1_swver(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertIn("AT+MTEPAPPLY", ctx.link.sent)
+        self.assertEqual(ctx.variant, "wifi")
+
+    def test_a_thread_image_agrees_with_its_transport(self):
+        link = self._link(**{"AT+MTOTA?": (0, ["+MTOTA:0,IDLE,0,thread"]),
+                             "AT+MTNET?": (0, ["+MTNET:THREAD,1,1,0"])})
+        ctx = fresh_phase4_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_1_swver(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual(ctx.variant, "thread")
+
+    def test_a_combined_image_agrees_with_either_transport(self):
+        link = self._link(**{"AT+MTOTA?": (0, ["+MTOTA:0,IDLE,0,combined"])})
+        ctx = fresh_phase4_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_1_swver(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_a_variant_that_contradicts_the_transport_fails(self):
+        link = self._link(**{"AT+MTOTA?": (0, ["+MTOTA:0,IDLE,0,thread"])})
+        ctx = fresh_phase4_ctx(link)   # AT+MTNET? still says WIFI
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_1_swver(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("variant agrees" in n for n in names), names)
+
+    def test_a_device_that_refuses_the_version_aborts_the_chain(self):
+        link = self._link(**{
+            'AT+MTSWVER=%d,"%s"' % (OTA_BASE_VERSION, OTA_BASE_VERSION_STR):
+                (8, [])})
+        ctx = fresh_phase4_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_4_1_swver(ctx)
+
+
+class TestStep42ImageTool(unittest.TestCase):
+    def _ctx(self, tool=None, runner=None):
+        ctx = fresh_phase4_ctx(ota_image_tool=tool)
+        ctx.payload = ota_test_payload(256)
+        ctx.image = wrap_ota_image(ctx.payload, 0xFFF1, 0x8000,
+                                   OTA_TARGET_VERSION, OTA_TARGET_VERSION_STR)
+        ctx.image_tool_runner = runner
+        return ctx
+
+    def test_not_applicable_without_the_tool(self):
+        ctx = self._ctx()
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_2_image_tool(ctx)
+        self.assertEqual(ctx.suite.results, [])
+        self.assertEqual(len(ctx.suite.na), 1)
+
+    def test_a_matching_reference_file_passes(self):
+        holder = {}
+
+        def runner(argv, timeout):
+            holder["argv"] = argv
+            with open(argv[-1], "wb") as fh:
+                fh.write(holder["want"])
+            return 0, ""
+
+        ctx = self._ctx(tool="/tmp/ota_image_tool.py", runner=runner)
+        holder["want"] = ctx.image
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_2_image_tool(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertIn("create", holder["argv"])
+        self.assertIn("-da", holder["argv"])
+
+    def test_one_differing_byte_fails_the_row(self):
+        def runner(argv, timeout):
+            with open(argv[-1], "wb") as fh:
+                fh.write(b"\x00" * 40)
+            return 0, ""
+
+        ctx = self._ctx(tool="/tmp/ota_image_tool.py", runner=runner)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_2_image_tool(ctx)
+        self.assertGreater(ctx.suite.failed, 0)
+
+
+class TestStep43ProviderUp(unittest.TestCase):
+    def _ctx(self, script, log=None):
+        d = tempfile.mkdtemp()
+        runner = FakeChipRunner(script)
+        chip = ChipTool("/bin/chip-tool", d, runner=runner)
+        ctx = fresh_phase4_ctx(FakeOtaLink(), chip=chip)
+        text = fixture("ota_provider_start.txt") if log is None else log
+        ctx.provider = OtaProvider("/bin/provider",
+                                   os.path.join(d, "test.ota"),
+                                   os.path.join(d, "kvs.d"),
+                                   popen=lambda argv, **kw: FakePopen(text))
+        return ctx, runner
+
+    def test_a_provider_that_never_listens_aborts_the_chain(self):
+        # The shape a leftover provider from an earlier session makes: the
+        # second one dies on the bind for port 5541, and the pairing that
+        # would follow commissions the OLD provider instead, which serves a
+        # different image. Caught here rather than four rows later as an
+        # unexplained byte mismatch.
+        ctx, runner = self._ctx([], log="Failed to bind: address in use\n")
+        ctx.provider.wait_for_log = lambda pattern, timeout=30.0: None
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_4_3_provider_up(ctx)
+        self.assertEqual(runner.calls, [])   # never even tried to pair
+
+    def test_happy_path_pairs_then_writes_the_acl(self):
+        ctx, runner = self._ctx([(0, "success"), (0, "WriteResponse")])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_3_provider_up(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        verbs = [argv[1] for argv, _ in runner.calls]
+        self.assertEqual(verbs, ["pairing", "accesscontrol"])
+        self.assertIsNotNone(ctx.provider.wait_for_log(r"Server Listening",
+                                                       timeout=1.0))
+        self.assertIn(OTA_PROVIDER_ACL, runner.calls[1][0])
+
+    def test_a_stale_node_id_is_unpaired_and_retried(self):
+        # A provider from an earlier run can still be in the storage
+        # directory, and chip-tool then refuses 0xDEAD as a duplicate. That
+        # is bench state, not a defect.
+        ctx, runner = self._ctx([(1, "duplicate node id"), (0, "unpaired"),
+                                 (0, "success"), (0, "WriteResponse")])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_3_provider_up(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual([argv[2] for argv, _ in runner.calls][:3],
+                         ["onnetwork-long", "unpair", "onnetwork-long"])
+
+    def test_a_pairing_that_will_not_recover_aborts_the_chain(self):
+        ctx, runner = self._ctx([(1, "no"), (1, "no"), (1, "no")])
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_4_3_provider_up(ctx)
+
+
+class TestStep44Announce(unittest.TestCase):
+    def _ctx(self, urcs, chip_rc=0):
+        link = FakeOtaLink({"AT+MTOTA=1": (0, [])})
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner(
+                            [(chip_rc, "")],
+                            on_call=lambda argv: link.push_urcs(urcs)))
+        return fresh_phase4_ctx(link, chip=chip)
+
+    def test_query_offer_and_first_progress_line(self):
+        ctx = self._ctx(ota_urc_section("abort")[:3])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_4_announce(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_the_announce_verb_and_argv(self):
+        ctx = self._ctx(ota_urc_section("abort")[:3])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_4_announce(ctx)
+        argv = ctx.chip._runner.calls[0][0]
+        self.assertIn("otasoftwareupdaterequestor", argv)
+        self.assertIn("announce-otaprovider", argv)   # not announce-ota-provider
+        self.assertIn("0xDEAD", argv)
+        self.assertIn("0x4845", argv)
+
+    def test_a_stale_session_recovery_is_reported_not_failed(self):
+        ctx = self._ctx(ota_urc_section("stale-session"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            step_4_4_announce(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertIn("stale CASE session", buf.getvalue())
+
+    def test_an_image_with_no_requestor_aborts_the_chain(self):
+        link = FakeOtaLink({"AT+MTOTA=1": (8, [])})   # +MTERR:8
+        ctx = fresh_phase4_ctx(link)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StepAbort):
+                step_4_4_announce(ctx)
+
+
+class TestStep48StagedApply(unittest.TestCase):
+    IMAGE = ota_test_payload(2 * 1024)
+
+    def _ctx(self, apply_urcs):
+        commands, on_command, first, _ = relay_script(self.IMAGE)
+        commands.update({"AT+MTOTA=1": (0, []),
+                         "AT+MTOTASTAGED=1": (0, []),
+                         "AT+MTOTA?": (0, ["+MTOTA:1,APPLYING,100,wifi"])})
+        on_command["AT+MTOTASTAGED=1"] = apply_urcs
+        link = FakeOtaLink(commands, no_reset=True,
+                           urcs_on_command=on_command)
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner(
+                            [(0, "")],
+                            on_call=lambda argv: link.push_urcs(
+                                ota_urc_section("abort")[:2] + first)))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        ctx.image = self.IMAGE
+        return ctx
+
+    def test_apply_scores_clean(self):
+        ctx = self._ctx(ota_urc_section("staged-apply"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_8_staged_apply(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+
+    def test_no_apply_urc_fails_the_row(self):
+        ctx = self._ctx([])
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_8_staged_apply(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("APPLY" in n for n in names), names)
+
+
+class TestStep49ConfirmAfterReboot(unittest.TestCase):
+    def _ctx(self, provider_log, update_state="[TOO]   UpdateState: 1"):
+        cmds = reboot_commands()
+        cmds.update({
+            'AT+MTSWVER=%d,"%s"' % (OTA_TARGET_VERSION,
+                                    OTA_TARGET_VERSION_STR): (0, []),
+            "AT+MTSWVER?": (0, ['+MTSWVER:%d,"%s"'
+                                % (OTA_TARGET_VERSION,
+                                   OTA_TARGET_VERSION_STR)]),
+        })
+        link = FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner([(0, update_state)]))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        d = tempfile.mkdtemp()
+        ctx.provider = OtaProvider("/bin/provider",
+                                   os.path.join(d, "test.ota"),
+                                   os.path.join(d, "kvs.d"),
+                                   popen=lambda argv, **kw:
+                                   FakePopen(provider_log))
+        ctx.provider.start()
+        return ctx
+
+    def test_the_notification_and_the_idle_read_back(self):
+        ctx = self._ctx(fixture("ota_provider_start.txt"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_9_confirm_after_reboot(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        # AT+MTEPAPPLY, not a power cycle: nothing in this row closes or
+        # reopens the port, which is what keeps the first-run state alive.
+        self.assertIn("AT+MTEPAPPLY", ctx.link.sent)
+
+    def test_a_provider_that_never_logged_it_fails(self):
+        ctx = self._ctx("[SVR] Server Listening...\n")
+        ctx.provider.wait_for_log = lambda pattern, timeout=30.0: None
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_9_confirm_after_reboot(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("NotifyUpdateApplied" in n for n in names), names)
+
+    def test_a_requestor_still_busy_fails(self):
+        ctx = self._ctx(fixture("ota_provider_start.txt"),
+                        update_state="[TOO]   UpdateState: 5")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_9_confirm_after_reboot(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("Idle" in n for n in names), names)
+
+
+class TestStep410InFlightTail(unittest.TestCase):
+    """A BLOCK line can legitimately overtake AT+MTOTA=0: the requestor
+    announces the next block the moment the previous acknowledgement lands.
+    Mode 0 promises nothing NEW afterwards, not that the wire was already
+    silent."""
+
+    IMAGE = ota_test_payload(4 * 1024)
+
+    def test_a_line_already_in_flight_does_not_fail_the_row(self):
+        commands, on_command, first, _ = relay_script(self.IMAGE)
+        commands["AT+MTOTA=0"] = (0, [])
+        commands["AT+MTOTA?"] = (0, ["+MTOTA:0,IDLE,0,wifi"])
+        link = FakeOtaLink(commands, no_reset=True,
+                           urcs_on_command=on_command)
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner(
+                            [(0, "")],
+                            on_call=lambda argv: link.push_urcs(
+                                ota_urc_section("abort")[:2] + first)))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        ctx.image = self.IMAGE
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            step_4_10_disable_during_download(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertIn("in flight when the mode changed", buf.getvalue())
+
+    def test_a_line_arriving_after_the_quiet_window_opens_fails(self):
+        commands, on_command, first, _ = relay_script(self.IMAGE)
+        commands["AT+MTOTA=0"] = (0, [])
+        commands["AT+MTOTA?"] = (0, ["+MTOTA:0,IDLE,0,wifi"])
+        on_command["AT+MTOTA=0"] = []
+        link = FakeOtaLink(commands, no_reset=True,
+                           urcs_on_command=on_command)
+
+        real_drain = link.drain
+
+        def drain_then_speak(quiet=0.2):
+            dropped = real_drain(quiet)
+            link.push_urcs(["+MTOTA:BLOCK,2,1024"])   # after the mode change
+            return dropped
+
+        link.drain = drain_then_speak
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner(
+                            [(0, "")],
+                            on_call=lambda argv: link.push_urcs(
+                                ota_urc_section("abort")[:2] + first)))
+        ctx = fresh_phase4_ctx(link, chip=chip)
+        ctx.image = self.IMAGE
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_4_10_disable_during_download(ctx)
+        names = [n for n, ok, _ in ctx.suite.results if not ok]
+        self.assertTrue(any("no further" in n for n in names), names)
+
+
+class TestBuildOtaContext(unittest.TestCase):
+    def _args(self, **kw):
+        a = types.SimpleNamespace(node_id=0x4845, ota_payload_size=512,
+                                  ota_provider="/bin/provider",
+                                  ota_image_tool=None, include_ota=True,
+                                  include_slow=False, include_manual=False,
+                                  keyword=None, port="/dev/null")
+        for k, v in kw.items():
+            setattr(a, k, v)
+        return a
+
+    def test_the_image_names_the_ids_the_device_reports(self):
+        # An image naming other ids is answered NotAvailable and no URC ever
+        # arrives, which on the bench looks exactly like a broken relay.
+        link = FakeOtaLink({"AT+MTCODES?": (0, list(CODES))})
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner(
+                            [(0, fixture("chiptool_parse_setup_payload.txt"))]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            ctx = build_ota_context(link, chip, Suite(), self._args())
+        self.assertEqual((ctx.vendor, ctx.product), (65521, 32768))
+        self.assertEqual(ctx.image,
+                         wrap_ota_image(ctx.payload, 65521, 32768,
+                                        OTA_TARGET_VERSION,
+                                        OTA_TARGET_VERSION_STR))
+        with open(ctx.image_path, "rb") as fh:
+            self.assertEqual(fh.read(), ctx.image)
+
+    def test_a_device_that_will_not_say_falls_back_to_the_constants(self):
+        link = FakeOtaLink({"AT+MTCODES?": (-2, [])})
+        chip = ChipTool("/bin/chip-tool", tempfile.mkdtemp(),
+                        runner=FakeChipRunner([]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            ctx = build_ota_context(link, chip, Suite(), self._args())
+        self.assertEqual((ctx.vendor, ctx.product), (0xFFF1, 0x8000))
+
+    def test_the_recorded_digest_carries_no_credential_shaped_run(self):
+        # Baselines are committed, and the project scans committed files for
+        # an unbroken run of 24 or more hex characters. A sha256 is not a
+        # credential but it trips the scan, so the header groups it.
+        grouped = group_hex(hashlib.sha256(b"provider").hexdigest())
+        self.assertIsNone(re.search(r"[0-9a-fA-F]{24,}", grouped))
+        self.assertEqual(grouped.replace(" ", ""),
+                         hashlib.sha256(b"provider").hexdigest())
+        self.assertIsNone(group_hex(None))
+
+    def test_file_sha256_of_a_missing_file_is_none(self):
+        self.assertIsNone(file_sha256("/nope/not/a/file"))
+        with tempfile.NamedTemporaryFile(delete=False) as fh:
+            fh.write(b"abc")
+        self.assertEqual(file_sha256(fh.name),
+                         hashlib.sha256(b"abc").hexdigest())
+
+
+class TestRestoreOtaState(unittest.TestCase):
+    def test_rolls_the_version_back_and_stops_the_provider(self):
+        cmds = reboot_commands()
+        cmds.update({"AT+MTOTA=0": (0, []),
+                     'AT+MTSWVER=%d,"%s"' % (OTA_BASE_VERSION,
+                                             OTA_BASE_VERSION_STR): (0, [])})
+        link = FakeOtaLink(cmds,
+                           urcs_on_command={"AT+MTEPAPPLY": ["+MTREADY"]})
+        ctx = fresh_phase4_ctx(link)
+        stopped = []
+        ctx.provider = types.SimpleNamespace(stop=lambda: stopped.append(1))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(restore_ota_state(ctx))
+        self.assertIn('AT+MTSWVER=%d,"%s"' % (OTA_BASE_VERSION,
+                                              OTA_BASE_VERSION_STR),
+                      link.sent)
+        self.assertEqual(stopped, [1])
+
+    def test_a_dead_link_still_stops_the_provider(self):
+        class DeadLink:
+            def command(self, *a, **kw):
+                raise OSError("port closed")
+
+        ctx = fresh_phase4_ctx(DeadLink())
+        stopped = []
+        ctx.provider = types.SimpleNamespace(stop=lambda: stopped.append(1))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(restore_ota_state(ctx))
+        self.assertEqual(stopped, [1])
+
+
 from mt_regression import BRIDGE_LINES, open_at_port, wait_boot_marker
 
 
@@ -8891,8 +10080,13 @@ class FakeSerialPort:
 class FakeSerialModule:
     SerialException = OSError
 
+    def __init__(self):
+        self.made = []
+
     def Serial(self, *a, **kw):
-        return FakeSerialPort()
+        p = FakeSerialPort()
+        self.made.append(p)
+        return p
 
 
 class TestBridgeContract(unittest.TestCase):
@@ -8902,37 +10096,51 @@ class TestBridgeContract(unittest.TestCase):
     like dead hardware."""
 
     def test_challenger_asserts_both(self):
-        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "challenger")
+        mod = FakeSerialModule()
+        p = open_at_port("/dev/serial/by-id/x", mod, "challenger")
         self.assertTrue(p.dtr)
         self.assertTrue(p.rts)
 
     def test_cpico_clears_both(self):
-        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "cpico")
+        mod = FakeSerialModule()
+        p = open_at_port("/dev/serial/by-id/x", mod, "cpico")
         self.assertFalse(p.dtr)
         self.assertFalse(p.rts)
 
     def test_the_lines_are_set_before_the_open_not_after(self):
         # An open that asserts DTR even briefly pulses the module's reset,
         # so setting the lines afterwards is too late.
-        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "cpico")
-        first_open = [i for i, (n, _, _) in enumerate(p.order) if n == "open"][0]
+        mod = FakeSerialModule()
+        p = open_at_port("/dev/serial/by-id/x", mod, "cpico")
+        first_open = [i for i, (n, _, _) in enumerate(p.order)
+                      if n == "open"][0]
         before = [(n, v) for n, v, _ in p.order[:first_open]]
         self.assertIn(("dtr", False), before)
         self.assertIn(("rts", False), before)
 
     def test_an_unknown_bridge_falls_back_to_the_default_contract(self):
-        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "nonsense")
+        mod = FakeSerialModule()
+        p = open_at_port("/dev/serial/by-id/x", mod, "nonsense")
         self.assertEqual((p.dtr, p.rts), (True, True))
 
     def test_both_bridges_are_offered_on_the_command_line(self):
         self.assertEqual(sorted(BRIDGE_LINES), ["challenger", "cpico"])
 
     def test_wait_boot_marker_consumes_the_ready(self):
-        ft = FakeTransport()
-        ft.rx = b"+MTREADY\r\n"
-        link = ATLink(ft, default_timeout=0.2)
-        self.assertEqual(wait_boot_marker(link, timeout=1.0), "+MTREADY")
+        link = FakeOtaLink(urcs=["+MTREADY"], no_reset=True)
+        self.assertEqual(wait_boot_marker(link), "+MTREADY")
         self.assertIsNone(wait_boot_marker(link, timeout=0.1))
+
+    def test_relink_reopens_with_the_same_contract(self):
+        mod = FakeSerialModule()
+        link = ATLink(FakeTransport(b""))
+        relink = make_relink(link, "/dev/serial/by-id/x", settle=0, pump=0,
+                             path_exists=lambda p: True,
+                             sleep=lambda s: None, serial_mod=mod,
+                             bridge="cpico")
+        ok, _ = relink(lambda: (True, ""))
+        self.assertTrue(ok)
+        self.assertFalse(mod.made[0].dtr)
 
 
 if __name__ == "__main__":
