@@ -148,8 +148,9 @@
  * round: a header entry point added tomorrow has a place to be stubbed while
  * its implementation is written. */
 
-/* ---- firmware over the air: stubbed until hearth_ota_nrf.cpp (Task 4) ---- */
-int mt_matter_ota_set_mode(int mode) { (void)mode; return -1; }
-int mt_matter_ota_block_acked(uint32_t seq) { (void)seq; return -1; }
-int mt_matter_ota_staged(int ok, int reason) { (void)ok; (void)reason; return -1; }
-int mt_matter_swver_set(uint32_t version, const char *str) { (void)version; (void)str; return -1; }
+/* The firmware-over-the-air quartet left this file in the FOTA round, when
+ * the port grew a Matter OTA requestor whose image store is the host: the
+ * three mt_matter_ota_* shims are real in platform/common/hearth_ota_
+ * requestor.cpp, shared with the C6, and mt_matter_swver_set() is real in
+ * port/hearth_ota_nrf.cpp against the ConfigurationManager that serves the
+ * host-declared product version to Basic Information. */

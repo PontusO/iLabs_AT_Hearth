@@ -31,6 +31,38 @@
 #
 mainmenu "Hearth nRF54L15 Matter Platform"
 
+# ---- one image, said out loud (the FOTA relay round) ---------------------
+#
+# Zephyr defines UPDATEABLE_IMAGE_NUMBER inside "if IMG_MANAGER"
+# (zephyr/subsys/dfu/Kconfig:97), and IMG_MANAGER in turn depends on
+# STREAM_FLASH, so with the DFU image manager off the symbol does not exist
+# at all. CHIP's own nrfconnect/OTAImageProcessorImpl.cpp reads it
+# (OTAImageProcessorImpl.cpp:97) and the gn build compiles that file
+# whenever chip_enable_ota_requestor is set, whether or not anything
+# instantiates it (src/platform/nrfconnect/BUILD.gn:133). Turning the
+# requestor on for the FOTA relay therefore stops the build in a file this
+# firmware never links, on a symbol that only a subsystem it does not use
+# would have defined.
+#
+# The alternative was to let IMG_MANAGER stand at the y CHIP_OTA_REQUESTOR
+# implies, and it does not work here: IMG_MANAGER's only image-manager
+# choice selects MCUBOOT_BOOTUTIL_LIB, whose bootutil_public.c is compiled
+# in THIS image's Kconfig namespace, where CONFIG_SINGLE_APPLICATION_SLOT is
+# an MCUboot-image symbol and therefore unset, so pm_sysflash.h takes its
+# two-slot branch and the build fails on PM_MCUBOOT_SECONDARY_ID. The same
+# single-slot partition map fails dfu_target_mcuboot.c on
+# PM_MCUBOOT_SECONDARY_SIZE and PM_MCUBOOT_SECONDARY_ADDRESS. Both were
+# tried; prj.conf's OTA block records the order.
+#
+# So the number is stated here instead, and it is not a workaround value:
+# this device has exactly one updateable image, which is the whole premise
+# of the host-driven update path (FIRMWARE_UPDATE_SPEC). It matches the
+# default Zephyr would have given under IMG_MANAGER, and the only code that
+# reads it in this build is the unreferenced file above.
+config UPDATEABLE_IMAGE_NUMBER
+	int
+	default 1
+
 source "$(ZEPHYR_CONNECTEDHOMEIP_MODULE_DIR)/config/nrfconnect/chip-module/Kconfig.features"
 source "$(ZEPHYR_CONNECTEDHOMEIP_MODULE_DIR)/config/nrfconnect/chip-module/Kconfig.defaults"
 source "$(ZEPHYR_NRF_MODULE_DIR)/samples/matter/common/src/Kconfig"

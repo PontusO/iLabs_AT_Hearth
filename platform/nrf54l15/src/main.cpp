@@ -27,6 +27,16 @@ extern "C" {
 #include "mt_chip_events.h"
 #include "mt_port_ids.h"
 
+/*
+ * port/hearth_ota_nrf.cpp. Split in two because the two halves belong at
+ * different points of the boot: the ConfigurationManager has to be installed
+ * before PrepareServer() runs ConfigurationMgr().Init(), and the persisted
+ * product version cannot be read until that init has brought the settings
+ * backend up.
+ */
+void hearth_swver_install();
+void hearth_swver_load();
+
 LOG_MODULE_REGISTER(hearth_main, LOG_LEVEL_INF);
 
 /*
@@ -112,11 +122,31 @@ static void rebuild_composition(void)
 
 int main(void)
 {
+    /*
+     * FOTA round task 4: install the ConfigurationManager that serves the
+     * host-declared product version, before anything in CHIP can ask for it.
+     * PrepareServer() below runs PlatformMgr().InitChipStack(), and that
+     * calls ConfigurationMgr().Init() on whichever instance is installed at
+     * the time; installing afterwards would leave the default instance
+     * initialised and this one not.
+     */
+    hearth_swver_install();
+
     CHIP_ERROR err = Nrf::Matter::PrepareServer();
     if (err != CHIP_NO_ERROR) {
         LOG_ERR("PrepareServer failed: %" CHIP_ERROR_FORMAT, err.Format());
         return -1;
     }
+    /*
+     * FOTA round task 4: read the persisted product version now that
+     * PrepareServer()'s InitChipStack() has brought the settings backend up,
+     * and before StartServer(), which is where Server::Init() runs and where
+     * Basic Information starts answering reads. The requestor keeps its own
+     * copy of the current version, taken once in DefaultOTARequestor::Init()
+     * off the back of kServerReady, so this has to be in force by then too.
+     */
+    hearth_swver_load();
+
     err = Nrf::Matter::StartServer();
     if (err != CHIP_NO_ERROR) {
         LOG_ERR("StartServer failed: %" CHIP_ERROR_FORMAT, err.Format());
