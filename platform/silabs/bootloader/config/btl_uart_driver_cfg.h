@@ -52,23 +52,25 @@
 // <<< sl:start pin_tool >>>
 // <usart signal=TX,RX,(CTS),(RTS)> SL_SERIAL_UART
 // $[USART_SL_SERIAL_UART]
-#warning "Bootloader UART peripheral not configured"
+// Hearth: the AT and bootloader UART on the iLabs RP2350 carrier. The SDK's
+// "Bootloader UART peripheral not configured" pragma belongs to the unset
+// template and is deliberately absent here: this block configures it.
 #define SL_SERIAL_UART_PERIPHERAL                USART0
 #define SL_SERIAL_UART_PERIPHERAL_NO             0
 
-// USART0 TX on PA08
+// USART0 TX on PA05, module pin 12
 #define SL_SERIAL_UART_TX_PORT                   gpioPortA
 #define SL_SERIAL_UART_TX_PIN                    5
 
-// USART0 RX on PA01
+// USART0 RX on PA06, module pin 13
 #define SL_SERIAL_UART_RX_PORT                   gpioPortA
 #define SL_SERIAL_UART_RX_PIN                    6
 
-// USART0 CTS on PA02
+// CTS unused: the carrier has no flow control, SL_SERIAL_UART_FLOW_CONTROL is 0
 //#define SL_SERIAL_UART_CTS_PORT                  gpioPortA
 //#define SL_SERIAL_UART_CTS_PIN                   8
 
-// USART0 RTS on PA03
+// RTS unused: the carrier has no flow control, SL_SERIAL_UART_FLOW_CONTROL is 0
 //#define SL_SERIAL_UART_RTS_PORT                  gpioPortA
 //#define SL_SERIAL_UART_RTS_PIN                   7
 // [USART_SL_SERIAL_UART]$
