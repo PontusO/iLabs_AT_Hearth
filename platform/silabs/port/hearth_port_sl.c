@@ -32,12 +32,20 @@
 
 /* ---- identity ------------------------------------------------------ *
  * The model names the co-processor the host sees (AT+CGMM). Selected on
- * the SoC define, never on a board name, with #error for anything else:
- * a wrong-but-plausible answer is the failure mode the board contract
- * exists to prevent (B429). */
+ * the part define the SiSDK project carries, never on a board name, with
+ * #error for anything else: a wrong-but-plausible answer is the failure
+ * mode the board contract exists to prevent (B429).
+ *
+ * MGM240PA32VNA is the module id, measured in Task 5 (README, "Do not
+ * build for BRD2704A"). Naming it alone, rather than an
+ * _EFR32_MG24_FAMILY catch-all, turns the BRD2704A trap into a compile
+ * error: that board's project defines MGM240PB32VNA, the B part, whose
+ * image RAIL-asserts on this module at runtime and is silent on every
+ * UART. A build that cannot start is cheaper than one that dies in the
+ * radio init. A future EFR32MG24 board adds its own arm here. */
 const char *hearth_port_model(void)
 {
-#if defined(EFR32MG24B310F1536IM48) || defined(EFR32MG24B220F1536IM48) || defined(_EFR32_MG24_FAMILY)
+#if defined(MGM240PA32VNA)
     return "MGM240P Hearth";
 #else
 #error "hearth_port_model(): unknown Silicon Labs part; add its model string arm"
@@ -79,7 +87,7 @@ void *hearth_stage_alloc(size_t bytes)
 {
     if (bytes > STAGE_BYTES) return NULL;
     void *block = NULL;
-    CORE_atomicState_t crit = CORE_EnterAtomic();
+    CORE_irqState_t crit = CORE_EnterAtomic();
     for (int i = 0; i < STAGE_SLOTS; i++) {
         if (!s_stage_used[i]) { s_stage_used[i] = true; block = s_stage_pool[i]; break; }
     }
@@ -90,7 +98,7 @@ void *hearth_stage_alloc(size_t bytes)
 void hearth_stage_free(void *block)
 {
     if (block == NULL) return;
-    CORE_atomicState_t crit = CORE_EnterAtomic();
+    CORE_irqState_t crit = CORE_EnterAtomic();
     for (int i = 0; i < STAGE_SLOTS; i++) {
         if (block == s_stage_pool[i]) { s_stage_used[i] = false; break; }
     }
@@ -167,7 +175,7 @@ void hearth_sem_give(hearth_sem_t sem) { xSemaphoreGive((SemaphoreHandle_t)sem);
  * exactly what the header asks for (URCs can fire from stack callbacks
  * before any init). One saved state per well-known id; the core never
  * nests a section with itself. */
-static CORE_atomicState_t s_crit_state[HEARTH_CRIT_COUNT];
+static CORE_irqState_t s_crit_state[HEARTH_CRIT_COUNT];
 
 void hearth_crit_enter(int id) { s_crit_state[id] = CORE_EnterAtomic(); }
 void hearth_crit_exit(int id)  { CORE_ExitAtomic(s_crit_state[id]); }
