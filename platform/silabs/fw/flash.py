@@ -84,6 +84,16 @@ class PortReader:
     def pushback(self, data):
         self._pending = bytearray(data) + self._pending
 
+    def reset(self):
+        """Drop everything buffered, here and in the port.
+
+        Both halves, always: clearing only the port's buffer would leave a
+        pushed-back byte to be read as if it had just arrived, which is
+        precisely the stale-reply confusion the pushback exists to avoid.
+        """
+        self._pending = bytearray()
+        self.port.reset_input_buffer()
+
     def read(self, n, timeout=None):
         if self._pending:
             take = bytes(self._pending[:n])
@@ -147,7 +157,7 @@ def enter_bootloader(s, reader, strap):
         print("--no-strap: driving neither reset nor strap; the module must "
               "already be at the bootloader menu (note that opening the port "
               "has itself reset it, see the header, item 3)")
-        s.reset_input_buffer()
+        reader.reset()
         return
     s.rts = True                # strap low (PC00)
     time.sleep(STRAP_SETTLE_S)
@@ -173,7 +183,7 @@ def _menu_line(seen):
 
 def upload(s, reader, image):
     """Menu "1", then the XMODEM transfer. Returns the block count."""
-    s.reset_input_buffer()
+    reader.reset()
     s.write(b"1")
     found, seen = reader.read_until([bytes([xmodem.CRC_C])], HANDSHAKE_TIMEOUT_S)
     if not found:
@@ -214,10 +224,10 @@ def upload(s, reader, image):
     return blocks
 
 
-def run_application(s):
+def run_application(s, reader):
     """Menu "2": leave the bootloader and start the application."""
     time.sleep(0.2)
-    s.reset_input_buffer()
+    reader.reset()
     s.write(b"2")
 
 
@@ -256,7 +266,7 @@ def main():
         enter_bootloader(s, reader, strap=not args.no_strap)
         blocks = upload(s, reader, image)
         print("uploaded %d block(s), %d bytes" % (blocks, len(image)))
-        run_application(s)
+        run_application(s, reader)
         found, seen = wait_ready(reader, args.ready_timeout)
         if not found:
             die("no +MTREADY within %.0f s after the upload; the AT port read "
