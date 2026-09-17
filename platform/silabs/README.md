@@ -1,11 +1,12 @@
 # Hearth on Silicon Labs EFR32MG24 (MGM240P)
 
-Status: **round 1 software half complete; the toolchain, the project's own
-bootloader and a stock Silabs Matter-over-Thread example are bench-proven on
-the MGM240PA32VNA3 (Task 5, 2026-09-17); Tasks 6 to 8 pending** (graph T446).
-The third Hearth
-platform, mimicking the nRF54L15 port: a Thread FTD + BLE co-processor
-serving the `AT+MT` contract over one UART. Design:
+Status: **the Hearth skeleton boots on the MGM240PA32VNA3, prints its boot log
+on the console and answers the `AT+MT` surface: `+MTREADY` on the wire, the
+harness Phase 0 gate passed and Phase 1 run (Task 6, 2026-09-17). Tasks 7 and 8
+pending; the Matter stack arrives with the upward-port round** (graph T446).
+
+The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
+co-processor serving the `AT+MT` contract over one UART. Design:
 `iLabs_Hearth_docs/superpowers/specs/2026-09-05-silabs-mg24-port-design.md`.
 
 This README is the platform bible, in the shape of `platform/nrf54l15/README.md`:
@@ -19,8 +20,8 @@ task that produces them.
 |---|---|---|---|
 | AT UART TX | PA05 (pin 12) | EUSART0 TX (app), USART0 TX (bootloader) | the bootloader's TX |
 | AT UART RX | PA06 (pin 13) | EUSART0 RX (app), USART0 RX (bootloader) | the bootloader's RX |
-| Console TX | PA00 (pin 7) | USART0 TX | the only console line the Debug Probe's UART CDC is wired to; nothing has been observed on it yet (see Toolchain) |
-| Console RX | PA03 (pin 10) | USART0 RX | on the header, deliberately uninitialised by the port (design spec, board contract item 6) |
+| Console TX | PA00 (pin 7) | USART0 TX | Hearth's console, 115200 8N1, TX only; **proven 2026-09-17** by the skeleton's own boot log on the Debug Probe's UART CDC |
+| Console RX | PA03 (pin 10) | USART0 RX | on the header, deliberately uninitialised by the port: a shipping image has no console input path (design spec board contract item 6, CRA_COMPLIANCE.md) |
 | Reset | RESETn (pin 31) | active low | internal pull-up; drive low only, never high |
 | SWD | PA01 (pin 8), PA02 (pin 9) | SWCLK, SWDIO | bootloader install, debug. **PA01 is SWCLK: never hand it to a UART** |
 | Recovery strap | PC00 (pin 22) | `SL_BTL_BUTTON`, active low | held low through reset enters the bootloader; proven both ways 2026-09-17 |
@@ -208,6 +209,16 @@ evidence that the probe's RX is really on PA00 at all, as opposed to floating.
 Task 8, which wires Hearth's own console, should establish the path with
 traffic it controls before trusting silence on it.
 
+**Settled 2026-09-17 (Task 6): the path is real and it is on PA00.** The ruling
+of that date moved Hearth's own console forward from Task 8 for exactly this
+reason, and the first skeleton image put four lines on the Debug Probe's UART
+CDC at 115200 with DTR asserted (see "Measured"). So the probe's RX does reach
+PA00, and the stock example's silence was the example's, not the wiring's. The
+one thing Task 5 did read there, a single non-printable byte per reset, shows
+up in Hearth's capture too: a lone `\x00` at t=0, the line transition when the
+module comes out of reset and the TX pad is driven high. It is framing noise,
+not data.
+
 The example was proven alive by other means (below). Do not take this silence
 as evidence that a console cannot work here, only that the stock example did
 not give one.
@@ -230,6 +241,83 @@ not give one.
 
    `scan le` matters: a plain `scan on` reports nothing here.
 3. Commissioned and controlled, recorded under "Commissioning" below.
+
+## Building
+
+The Hearth project is `platform/silabs/hearth.slcp`, an slc project against the
+Simplicity SDK alone: there is no Matter in the skeleton image, so the Matter
+extension is not in this build at all. `core/sources.cmake` is the source list
+of record for `core/`; the `.slcp` writes the same seven paths out in slc's
+syntax and says so at the top, and the two must be changed together.
+
+```bash
+cd <repo root>
+source platform/silabs/toolchain.env
+git status --porcelain            # build from a committed tree
+slc generate -d ~/silabs/work/hearth-skeleton --sdk-package-path "$SISDK_ROOT" \
+    -p platform/silabs/hearth.slcp --with MGM240PA32VNA \
+    --generator-timeout=180 -o makefile
+POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-skeleton \
+    -f hearth.Makefile -j8
+cd ~/silabs/work/hearth-skeleton/build/debug
+commander gbl create hearth.gbl --app hearth.s37
+```
+
+`--with MGM240PA32VNA`, the module id, never a board id; see "Do not build for
+BRD2704A". Since Task 6 a wrong target is a compile error rather than a bench
+mystery: `hearth_port_model()` names `MGM240PA32VNA` alone.
+
+The build directory is outside the repository, for the same reason the
+extension is copied out of the Conan cache: slc writes a large generated tree
+and nothing good comes of having it inside a checkout.
+
+Like the stock example's, this build emits no `.gbl`; Commander makes one from
+the `.s37`. There is no `artifact/` directory and no post-build size report,
+because the `.slcp` declares no `post_build:` profile; `arm-none-eabi-size` is
+where the figures below come from.
+
+Two build notes worth keeping:
+
+- **`bootloader_interface` is not optional.** Without that component the
+  generated linker file puts `FLASH` at `ORIGIN = 0x8000000`, on top of the
+  project's own Gecko Bootloader, and nothing in the build says so: it
+  compiles, Commander makes a `.gbl` from it, and the bootloader writes the
+  image over itself. With it, `FLASH` is `ORIGIN = 0x8006000, LENGTH =
+  0x178000` and `bootloader_app_properties` comes along, which is what
+  `commander gbl create --app` wants. This was caught by reading the `size -A`
+  output of the first build, not by anything failing.
+- **Two deprecation warnings are expected**, both in `main.c`:
+  `sl_system_init` and `sl_system_kernel_start` are deprecated in SiSDK
+  2025.12 in favour of `sl_main`, and Silicon Labs says `sl_system` goes away
+  in sisdk-2026.6. They are left visible rather than silenced; see "Migrating
+  to sl_main" below.
+
+### Migrating to sl_main
+
+This project uses `sl_system` because the skeleton's `main()` is its own
+(`platform/silabs/src/main.c`) and `sl_system_implementation_kernel` is the
+component that requires `custom_main`. That choice has a deadline and a
+conflict, and both belong to the upward-port round:
+
+- `sl_system` is marked `quality: deprecated` in SiSDK 2025.12.3 and its own
+  description says to replace it with `sl_main` by sisdk-2026.6.
+- `sl_system_implementation_kernel` declares `conflicts: sl_main`, and the
+  stock Silicon Labs Matter 2.8.1 `lighting-app.slcp` lists `sl_main`. So the
+  round that adds the Matter stack will have to move, not choose.
+- `sl_system_compatibility`, the aliasing shim, is not a way out: it declares
+  `conflicts: kernel`, i.e. baremetal only.
+
+The move is not a rename, so read the SDK before doing it. Under `sl_main`
+with a kernel the SDK **wraps** `main`: `sl_main_retarget.c` links a
+`__wrap_main` that calls `sl_main_init()` and `sl_main_kernel_start()`, and the
+application's own `main()` then runs inside the start task (see the SDK's
+`platform/service/sl_main/src/rtos/main.c`, which calls
+`sl_main_second_stage_init()` and returns into
+`sl_main_start_task_should_continue()`). So this project's `main()` stops being
+the entry point and becomes the start-task body, and stops starting the
+scheduler. What must not change is the ordering the boot contract depends on:
+platform init, then the console, then `mt_at_start()` on a task, with nothing
+on the AT link before `+MTREADY`.
 
 ## Flashing
 
@@ -299,11 +387,42 @@ Serial upload complete
 `sx` from lrzsz is the obvious alternative and is the wrong tool here: opening
 the port asserts DTR, which holds the module in reset.
 
+Measured again 2026-09-17 with the Hearth skeleton, which is twenty times
+smaller: **47 860 B as 374 blocks in 5 s**, no block retries, the same ending.
+An application was present this time, so the upload was entered through the
+strap:
+
+```python
+s.rts = True;  time.sleep(0.1)     # hold PC00 low
+s.dtr = True;  time.sleep(0.1)     # RESETn low
+s.dtr = False                      # released into the bootloader
+# ... wait for "BL > ", send b"1", wait for the bootloader's "C", send blocks
+s.rts = False                      # release the strap after the upload
+```
+
 The two CDCs on this bench want **opposite** DTR: the carrier's bridge must be
 opened with DTR cleared, or the module is held in reset, while the Debug
 Probe's UART CDC must be opened with DTR asserted, or it discards everything
 the console sends. Getting the second one wrong looks exactly like dead
-hardware; see "The stock example has no usable console here" above.
+hardware, and it did once here; see "The stock example has no usable console
+here" above. Hearth's boot log was read with DTR asserted and arrived first
+time ("Measured").
+
+### Running the harness against this carrier
+
+`test/mt_regression.py` must be given the bridge contract, or it opens the port
+pyserial's way (DTR and RTS both asserted) and holds the module in reset and in
+recovery at once, which reads as dead hardware:
+
+```bash
+export MT_PORT=/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00
+python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
+```
+
+`--bridge cpico` clears both lines **before** the open and then waits for the
+`+MTREADY` that the open's own brief reset produces, so the first command does
+not race the boot. The default, `--bridge challenger`, is the C6 contract and
+is unchanged.
 
 ### Recovery semantics
 
@@ -387,74 +506,213 @@ session, not BLE, so they prove the device joined the mesh.
 
 ## Measured
 
-Pending (Task 6): skeleton image size and free RAM at `+MTREADY`. Note for
-whoever fills this in: `hearth_log_write` (`hearth_port_sl.c`) discards
-everything it is given until a console UART is wired (Task 8), so the RX
-ring overflow warning it would otherwise print is unobservable until then;
-an absence of overflow warnings in this section is not evidence the ring
-never overflowed.
+All of this is the skeleton image, 2026-09-17, built from the committed tree at
+`19e7fe8` in `~/silabs/work/hearth-skeleton` by the "Building" recipe above,
+running on the MGM240PA32VNA3 on the iLabs RP2350 carrier.
 
-## First-compile checklist (Task 6)
+### Image size
 
-`hearth_port_sl.c` (Task 4) was written and host-tested for its pure-C
-pieces without a Simplicity SDK toolchain, so several SDK identifier names
-and behaviors are unverified. Task 6, the first real compile, must check:
+`arm-none-eabi-size ~/silabs/work/hearth-skeleton/build/debug/hearth.out`:
 
-- `GPIO->EUSARTROUTE[0]` field names (`TXROUTE`/`RXROUTE`/`ROUTEEN`) and the
-  `_GPIO_EUSART_*ROUTE_PORT_SHIFT` / `_PIN_SHIFT` macros against the real
-  EFR32MG24 device header; `EUSART0_RX_IRQn` likewise.
-- `EUSART_UART_INIT_DEFAULT_HF`'s default RX FIFO watermark: `hearth_ring`'s
-  RX ISR assumes `EUSART_STATUS_RXFL`/`EUSART_IF_RXFL` fire per received
-  byte (the nRF port's bench-proven bug, "AT+MTEP=256" losing its '=', is
-  exactly what a coarser watermark would reintroduce here).
-- The default CMU clock source EUSART0 is fed from when
-  `CMU_ClockEnable(cmuClock_EUSART0, true)` is called with no prior
-  `CMU_ClockSelectSet`, and whether that gives 115200 baud without drift.
-- `configUSE_MUTEXES` is enabled in `FreeRTOSConfig.h`: `hearth_port_sl.c`
-  calls `xSemaphoreCreateMutex()` for the TX lock.
-- `CORE_atomicState_t`, `CORE_EnterAtomic()` and `CORE_ExitAtomic()` are the
-  actual emlib `em_core.h` API for BASEPRI-based atomic sections (as
-  opposed to, for example, a single shared `CORE_irqState_t` type or a
-  macro-only interface); `hearth_port_sl.c` uses the function-pair form
-  named in the Task 4 fix-round-1 review.
-- The Hearth-owned NVM3 key range `0x0A000..0x0AFFF` (`hearth_kvid.h`,
-  `HEARTH_KV_BASE`/`HEARTH_KV_SPAN`) does not collide with CHIP's own
-  `SilabsConfig` NVM3 keys or the OpenThread EFR32 settings backend's NVM3
-  keys in the default NVM3 instance.
-- The `_EFR32_MG24_FAMILY` fallback arm in `hearth_port_model()`'s `#if`
-  (`hearth_port_sl.c`) is replaced with the part define the SiSDK project
-  sets for the MGM240PA32VNA3. Task 5 measured it: **`MGM240PA32VNA`**, set
-  as `-DMGM240PA32VNA=1` when the project is generated with
-  `--with MGM240PA32VNA`. Note that a project generated for BRD2704A gets
-  `MGM240PB32VNA` instead and RAIL-asserts on this module, so the define is
-  not a cosmetic difference; see "Do not build for BRD2704A" above.
-- `sl_system_init()` against `sl_main`. The stock 2.8.1 `lighting-app.slcp`
-  lists the `sl_main` component, not `sl_system`, and the Matter 2.8.0
-  release notes carry an "sl_system to sl_main migration" entry. SiSDK
-  2025.12.3 ships both (`platform/service/system/inc/sl_system_init.h` and
-  `platform/service/sl_main/inc/sl_main_init.h`, plus a compatibility shim at
-  `platform/service/sl_main/sl_system_compatibility/inc/sl_system_init.h`),
-  so `hearth_port_sl.c`'s call should still resolve; confirm which one the
-  Hearth project actually pulls in before relying on it.
-- The RX IRQ's priority (`NVIC_SetPriority(EUSART0_RX_IRQn,
-  CORE_ATOMIC_BASE_PRIORITY_LEVEL)`, `hearth_port_sl.c`, `link_configure`)
-  must be numerically at or below `configMAX_SYSCALL_INTERRUPT_PRIORITY`;
-  confirm `CORE_ATOMIC_BASE_PRIORITY_LEVEL` actually resolves to a value
-  that satisfies that for this project's `FreeRTOSConfig.h`, not just that
-  the macro exists.
-- `configTICK_RATE_HZ`: confirm its actual value (commonly 1024 Hz on
-  Silabs configs, not 1000), and that the header's one-hour timeout ceiling
-  does not overflow `TickType_t` at that rate after the fix that made
-  `hearth_now_ms()` and `hearth_sem_take`/`link_wait`'s wait-slicing
-  (`hearth_port_sl.c`) tick-rate-independent.
-- `nvm3_initDefault()` is called lazily by this port
-  (`nvm3_ensure_init()`, `hearth_port_sl.c`); `sl_system_init()` already
-  initialises NVM3 when the project's `nvm3_default` component is present.
-  Confirm the port's second call is a harmless no-op returning
-  `ECODE_NVM3_OK` in that case (SiSDK's own doc for `nvm3_initDefault()`
-  should say), or drop the lazy init here if the project guarantees the
-  component is always present.
-- `EUSART_BaudrateSet()` (`hearth_link_set_baud`, `hearth_port_sl.c`) is
-  called with the EUSART left enabled, mid-session, not disabled first.
-  Confirm CLKDIV accepts a write in that state on this part, or add a
-  disable/enable cycle around the call if it does not.
+| | Bytes |
+|---|---|
+| `text` | 47 596 |
+| `data` | 176 |
+| `bss` | 261 536 |
+
+`size -A`, which is where the interesting split is:
+
+| Section | Bytes | Where |
+|---|---|---|
+| `.text` | 46 780 | flash |
+| `.vectors` | 368 | flash, at 0x08006000 |
+| `.data` | 176 | RAM, loaded from flash |
+| `.nvm` | 40 960 | flash, at the TOP of the application region (`__nvm3Base = __main_flash_end__ - SIZEOF(.nvm)`); NVM3's store, not code |
+| `.bss` | 42 924 | RAM |
+| `.memory_manager_heap` | 214 512 | RAM, the SDK memory manager taking whatever is left |
+| `.stack` | 4 096 | RAM, the C stack `main()` runs on |
+| `text_application_ram` | 428 | RAM |
+| `.bootloader_reset_section` | 4 | RAM, at 0x20000000 |
+
+Application image on flash: **47 776 B** (`hearth.bin`, 0x08006000 to
+0x08011AA0) of the 1 540 096 B application region, **3.10 %**, with NVM3's
+40 960 B reserved at the top of that region. The stock Silabs `lighting-app`,
+for scale, was 1 025 140 B; the difference is the whole Matter stack, which
+this image does not carry. `hearth.s37` is 143 408 B, `hearth.gbl` 47 860 B.
+
+RAM adds up to 262 140 B, the full 256 KiB less the 4-byte bootloader reset
+region, which is the same shape the stock example showed: everything not
+statically claimed ends up in `.memory_manager_heap`.
+
+### Free FreeRTOS heap at `+MTREADY`
+
+`configTOTAL_HEAP_SIZE` is **24 576** (raised from the SDK default of 8 192,
+which does not hold the boot task and the 6 KiB AT parser task at the same
+time). `xPortGetFreeHeapSize()` logged immediately after `mt_at_start()`
+returns: **13 768 B free**. That figure still counts the boot task's own 4 KiB
+stack and TCB, which are released a few instructions later by
+`vTaskDelete(NULL)`, so the steady-state figure is about 4 KiB higher. This is
+the FreeRTOS heap only; `.memory_manager_heap` is a separate 214 512 B pool
+that nothing in the skeleton allocates from.
+
+### The boot log, and `+MTREADY` after it
+
+Captured 2026-09-17 by resetting the module (DTR pulse on the carrier's CDC)
+and reading both ports at once with timestamps. The console is the Debug
+Probe's UART CDC at 115200 **with DTR asserted**; the AT link is the carrier's
+CDC with DTR and RTS cleared.
+
+```
+  0.000  CONSOLE  b'\x00'
+  0.091  CONSOLE  b'I boot: Hearth skeleton on USART'
+  0.101  CONSOLE  b'0 TX PA00, 115200 8N1\r\nI boot: boot task up, model MGM240P Hearth\r\nI at_parser: parser started\r'
+  0.101  AT       b'+'
+  0.111  CONSOLE  b'\nI boot: +MTREADY sent, free heap 13768 B\r\n'
+  0.111  AT       b'MTREADY\r\n'
+```
+
+Console, in full:
+
+```
+I boot: Hearth skeleton on USART0 TX PA00, 115200 8N1
+I boot: boot task up, model MGM240P Hearth
+I at_parser: parser started
+I boot: +MTREADY sent, free heap 13768 B
+```
+
+AT link, in full: `b'+MTREADY\r\n'`, 10 bytes, **nothing before it and nothing
+else**. The boot contract is what this capture is evidence for: the first three
+console lines are on the wire before the first byte of `+MTREADY`, and no URC
+precedes the marker.
+
+The leading `\x00` on the console at t=0 is the line transition as the module
+leaves reset and the TX pad is driven high, not data.
+
+### The AT identity surface
+
+```
+boot: b'+MTREADY\r\n'
+AT           -> OK
+AT+CGMM      -> MGM240P Hearth|OK
+AT+CGMR      -> 1.2.0|OK
+AT+MTVER?    -> +MTVER:1.2.0|OK
+AT+MTNET?    -> +MTNET:THREAD,0,0,0|OK
+AT+MTSTATE?  -> +MTSTATE:0,0|OK
+```
+
+### Harness Phase 0 and Phase 1
+
+```
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+===== RESULT: 0 passed, 0 failed =====
+
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico \
+      --transport THREAD --phase 1 --baseline platform/silabs/skeleton-phase1.json
+===== RESULT: 261 passed, 35 failed =====
+baseline written: platform/silabs/skeleton-phase1.json
+```
+
+296 rows, the same count the nRF54L15 skeleton ran. The record is
+`platform/silabs/skeleton-phase1.json`, kept **here and not in
+`test/baselines/`**, which holds shipping baselines only: this image has no
+data model and must never be mistaken for a qualified one.
+
+### The 35 failing rows: the upward port's starting checklist
+
+Every one of them needs a Matter data model, and the skeleton answers them from
+`port/mt_matter_stub.c` and `port/mt_devtypes_stub.c`. The shape of the stub
+answers, sampled by hand:
+
+```
+AT+MTCODES?        -> ERROR
+AT+MTATTR=1,6,0    -> +MTERR:2|ERROR
+AT+MTEP?           -> OK            (an empty composition)
+AT+MTTHREAD?       -> +MTERR:8|ERROR
+AT+MTROWGET=1,1    -> +MTERR:2|ERROR
+```
+
+`+MTERR:2` is endpoint-not-found, which is honest: there are no endpoints.
+Several rows expect `+MTERR:3` or `+MTERR:4` (cluster or attribute not found on
+an endpoint that does exist), and those are the rows that turn green when the
+composition rebuild is real. The list, verbatim from the run:
+
+- `[AT+] MTCODES? format`
+- `[AT+] MTCODES? stable across reads`
+- `[AT+] MTATTR read 1,6,0`
+- `[AT+] MTATTR hex equals decimal`
+- `[AT+] MTATTR root VendorID read`
+- `[AT-] MTATTR=1,6,0,1,2 -> +MTERR:1`
+- `[AT-] MTATTR=1,6,0,z -> +MTERR:1`
+- `[AT-] MTATTR=1,0xFFFF,0 -> +MTERR:3`
+- `[AT-] MTATTR=1,6,0xFFFF -> +MTERR:4`
+- `[AT-] MTATTR NodeLabel -> +MTERR:5`
+- `[AT-] MTEP=0x0071,0,0 under a light -> +MTERR:1 (cabinet parent must be a fridge or an oven)`
+- `[AT-] MTEP=0x0077 unparented -> +MTERR:1 (cook surface REQUIRES a cooktop parent)`
+- `[AT-] MTEP=0x0077,0,0 under a light -> +MTERR:1 (cook surface parent must be a cooktop)`
+- `[AT-] MTALARM=1,0,0 -> +MTERR:3 (migrated: field 0 passes the union gate; the single-light rig's ep 1 carries neither alarm cluster)`
+- `[AT-] MTATTR=1,6,0,-1 -> +MTERR:1 (minus on an unsigned attribute: pre-round-A this wrapped through strtoul and wrote true)`
+- `[AT-] MTATTR=1,6,0,92233720368547758080 -> +MTERR:1 (literal overflows 64 bits: rejected at parse, ERANGE)`
+- `[AT-] MTATTR=1,6,0xFFFC,4294967296 -> +MTERR:1 (2^32 into the u32 FeatureMap: the width gate, not silent truncation to 0)`
+- `[AT-] MTMEAS staged variant-1 water heater: gate rows (+MTERR:3, gate outranks range), unknown field, then restore`
+- `[AT-] MTMEAS=1,152,3,-5000000000 -> +MTERR:3 (AbsMinPower IS signed, so the minus parses and the light's missing cluster answers: the signedness table's positive control)`
+- `[AT-] MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM: the cluster-missing and attribute-missing rows with their OK controls, then restore`
+- `[AT-] MTTHREAD? shape by image (+MTERR:8 on WiFi, decoded line on Thread)`
+- `[AT-] MTROWAPPLY=1,1,1 -> +MTERR:4 (stage matches, reaches the bridge: ep 1 carries no EnergyEvse cluster), then AT+MTROWCLEAR -> OK`
+- `[AT-] MTROWGET=1,1 -> +MTERR:4 (ep 1 carries no EnergyEvse cluster, unqualified bulk form)`
+- `[AT-] MTROWGET=1,1,0 -> +MTERR:4 (same lookup, single-row form)`
+- `[AT-] MTMETERID comma survives inside a quoted pod -> +MTERR:4 (ep 1 wrong cluster: reaching the bridge at all proves the comma did NOT split the token)`
+- `[AT-] MTMETERID 64-byte pod -> +MTERR:4 (ep 1 wrong cluster: reaching the bridge proves the length was accepted)`
+- `[AT-] MTMETERID pwr only present -> +MTERR:4 (ep 1 wrong cluster: reaching the bridge proves choice-b accepted a single value)`
+- `[AT-] MTMETERID apparent only present -> +MTERR:4 (same, the other half of choice-b)`
+- `[AT-] MTMETERID=1,0,"A","B","C",100,200, -> +MTERR:4 (ep 1 wrong cluster: the trailing comma makes an empty <src> legal, null)`
+- `[AT-] MTMEAS=1,153,4,-5000000000 -> +MTERR:3 (CircuitCapacity IS signed, so the minus AND the 64-bit width both parse and the call reaches the bridge, where ep 1 carries no EnergyEvse cluster: the +MTERR:3 is the positive evidence)`
+- `[AT-] MTMEAS=1,153,15,-1 -> +MTERR:3 (BatteryCapacity is signed too, the same differential)`
+- `[AT-] MTMEAS=1,153,18,5000000000 -> +MTERR:3 (SessionEnergyCharged past 32 bits parses, the 64-bit value pipeline: same differential)`
+- `[AT-] MTMEAS=1,153,0,1 -> +MTERR:3 (a perfectly well formed push at a light endpoint: cluster-not-present, not endpoint-not-present)`
+- `[AT-] MTROWAPPLY count-0, both directions, on a real EVSE endpoint (case a: nothing staged; case b: two rows staged, must be abandoned not committed); SOC-variant rule negative arm; meter identity push + AT+MTATTR readback (the dead-shell fix)`
+- `[AT-] Utility meter pool exhaustion (MT_METER_MAX=2): a third meter aborts the rebuild and AT+MTEP? shows exactly the successful prefix, never the declared count and never empty`
+
+Nothing in this list is a defect in the port. When the upward round lands, this
+section's replacement is the list of rows that still fail.
+
+### What is not measured here
+
+`hearth_log_write` now writes to the console, so the RX ring overflow warning
+is observable at last: `W link: rx ring overflow, dropped N byte(s)`. None
+appeared in any run above, but none of those runs pushed the link hard enough
+for that to be evidence. The ring is 1 024 bytes against a 512-byte
+`MT_AT_LINE_MAX`.
+
+## First-compile checklist (Task 6): what each item turned out to be
+
+`hearth_port_sl.c` (Task 4) was written and host-tested for its pure-C pieces
+without a Simplicity SDK toolchain, so a list of SDK identifiers and behaviours
+was left unverified. Task 6 was the first real compile, 2026-09-17, against
+SiSDK 2025.12.3. **Two items were wrong and are fixed; the rest held.** The
+answers are kept because the next person to touch this file will ask the same
+questions.
+
+| Item | Verdict |
+|---|---|
+| `GPIO->EUSARTROUTE[0]` field names and the shift macros | **Correct.** `efr32mg24_gpio.h` declares `GPIO_EUSARTROUTE_TypeDef` with `ROUTEEN`, `RXROUTE` and `TXROUTE`, `GPIO->EUSARTROUTE[2]`, and `_GPIO_EUSART_TXROUTE_PORT_SHIFT` 0 / `_GPIO_EUSART_RXROUTE_PIN_SHIFT` 16 exist as used. `EUSART0_RX_IRQn` is IRQ 11. |
+| `EUSART_UART_INIT_DEFAULT_HF`'s RX FIFO watermark | **Correct, and it is one frame.** The macro passes `advancedSettings = NULL`, `EUSART_UartInitHf()` writes `CFG1 = _EUSART_CFG1_RESETVALUE`, and `_EUSART_CFG1_RXFIW_DEFAULT` is `RXFIW_ONEFRAME` (0). So `STATUS.RXFL` and `IF.RXFL` do fire per received byte, and the ISR's drain loop is right. The nRF port's lost `'='` cannot recur through a coarse watermark here. |
+| The default clock EUSART0 is fed from, and 115200 without drift | **Fine, and it is the 39 MHz HFXO.** `CMU_EUSART0CLKCTRL.CLKSEL` resets to `EM01GRPCCLK`; the project's clock manager takes `SL_CLOCK_MANAGER_DEFAULT_HF_CLOCK_SOURCE` = HFXO, and the MGM240PA32VNA config override sets `SL_CLOCK_MANAGER_HFXO_FREQ` 39000000, the module's own crystal. `EUSART_UartInitHf()` derives CLKDIV from `CMU_ClockFreqGet()`, so nothing is hardcoded: 39 MHz, OVS16, CLKDIV 5160 gives 115 215 baud, 0.013 % off. Bench-confirmed by the whole Phase 1 run. |
+| `configUSE_MUTEXES` | **Enabled.** `1` in the SDK's `config/series2/FreeRTOSConfig.h`. |
+| `CORE_atomicState_t` | **WRONG, fixed.** No such type. emlib has one type for both section kinds, `CORE_irqState_t` (`typedef uint32_t`, `sl_core.h`), and `CORE_EnterAtomic()` / `CORE_ExitAtomic()` take and return it. The function-pair form itself was right. |
+| The Hearth NVM3 key range `0x0A000..0x0AFFF` | **No collision.** CHIP's `SilabsConfig` uses `kMatterNvm3KeyDomain` 0x087000, range 0x087200 to 0x087FFF; the OpenThread EFR32 settings backend uses `NVM3KEY_DOMAIN_OPENTHREAD` 0x20000 upward. Hearth's range sits inside the user domain (0x000000 to 0x00FFFF) that neither touches. |
+| The part define for `hearth_port_model()` | **Was a family catch-all, fixed.** The generated makefile carries `-DMGM240PA32VNA=1`, and `hearth_port_model()` now names that alone. A project generated for BRD2704A gets `MGM240PB32VNA` and now fails to compile, instead of building an image that RAIL-asserts on this module. |
+| `sl_system_init()` against `sl_main` | **Resolves, via `sl_system`, which is deprecated.** The project lists `sl_system`, whose kernel implementation is the component that requires `custom_main`, which is what lets `main()` be this project's own. It compiles with two `-Wdeprecated-declarations` warnings, left visible on purpose. The migration and its deadline are in "Migrating to sl_main" above; it is the upward-port round's, because `sl_system_implementation_kernel` declares `conflicts: sl_main` and the stock Matter 2.8.1 app uses `sl_main`. |
+| The RX IRQ priority against `configMAX_SYSCALL_INTERRUPT_PRIORITY` | **Correct, and exactly at the boundary.** `CORE_ATOMIC_BASE_PRIORITY_LEVEL` is 3, `__NVIC_PRIO_BITS` is 4, so `NVIC_SetPriority(EUSART0_RX_IRQn, 3)` writes 3 << 4 = 48 into the IPR byte. `configMAX_SYSCALL_INTERRUPT_PRIORITY` is 48, and FreeRTOS's check is `>=`, so `xSemaphoreGiveFromISR()` from that handler is legal. `CORE_EnterAtomic()` sets `BASEPRI` to the same 48, which masks priority values at or above it, so the atomic sections really do exclude this ISR: both halves of the Task 4 reasoning hold, and they hold because the two numbers are equal, not by a margin. Anything that changes either one breaks both at once. |
+| `configTICK_RATE_HZ` | **1000, not 1024.** So `portTICK_PERIOD_MS` is 1 and does not truncate to 0, and `pdMS_TO_TICKS()` cannot overflow a 32-bit `TickType_t` at the header's one-hour ceiling. The tick-rate-independent `hearth_now_ms()` and the 60-second wait slicing are therefore belt and braces on this project as configured, and they stay: the value is one line in a generated config header, and the failure they prevent is silent. |
+| The port's second `nvm3_initDefault()` | **A documented no-op.** `sl_platform_init()` (generated `autogen/sl_event_handler.c`) calls `nvm3_initDefault()`, so the lazy `nvm3_ensure_init()` is a second `nvm3_open()` with the same handle and init data, which `nvm3_generic.h` says "will be regarded as a no operation and the function will return the same status as the previous call". Kept, because it costs nothing and keeps the KV store usable if a future project drops the component. Note the return type is `sl_status_t` now, with `ECODE_NVM3_OK` defined as `SL_STATUS_OK`; the comparison is still correct. |
+| `EUSART_BaudrateSet()` with the EUSART left enabled | **Required, not merely tolerated.** In asynchronous mode `em_eusart.c` asserts `EFM_ASSERT(eusart->EN == EUSART_EN_EN)` before touching CLKDIV: "The peripheral must be enabled to configure the baud rate." Disabling around the call, which was the suggested remedy, would have introduced the bug. |
+
+Two more things the first build settled that were not on the list:
+
+- **`bootloader_interface` has to be in the project**, or the image links over
+  the bootloader silently. See "Building".
+- **`vTaskStartScheduler()` is the wrong way to start the kernel here.** The
+  generated `sl_kernel_start()` calls `osKernelStart()`, the CMSIS-RTOS2 entry
+  that pairs with the `osKernelInitialize()` `sl_platform_init()` already ran.
+  `main()` calls `sl_system_kernel_start()`.
