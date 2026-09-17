@@ -273,7 +273,8 @@ def main():
     ap.add_argument("--image", required=True, help="the .gbl to upload")
     ap.add_argument("--no-strap", action="store_true",
                     help="drive neither reset nor strap; the module must "
-                         "already be at the bootloader menu")
+                         "reach the bootloader menu on its own, which in "
+                         "practice means a blank application slot")
     ap.add_argument("--ready-timeout", type=float, default=READY_TIMEOUT_S,
                     help="seconds to wait for +MTREADY after the application "
                          "is started (default %(default)s; the skeleton takes "

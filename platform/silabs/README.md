@@ -111,6 +111,13 @@ slt install -f platform/silabs/slt/pkg.lock --check-updates=false --non-interact
 `--check-updates=false` matters: the flag defaults to true and would walk the
 pins forward.
 
+**That command has not been exercised.** Round 1 installed the toolchain once,
+on this machine, and never reinstalled from the lock; the recipe above is the
+documented route, read off SLT's own interface, not a reproduced one. The lock
+file is what is proven: it is the artefact SLT wrote for the install everything
+below was built with. Treat the command as the intended path and expect to
+correct it the first time someone actually installs elsewhere.
+
 The Conan revision is the identity that matters, because that is what was
 installed and built against. For reading the SDK sources against a commit, the
 GA tree is mirrored at `github.com/SiliconLabsSoftware/sisdk-release`:
@@ -254,7 +261,13 @@ The Hearth project is `platform/silabs/hearth.slcp`, an slc project against the
 Simplicity SDK alone: there is no Matter in the skeleton image, so the Matter
 extension is not in this build at all. `core/sources.cmake` is the source list
 of record for `core/`; the `.slcp` writes the same seven paths out in slc's
-syntax and says so at the top, and the two must be changed together.
+syntax and says so at the top, and the two must be changed together. Nothing
+enforces that agreement: a path added to `sources.cmake` and forgotten in the
+`.slcp` shows up only as a link error for the missing symbol, and a source
+dropped from `sources.cmake` while the `.slcp` still lists it is not caught at
+all: the file is still on disk, so slc compiles it and the build is green
+against a list that is no longer the list of record. The check is manual, and
+it is in the open table below.
 
 ```bash
 cd <repo root>
@@ -942,4 +955,8 @@ not finish is here, and nothing here is unowned.
 | Signing (ECDSA-P256 dev key under `keys/`, as the nRF port does), secure boot, and the SE debug lock after the one-time SWD install | **pre-ship** (design spec section 7, stage 2). The bootloader itself is built and installed already; it accepts an unsigned `.gbl` today |
 | Thread-arm baselines under `test/baselines/`, ARCHITECTURE 8.21 and its decision-log rows, and the host library's `fw/README` variant table | the **qualification round** (design spec section 8, steps 6 and 7). The skeleton's Phase 1 record deliberately stays out of `test/baselines/`, which holds shipping baselines only |
 | The RX ring overflow warning is observable but has never fired: no run so far pushed the link hard enough for its absence to be evidence | the **upward-port round**'s first sustained traffic; see "What is not measured here" |
+| `hearth_link_write()` has no peripheral-ready guard. It skips the TX mutex while `s_tx_lock` is NULL, but the `EUSART_Tx` loop under it would still run against an unclocked, disabled EUSART0, which on Series 2 hangs or faults. Unreachable in this image (`mt_at_start()` calls `hearth_link_init()` first and no stack callback exists yet), so it is a latent trap the Matter callbacks would arm | the **upward-port round**, as its first change: mirror `s_console_ready` with an `s_link_ready` flag set at the end of `hearth_link_init()`. Deferred so the round 1 figures stay attributed to the commit that built them; the comment in `port/hearth_port_sl.c` says the same |
+| `src/main.c` ignores `xTaskCreate()`'s return value, so a boot task that fails to create is silent on both UARTs: no console line, no `+MTREADY`, and nothing to distinguish it from a hung image | the **upward-port round**. Deferred so the round 1 figures stay attributed to the commit that built them |
+| `hearth_console_init()` is declared ad hoc in `src/main.c` rather than in a header, so it is invisible to `test/host/check_decls.py` and a signature drift between the declaration and `port/hearth_port_sl.c` would not be caught | the **upward-port round**. Deferred so the round 1 figures stay attributed to the commit that built them |
+| Nothing enforces the agreement between `hearth.slcp`'s source list and `core/sources.cmake`: an addition missed in the `.slcp` surfaces as a link error, but a core source dropped from `sources.cmake` is not caught at all | the **upward-port round**, which adds core sources in batches and is where the lists drift first; see "Building" |
 | The console is TX only by design, so the port has no console input path and no shell | settled, not open: it is board contract item 6 and a CRA posture (`CRA_COMPLIANCE.md` in the docs repository). Listed here so nobody reopens it as an omission |

@@ -6014,14 +6014,24 @@ def swd_reset(runner=None):
 # strap: opening the port pyserial's way returns zero bytes and reads exactly
 # like dead hardware.
 #
-# Backported verbatim from the FOTA round's branch, dev/fota-firmware at
-# 38f5975, where it was introduced by 15362e8. NOT from main: main is at
-# 1842af3 and carries none of this, because dev/fota-firmware is unmerged.
-# So the two branches will both have to carry it until that merge, and
-# whoever does the merge should expect this hunk on both sides rather than
-# a conflict to resolve by choosing. The contract itself is written down in
-# fw/flash.py, platform/nrf54l15/README.md "Everyday flashing" and
-# platform/silabs/README.md "Uploading an application over XMODEM"; this
+# Backported from the FOTA round's branch, dev/fota-firmware at 38f5975,
+# where it was introduced by 15362e8. NOT from main: main is at 1842af3 and
+# carries none of this, because dev/fota-firmware is unmerged. So both
+# branches carry it until that merge.
+#
+# The CODE is byte-identical between the two branches: BRIDGE_LINES,
+# open_at_port, make_relink, the cpico block in main() and KNOWN_MODELS.
+# Three PROSE regions differ and will conflict at the merge: this comment
+# block; the --bridge argparse help text (this branch says "every C6 phase"
+# and names the MGM240P, the FOTA branch says "every phase before Phase 4"
+# and names only the nRF54L15); and wait_boot_marker's docstring (the FOTA
+# version cites a report path under the gitignored SDD workspace, dropped
+# here). Resolve all three by keeping one side whole: neither wording is
+# wrong, and neither describes behaviour the other lacks.
+#
+# The contract itself is written down in fw/flash.py,
+# platform/nrf54l15/README.md "Everyday flashing" and
+# platform/silabs/README.md "Uploading an application: fw/flash.py"; this
 # branch predates all of it, and the MG24 skeleton cannot be reached over
 # the CPico without it.
 BRIDGE_LINES = {

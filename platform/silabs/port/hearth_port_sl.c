@@ -174,8 +174,14 @@ void hearth_sem_give(hearth_sem_t sem) { xSemaphoreGive((SemaphoreHandle_t)sem);
  * the RX ISR too. Atomic sections need no init, so they are usable from
  * the first instruction, before the scheduler runs, and from an ISR:
  * exactly what the header asks for (URCs can fire from stack callbacks
- * before any init). One saved state per well-known id; the core never
- * nests a section with itself. */
+ * before any init). One saved state per well-known id, which needs the
+ * stronger invariant than "no id nests with itself": NO section may be open
+ * while another is entered, whatever the ids. Two different ids nested
+ * would each save a BASEPRI, and the inner exit would restore the outer's
+ * pre-section value, reopening the window early; the outer exit would then
+ * restore a value captured inside a section. The final whole-branch review
+ * walked every hearth_crit_enter/exit pair in core/mt/mt_at.c on
+ * 2026-09-17 and found no nesting of any kind. */
 static CORE_irqState_t s_crit_state[HEARTH_CRIT_COUNT];
 
 void hearth_crit_enter(int id) { s_crit_state[id] = CORE_EnterAtomic(); }
@@ -267,10 +273,23 @@ void hearth_link_write(const void *data, size_t len)
 {
     const uint8_t *p = data;
     /* hearth_port.h documents that a URC can fire from a stack callback
-     * before hearth_link_init() has run, and s_tx_lock is NULL until it
-     * does; xSemaphoreTake(NULL, ...) is a hard fault, not a no-op, so
-     * write unlocked rather than lock against a mutex that does not
-     * exist yet. */
+     * before hearth_link_init() has run. Only HALF of that case is handled
+     * here. The mutex half is: s_tx_lock is NULL until init runs, and
+     * xSemaphoreTake(NULL, ...) is a hard fault rather than a no-op, so the
+     * NULL checks below write unlocked instead of locking against a mutex
+     * that does not exist yet. The PERIPHERAL half is NOT: the EUSART_Tx
+     * loop would run against an EUSART0 that is still unclocked and
+     * disabled, and on Series 2 that either hangs waiting on TXFL or faults
+     * on the register read itself.
+     *
+     * The path is unreachable in this image: mt_at_start() calls
+     * hearth_link_init() before anything else (core/mt/mt_at.c), and no
+     * stack callback that could emit a URC exists yet in round 1. The guard
+     * is the upward-port round's first change: mirror s_console_ready with
+     * an s_link_ready flag set at the end of hearth_link_init(), and return
+     * early here when it is clear. Deliberately not added now, so round 1's
+     * measured image figures stay attributed to the commit that built
+     * them. */
     if (s_tx_lock != NULL) xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     for (size_t i = 0; i < len; i++) EUSART_Tx(AT_EUSART, p[i]);
     while (!(AT_EUSART->STATUS & EUSART_STATUS_TXC)) {}   /* off the wire */
