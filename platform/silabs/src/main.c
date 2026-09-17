@@ -45,9 +45,14 @@ int main(void)
     hearth_console_init();  /* after sl_system_init(): it brings the clocks up */
     HEARTH_LOGI("boot", "Hearth skeleton on USART0 TX PA00, 115200 8N1");
     xTaskCreate(hearth_boot_task, "hearth_boot", 1024, NULL, tskIDLE_PRIORITY + 1, NULL);
-    /* sl_system_kernel_start(), not vTaskStartScheduler() directly: it
-     * fires the generated kernel_start event first, and components register
-     * handlers there that would otherwise never run. It does not return. */
+    /* sl_system_kernel_start(), not vTaskStartScheduler() directly. It
+     * fires the generated kernel_start event, and on this project that
+     * handler is osKernelStart() (autogen/sl_event_handler.c): the
+     * CMSIS-RTOS2 entry that pairs with the osKernelInitialize()
+     * sl_platform_init() already ran. Calling the FreeRTOS scheduler
+     * straight would step around both, and would silently drop any
+     * kernel_start handler a later component registers. It does not
+     * return. */
     sl_system_kernel_start();
     for (;;) {}             /* the scheduler never returns */
 }
