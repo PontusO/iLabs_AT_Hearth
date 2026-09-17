@@ -178,9 +178,12 @@ re-uploaded as a `.gbl`:
 
 | `sl_uartdrv_eusart_vcom` pins | Read on | Result |
 |---|---|---|
-| PA00 TX, PA01 RX (the module target's default) | Debug Probe UART CDC | nothing |
-| PA05 TX, PA06 RX | the carrier's AT CDC | nothing |
-| PA00 TX, PA03 RX (the board contract's console) | Debug Probe UART CDC | one or two bytes of framing noise, no data |
+| PA00 TX, PA01 RX (the module target's default) | Debug Probe UART CDC, DTR cleared | nothing, and the reading is void: see the second bullet below |
+| PA05 TX, PA06 RX | the carrier's AT CDC, DTR cleared (correct for the bridge) | nothing |
+| PA00 TX, PA03 RX (the board contract's console) | Debug Probe UART CDC, DTR asserted | one or two bytes of framing noise at seven baud rates, no data |
+
+Only the last two rows are readings; the first is kept because the
+configuration it names is the trap, not because its result means anything.
 
 Two mistakes were made reaching that table, and both are worth knowing because
 they cost bench time and would cost it again:
