@@ -8,7 +8,8 @@ reset, RTS asserted pulls the recovery strap (PC00) low, both released =
 running. Entering the bootloader: assert RTS, pulse DTR, release RTS after
 the menu appears. --no-strap skips the strap sequence for a module that is
 already sitting in the bootloader menu (a blank application slot, or a
-bench session that entered it by hand); AT+MTBOOTLOADER is NOT part of the
+bench session that entered it by hand, though item 3 below is what that
+second case runs into on this carrier); AT+MTBOOTLOADER is NOT part of the
 wire contract and there is no application-side entry.
 
 Only /dev/serial/by-id paths are accepted (TESTING.md section 2).
