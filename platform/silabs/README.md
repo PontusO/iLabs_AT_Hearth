@@ -418,8 +418,19 @@ with DTR and RTS cleared before the open (a running image answers `+MTREADY`
 about 200 ms after the open), so a module parked in the menu with a valid
 application in flash is started by that reset before the host can write a
 byte, whatever it does afterwards; the flag cannot rescue such a session and
-does not pretend to. Against a running application it fails in five seconds
-with "the bootloader did not start an XMODEM transfer".
+does not pretend to. Against a running application it gives up after the
+three-second menu wait, measured 2026-09-17 at 3.0 s wall clock, exit 1:
+
+```
+flash.py: no bootloader menu within 3 s; got b'+MTREADY\r\n'. --no-strap needs
+a module that reaches the menu on its own, which means a blank application
+slot; a module with a valid application is started by the open's own reset and
+has to be caught with the strap (drop --no-strap).
+```
+
+The `+MTREADY` quoted in that message is the module booting its application
+from the open's own reset, so the failure carries the evidence for the
+paragraph above.
 
 The blank-slot case was measured by erasing the application region over SWD
 (`flash erase_address 0x08006000 0x178000`, the linker's application region

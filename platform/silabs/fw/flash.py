@@ -168,14 +168,12 @@ def enter_bootloader(s, reader, strap):
         print("--no-strap: driving neither reset nor strap; waiting for the "
               "menu the port's own open-time reset produces")
         found, seen = reader.read_until(MENU_MARKERS, MENU_TIMEOUT_S)
-        if not found:
-            die("no bootloader menu within %.0f s of opening the port; got "
-                "%r. --no-strap needs a module that reaches the menu on its "
-                "own, which means a blank application slot; a module with a "
-                "valid application is started by the open's reset and has to "
-                "be caught with the strap (drop --no-strap)."
-                % (MENU_TIMEOUT_S, seen[-120:]))
-        print("bootloader menu: %s" % _menu_line(seen))
+        _require_menu(found, seen,
+                      "--no-strap needs a module that reaches the menu on "
+                      "its own, which means a blank application slot; a "
+                      "module with a valid application is started by the "
+                      "open's own reset and has to be caught with the strap "
+                      "(drop --no-strap).")
         return
     s.rts = True                # strap low (PC00)
     time.sleep(STRAP_SETTLE_S)
@@ -184,10 +182,22 @@ def enter_bootloader(s, reader, strap):
     s.dtr = False               # released into the bootloader
     found, seen = reader.read_until(MENU_MARKERS, MENU_TIMEOUT_S)
     s.rts = False               # the strap is sampled at boot; release it now
+    _require_menu(found, seen,
+                  "Check the strap pin (README board table) and that the "
+                  "module is on PA05/PA06.")
+
+
+def _require_menu(found, seen, hint):
+    """Announce the menu, or die saying what was read instead.
+
+    Both entry paths end here, so the failure always names the same window
+    and quotes the same tail; only the hint differs. The strap path
+    releases RTS before calling this, because the line has to be let go
+    whether the menu appeared or not.
+    """
     if not found:
-        die("bootloader menu not seen on the AT UART within %.0f s; got %r. "
-            "Check the strap pin (README board table) and that the module is "
-            "on PA05/PA06." % (MENU_TIMEOUT_S, seen[-120:]))
+        die("no bootloader menu within %.0f s; got %r. %s"
+            % (MENU_TIMEOUT_S, seen[-120:], hint))
     print("bootloader menu: %s" % _menu_line(seen))
 
 
