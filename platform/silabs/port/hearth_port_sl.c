@@ -21,6 +21,7 @@
 #include "em_device.h"
 #include "em_eusart.h"
 #include "em_gpio.h"
+#include "em_usart.h"
 #include "nvm3.h"
 #include "nvm3_default.h"
 
@@ -419,11 +420,86 @@ int hearth_kv_delete(const char *ns, const char *key)
 }
 
 /* ---- log ------------------------------------------------------------- *
- * The console, if one is wired, is a different UART than the AT link
- * (board contract item 6). Until Task 8 decides the console, log lines
- * are dropped rather than written onto the AT link, where they would
- * corrupt URC assertions. */
+ * The console is a different UART than the AT link (board contract item
+ * 6), and it is USART0 TX on PA00 (module pin 7), 115200 8N1, the only
+ * console line the carrier wires to the Debug Probe's UART CDC. Ruling
+ * 2026-09-17 (design spec section 7 addendum) moved this forward from
+ * Task 8, because Task 5 could never establish that the probe's RX
+ * really reaches PA00: the stock example was silent there, and silence
+ * on an unproven path proves nothing. Hearth's own boot log is the
+ * traffic that settles it.
+ *
+ * TX only. PA03 (module pin 10) is the header's RX line and is
+ * deliberately left uninitialised: a shipping image has no console input
+ * path (CRA_COMPLIANCE.md, the CHIP shell row). PA01/PA02 are SWD and
+ * are never handed to a UART (the Task 5 trap, README).
+ *
+ * Bare USART_InitAsync/USART_Tx rather than the SDK's sl_iostream_usart
+ * component: iostream would add an instance whose generated config
+ * defaults the RX pin to PA01, which is SWCLK, and the whole value of it
+ * here (RX, buffering, stdio retarget) is value this port must not have.
+ * Sixty lines of emlib have no defaults to get wrong.
+ *
+ * s_log_lock is the console's own mutex, NOT the AT link's s_tx_lock.
+ * FreeRTOS mutexes do not recurse, so sharing one would deadlock the
+ * first time a log line is ever emitted from inside a hearth_link_write
+ * that holds it, and a console line must not queue behind a long AT
+ * response either. Log lines never touch EUSART0. */
+#define LOG_USART      USART0
+#define LOG_USART_CLK  cmuClock_USART0
+#define LOG_TX_PORT    gpioPortA
+#define LOG_TX_PIN     0
+
+static SemaphoreHandle_t s_log_lock;
+static volatile bool     s_console_ready;
+
+/* Called once from main() after sl_system_init(), which is what brings the
+ * device clocks up. Declared at its one call site rather than in a header
+ * of its own. Logs raised before it are dropped: the peripheral is not
+ * configured yet, and s_console_ready is the gate that says so. */
+void hearth_console_init(void)
+{
+    USART_InitAsync_TypeDef init = USART_INITASYNC_DEFAULT;
+    init.enable   = usartEnableTx;      /* TX only; see above */
+    init.baudrate = 115200;
+
+    CMU_ClockEnable(cmuClock_GPIO, true);
+    CMU_ClockEnable(LOG_USART_CLK, true);
+    GPIO_PinModeSet(LOG_TX_PORT, LOG_TX_PIN, gpioModePushPull, 1);
+    GPIO->USARTROUTE[0].TXROUTE = (LOG_TX_PORT << _GPIO_USART_TXROUTE_PORT_SHIFT)
+                                | (LOG_TX_PIN  << _GPIO_USART_TXROUTE_PIN_SHIFT);
+    GPIO->USARTROUTE[0].ROUTEEN = GPIO_USART_ROUTEEN_TXPEN;
+    USART_InitAsync(LOG_USART, &init);
+
+    s_log_lock = xSemaphoreCreateMutex();
+    s_console_ready = true;
+}
+
 void hearth_log_write(hearth_log_level_t level, const char *tag, const char *fmt, ...)
 {
-    (void)level; (void)tag; (void)fmt;
+    static const char lvl[] = { 'E', 'W', 'I' };
+    char line[192];
+    va_list ap;
+
+    if (!s_console_ready) return;
+
+    int n = snprintf(line, sizeof(line) - 2, "%c %s: ",
+                     level <= HEARTH_LOG_INFO ? lvl[level] : '?', tag);
+    if (n < 0) return;
+    if ((size_t)n > sizeof(line) - 3) n = (int)sizeof(line) - 3;
+    va_start(ap, fmt);
+    int m = vsnprintf(line + n, sizeof(line) - 2 - (size_t)n, fmt, ap);
+    va_end(ap);
+    if (m > 0) n += m;
+    /* Same clamp as hearth_link_write_line: vsnprintf was given two bytes
+     * less than the buffer, so on truncation it wrote at most
+     * sizeof(line) - 3 content bytes before its own NUL, and clamping one
+     * higher would put that NUL on the wire ahead of the CRLF. */
+    if ((size_t)n > sizeof(line) - 3) n = (int)sizeof(line) - 3;
+    line[n] = '\r'; line[n + 1] = '\n';
+
+    if (s_log_lock != NULL) xSemaphoreTake(s_log_lock, portMAX_DELAY);
+    for (int i = 0; i < n + 2; i++) USART_Tx(LOG_USART, (uint8_t)line[i]);
+    while (!(LOG_USART->STATUS & USART_STATUS_TXC)) {}
+    if (s_log_lock != NULL) xSemaphoreGive(s_log_lock);
 }
