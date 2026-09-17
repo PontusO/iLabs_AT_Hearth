@@ -1,0 +1,88 @@
+# hearth.slcp - the Hearth skeleton application for the MGM240PA32VNA3.
+#
+# THE SOURCE LIST OF RECORD FOR core/ IS core/sources.cmake. The seven
+# core/ paths below are that file's HEARTH_CORE_SOURCES written out in
+# slc's syntax, because slc reads no CMake; the two must agree, and a
+# source added there must be added here in the same commit.
+#
+# Generate and build (platform/silabs/README.md, "Building"):
+#
+#   source platform/silabs/toolchain.env
+#   slc generate -d <builddir> --sdk-package-path "$SISDK_ROOT" \
+#       -p platform/silabs/hearth.slcp --with MGM240PA32VNA \
+#       --generator-timeout=180 -o makefile
+#   POST_BUILD_EXE=$(which commander) make all -C <builddir> -f hearth.Makefile -j8
+#
+# --with MGM240PA32VNA, the MODULE id, never the BRD2704A board id: that
+# board carries the MGM240P*B* part and its image RAIL-asserts on this
+# module (README, "Do not build for BRD2704A"). hearth_port_model() now
+# #errors on anything but MGM240PA32VNA, so a wrong target fails here
+# rather than on the bench.
+
+project_name: hearth
+package: platform
+quality: production
+label: Hearth - AT+MT co-processor skeleton (MGM240PA32VNA)
+description: >
+  The Hearth AT+MT co-processor for the MGM240PA32VNA3 on the iLabs RP2350
+  carrier, skeleton round: the portable core/ engine, the Simplicity SDK
+  downward port (FreeRTOS, EUSART0 on PA05/PA06 for the AT link, USART0 TX
+  on PA00 for the console, NVM3 for the key-value store) and the stubbed
+  upward port. There is no Matter stack in this image; it arrives with the
+  upward port round.
+
+source:
+  - path: src/main.c
+  - path: port/hearth_port_sl.c
+  - path: port/hearth_ring.c
+  - path: port/hearth_kvid.c
+  - path: port/mt_matter_stub.c
+  - path: port/mt_devtypes_stub.c
+  # core/: mirrors core/sources.cmake, which is authoritative.
+  - path: ../../core/at/at_parser.c
+  - path: ../../core/mt/mt_at.c
+  - path: ../../core/mt/mt_cmdbox.c
+  - path: ../../core/mt/mt_composition.c
+  - path: ../../core/mt/mt_comp_store.c
+  - path: ../../core/mt/mt_rows.c
+  - path: ../../core/mt/mt_transport.c
+
+include:
+  - path: ../../core/include
+  - path: port
+
+define:
+  # Single-transport image: the combined-image command surface is compiled
+  # out (spec 3.12.2).
+  - name: MT_COMBINED_IMAGE
+    value: "0"
+
+component:
+  # main() is this project's own (src/main.c), so sl_system, not sl_main:
+  # sl_system's kernel implementation is the one that requires custom_main.
+  - id: sl_system
+  # Without this the image links at 0x08000000, on top of the project's own
+  # Gecko Bootloader, and there is nothing in the build that says so: it
+  # compiles, it produces a .gbl, and the bootloader writes it over itself.
+  # bootloader_interface moves FLASH to ORIGIN 0x08006000 in the generated
+  # linker file and pulls in bootloader_app_properties, which is what
+  # `commander gbl create --app` needs.
+  - id: bootloader_interface
+  - id: sl_main_custom_main
+  - id: device_init
+  - id: clock_manager
+  - id: freertos
+  - id: freertos_heap_4
+  - id: emlib_cmu
+  - id: emlib_core
+  - id: emlib_eusart
+  - id: emlib_gpio
+  - id: emlib_usart
+  - id: nvm3_default
+
+configuration:
+  # The default 8 KiB does not hold the boot task (4 KiB of stack) and the
+  # AT parser task (MT_PARSER_TASK_STACK, 6 KiB) at the same time. Measured
+  # free heap at +MTREADY is recorded in the README's "Measured" section.
+  - name: configTOTAL_HEAP_SIZE
+    value: "24576"
