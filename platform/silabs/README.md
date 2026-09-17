@@ -1,11 +1,13 @@
 # Hearth on Silicon Labs EFR32MG24 (MGM240P)
 
-Status: **the Hearth skeleton boots on the MGM240PA32VNA3, prints its boot log
-on the console and answers the `AT+MT` surface: `+MTREADY` on the wire, the
-harness Phase 0 gate passed and Phase 1 run (Task 6, 2026-09-17), and
-`fw/flash.py` flashes it from the host over XMODEM, ending at `+MTREADY`
-(Task 7, 2026-09-17). Task 8 pending; the Matter stack arrives with the
-upward-port round** (graph T446).
+Status: **round 1 (bring-up, downward port, boot contract) is complete on
+`dev/silabs-mg24-bringup`, 2026-09-17.** The Hearth skeleton boots on the
+MGM240PA32VNA3, prints its boot log on the console and answers the `AT+MT`
+surface: `+MTREADY` on the wire, the harness Phase 0 gate passed and Phase 1
+run (Task 6), and `fw/flash.py` flashes it from the host over XMODEM, ending at
+`+MTREADY` (Task 7). There is no Matter stack in this image: it arrives with
+the upward-port round, whose starting checklist is "The 35 failing rows" below
+(graph T446).
 
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
@@ -13,8 +15,9 @@ co-processor serving the `AT+MT` contract over one UART. Design:
 
 This README is the platform bible, in the shape of `platform/nrf54l15/README.md`:
 the board contract, the toolchain, flashing, and the measured figures are
-recorded here as each lands. Sections marked "pending" are filled by the
-task that produces them.
+recorded here as each lands. Every figure below was measured, and says when and
+by which command; everything round 1 did not finish is listed with its owner
+under "What round 1 leaves open" at the end.
 
 ## Board: the iLabs RP2350 carrier with an MGM240PA32VNA3
 
@@ -22,11 +25,11 @@ task that produces them.
 |---|---|---|---|
 | AT UART TX | PA05 (pin 12) | EUSART0 TX (app), USART0 TX (bootloader) | the bootloader's TX |
 | AT UART RX | PA06 (pin 13) | EUSART0 RX (app), USART0 RX (bootloader) | the bootloader's RX |
-| Console TX | PA00 (pin 7) | USART0 TX | Hearth's console, 115200 8N1, TX only; **proven 2026-09-17** by the skeleton's own boot log on the Debug Probe's UART CDC |
+| Console TX | PA00 (pin 7) | USART0 TX | Hearth's console, 115200 8N1, TX only; **carries Hearth's boot log since Task 6** (2026-09-17), read on the Debug Probe's UART CDC with DTR asserted. The stock Silabs example never drove it, which is a fact about that example: see "The stock example has no usable console here" |
 | Console RX | PA03 (pin 10) | USART0 RX | on the header, deliberately uninitialised by the port: a shipping image has no console input path (design spec board contract item 6, CRA_COMPLIANCE.md) |
 | Reset | RESETn (pin 31) | active low | internal pull-up; drive low only, never high |
 | SWD | PA01 (pin 8), PA02 (pin 9) | SWCLK, SWDIO | bootloader install, debug. **PA01 is SWCLK: never hand it to a UART** |
-| Recovery strap | PC00 (pin 22) | `SL_BTL_BUTTON`, active low | held low through reset enters the bootloader; proven both ways 2026-09-17, and driven by `fw/flash.py` through the CDC's RTS |
+| Recovery strap | PC00 (pin 22) | `SL_BTL_BUTTON`, active low | held low through reset enters the bootloader. Task 5 measured all three reset cases, held and released, with and without a valid application ("Recovery semantics"); Task 7's `fw/flash.py` drives it through the CDC's RTS |
 | Power | VDD (pin 15) | 3.3 V nominal | +20 dBm part; ~160 mA TX peaks |
 
 Silicon, measured over SWD 2026-09-17 (`openocd -f mg24.cfg -c "init; flash
@@ -206,15 +209,16 @@ they cost bench time and would cost it again:
   non-printable bytes at every rate and nothing else, which is the signature of
   a single line transition rather than of data at the wrong speed.
 
-That last point leaves one thing genuinely unproven: a single edge is weak
-evidence that the probe's RX is really on PA00 at all, as opposed to floating.
-Task 8, which wires Hearth's own console, should establish the path with
-traffic it controls before trusting silence on it.
+That last point left one thing genuinely unproven when Task 5 ended: a single
+edge is weak evidence that the probe's RX is really on PA00 at all, as opposed
+to floating. The path had to be established with traffic this project controls
+before silence on it could be trusted.
 
 **Settled 2026-09-17 (Task 6): the path is real and it is on PA00.** The ruling
-of that date moved Hearth's own console forward from Task 8 for exactly this
-reason, and the first skeleton image put four lines on the Debug Probe's UART
-CDC at 115200 with DTR asserted (see "Measured"). So the probe's RX does reach
+of that date moved Hearth's own console forward into Task 6, out of the docs
+task it had been left to, for exactly this reason, and the first skeleton image
+put four lines on the Debug Probe's UART CDC at 115200 with DTR asserted (see
+"Measured"). So the probe's RX does reach
 PA00, and the stock example's silence was the example's, not the wiring's. The
 one thing Task 5 did read there, a single non-printable byte per reset, shows
 up in Hearth's capture too: a lone `\x00` at t=0, the line transition when the
@@ -294,12 +298,38 @@ Two build notes worth keeping:
   in sisdk-2026.6. They are left visible rather than silenced; see "Migrating
   to sl_main" below.
 
+### The console this image drives
+
+Hearth's own console is **USART0 TX on PA00, 115200 8N1, TX only**, brought up
+by `hearth_console_init()` in `port/hearth_port_sl.c` and called once from
+`main()` after `sl_system_init()`, which is what brings the device clocks up.
+It was wired in Task 6 (ruling of 2026-09-17) rather than left to the
+upward-port round, because the first bench session must not be blind; the
+capture is under "Measured".
+
+The form is **bare emlib** (`USART_InitAsync`, `USART_Tx`, and a write to
+`GPIO->USARTROUTE[0]`), not the SDK's `sl_iostream_usart` component. iostream
+would add an instance whose generated config defaults the RX pin to PA01, which
+is SWCLK, and everything it brings beyond raw TX (RX, buffering, the stdio
+retarget) is value this port must not have: a shipping image has no console
+input path. Sixty lines of emlib have no defaults to get wrong.
+
+Two properties of it worth knowing before touching the log path:
+
+- Log lines take the console's **own** mutex, never the AT link's `s_tx_lock`.
+  FreeRTOS mutexes do not recurse, so one shared mutex would deadlock the first
+  time a log line was emitted from inside a link write that held it, and a log
+  line must not queue behind a long AT response either.
+- Anything logged before `hearth_console_init()` returns is **dropped**: the
+  peripheral is not configured yet, and `s_console_ready` is the gate that says
+  so.
+
 ### Migrating to sl_main
 
 This project uses `sl_system` because the skeleton's `main()` is its own
 (`platform/silabs/src/main.c`) and `sl_system_implementation_kernel` is the
 component that requires `custom_main`. That choice has a deadline and a
-conflict, and both belong to the upward-port round:
+conflict, and both belong to the upward-port round (graph F477):
 
 - `sl_system` is marked `quality: deprecated` in SiSDK 2025.12.3 and its own
   description says to replace it with `sl_main` by sisdk-2026.6.
@@ -399,7 +429,7 @@ uploaded 374 block(s), 47860 bytes
 ```
 
 That transcript is a bench run of 2026-09-17, the Task 6 skeleton reflashed
-with the tool that replaced the by-hand procedure. Seven successful runs that
+with the tool that replaced the by-hand procedure. Eight successful runs that
 day, across both entry paths, gave the same 374 blocks, the same 5.3 s and no
 retransmits, and `test/mt_regression.py --bridge cpico --phase 0` passed after
 them.
@@ -499,7 +529,7 @@ Measured 2026-09-17 by hand, the stock Silabs example: 984 268 B as 7 690
 blocks in **111 s**, about 14 ms per block. The Hearth skeleton, twenty times
 smaller, by hand the same day: **47 860 B as 374 blocks in 5 s**, no block
 retries. `flash.py` reproduces that transfer at the same 374 blocks and
-measures it at **5.3 s** over seven runs, its own figure and a different
+measures it at **5.3 s** over eight runs, its own figure and a different
 measurement (it times the whole framer call, not just the block loop).
 
 `sx` from lrzsz is the obvious alternative and is the wrong tool here: opening
@@ -643,7 +673,8 @@ claims to be.
 | `data` | 176 |
 | `bss` | 261 536 |
 
-`size -A`, which is where the interesting split is:
+`arm-none-eabi-size -A` on the same file, which is where the interesting split
+is:
 
 | Section | Bytes | Where |
 |---|---|---|
@@ -657,11 +688,34 @@ claims to be.
 | `text_application_ram` | 428 | RAM |
 | `.bootloader_reset_section` | 4 | RAM, at 0x20000000 |
 
-Application image on flash: **47 776 B** (`hearth.bin`, 0x08006000 to
-0x08011AA0) of the 1 540 096 B application region, **3.10 %**, with NVM3's
-40 960 B reserved at the top of that region. The stock Silabs `lighting-app`,
-for scale, was 1 025 140 B; the difference is the whole Matter stack, which
-this image does not carry. `hearth.s37` is 143 408 B, `hearth.gbl` 47 860 B.
+The three artifact files, `ls -l` in
+`~/silabs/work/hearth-skeleton/build/debug` (the `233778c` build; the listing
+was read back on 2026-09-17, the day of the build, and the timestamps are the
+link's):
+
+```
+$ ls -l hearth.bin hearth.gbl hearth.s37
+-rwxrwxr-x 1 pontus pontus   47776 Sep 17 16:49 hearth.bin
+-rw-rw-r-- 1 pontus pontus   47860 Sep 17 16:49 hearth.gbl
+-rwxrwxr-x 1 pontus pontus  143408 Sep 17 16:49 hearth.s37
+```
+
+`hearth.bin` and `hearth.s37` come from the link rule of the generated
+`hearth.Makefile`, which runs `arm-none-eabi-objcopy` over `hearth.out` three
+times immediately after the link (`-O binary`, `-O ihex`, `-O srec`), so the
+"Building" recipe's `make all` produces both without being asked. `hearth.gbl`
+is the one file the build does not produce: it is the output of the
+`commander gbl create hearth.gbl --app hearth.s37` step of that same recipe,
+and `fw/flash.py` reads the same 47 860 B back off disk on every upload
+(`image: .../hearth.gbl, 47860 bytes, 374 block(s) of 128`). The `.s37` is
+three times the size of the image it carries because S-records are ASCII.
+
+Application image on flash: **47 776 B**, which is `hearth.bin`'s size, the
+plain binary of the loaded flash sections. Its span is therefore 0x08006000
+(the linker's `FLASH` `ORIGIN`) to 0x08011AA0, and it is **3.10 %** of the
+1 540 096 B application region, with NVM3's 40 960 B reserved at the top of
+that region. The stock Silabs `lighting-app`, for scale, was 1 025 140 B; the
+difference is the whole Matter stack, which this image does not carry.
 
 The RAM rows sum to **262 140 B** (42 924 + 214 512 + 4 096 + 176 + 428 + 4),
 4 B short of the part's 262 144. The shortfall is alignment padding, not a
@@ -743,15 +797,36 @@ baseline written: platform/silabs/skeleton-phase1.json
 ```
 
 Run twice, sixteen minutes apart, across a reflash of a rebuilt image: the
-same 261 and the same 35, **row for row**. That is a diff, not an impression:
-`diff` of the two runs' `[PASS]` lines and `diff` of their `[FAIL]` lines both
-come back empty. The evidence is in
-`.superpowers/sdd/2026-09-05-silabs-mg24-port/task-6-report.md`, section 8.
+same 261 and the same 35, **row for row**. That is a diff, not an impression.
+Both runs were redirected to files, run 1 from the `19e7fe8` tree and run 2
+from the `233778c` tree, and this is the comparison, 2026-09-17:
+
+```
+$ grep '^===== RESULT' phase1.log
+===== RESULT: 261 passed, 35 failed =====
+$ grep '^===== RESULT' phase1b.log
+===== RESULT: 261 passed, 35 failed =====
+
+$ diff <(grep 'PASS\]' phase1.log) <(grep 'PASS\]' phase1b.log); echo $?
+0
+$ diff <(grep 'FAIL\]' phase1.log) <(grep 'FAIL\]' phase1b.log); echo $?
+0
+```
+
+Both diffs are empty, so it is not only the counts that match: the same 261
+rows passed and the same 35 rows failed, by name. The two logs are the same
+size to the byte (22 984 B each) and were written at 16:34 and 16:51.
 
 296 rows, the same count the nRF54L15 skeleton ran. The record is
 `platform/silabs/skeleton-phase1.json`, kept **here and not in
 `test/baselines/`**, which holds shipping baselines only: this image has no
 data model and must never be mistaken for a qualified one.
+
+A figure that exists only in a terminal scrollback is not provenance. These two
+runs could be compared after the fact because they were redirected to files; the
+size and boot figures of the first build were not, which is why the preamble
+above says the figures are the second build's. Any later round that means to
+claim reproduction should redirect every measurement it intends to compare.
 
 ### The 35 failing rows: the upward port's starting checklist
 
@@ -808,8 +883,11 @@ composition rebuild is real. The list, verbatim from the run:
 - `[AT-] MTROWAPPLY count-0, both directions, on a real EVSE endpoint (case a: nothing staged; case b: two rows staged, must be abandoned not committed); SOC-variant rule negative arm; meter identity push + AT+MTATTR readback (the dead-shell fix)`
 - `[AT-] Utility meter pool exhaustion (MT_METER_MAX=2): a third meter aborts the rebuild and AT+MTEP? shows exactly the successful prefix, never the declared count and never empty`
 
-Nothing in this list is a defect in the port. When the upward round lands, this
-section's replacement is the list of rows that still fail.
+Nothing in this list is a defect in the port. The list belongs to the
+**upward-port round** (graph T446), which starts from it and from the baseline
+it was recorded in, `platform/silabs/skeleton-phase1.json`: each batch of that
+round retires stubs and turns rows green, and when it lands, this section's
+replacement is the list of rows that still fail.
 
 ### What is not measured here
 
@@ -824,9 +902,9 @@ for that to be evidence. The ring is 1 024 bytes against a 512-byte
 `hearth_port_sl.c` (Task 4) was written and host-tested for its pure-C pieces
 without a Simplicity SDK toolchain, so a list of SDK identifiers and behaviours
 was left unverified. Task 6 was the first real compile, 2026-09-17, against
-SiSDK 2025.12.3. **Two items were wrong and are fixed; the rest held.** The
-answers are kept because the next person to touch this file will ask the same
-questions.
+SiSDK 2025.12.3. **Two items were wrong and are fixed; the rest held.** No item
+on this list is open: it is the record of the verdicts, kept because the next
+person to touch this file will ask the same questions.
 
 | Item | Verdict |
 |---|---|
@@ -851,3 +929,17 @@ Two more things the first build settled that were not on the list:
   generated `sl_kernel_start()` calls `osKernelStart()`, the CMSIS-RTOS2 entry
   that pairs with the `osKernelInitialize()` `sl_platform_init()` already ran.
   `main()` calls `sl_system_kernel_start()`.
+
+## What round 1 leaves open
+
+Round 1 is bring-up, the downward port and the boot contract. Everything it did
+not finish is here, and nothing here is unowned.
+
+| Open item | Owner |
+|---|---|
+| The Matter stack: `chip::Server` with the minimal static ZAP, the disabled catalogue endpoint 240, the composition rebuild, the arenas and the device-type catalogue in audited batches, each batch retiring stubs from `port/mt_matter_stub.c` and `port/mt_devtypes_stub.c` | the **upward-port round** (graph T446). Its starting checklist is "The 35 failing rows" above, and the run they came from is the baseline `platform/silabs/skeleton-phase1.json` |
+| The `sl_system` to `sl_main` migration, due by sisdk-2026.6 and forced earlier than that by the Matter app | the **upward-port round** (graph F477): `sl_system_implementation_kernel` declares `conflicts: sl_main` and the stock Silicon Labs Matter 2.8.1 app lists `sl_main`, so that round has to move rather than choose. What the move changes is in "Migrating to sl_main"; the two deprecation warnings are left visible until it happens |
+| Signing (ECDSA-P256 dev key under `keys/`, as the nRF port does), secure boot, and the SE debug lock after the one-time SWD install | **pre-ship** (design spec section 7, stage 2). The bootloader itself is built and installed already; it accepts an unsigned `.gbl` today |
+| Thread-arm baselines under `test/baselines/`, ARCHITECTURE 8.21 and its decision-log rows, and the host library's `fw/README` variant table | the **qualification round** (design spec section 8, steps 6 and 7). The skeleton's Phase 1 record deliberately stays out of `test/baselines/`, which holds shipping baselines only |
+| The RX ring overflow warning is observable but has never fired: no run so far pushed the link hard enough for its absence to be evidence | the **upward-port round**'s first sustained traffic; see "What is not measured here" |
+| The console is TX only by design, so the port has no console input path and no shell | settled, not open: it is board contract item 6 and a CRA posture (`CRA_COMPLIANCE.md` in the docs repository). Listed here so nobody reopens it as an omission |
