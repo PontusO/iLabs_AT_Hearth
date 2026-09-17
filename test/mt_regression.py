@@ -6003,8 +6003,55 @@ def swd_reset(runner=None):
     return True, ""
 
 
+# The DTR/RTS contract at the AT port is a property of the BRIDGE, not of
+# the co-processor, and the two bridges on this bench are opposites.
+#
+# On the Challenger's RP2350 (the espnow bridge) DTR asserted is what the
+# firmware expects, and pyserial's default open asserts it, which is why the
+# C6 phases never had to think about it. On the CPico bridge, in front of the
+# nRF54L15 and now in front of the MGM240PA32VNA3 on the iLabs carrier, DTR
+# asserted HOLDS THE MODULE IN RESET and RTS asserted drives the recovery
+# strap: opening the port pyserial's way returns zero bytes and reads exactly
+# like dead hardware.
+#
+# Backported verbatim from the FOTA round on main (fw/flash.py's contract,
+# platform/nrf54l15/README.md "Everyday flashing", platform/silabs/README.md
+# "Uploading an application over XMODEM"), because this branch predates it
+# and the MG24 skeleton cannot be reached over the CPico without it.
+BRIDGE_LINES = {
+    "challenger": {"dtr": True, "rts": True},
+    "cpico": {"dtr": False, "rts": False},
+}
+
+
+def open_at_port(path, serial_mod, bridge="challenger", baud=115200):
+    """Open the AT port with the bridge's DTR/RTS contract applied BEFORE
+    the open, not after: on the CPico an open that asserts DTR even briefly
+    pulses the module's reset, and the boot that follows eats the first
+    command sent to it."""
+    lines = BRIDGE_LINES.get(bridge, BRIDGE_LINES["challenger"])
+    port = serial_mod.Serial()
+    port.port = path
+    port.baudrate = baud
+    port.timeout = 0.05
+    port.dtr = lines["dtr"]
+    port.rts = lines["rts"]
+    port.open()
+    port.dtr = lines["dtr"]
+    port.rts = lines["rts"]
+    return port
+
+
+def wait_boot_marker(link, timeout=25.0):
+    """Eat the +MTREADY that follows a reset-on-open before any command goes
+    out. A command sent too early is answered BY +MTREADY and is otherwise
+    lost, and the mode it was setting silently stays where it was."""
+    return link.await_urc(r"\+MTREADY$", timeout=timeout)
+
+
 def make_relink(link, port_path, settle=1.0, pump=2.5, deadline_s=30.0,
-                path_exists=None, sleep=None, serial_mod=None):
+                path_exists=None, sleep=None, serial_mod=None,
+                bridge="challenger"):
     """Close the port, run action() while it is closed, wait for the
     device path to come back (SWD reset and power cycles re-enumerate
     USB), reopen and swap the transport in place. Use the by-id path as
@@ -6041,7 +6088,7 @@ def make_relink(link, port_path, settle=1.0, pump=2.5, deadline_s=30.0,
             if not path_exists(port_path):
                 continue
             try:
-                cand = serial_mod.Serial(port_path, 115200, timeout=0.05)
+                cand = open_at_port(port_path, serial_mod, bridge)
             except (serial_mod.SerialException, OSError):
                 sleep(0.2)
                 continue
@@ -8099,6 +8146,13 @@ def main(argv=None):
                                            "/tmp/mt-regression"))
     ap.add_argument("--ssid", default=os.environ.get("MT_SSID"))
     ap.add_argument("--psk", default=os.environ.get("MT_PSK"))
+    ap.add_argument("--bridge", choices=sorted(BRIDGE_LINES),
+                    default=os.environ.get("MT_BRIDGE", "challenger"),
+                    help="the DTR/RTS contract at the AT port, which is a "
+                         "property of the bridge board: challenger asserts "
+                         "both (the default, every C6 phase), cpico clears "
+                         "both (asserting DTR there holds the nRF54L15 or "
+                         "the MGM240P in reset)")
     ap.add_argument("--node-id", type=lambda x: int(x, 0), default=0x4845,
                     help="node id chip-tool assigns at pairing")
     ap.add_argument("--max-endpoints", type=int, default=None,
@@ -8142,12 +8196,18 @@ def main(argv=None):
 
     import serial
     try:
-        port = serial.Serial(args.port, 115200, timeout=0.05)
+        port = open_at_port(args.port, serial, args.bridge)
     except serial.SerialException as exc:
         print("ABORT: cannot open %s: %s" % (args.port, exc))
         return 2
 
     link = ATLink(port)
+    if args.bridge == "cpico":
+        # This bridge resets the module on open; phase0's AT would race the
+        # boot. Nothing is lost by waiting: the marker is queued either way.
+        if wait_boot_marker(link) is None:
+            print("  (no +MTREADY within 25 s of opening the port; "
+                  "continuing, the gate will say whether the link is alive)")
     header = {
         "port": args.port,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -8183,7 +8243,7 @@ def main(argv=None):
             res, _ = link.command("AT+MTTRANSPORT?")
             ctx.image = "combined" if res == 0 else transport.lower()
             ctx.dataset = dataset
-            ctx.relink = make_relink(link, args.port)
+            ctx.relink = make_relink(link, args.port, bridge=args.bridge)
             ctx.chip2 = ChipTool(args.chip_tool, args.storage + "-f2")
             ctx.chip2.wipe_storage()
             run_phase2(ctx)

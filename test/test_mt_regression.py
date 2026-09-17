@@ -647,9 +647,20 @@ class FlakySerial:
         b"AT+CGMR\r\n": b"0.1.0\r\nOK\r\n",
     }
 
-    def __init__(self, port, baudrate, timeout=0.05):
+    def __init__(self, port=None, baudrate=115200, timeout=0.05):
+        # open_at_port() builds an unopened port, sets the bridge's DTR/RTS
+        # contract on it and only then opens it, so the double has to accept
+        # that shape as well as the old positional one.
         self.rx = b""
         self.armed = False
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.dtr = None
+        self.rts = None
+
+    def open(self):
+        pass
 
     def write(self, data):
         if data == b"AT+CGMR\r\n":
@@ -1613,10 +1624,17 @@ class TestMakeRelink(unittest.TestCase):
     bogus link loss. The relink must catch the bounce itself."""
 
     class _QuietPort:
-        """Open port that stays silent: the pump window passes clean."""
+        """Open port that stays silent: the pump window passes clean.
+        open()/dtr/rts exist because open_at_port() configures the bridge's
+        line contract on an unopened port before opening it."""
         def __init__(self, rx=b""):
             self.rx = rx
             self.closed = False
+            self.dtr = None
+            self.rts = None
+
+        def open(self):
+            pass
 
         def read(self, n=1):
             chunk, self.rx = self.rx[:n], self.rx[n:]
@@ -1633,7 +1651,7 @@ class TestMakeRelink(unittest.TestCase):
         transport (returned) or an Exception instance (raised)."""
         seq = list(opens)
 
-        def serial_ctor(path, baud, timeout):
+        def serial_ctor(*args, **kwargs):
             item = seq.pop(0)
             if isinstance(item, Exception):
                 raise item
@@ -8529,6 +8547,83 @@ class TestPhase3EndpointCap(unittest.TestCase):
         msg = self._refuses(["--port", "/dev/nope", "--phase", "1",
                              "--max-endpoints", "20"])
         self.assertIn("--phase 3 only", msg)
+
+
+from mt_regression import BRIDGE_LINES, open_at_port, wait_boot_marker
+
+
+class FakeSerialPort:
+    """serial.Serial double that records the ORDER of its line writes
+    against the open, which is the only thing open_at_port() has to get
+    right."""
+
+    def __init__(self):
+        self.port = None
+        self.baudrate = None
+        self.timeout = None
+        self.dtr = None
+        self.rts = None
+        self.opened = False
+        self.order = []
+
+    def __setattr__(self, name, value):
+        if name in ("dtr", "rts") and "order" in self.__dict__:
+            self.order.append((name, value, self.__dict__.get("opened")))
+        object.__setattr__(self, name, value)
+
+    def open(self):
+        self.opened = True
+        self.order.append(("open", None, True))
+
+    def read(self, n):
+        return b""
+
+
+class FakeSerialModule:
+    SerialException = OSError
+
+    def Serial(self, *a, **kw):
+        return FakeSerialPort()
+
+
+class TestBridgeContract(unittest.TestCase):
+    """The DTR/RTS contract is a property of the bridge, and the bench's two
+    bridges are opposites: asserting DTR at the CPico holds the nRF54L15 or
+    the MGM240P in reset and the port answers nothing at all, which reads
+    like dead hardware."""
+
+    def test_challenger_asserts_both(self):
+        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "challenger")
+        self.assertTrue(p.dtr)
+        self.assertTrue(p.rts)
+
+    def test_cpico_clears_both(self):
+        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "cpico")
+        self.assertFalse(p.dtr)
+        self.assertFalse(p.rts)
+
+    def test_the_lines_are_set_before_the_open_not_after(self):
+        # An open that asserts DTR even briefly pulses the module's reset,
+        # so setting the lines afterwards is too late.
+        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "cpico")
+        first_open = [i for i, (n, _, _) in enumerate(p.order) if n == "open"][0]
+        before = [(n, v) for n, v, _ in p.order[:first_open]]
+        self.assertIn(("dtr", False), before)
+        self.assertIn(("rts", False), before)
+
+    def test_an_unknown_bridge_falls_back_to_the_default_contract(self):
+        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "nonsense")
+        self.assertEqual((p.dtr, p.rts), (True, True))
+
+    def test_both_bridges_are_offered_on_the_command_line(self):
+        self.assertEqual(sorted(BRIDGE_LINES), ["challenger", "cpico"])
+
+    def test_wait_boot_marker_consumes_the_ready(self):
+        ft = FakeTransport()
+        ft.rx = b"+MTREADY\r\n"
+        link = ATLink(ft, default_timeout=0.2)
+        self.assertEqual(wait_boot_marker(link, timeout=1.0), "+MTREADY")
+        self.assertIsNone(wait_boot_marker(link, timeout=0.1))
 
 
 if __name__ == "__main__":
