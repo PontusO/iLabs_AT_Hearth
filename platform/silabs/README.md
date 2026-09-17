@@ -2,8 +2,10 @@
 
 Status: **the Hearth skeleton boots on the MGM240PA32VNA3, prints its boot log
 on the console and answers the `AT+MT` surface: `+MTREADY` on the wire, the
-harness Phase 0 gate passed and Phase 1 run (Task 6, 2026-09-17). Tasks 7 and 8
-pending; the Matter stack arrives with the upward-port round** (graph T446).
+harness Phase 0 gate passed and Phase 1 run (Task 6, 2026-09-17), and
+`fw/flash.py` flashes it from the host over XMODEM, ending at `+MTREADY`
+(Task 7, 2026-09-17). Task 8 pending; the Matter stack arrives with the
+upward-port round** (graph T446).
 
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
@@ -24,7 +26,7 @@ task that produces them.
 | Console RX | PA03 (pin 10) | USART0 RX | on the header, deliberately uninitialised by the port: a shipping image has no console input path (design spec board contract item 6, CRA_COMPLIANCE.md) |
 | Reset | RESETn (pin 31) | active low | internal pull-up; drive low only, never high |
 | SWD | PA01 (pin 8), PA02 (pin 9) | SWCLK, SWDIO | bootloader install, debug. **PA01 is SWCLK: never hand it to a UART** |
-| Recovery strap | PC00 (pin 22) | `SL_BTL_BUTTON`, active low | held low through reset enters the bootloader; proven both ways 2026-09-17 |
+| Recovery strap | PC00 (pin 22) | `SL_BTL_BUTTON`, active low | held low through reset enters the bootloader; proven both ways 2026-09-17, and driven by `fw/flash.py` through the CDC's RTS |
 | Power | VDD (pin 15) | 3.3 V nominal | +20 dBm part; ~160 mA TX peaks |
 
 Silicon, measured over SWD 2026-09-17 (`openocd -f mg24.cfg -c "init; flash
@@ -321,10 +323,12 @@ on the AT link before `+MTREADY`.
 
 ## Flashing
 
-Pending (Task 7): `fw/flash.py` over the UART XMODEM bootloader. What Task 5
-used by hand, and what Task 7 replaces, is recorded here.
+`fw/flash.py` is the tool (Task 7, 2026-09-17). It does the whole job: enters
+the bootloader, uploads the `.gbl`, starts the application and exits 0 only
+when `+MTREADY` comes back. What Task 5 and Task 6 did by hand is kept below
+as the explanation of what the script does, not as a procedure to follow.
 
-Every serial device here, and every `--port` Task 7's flasher takes, **must be
+Every serial device here, and every `--port` the flasher takes, **must be
 a `/dev/serial/by-id` path**, never `/dev/ttyACM<n>`. ttyACM numbering changes
 whenever USB devices are plugged or unplugged; on this bench ttyACM0 is the
 Thread RCP, and a stray write to the wrong device kills `otbr-agent`. The
@@ -361,44 +365,105 @@ swallow their output, so give each command its own `-c`.
 Never issue an SE device erase or a debug-lock command. `flash erase_sector 0 0
 last` is enough when a clean part is wanted, and was used once here.
 
-### Uploading an application over XMODEM
+### Uploading an application: `fw/flash.py`
+
+```bash
+export MT_PORT=/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00
+python3 platform/silabs/fw/flash.py --port "$MT_PORT" \
+        --image ~/silabs/work/hearth-skeleton/build/debug/hearth.gbl
+```
+
+```
+image: .../hearth.gbl, 47860 bytes, 374 block(s) of 128
+bootloader menu: Gecko Bootloader v3.02.01
+  100/374 blocks
+  200/374 blocks
+  300/374 blocks
+  374 blocks, 374 frame(s) sent (0 retransmit(s)), 5.3 s
+bootloader: Serial upload complete
+uploaded 374 block(s), 47860 bytes
++MTREADY seen: the module is running the new image
+```
+
+That transcript is a bench run of 2026-09-17, the Task 6 skeleton reflashed
+with the tool that replaced the by-hand procedure. Three consecutive runs gave
+the same block count, the same 5.3 s and no retransmits, and
+`test/mt_regression.py --bridge cpico --phase 0` passed after them.
+
+The exit status is the contract: **0 only when `+MTREADY` was read back** from
+the new image. Every failure path exits 1 with one line on stderr saying which
+step failed and what the port actually returned.
+
+Options beyond `--port` and `--image`: `--ready-timeout` (default 20 s) and
+`--no-strap`, which drives neither reset nor strap for a module that is
+already at the bootloader menu. `--no-strap` only reaches a module with a
+**blank application slot**, and the reason is a bench fact worth knowing:
+opening this CDC pulses the module's reset even with DTR and RTS cleared
+before the open (measured 2026-09-17: a running image answers `+MTREADY` about
+200 ms after the open), so a module parked in the menu with a valid
+application in flash is reset out of the menu before the first byte is
+written, whatever the host does afterwards. Against a running application
+`--no-strap` fails in five seconds with "the bootloader did not start an
+XMODEM transfer", which is the honest answer.
+
+There is no application-side entry into the bootloader: `AT+MTBOOTLOADER` is
+not part of the wire contract, and the strap is the only way in.
+
+The framer is `fw/xmodem.py`, stdlib only, unit-tested against a scripted
+receiver in `fw/test_xmodem.py` (`python3 platform/silabs/fw/test_xmodem.py`,
+11 tests, no hardware).
+
+#### What the script does, and why each step is there
 
 The bootloader menu answers on the AT UART at 115200 after a reset. On this
 carrier the CDC's DTR line holds RESETn low and its RTS line pulls the PC00
-strap low, and Linux asserts both when the port is opened, so both must be set
-explicitly with pyserial after opening:
+strap low, and Linux asserts both when the port is opened, so both are set
+explicitly, **before** the open (the order `test/mt_regression.py`'s
+`open_at_port()` uses; setting them after the open lets the default reach the
+module first):
 
 ```python
-s = serial.Serial(port, 115200, timeout=1)
+s = serial.Serial(); s.port = port; s.baudrate = 115200
 s.dtr = False; s.rts = False          # release reset and strap
-s.rts = True                          # optional: hold the recovery strap
-s.dtr = True; time.sleep(0.15); s.dtr = False   # reset pulse
+s.open()
+s.rts = True;  time.sleep(0.1)        # hold PC00 low
+s.dtr = True;  time.sleep(0.1)        # RESETn low
+s.dtr = False                         # released into the bootloader
+# ... wait for the banner, send b"1", wait for the bootloader's "C", send
+#     blocks, then b"2" to run the application
+s.rts = False                         # the strap is sampled at boot only
 ```
 
 The Gecko Bootloader's parser is **128-byte blocks only**
 (`XMODEM_DATA_SIZE 128` in `btl_xmodem.h`), so this is plain XMODEM-CRC, not
-XMODEM-1K. Send `1`, wait for the bootloader's `C`, then the blocks. Measured
-2026-09-17: 984 268 B as 7 690 blocks in **111 s**, ending
+XMODEM-1K. The wire, measured:
 
 ```
-Serial upload complete
+banner:    b'\r\nGecko Bootloader v3.02.01\r\n1. upload gbl\r\n2. run\r\n3. ebl info\r\nBL > \x00'
+after '1': b'\r\nbegin upload\r\n\x00C'
+EOT     -> b'\x06'
+tail:      b'\r\nSerial upload complete\r\n\x00\r\nGecko Bootloader v3.02.01\r\n...'
 ```
+
+Two details in that trace are why the script is not a naive loop. The menu
+**echoes fifteen bytes before its first `C`**, so a handshake that reads one
+byte at a time for a bounded number of tries is exhausted by the echo: the
+script drains the preamble itself and pushes the `C` it finds back into the
+reader, so the framer's own handshake still sees the byte that started it. And
+the bootloader **returns to its menu** after "Serial upload complete", so the
+application is started by sending `2`, not by a reset. A reset with the strap
+released would start it too (the recovery table below), but `2` needs no line
+handling at all and leaves the strap where it is.
+
+Measured 2026-09-17 by hand, the stock Silabs example: 984 268 B as 7 690
+blocks in **111 s**, about 14 ms per block. The Hearth skeleton, twenty times
+smaller, by hand the same day: **47 860 B as 374 blocks in 5 s**, no block
+retries. `flash.py` reproduces that transfer at the same 374 blocks and
+measures it at **5.3 s** over three runs, its own figure and a different
+measurement (it times the whole framer call, not just the block loop).
 
 `sx` from lrzsz is the obvious alternative and is the wrong tool here: opening
 the port asserts DTR, which holds the module in reset.
-
-Measured again 2026-09-17 with the Hearth skeleton, which is twenty times
-smaller: **47 860 B as 374 blocks in 5 s**, no block retries, the same ending.
-An application was present this time, so the upload was entered through the
-strap:
-
-```python
-s.rts = True;  time.sleep(0.1)     # hold PC00 low
-s.dtr = True;  time.sleep(0.1)     # RESETn low
-s.dtr = False                      # released into the bootloader
-# ... wait for "BL > ", send b"1", wait for the bootloader's "C", send blocks
-s.rts = False                      # release the strap after the upload
-```
 
 The two CDCs on this bench want **opposite** DTR: the carrier's bridge must be
 opened with DTR cleared, or the module is held in reset, while the Debug
@@ -434,6 +499,15 @@ is unchanged.
 
 All three measured 2026-09-17. The middle row is what let the first upload
 happen with no strap at all: the module was blank.
+
+A fourth fact belongs beside that table, because it bounds what any host tool
+can do: **opening the carrier's CDC resets the module**, even with DTR and RTS
+cleared before the open. Measured 2026-09-17 with a running skeleton: the
+image answers `+MTREADY` about 200 ms after the open, every time. It is the
+same open-time reset the harness's `--bridge cpico` waits out. The
+consequence for flashing is that a module parked in the bootloader menu with a
+valid application in flash cannot be picked up by a later host session without
+the strap: the open takes it out of the menu first.
 
 ## Bootloader
 
