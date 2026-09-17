@@ -365,6 +365,19 @@ swallow their output, so give each command its own `-c`.
 Never issue an SE device erase or a debug-lock command. `flash erase_sector 0 0
 last` is enough when a clean part is wanted, and was used once here.
 
+To blank the **application only** and leave the bootloader in place, which is
+how the blank-slot path is tested without reinstalling anything:
+
+```bash
+openocd -f mg24.cfg -c "init" -c "halt" \
+        -c "flash erase_address 0x08006000 0x178000" -c "reset run" -c "shutdown"
+```
+
+0x08006000 and 0x178000 are the linker's application region exactly (the
+`FLASH` `ORIGIN` and `LENGTH` the `bootloader_interface` component produces),
+so nothing below 0x08006000 is touched and the module drops into the menu on
+its own at the next reset. Measured 2026-09-17: 1 540 096 B erased in 2.9 s.
+
 ### Uploading an application: `fw/flash.py`
 
 ```bash
@@ -386,25 +399,38 @@ uploaded 374 block(s), 47860 bytes
 ```
 
 That transcript is a bench run of 2026-09-17, the Task 6 skeleton reflashed
-with the tool that replaced the by-hand procedure. Three consecutive runs gave
-the same block count, the same 5.3 s and no retransmits, and
-`test/mt_regression.py --bridge cpico --phase 0` passed after them.
+with the tool that replaced the by-hand procedure. Seven successful runs that
+day, across both entry paths, gave the same 374 blocks, the same 5.3 s and no
+retransmits, and `test/mt_regression.py --bridge cpico --phase 0` passed after
+them.
 
 The exit status is the contract: **0 only when `+MTREADY` was read back** from
 the new image. Every failure path exits 1 with one line on stderr saying which
 step failed and what the port actually returned.
 
 Options beyond `--port` and `--image`: `--ready-timeout` (default 20 s) and
-`--no-strap`, which drives neither reset nor strap for a module that is
-already at the bootloader menu. `--no-strap` only reaches a module with a
-**blank application slot**, and the reason is a bench fact worth knowing:
-opening this CDC pulses the module's reset even with DTR and RTS cleared
-before the open (measured 2026-09-17: a running image answers `+MTREADY` about
-200 ms after the open), so a module parked in the menu with a valid
-application in flash is reset out of the menu before the first byte is
-written, whatever the host does afterwards. Against a running application
-`--no-strap` fails in five seconds with "the bootloader did not start an
-XMODEM transfer", which is the honest answer.
+`--no-strap`, which drives neither reset nor strap and waits for the menu the
+port's own open produces.
+
+**`--no-strap` reaches a module with a blank application slot, and only that**,
+measured 2026-09-17 both ways. Opening this CDC pulses the module's reset even
+with DTR and RTS cleared before the open (a running image answers `+MTREADY`
+about 200 ms after the open), so a module parked in the menu with a valid
+application in flash is started by that reset before the host can write a
+byte, whatever it does afterwards; the flag cannot rescue such a session and
+does not pretend to. Against a running application it fails in five seconds
+with "the bootloader did not start an XMODEM transfer".
+
+The blank-slot case was measured by erasing the application region over SWD
+(`flash erase_address 0x08006000 0x178000`, the linker's application region
+exactly, nothing below it) and flashing the skeleton back with
+`flash.py --no-strap`: 374 blocks, `+MTREADY`, twice. The wait is what makes
+it work. `--no-strap` must wait for the banner exactly as the strap path
+does, because after the open's reset the bootloader needs its ~100 ms to come
+up; a version of this script that wrote `1` immediately was proven to fail on
+that same blank slot, the `1` landing on a USART that was not listening yet
+and the run dying at the handshake timeout with the banner arriving after the
+byte that was lost.
 
 There is no application-side entry into the bootloader: `AT+MTBOOTLOADER` is
 not part of the wire contract, and the strap is the only way in.
@@ -429,9 +455,12 @@ s.open()
 s.rts = True;  time.sleep(0.1)        # hold PC00 low
 s.dtr = True;  time.sleep(0.1)        # RESETn low
 s.dtr = False                         # released into the bootloader
-# ... wait for the banner, send b"1", wait for the bootloader's "C", send
-#     blocks, then b"2" to run the application
-s.rts = False                         # the strap is sampled at boot only
+# ... wait for the banner ...
+s.rts = False                         # the strap is sampled at boot only, so
+                                      # it is released as soon as the menu is
+                                      # there, not after the upload
+# ... send b"1", wait for the bootloader's "C", send the blocks, then b"2"
+#     to run the application
 ```
 
 The Gecko Bootloader's parser is **128-byte blocks only**
@@ -446,7 +475,7 @@ tail:      b'\r\nSerial upload complete\r\n\x00\r\nGecko Bootloader v3.02.01\r\n
 ```
 
 Two details in that trace are why the script is not a naive loop. The menu
-**echoes fifteen bytes before its first `C`**, so a handshake that reads one
+**echoes seventeen bytes before its first `C`**, so a handshake that reads one
 byte at a time for a bounded number of tries is exhausted by the echo: the
 script drains the preamble itself and pushes the `C` it finds back into the
 reader, so the framer's own handshake still sees the byte that started it. And
@@ -459,7 +488,7 @@ Measured 2026-09-17 by hand, the stock Silabs example: 984 268 B as 7 690
 blocks in **111 s**, about 14 ms per block. The Hearth skeleton, twenty times
 smaller, by hand the same day: **47 860 B as 374 blocks in 5 s**, no block
 retries. `flash.py` reproduces that transfer at the same 374 blocks and
-measures it at **5.3 s** over three runs, its own figure and a different
+measures it at **5.3 s** over seven runs, its own figure and a different
 measurement (it times the whole framer call, not just the block loop).
 
 `sx` from lrzsz is the obvious alternative and is the wrong tool here: opening
