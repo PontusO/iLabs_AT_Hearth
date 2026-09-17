@@ -19,9 +19,10 @@ task that produces them.
 |---|---|---|---|
 | AT UART TX | PA05 (pin 12) | EUSART0 TX (app), USART0 TX (bootloader) | the bootloader's TX |
 | AT UART RX | PA06 (pin 13) | EUSART0 RX (app), USART0 RX (bootloader) | the bootloader's RX |
-| Console | PA00 (pin 7) | USART0 TX | wired to the Debug Probe's UART CDC; nothing observed on it yet (see Toolchain) |
+| Console TX | PA00 (pin 7) | USART0 TX | the only console line the Debug Probe's UART CDC is wired to; nothing has been observed on it yet (see Toolchain) |
+| Console RX | PA03 (pin 10) | USART0 RX | on the header, deliberately uninitialised by the port (design spec, board contract item 6) |
 | Reset | RESETn (pin 31) | active low | internal pull-up; drive low only, never high |
-| SWD | PA01 (pin 8), PA02 (pin 9) | SWCLK, SWDIO | bootloader install, debug |
+| SWD | PA01 (pin 8), PA02 (pin 9) | SWCLK, SWDIO | bootloader install, debug. **PA01 is SWCLK: never hand it to a UART** |
 | Recovery strap | PC00 (pin 22) | `SL_BTL_BUTTON`, active low | held low through reset enters the bootloader; proven both ways 2026-09-17 |
 | Power | VDD (pin 15) | 3.3 V nominal | +20 dBm part; ~160 mA TX peaks |
 
@@ -86,16 +87,38 @@ The SDK is **not** cloned from git; anyone reproducing this uses the lock file.
 | Ninja | 1.12.1 | unused by this port's build |
 | openocd | 0.12.0+dev-02533-gf92f577cc (2026-05-28) | `/usr/local/bin/openocd`, the SWD path |
 
-The recipe is `~/silabs/pkg.slt` and the lock, with the Conan revisions above,
-is `~/silabs/pkg.lock`. Reinstall elsewhere with
-`slt install -f pkg.lock --check-updates=false --non-interactive`.
+Both SLT files are in the repository, so the pin outlives any one machine:
+
+- `platform/silabs/slt/pkg.slt`, the recipe, with every version written out
+  rather than left as `"~"`.
+- `platform/silabs/slt/pkg.lock`, the lock, which additionally carries the
+  Conan revisions in the table above and the two dependencies SLT resolved on
+  its own (`python 3.10.3` and `java21 21.0.6`). **The lock is the
+  authoritative pin.**
+
+Reinstall elsewhere with:
+
+```bash
+slt install -f platform/silabs/slt/pkg.lock --check-updates=false --non-interactive
+```
+
+`--check-updates=false` matters: the flag defaults to true and would walk the
+pins forward.
 
 The Conan revision is the identity that matters, because that is what was
 installed and built against. For reading the SDK sources against a commit, the
-GA tree is mirrored at `github.com/SiliconLabsSoftware/sisdk-release`, where
-tag `v2025.12.3` is `941f75df141392f802d3834c3ee6537f20000d15` (the same commit
-as `v2025.12-build.2712`). That mirror is for reference only; nothing here is
-built from it.
+GA tree is mirrored at `github.com/SiliconLabsSoftware/sisdk-release`:
+
+```
+$ git ls-remote --tags https://github.com/SiliconLabsSoftware/sisdk-release.git | grep v2025.12.3
+941f75df141392f802d3834c3ee6537f20000d15	refs/tags/v2025.12.3
+997a7da21d6111a825259ccb2b9015e72b4e1cc3	refs/tags/v2025.12.3-1
+```
+
+`v2025.12.3` is `941f75df141392f802d3834c3ee6537f20000d15`, the same commit as
+`v2025.12-build.2712`. Note the separate `v2025.12.3-1` tag on a different
+commit; the installed package is 2025.12.3, so `941f75df` is the one to read.
+The mirror is for reference only; nothing here is built from it.
 
 **Why extension 2.8.1 and not 2.8.0**, which is what the design spec names:
 2.8.1 is the release paired with the newest 2025.12 patch. `slt list
@@ -148,13 +171,42 @@ of main flash (0x08000000 to 0x08006000).
 ### The stock example has no usable console here
 
 `-DSILABS_LOG_OUT_UART=1` is in the build and `SL_CATALOG_UARTDRV_EUSART_PRESENT`
-is in the component catalogue, but nothing was ever observed from the running
-example on any UART: not on PA00/PA01, which is where the module target puts
-`sl_uartdrv_eusart_vcom` by default and where the Debug Probe's UART CDC is
-wired, and not on PA05/PA06 after the config header was edited to move it
-there and the project rebuilt with `--skip_gen`. The example was proven alive
-by other means (below). Task 8 wires Hearth's own console; do not take this
-silence as evidence that a console cannot work, only that the stock example did
+is in the component catalogue, and nothing has been observed from the running
+example on any UART in any of three pin configurations, all rebuilt with
+`--skip_gen` after editing `config/sl_uartdrv_eusart_vcom_config.h` and
+re-uploaded as a `.gbl`:
+
+| `sl_uartdrv_eusart_vcom` pins | Read on | Result |
+|---|---|---|
+| PA00 TX, PA01 RX (the module target's default) | Debug Probe UART CDC | nothing |
+| PA05 TX, PA06 RX | the carrier's AT CDC | nothing |
+| PA00 TX, PA03 RX (the board contract's console) | Debug Probe UART CDC | one or two bytes of framing noise, no data |
+
+Two mistakes were made reaching that table, and both are worth knowing because
+they cost bench time and would cost it again:
+
+- **The module target's default RX pin is PA01, which is SWCLK.** The first
+  configuration therefore drove a UART receiver onto the pad the Debug Probe
+  was actively clocking. That is a real defect in the experiment, and it was the
+  obvious candidate explanation for the silence. It is not the explanation: the
+  third row above is the same build with the console on the board contract's
+  own pins, PA00 TX and PA03 RX, with nothing touching SWCLK, and it is silent
+  too. Never let a generated project keep PA01 for a UART.
+- **The Debug Probe's UART CDC discards output while the host holds DTR low**
+  (`platform/nrf54l15/README.md`, where it cost half a bench day). Every
+  Debug-Probe-side reading taken before this was made with DTR cleared and is
+  void. With DTR asserted, a scan of 115200, 921600, 230400, 460800, 57600,
+  38400 and 9600 baud, eight seconds each after a reset, returns one or two
+  non-printable bytes at every rate and nothing else, which is the signature of
+  a single line transition rather than of data at the wrong speed.
+
+That last point leaves one thing genuinely unproven: a single edge is weak
+evidence that the probe's RX is really on PA00 at all, as opposed to floating.
+Task 8, which wires Hearth's own console, should establish the path with
+traffic it controls before trusting silence on it.
+
+The example was proven alive by other means (below). Do not take this silence
+as evidence that a console cannot work here, only that the stock example did
 not give one.
 
 ### What proved the example alive
@@ -180,6 +232,15 @@ not give one.
 
 Pending (Task 7): `fw/flash.py` over the UART XMODEM bootloader. What Task 5
 used by hand, and what Task 7 replaces, is recorded here.
+
+Every serial device here, and every `--port` Task 7's flasher takes, **must be
+a `/dev/serial/by-id` path**, never `/dev/ttyACM<n>`. ttyACM numbering changes
+whenever USB devices are plugged or unplugged; on this bench ttyACM0 is the
+Thread RCP, and a stray write to the wrong device kills `otbr-agent`. The
+carrier's CDC is
+`/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00` and the Debug
+Probe's UART CDC is
+`/dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E661745883698A36-if01`.
 
 ### Installing the bootloader over SWD
 
@@ -234,6 +295,12 @@ Serial upload complete
 
 `sx` from lrzsz is the obvious alternative and is the wrong tool here: opening
 the port asserts DTR, which holds the module in reset.
+
+The two CDCs on this bench want **opposite** DTR: the carrier's bridge must be
+opened with DTR cleared, or the module is held in reset, while the Debug
+Probe's UART CDC must be opened with DTR asserted, or it discards everything
+the console sends. Getting the second one wrong looks exactly like dead
+hardware; see "The stock example has no usable console here" above.
 
 ### Recovery semantics
 
