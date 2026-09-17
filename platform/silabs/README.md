@@ -90,6 +90,13 @@ The recipe is `~/silabs/pkg.slt` and the lock, with the Conan revisions above,
 is `~/silabs/pkg.lock`. Reinstall elsewhere with
 `slt install -f pkg.lock --check-updates=false --non-interactive`.
 
+The Conan revision is the identity that matters, because that is what was
+installed and built against. For reading the SDK sources against a commit, the
+GA tree is mirrored at `github.com/SiliconLabsSoftware/sisdk-release`, where
+tag `v2025.12.3` is `941f75df141392f802d3834c3ee6537f20000d15` (the same commit
+as `v2025.12-build.2712`). That mirror is for reference only; nothing here is
+built from it.
+
 **Why extension 2.8.1 and not 2.8.0**, which is what the design spec names:
 2.8.1 is the release paired with the newest 2025.12 patch. `slt list
 matter_extension -v 2.8.1 --deps` names `simplicity-sdk 2025.12.3`, while
