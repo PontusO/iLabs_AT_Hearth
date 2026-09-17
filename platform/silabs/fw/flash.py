@@ -39,9 +39,10 @@ each one is a place where a reasonable-looking change breaks the tool:
    application in flash cannot be reached this way by any host-side
    choice, because the open resets it before the first byte is written.
    What --no-strap does guarantee is that this tool adds no reset and no
-   strap of its own, and that the 'C' handshake after "1" is what decides:
-   against a running application it fails in 5 s with a clear message
-   rather than uploading into nothing.
+   strap of its own. It still waits for the menu before writing anything,
+   and for the same reason the strap path does: after that open-time reset
+   the bootloader needs its ~100 ms to come up, and a "1" written into
+   those milliseconds is written to a USART that is not listening yet.
 
 Exit status is 0 only when +MTREADY was read back from the new image; every
 failure path exits 1 with a one-line reason on stderr.
@@ -152,13 +153,29 @@ def open_port(path):
 def enter_bootloader(s, reader, strap):
     """Reset the module with the strap held and wait for the menu.
 
-    With strap=False nothing is driven at all: see the header, item 3.
+    With strap=False nothing is driven, but the wait is the same: see the
+    header, item 3.
     """
     if not strap:
-        print("--no-strap: driving neither reset nor strap; the module must "
-              "already be at the bootloader menu (note that opening the port "
-              "has itself reset it, see the header, item 3)")
-        reader.reset()
+        # Wait for the menu exactly as the strap path does, and drive
+        # nothing to get it. The open has already reset the module (header,
+        # item 3), so on a blank slot the bootloader is still coming up:
+        # writing "1" straight away would put the byte on a USART that is
+        # not listening yet, and the run would die at the handshake timeout
+        # looking like a bootloader fault. The banner may equally have
+        # landed before this function was reached, which is why nothing is
+        # discarded before the wait.
+        print("--no-strap: driving neither reset nor strap; waiting for the "
+              "menu the port's own open-time reset produces")
+        found, seen = reader.read_until(MENU_MARKERS, MENU_TIMEOUT_S)
+        if not found:
+            die("no bootloader menu within %.0f s of opening the port; got "
+                "%r. --no-strap needs a module that reaches the menu on its "
+                "own, which means a blank application slot; a module with a "
+                "valid application is started by the open's reset and has to "
+                "be caught with the strap (drop --no-strap)."
+                % (MENU_TIMEOUT_S, seen[-120:]))
+        print("bootloader menu: %s" % _menu_line(seen))
         return
     s.rts = True                # strap low (PC00)
     time.sleep(STRAP_SETTLE_S)
@@ -247,7 +264,11 @@ def main():
     ap.add_argument("--no-strap", action="store_true",
                     help="drive neither reset nor strap; the module must "
                          "already be at the bootloader menu")
-    ap.add_argument("--ready-timeout", type=float, default=READY_TIMEOUT_S)
+    ap.add_argument("--ready-timeout", type=float, default=READY_TIMEOUT_S,
+                    help="seconds to wait for +MTREADY after the application "
+                         "is started (default %(default)s; the skeleton takes "
+                         "about 0.1 s, so raise it only for an image that "
+                         "does real work before the marker)")
     args = ap.parse_args()
 
     try:

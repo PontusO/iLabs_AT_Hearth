@@ -16,6 +16,13 @@ send() with block_size=128 and the 1024-byte default is never used against
 the bench bootloader. The default is kept because it is the signature the
 task brief specifies and because a receiver that does take 1K blocks needs
 no other change here.
+
+One deliberate narrowness, so that nobody has to find it by reading send():
+only a NAK causes a retransmit. A reply that never arrives raises
+XmodemError instead, so a receiver that drops a frame silently ends the
+transfer rather than recovering from it. The bench bootloader has never
+dropped one (no retransmit in any run to date, by hand or by flash.py), and
+widening this belongs with a case that reproduces a loss.
 """
 
 from typing import Callable
