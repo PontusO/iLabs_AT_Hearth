@@ -507,8 +507,11 @@ session, not BLE, so they prove the device joined the mesh.
 ## Measured
 
 All of this is the skeleton image, 2026-09-17, built from the committed tree at
-`19e7fe8` in `~/silabs/work/hearth-skeleton` by the "Building" recipe above,
-running on the MGM240PA32VNA3 on the iLabs RP2350 carrier.
+`233778c` in `~/silabs/work/hearth-skeleton` by the "Building" recipe above,
+running on the MGM240PA32VNA3 on the iLabs RP2350 carrier. Every figure below
+was taken twice, from two clean generate-and-build cycles (`19e7fe8`, then
+`233778c` after a comment-only change), re-uploaded between them: identical
+sizes, identical boot log, identical Phase 1 pass and fail sets.
 
 ### Image size
 
@@ -612,6 +615,9 @@ $ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico \
 ===== RESULT: 261 passed, 35 failed =====
 baseline written: platform/silabs/skeleton-phase1.json
 ```
+
+Run twice, sixteen minutes apart, across a reflash: the same 261 and the same
+35, row for row.
 
 296 rows, the same count the nRF54L15 skeleton ran. The record is
 `platform/silabs/skeleton-phase1.json`, kept **here and not in
