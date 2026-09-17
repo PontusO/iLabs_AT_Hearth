@@ -6014,10 +6014,16 @@ def swd_reset(runner=None):
 # strap: opening the port pyserial's way returns zero bytes and reads exactly
 # like dead hardware.
 #
-# Backported verbatim from the FOTA round on main (fw/flash.py's contract,
-# platform/nrf54l15/README.md "Everyday flashing", platform/silabs/README.md
-# "Uploading an application over XMODEM"), because this branch predates it
-# and the MG24 skeleton cannot be reached over the CPico without it.
+# Backported verbatim from the FOTA round's branch, dev/fota-firmware at
+# 38f5975, where it was introduced by 15362e8. NOT from main: main is at
+# 1842af3 and carries none of this, because dev/fota-firmware is unmerged.
+# So the two branches will both have to carry it until that merge, and
+# whoever does the merge should expect this hunk on both sides rather than
+# a conflict to resolve by choosing. The contract itself is written down in
+# fw/flash.py, platform/nrf54l15/README.md "Everyday flashing" and
+# platform/silabs/README.md "Uploading an application over XMODEM"; this
+# branch predates all of it, and the MG24 skeleton cannot be reached over
+# the CPico without it.
 BRIDGE_LINES = {
     "challenger": {"dtr": True, "rts": True},
     "cpico": {"dtr": False, "rts": False},

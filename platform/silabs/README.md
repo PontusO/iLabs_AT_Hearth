@@ -508,10 +508,16 @@ session, not BLE, so they prove the device joined the mesh.
 
 All of this is the skeleton image, 2026-09-17, built from the committed tree at
 `233778c` in `~/silabs/work/hearth-skeleton` by the "Building" recipe above,
-running on the MGM240PA32VNA3 on the iLabs RP2350 carrier. Every figure below
-was taken twice, from two clean generate-and-build cycles (`19e7fe8`, then
-`233778c` after a comment-only change), re-uploaded between them: identical
-sizes, identical boot log, identical Phase 1 pass and fail sets.
+running on the MGM240PA32VNA3 on the iLabs RP2350 carrier.
+
+The image was built and flashed twice, from `19e7fe8` and then from `233778c`
+(a comment-only change), each from a clean `slc generate`. **The figures below
+are the second build's**, with one exception that is a genuine comparison: the
+Phase 1 result set was captured on both runs and diffed row for row, and the
+two are identical (see "Harness Phase 0 and Phase 1"). The two build logs
+differ only in the line number of a deprecation warning, which is the comment
+that moved. Nothing else below is a two-run figure, and nothing else below
+claims to be.
 
 ### Image size
 
@@ -543,9 +549,15 @@ Application image on flash: **47 776 B** (`hearth.bin`, 0x08006000 to
 for scale, was 1 025 140 B; the difference is the whole Matter stack, which
 this image does not carry. `hearth.s37` is 143 408 B, `hearth.gbl` 47 860 B.
 
-RAM adds up to 262 140 B, the full 256 KiB less the 4-byte bootloader reset
-region, which is the same shape the stock example showed: everything not
-statically claimed ends up in `.memory_manager_heap`.
+The RAM rows sum to **262 140 B** (42 924 + 214 512 + 4 096 + 176 + 428 + 4),
+4 B short of the part's 262 144. The shortfall is alignment padding, not a
+section: the linker file puts `RAM` at `ORIGIN = 0x20000004`, one word above
+`BOOTLOADER_RESET_REGION` at 0x20000000, and `.stack` opens with `. =
+ALIGN(8)`, so it starts at 0x20000008 and 0x20000004 to 0x20000008 is dead.
+`.bootloader_reset_section` is already one of the six rows summed above, so it
+is not the missing 4 B. Everything not statically claimed ends up in
+`.memory_manager_heap`, which is the same shape the stock example showed: it
+runs to exactly 0x20040000, the top of RAM.
 
 ### Free FreeRTOS heap at `+MTREADY`
 
@@ -616,8 +628,11 @@ $ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico \
 baseline written: platform/silabs/skeleton-phase1.json
 ```
 
-Run twice, sixteen minutes apart, across a reflash: the same 261 and the same
-35, row for row.
+Run twice, sixteen minutes apart, across a reflash of a rebuilt image: the
+same 261 and the same 35, **row for row**. That is a diff, not an impression:
+`diff` of the two runs' `[PASS]` lines and `diff` of their `[FAIL]` lines both
+come back empty. The evidence is in
+`.superpowers/sdd/2026-09-05-silabs-mg24-port/task-6-report.md`, section 8.
 
 296 rows, the same count the nRF54L15 skeleton ran. The record is
 `platform/silabs/skeleton-phase1.json`, kept **here and not in
