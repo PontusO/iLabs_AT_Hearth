@@ -6,21 +6,75 @@
  * batch forgot, which is what the "linker proves it" rule is for.
  *
  * Return convention, mechanically from the header comments: int with a
- * 0-on-success convention -> -1; mt_attr_result_t -> MT_ATTR_ERR_ENDPOINT
- * (no endpoints exist here) or MT_ATTR_ERR_CLUSTER where the comment names
- * it; MT_ROW_* -> MT_ROW_ERR_ENDPOINT; counts 0; bool false; pointer NULL;
- * void empty. Every out-parameter is zeroed (after a NULL check) before the
+ * 0-on-success convention -> -1; mt_attr_result_t and MT_ROW_* -> the
+ * endpoint code when the endpoint id is dead, the family's "the endpoint
+ * exists but does not carry this" code when it is live (see
+ * stub_endpoint_live() below); counts 0; bool false; pointer NULL; void
+ * empty. Every out-parameter is zeroed (after a NULL check) before the
  * failure return.
  *
  * Round 2 task 4 retired the first nine: the commissioning state, network
  * and Thread answers come from the running stack in port/mt_matter_sl.cpp
- * now. What is left below is everything the data model has to exist for.
+ * now. Round 2 task 5 retired the live-composition trio, and round 2 task 6
+ * the attribute read/write pair. What is left below is everything the data
+ * model has to exist for.
  */
 
 #include <stddef.h>
 #include <string.h>
 
 #include "mt_matter.h"
+
+/*
+ * ---- step 1b (round 2 task 6): a stub that knows the live endpoints ------
+ *
+ * A stub for a family this image has not ported. The endpoint may still be
+ * live (round 2 task 5's dynamic endpoints), and the honest answer then is
+ * "no such cluster on that endpoint", the code the family's real port gives
+ * for a light. Only a dead endpoint id answers "no such endpoint". No
+ * data-model access: this is still a stub, replaced by the batch that ports
+ * the family.
+ *
+ * Before this, every one of these answered "no such endpoint"
+ * unconditionally, which was right only while no endpoint existed at all. It
+ * stopped being right the moment task 5 stood up the rig's light: eighteen
+ * harness Phase 1 rows exist precisely to prove a host can tell "that
+ * endpoint is not there" from "that endpoint is there and does not do this",
+ * and a stub that collapses the two answers the wrong one for a live light.
+ *
+ * WHICH code "no such cluster" is varies by family and is taken from that
+ * family's own entry in core/include/mt_matter.h, never assumed: most answer
+ * MT_ATTR_ERR_CLUSTER, the AT+MTROW family answers MT_ROW_ERR_NO_PAYLOAD
+ * (+MTERR:4 through mt_at.c's row code mapping, where MT_ROW_ERR_ENDPOINT is
+ * +MTERR:2), and AT+MTMETERID answers MT_ATTR_ERR_ATTRIBUTE because its
+ * header entry says "deliberately not MT_ATTR_ERR_CLUSTER" and gives the
+ * reason. Each call site below names the code it uses for that reason.
+ *
+ * Stubs whose family takes no endpoint id are unchanged, and so are the
+ * delegate allocators: a pointer return has no error code to divide.
+ *
+ * This reads the same table AT+MTEP? reports (port/mt_matter_sl.cpp), which
+ * the boot rebuild fills before mt_at_start() lets any command run, so there
+ * is nothing to lock and no CHIP call to make from here.
+ */
+static bool stub_endpoint_live(uint16_t ep)
+{
+    uint16_t n = mt_matter_endpoint_count();
+    for (uint16_t i = 0; i < n; i++) {
+        uint32_t dt;
+        uint16_t id;
+        uint8_t var, pidx;
+        if (mt_matter_endpoint_info(i, &dt, &id, &var, &pidx) == 0 && id == ep) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The two shapes the step-1b stubs answer with. The meter-identity stub
+ * spells its own out, because its code is neither of these. */
+#define STUB_ATTR_MISS(ep) (stub_endpoint_live(ep) ? MT_ATTR_ERR_CLUSTER : MT_ATTR_ERR_ENDPOINT)
+#define STUB_ROW_MISS(ep)  (stub_endpoint_live(ep) ? MT_ROW_ERR_NO_PAYLOAD : MT_ROW_ERR_ENDPOINT)
 
 /* ---- commissioning state and identity ----------------------------------- */
 /* ---- network transport (C3) -------------------------------------------- */
@@ -43,45 +97,34 @@
 
 /* ---- attribute read/write ------------------------------------------------ */
 
-int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
-                        bool *is_unsigned)
-{
-    (void)ep; (void)cluster; (void)attr;
-    if (out != NULL) *out = 0;
-    if (is_unsigned != NULL) *is_unsigned = false;
-    return MT_ATTR_ERR_ENDPOINT;
-}
+/* Round 2 task 6 moved this section to port/mt_matter_sl.cpp, which answers
+ * it from the ember attribute store: mt_matter_attr_read and
+ * mt_matter_attr_write, plus the strong MatterPostAttributeChangeCallback
+ * that raises the +MTATTR URC. The banner stays so the section can be found
+ * by the same name in both files. */
 
-int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t val, bool notify)
-{
-    (void)ep;
-    (void)cluster;
-    (void)attr;
-    (void)val;
-    (void)notify;
-    return MT_ATTR_ERR_ENDPOINT;
-}
-
-int mt_matter_switch_click(uint16_t ep) { (void)ep; return MT_ATTR_ERR_ENDPOINT; }
+/* Switch has no cluster on either device type this build declares
+ * (MT_ATTR_ERR_CLUSTER, mt_matter.h's "the usual lookup failures"). */
+int mt_matter_switch_click(uint16_t ep) { return STUB_ATTR_MISS(ep); }
 
 /* ---- temperature level labels (C3) --------------------------------------- */
 
 int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count)
 {
-    (void)ep;
     (void)labels;
     (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* no TemperatureControl cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:248) */
+    return STUB_ATTR_MISS(ep);
 }
 
 /* ---- door lock (C2) -------------------------------------------------------- */
 
 int mt_matter_lock_state_set(uint16_t ep, uint8_t state, uint8_t source)
 {
-    (void)ep;
     (void)state;
     (void)source;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* no DoorLock cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:276) */
+    return STUB_ATTR_MISS(ep);
 }
 
 uint8_t mt_matter_lock_source_manual(void) { return 0; }
@@ -95,10 +138,11 @@ void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)
 
 int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
 {
-    (void)ep;
     (void)state;
     (void)level;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* no ValveConfigurationAndControl cluster: MT_ATTR_ERR_CLUSTER
+     * (mt_matter.h:347) */
+    return STUB_ATTR_MISS(ep);
 }
 
 /* ---- mode select ------------------------------------------------------------ */
@@ -107,11 +151,11 @@ void *mt_matter_mode_select_manager(void) { return NULL; }
 
 int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels, uint8_t count)
 {
-    (void)ep;
     (void)modes;
     (void)labels;
     (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* no ModeSelect cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:394) */
+    return STUB_ATTR_MISS(ep);
 }
 
 /* ---- ModeBase: RVC run/clean mode, microwave mode, and the rest ------------- */
@@ -122,13 +166,14 @@ void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep) { (vo
 int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
                             const char *const *labels, uint8_t count)
 {
-    (void)ep;
     (void)cluster;
     (void)modes;
     (void)tags;
     (void)labels;
     (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* cluster is not a ModeBase id, or ep does not carry it:
+     * MT_ATTR_ERR_CLUSTER (mt_matter.h:501) */
+    return STUB_ATTR_MISS(ep);
 }
 
 /* ---- OperationalState trio -------------------------------------------------- */
@@ -138,9 +183,10 @@ void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep) { (voi
 
 int mt_matter_opstate_set(uint16_t ep, uint8_t state)
 {
-    (void)ep;
     (void)state;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* no OperationalState-family cluster at all: MT_ATTR_ERR_CLUSTER
+     * (mt_matter.h:589) */
+    return STUB_ATTR_MISS(ep);
 }
 
 /* ---- RVC OperationalState ---------------------------------------------------- */
@@ -156,10 +202,10 @@ uint32_t mt_air_quality_feature_mask(void) { return 0; }
 
 int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
 {
-    (void)ep;
     (void)field;
     (void)value;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* ep has neither alarm cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:696) */
+    return STUB_ATTR_MISS(ep);
 }
 
 /* ---- chime -------------------------------------------------------------------- */
@@ -169,19 +215,19 @@ void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)
 
 int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids, const char *const *names, uint8_t count)
 {
-    (void)ep;
     (void)ids;
     (void)names;
     (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* no Chime cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:752) */
+    return STUB_ATTR_MISS(ep);
 }
 
 int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value)
 {
-    (void)ep;
     (void)what;
     (void)value;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* no Chime cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:776) */
+    return STUB_ATTR_MISS(ep);
 }
 
 /* ---- Microwave Oven Control ----------------------------------------------------- */
@@ -194,12 +240,13 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)d
 int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
                        const int64_t *values, uint8_t count)
 {
-    (void)ep;
     (void)cluster;
     (void)fields;
     (void)values;
     (void)count;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* cluster is none of the four push-served ids, or ep does not carry it:
+     * MT_ATTR_ERR_CLUSTER (mt_matter.h:897-899) */
+    return STUB_ATTR_MISS(ep);
 }
 
 void *mt_matter_epm_delegate_alloc(void) { return NULL; }
@@ -216,38 +263,42 @@ void *mt_matter_dem_delegate_alloc(uint16_t ep) { (void)ep; return NULL; }
 
 int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *quads)
 {
-    (void)ep;
     (void)cause;
     (void)n;
     (void)quads;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* no DeviceEnergyManagement cluster on ep: MT_ATTR_ERR_CLUSTER
+     * (mt_matter.h:1138) */
+    return STUB_ATTR_MISS(ep);
 }
 
 /* ---- nested row payloads (AT+MTROW family, energy round C2) ------------------------ */
 
+/* The MT_ROW_* family's "the endpoint exists but no cluster stores this row
+ * kind" code is MT_ROW_ERR_NO_PAYLOAD, which mt_at.c renders as +MTERR:4, not
+ * MT_ROW_ERR_CLUSTER: mt_rows.h's codec owns the MT_ROW_ERR_* space and has
+ * no such name (mt_matter.h:1152-1163, :1207-1208). */
+
 int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
 {
-    (void)ep; (void)kind; (void)stage;
-    return MT_ROW_ERR_ENDPOINT;
+    (void)kind; (void)stage;
+    return STUB_ROW_MISS(ep);
 }
 
 int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
                        mt_row_t *out, uint16_t *total)
 {
-    (void)ep;
     (void)kind;
     (void)idx;
     if (out != NULL) memset(out, 0, sizeof(*out));
     if (total != NULL) *total = 0;
-    return MT_ROW_ERR_ENDPOINT;
+    return STUB_ROW_MISS(ep);
 }
 
 int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
 {
-    (void)ep;
     (void)kind;
     if (total != NULL) *total = 0;
-    return MT_ROW_ERR_ENDPOINT;
+    return STUB_ROW_MISS(ep);
 }
 
 /* ---- Meter Identification Instance pool (energy round C2) -------------------------- */
@@ -260,9 +311,13 @@ void mt_meter_register_all(void) {}
 
 int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity_t *id)
 {
-    (void)ep;
     (void)id;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* This family's live-endpoint answer is MT_ATTR_ERR_ATTRIBUTE, not
+     * MT_ATTR_ERR_CLUSTER: mt_matter.h:1436-1440 says "deliberately not
+     * MT_ATTR_ERR_CLUSTER" because cmd_mtmeterid needs to tell an endpoint
+     * carrying no MeterIdentification Instance apart from the cluster-level
+     * refusals its own grammar raises. +MTERR:4. */
+    return stub_endpoint_live(ep) ? MT_ATTR_ERR_ATTRIBUTE : MT_ATTR_ERR_ENDPOINT;
 }
 
 /* ---- Energy EVSE delegate and targets store (energy round C2) --------------------- */
@@ -273,33 +328,37 @@ bool mt_matter_evse_reserve(void) { return false; }
 
 int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value)
 {
-    (void)ep;
     (void)field;
     (void)value;
-    return MT_ATTR_ERR_ENDPOINT;
+    /* ep carries no EnergyEvse cluster: MT_ATTR_ERR_CLUSTER
+     * (mt_matter.h:1552-1553) */
+    return STUB_ATTR_MISS(ep);
 }
+
+/* The three below are the kind-1 arm mt_matter_rows_*() routes to, so they
+ * carry the same MT_ROW_* contract by reference (mt_matter.h:1586-1606; the
+ * _total entry names +MTERR:2 / +MTERR:4 outright). No AT command reaches
+ * them while the rows_* trio above is itself a stub; they answer the same way
+ * so the pair cannot disagree the day one of them stops being a stub. */
 
 int mt_matter_evse_targets_apply(uint16_t ep, const mt_row_stage_t *stage)
 {
-    (void)ep;
     (void)stage;
-    return MT_ROW_ERR_ENDPOINT;
+    return STUB_ROW_MISS(ep);
 }
 
 int mt_matter_evse_targets_get(uint16_t ep, uint16_t idx, mt_row_t *out, uint16_t *total)
 {
-    (void)ep;
     (void)idx;
     if (out != NULL) memset(out, 0, sizeof(*out));
     if (total != NULL) *total = 0;
-    return MT_ROW_ERR_ENDPOINT;
+    return STUB_ROW_MISS(ep);
 }
 
 int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total)
 {
-    (void)ep;
     if (total != NULL) *total = 0;
-    return MT_ROW_ERR_ENDPOINT;
+    return STUB_ROW_MISS(ep);
 }
 
 /*

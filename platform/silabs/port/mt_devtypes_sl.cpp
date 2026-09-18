@@ -73,7 +73,6 @@
  */
 
 #include <app/util/attribute-storage.h>
-#include <app/util/endpoint-config-api.h>
 #include <app-common/zap-generated/ids/Attributes.h>
 #include <app-common/zap-generated/ids/Clusters.h>
 #include <app-common/zap-generated/ids/Commands.h>
