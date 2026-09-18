@@ -9,6 +9,11 @@ run (Task 6), and `fw/flash.py` flashes it from the host over XMODEM, ending at
 the upward-port round, whose starting checklist is "The 35 failing rows" below
 (graph T446).
 
+**Round 2 (the Matter core) has started on the same branch.** Its first task,
+2026-09-18, moved the skeleton onto the SDK's `sl_main` entry point and closed
+four round 1 deferrals; the image it produced is measured under "Measured",
+"Round 2 baseline". There is still no Matter component in the build.
+
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
 `iLabs_Hearth_docs/superpowers/specs/2026-09-05-silabs-mg24-port-design.md`.
@@ -702,9 +707,16 @@ session, not BLE, so they prove the device joined the mesh.
 
 ## Measured
 
-All of this is the skeleton image, 2026-09-17, built from the committed tree at
-`233778c` in `~/silabs/work/hearth-skeleton` by the "Building" recipe above,
-running on the MGM240PA32VNA3 on the iLabs RP2350 carrier.
+Two rounds of figures live here. **"Round 2 baseline" immediately below is the
+current image**: the same skeleton on `sl_main`, 2026-09-18. Everything after
+it is round 1's `sl_system` image, kept because the Phase 1 result set, the 35
+failing rows and the bench facts are still the record round 2 works from, and
+because a figure is only worth what its provenance says.
+
+The round 1 figures: the skeleton image, 2026-09-17, built from the committed
+tree at `233778c` in `~/silabs/work/hearth-skeleton` by the "Building" recipe
+above (which now names round 2's directory), running on the MGM240PA32VNA3 on
+the iLabs RP2350 carrier.
 
 The image was built and flashed twice, from `19e7fe8` and then from `233778c`
 (a comment-only change), each from a clean `slc generate`. **The figures below
@@ -715,7 +727,129 @@ differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
 
-### Image size
+### Round 2 baseline: the same skeleton on `sl_main`
+
+Built 2026-09-18 from the committed tree at `188dee5` in
+`~/silabs/work/hearth-core` by the "Building" recipe above, flashed with
+`fw/flash.py` and run on the same carrier. No Matter component yet: this is the
+round 1 skeleton with the entry point moved and the four round 1 deferrals
+closed, measured once so the stack has a clean baseline to be compared against.
+
+```
+$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-core \
+      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-core/build.log
+$ grep -c deprecated ~/silabs/work/hearth-core/build.log
+0
+$ grep -ci warning ~/silabs/work/hearth-core/build.log
+0
+```
+
+`arm-none-eabi-size ~/silabs/work/hearth-core/build/debug/hearth.out`, with
+round 1's figures beside them:
+
+| | Round 2, bytes | Round 1, bytes | Delta |
+|---|---|---|---|
+| `text` | 48 336 | 47 596 | +740 |
+| `data` | 176 | 176 | 0 |
+| `bss` | 261 536 | 261 536 | 0 |
+
+`arm-none-eabi-size -A` on the same file:
+
+| Section | Bytes | Where |
+|---|---|---|
+| `.text` | 47 520 | flash |
+| `.vectors` | 368 | flash, at 0x08006000 |
+| `.ARM.exidx` | 8 | flash; new, the C++ unwind index `main.cpp` brings |
+| `.copy.table` | 12 | flash; new with `sl_main` |
+| `.zero.table` | 0 | flash; new with `sl_main` |
+| `.data` | 176 | RAM, loaded from flash |
+| `.nvm` | 40 960 | flash, at the top of the application region; NVM3's store, not code |
+| `.bss` | 42 928 | RAM |
+| `.memory_manager_heap` | 217 580 | RAM, the SDK memory manager taking whatever is left |
+| `.stack` | 1 024 | RAM, the C stack; **1 KiB now, 4 KiB in round 1**, see below |
+| `text_application_ram` | 428 | RAM |
+| `.bootloader_reset_section` | 4 | RAM, at 0x20000000 |
+
+The RAM rows sum to 262 140 B again, the same 4 B of alignment padding below
+the part's 262 144 that round 1's section explains.
+
+```
+$ ls -l hearth.bin hearth.gbl hearth.s37
+-rwxrwxr-x 1 pontus pontus  48516 Sep 18 15:39 hearth.bin
+-rw-rw-r-- 1 pontus pontus  48600 Sep 18 15:39 hearth.gbl
+-rwxrwxr-x 1 pontus pontus 145624 Sep 18 15:39 hearth.s37
+```
+
+The application image on flash is **48 516 B**, 3.15 % of the 1 540 096 B
+application region; `hearth.gbl` is **48 600 B**, which `fw/flash.py` sent as
+380 blocks in 5.4 s with no retransmits. The move costs **+740 B of flash**,
+the same +740 on `text`, `hearth.bin` and `hearth.gbl`: the SDK's `main.c`,
+`main_retarget.c` and the C++ unwind tables, minus the two `sl_system` calls.
+
+**The C stack dropped from 4 096 to 1 024 B, and Hearth did not do it.**
+`memory_manager_region.slcc` picks a different config file per entry point:
+`config/legacy/sl_memory_manager_region_config.h` (`SL_STACK_SIZE 4096`)
+`unless: [sl_main]`, and `config/rtos/sl_memory_manager_region_config.h`
+(`SL_STACK_SIZE 1024`) `condition: [kernel, sl_main]`. Under `sl_main` with a
+kernel that stack carries only `sl_main_init()` before the scheduler, the two
+app hooks' early half, and every ISR; each task has its own stack. It is the
+SDK's choice for this configuration and is left at the SDK's value, but it is
+a number the Matter stack's interrupt handlers will share, so the first task
+that adds one should know it moved. `SL_STACK_SIZE` in the `.slcp`'s
+`configuration:` is the one line that raises it.
+
+### Free FreeRTOS heap at `+MTREADY`, round 2
+
+`configTOTAL_HEAP_SIZE` is unchanged at 24 576. `xPortGetFreeHeapSize()`
+logged immediately after `mt_at_start()` returns: **9 560 B free**, against
+round 1's 13 768 B. The 4 208 B difference is `sl_main`'s start task, which is
+what calls `app_init()`: `SL_MAIN_START_TASK_STACK_SIZE_BYTES` is 4 096 and its
+TCB is the rest. That task ends as soon as `app_init()` returns and the idle
+task reclaims it, exactly as the boot task's own 4 KiB is reclaimed a few
+instructions after this line is logged, so the steady-state figure is about
+8 KiB above the logged one. Neither number is the steady state; both are the
+same measurement point as round 1's, which is what makes them comparable.
+
+### The boot log and `+MTREADY`, round 2
+
+Captured 2026-09-18, both ports at once with timestamps: the console on the
+Debug Probe's UART CDC at 115200 with DTR asserted, the AT link on the
+carrier's CDC with DTR and RTS cleared before the open, whose own reset is the
+reset being watched.
+
+```
+  0.003  CONSOLE b'\x00'
+  0.064  CONSOLE b'I boot: Hearth on USART0 TX PA00, 115200 8N1 (sl_main)\r'
+  0.074  CONSOLE b'\n'
+  0.094  CONSOLE b'I boot: boot task up, model MGM240P Hearth\r\n'
+  0.102  AT      b'+MTREADY\r\n'
+  0.104  CONSOLE b'I at_parser: parser started\r\nI boot: +MTREADY sent, free FreeRTOS heap 9560 B\r\n'
+```
+
+AT link, in full: `b'+MTREADY\r\n'`, 10 bytes, nothing before it and nothing
+else. The boot contract is unchanged by the migration, and this capture is the
+evidence: the first two console lines are on the wire before the first byte of
+the marker, and no URC precedes it.
+
+### Harness Phase 0 and Phase 1, round 2
+
+```
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+===== RESULT: 0 passed, 0 failed =====
+
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico \
+      --transport THREAD --phase 1
+===== RESULT: 261 passed, 35 failed =====
+```
+
+The run was redirected to a file and diffed against
+`platform/silabs/skeleton-phase1.json` name by name, not count by count: the
+same 261 rows pass and the same 35 fail, with no row moving in either
+direction. The baseline file is **not** rewritten, because nothing it records
+changed; the 35 rows below are still this round's checklist.
+
+### Image size, round 1
 
 `arm-none-eabi-size ~/silabs/work/hearth-skeleton/build/debug/hearth.out`:
 
@@ -779,7 +913,7 @@ is not the missing 4 B. Everything not statically claimed ends up in
 `.memory_manager_heap`, which is the same shape the stock example showed: it
 runs to exactly 0x20040000, the top of RAM.
 
-### Free FreeRTOS heap at `+MTREADY`
+### Free FreeRTOS heap at `+MTREADY`, round 1
 
 `configTOTAL_HEAP_SIZE` is **24 576** (raised from the SDK default of 8 192,
 which does not hold the boot task and the 6 KiB AT parser task at the same
@@ -790,7 +924,7 @@ stack and TCB, which are released a few instructions later by
 the FreeRTOS heap only; `.memory_manager_heap` is a separate 214 512 B pool
 that nothing in the skeleton allocates from.
 
-### The boot log, and `+MTREADY` after it
+### The boot log, and `+MTREADY` after it, round 1
 
 Captured 2026-09-17 by resetting the module (DTR pulse on the carrier's CDC)
 and reading both ports at once with timestamps. The console is the Debug
@@ -835,7 +969,7 @@ AT+MTNET?    -> +MTNET:THREAD,0,0,0|OK
 AT+MTSTATE?  -> +MTSTATE:0,0|OK
 ```
 
-### Harness Phase 0 and Phase 1
+### Harness Phase 0 and Phase 1, round 1
 
 ```
 $ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
