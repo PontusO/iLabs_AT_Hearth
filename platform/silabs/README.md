@@ -32,6 +32,16 @@ row ("Measured", "Round 2 task 3"; "Boot flow" for what runs in what order).
 The upward port is still stubbed, so the same 35 rows still fail; retiring them
 is the upward-port round's.
 
+**Task 4, 2026-09-18, made the first upward-port section real.**
+`port/mt_matter_sl.cpp` answers the commissioning state, the fabric count, the
+commissioning window, the onboarding codes, the factory reset, the net info,
+the transport-mismatch question and the Thread role reads from the running
+stack instead of from `port/mt_matter_stub.c`. It is the nRF port's first
+section transferred whole ("Port sections" below). Phase 1 moves to **264/32**:
+`MTCODES? format`, `MTCODES? stable across reads` and `MTTHREAD? shape by
+image` turn green and nothing else changes verdict ("Measured", "Round 2 task
+4").
+
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
 `iLabs_Hearth_docs/superpowers/specs/2026-09-05-silabs-mg24-port-design.md`.
@@ -896,6 +906,62 @@ the hook, and `sl_main_start_task_should_continue()` returns false by default
 so the start task ends there. Hearth's work therefore goes on its own task,
 which is what `app_init()` creates.
 
+### Port sections: what has transferred from the nRF arm
+
+The upward port is a section-by-section transfer of the nRF54L15 port's two
+port files, so the two arms stay diffable. Each section carries the nRF line
+range it came from as a banner comment in the Silabs file; this table is the
+index, and a round that changes one arm finds the other through it.
+
+| Section | nRF source and lines | Silabs file | Landed |
+|---|---|---|---|
+| commissioning state, network, Thread | `platform/nrf54l15/port/mt_matter_zephyr.cpp` 388-602 | `port/mt_matter_sl.cpp` | round 2 task 4 |
+
+The nRF line ranges are against that file as it stands in the firmware
+repository on `dev/fota-firmware`; they are a reading aid, not a promise that
+the file has not moved since.
+
+Everything in `core/include/mt_matter.h` that has no row above is still
+answered by `port/mt_matter_stub.c`. `test/host/check_decls.py` (run by
+`make -C test/host silabs-stubs`) proves the pair between them defines every
+one of the header's 61 declarations exactly once, so a function that moves and
+is not deleted from the stub is a gate failure rather than a link-time
+surprise.
+
+What the transfer rewrites rather than copies, for this first section:
+
+- Zephyr's `LOG_ERR()` becomes `HEARTH_LOGE("matter", ...)` with the same
+  format strings (nRF 455, 460). The core log macro carries a printf format
+  attribute, so `"%" CHIP_ERROR_FORMAT` is checked at compile time here in a
+  way the Zephyr macro did not check it.
+- The nRF's `CONFIG_OPENTHREAD_FTD` note (nRF 503-505) becomes a reference to
+  `CHIP_DEVICE_CONFIG_THREAD_FTD`, which is 1 in `src/CHIPProjectConfig.h` and
+  is what `hearth_matter_init.cpp`'s `InitOpenThread()` already relies on when
+  it sets the device type to Router. Same conclusion, this tree's spelling:
+  `otThreadIsRouterEligible()` is always reachable and needs no `#if`.
+- `chip::DeviceLayer::StackLock` stays exactly as it was. It is CHIP's, not
+  Zephyr's, and on this platform it is load-bearing in a way it was not on the
+  nRF: `config/sl_matter_config.h` sets `SL_MATTER_STACK_LOCK_TRACKING_MODE` to
+  `SL_MATTER_STACK_LOCK_TRACKING_FATAL`, so an unlocked CHIP call from the AT
+  parser task kills the device instead of racing quietly.
+- The OpenThread reads keep the OT API and take the instance from
+  `ThreadStackMgrImpl().OTInstance()` under
+  `ThreadStackMgr().LockThreadStack()` / `UnlockThreadStack()`, which is the
+  same pair `hearth_matter_init.cpp` hands to the Inet layer as its native
+  params.
+- `<setup_payload/OnboardingCodesUtil.h>` is the header's path in this tree,
+  as it is in the nRF's. There is no `<app/server/OnboardingCodesUtil.h>`.
+
+One lock-ordering fact, because it is the kind of thing that is cheap to state
+and expensive to rediscover: `mt_matter_net_info()` holds the CHIP stack lock
+and calls `ConnectivityMgr().IsThreadEnabled()`, which takes the OpenThread
+lock itself
+(`GenericThreadStackManagerImpl_OpenThread.hpp:244-254`). That is CHIP lock
+then OT lock, the same order the CHIP event loop uses. `mt_matter_thread_info()`
+takes the OT lock **alone** and never reaches for the CHIP lock underneath it,
+so the port has no path that acquires them the other way round. Keep it that
+way.
+
 ## Flashing
 
 `fw/flash.py` is the tool (Task 7, 2026-09-17). It does the whole job: enters
@@ -1195,10 +1261,12 @@ session, not BLE, so they prove the device joined the mesh.
 
 ## Measured
 
-Four sets of figures live here. **"Round 2 task 3" immediately below is the
-current image**, the first one with the Matter stack running. "Round 2 task 2"
-after it is the same image with the stack linked but not started, which is what
-task 3's figures are measured against; "Round 2 baseline" is the skeleton on
+Five sets of figures live here. **"Round 2 task 4" immediately below is the
+current image**, the first one whose AT surface answers from the Matter stack.
+"Round 2 task 3" after it is the same image with the stack running but every
+`mt_matter.h` entry point still stubbed, which is what task 4's figures are
+measured against; "Round 2 task 2" is the stack linked but not started;
+"Round 2 baseline" is the skeleton on
 `sl_main` with no Matter at all; and everything after that is round 1's
 `sl_system` image, kept because the Phase 1 result set, the 35 failing rows and
 the bench facts are still the record round 2 works from, and because a figure is
@@ -1217,6 +1285,158 @@ two are identical (see "Harness Phase 0 and Phase 1"). The two build logs
 differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
+
+### Round 2 task 4: the AT surface answers from the stack
+
+Built 2026-09-18 from the committed tree at `6bece87` in
+`~/silabs/work/hearth-matter-t4` by the "Building" recipe above (a clean
+`slc generate` into an empty directory), flashed with `fw/flash.py` and run on
+the MGM240PA32VNA3 on the iLabs RP2350 carrier. `hearth.bin`
+`md5sum 2cf2d7c67d558b1a5a0c2198769df996`.
+
+This image is task 3's with `port/mt_matter_sl.cpp` in it: nine of the sixty-one
+`mt_matter.h` entry points now answer from CHIP and OpenThread rather than from
+a stub. Nothing else about the boot changed.
+
+```
+$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-t4 \
+      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-t4/build.log
+$ grep -c deprecated ~/silabs/work/hearth-matter-t4/build.log
+0
+$ grep -ci warning ~/silabs/work/hearth-matter-t4/build.log
+0
+```
+
+`arm-none-eabi-size ~/silabs/work/hearth-matter-t4/build/debug/hearth.out`, with
+task 3's figures beside it:
+
+| | Task 4, bytes | Task 3, bytes | Delta |
+|---|---|---|---|
+| `text` | 828 260 | 824 676 | +3 584 |
+| `data` | 3 352 | 3 352 | 0 |
+| `bss` (size's, includes the heap section) | 258 340 | 258 340 | 0 |
+
+`arm-none-eabi-size -A` on the same file: `.text` 827 424 (task 3: 823 840,
+**+3 584**), `.data` 3 352, `.bss` 114 104, `.memory_manager_heap` 139 624,
+`.stack` 4 608, `.nvm` 40 960, `text_application_ram` 448, `.vectors` 368,
+`.bootloader_reset_section` 4, `.ARM.exidx` 8, `.copy.table` 12. **Every RAM row
+is task 3's to the byte**; the whole cost of this task is 3 584 B of flash, and
+it is the code the linker could previously discard: the commissioning window
+manager's open path, the setup-payload QR and manual-code generators, the fabric
+table count and the OpenThread role and dataset getters.
+
+```
+$ ls -l hearth.bin hearth.gbl hearth.s37
+-rwxrwxr-x 1 pontus pontus  831628 Sep 18 18:48 hearth.bin
+-rw-rw-r-- 1 pontus pontus  831700 Sep 18 18:48 hearth.gbl
+-rwxrwxr-x 1 pontus pontus 2494928 Sep 18 18:48 hearth.s37
+```
+
+The application image on flash is **831 628 B**, 54.00 % of the 1 540 096 B
+application region, against task 3's 828 044 B and 53.77 %. `hearth.gbl` is
+**831 700 B**, which `fw/flash.py` sent as 6 498 blocks in 92.2 s with no
+retransmits (task 3: 6 470 blocks in 91.8 s).
+
+#### Free heap at `+MTREADY`, task 4
+
+**98 968 B free**, logged by `sl_memory_get_free_heap_size()` immediately after
+`mt_at_start()` returns, out of the 139 624 B `.memory_manager_heap`. That is
+task 3's figure **unchanged to the byte**, which is the expected result: this
+task added code, not allocations, and none of the nine functions runs before the
+marker. Everything task 3's section says about why this figure is not the steady
+state (the boot task logs it before the Bluetooth task is scheduled, and it
+still counts the boot task's own 5 KiB stack) applies here word for word.
+
+#### The AT surface, task 4
+
+Captured 2026-09-18, both ports at once: the console on the Debug Probe's UART
+CDC at 115200 with DTR asserted, the AT link on the carrier's CDC with DTR and
+RTS cleared before the open, whose own reset is the boot being watched. The AT
+port carried `+MTREADY` and nothing else before the first command.
+
+```
+AT               ->  OK
+AT+MTSTATE?      ->  +MTSTATE:1,0            OK
+AT+MTFABRICS?    ->  +MTFABRICS:0            OK
+AT+MTCODES?      ->  +MTCODES:MT:SAGA442C00KA0648G00,34970112332   OK
+AT+MTCODES?      ->  +MTCODES:MT:SAGA442C00KA0648G00,34970112332   OK
+AT+MTNET?        ->  +MTNET:THREAD,0,0,0     OK
+AT+MTTHREAD?     ->  +MTTHREAD:UNSPECIFIED,0,,,,,""                OK
+AT+MTCOMMISSION  ->  OK
+AT+MTSTATE?      ->  +MTSTATE:1,0            OK
+AT+MTCOMMISSION=300 -> OK
+```
+
+Those onboarding codes are the SDK's default example credentials (passcode
+20202021, discriminator 3840, the console says so on every boot), not a secret;
+the same pair is on the air in the BLE service data task 3 recorded.
+
+Three of those answers are worth reading twice, because two of them are not what
+a first guess predicts:
+
+- **`AT+MTSTATE?` is `1`, not `0`, on a factory-fresh device, and that is
+  correct.** `Server::Init()` opens a basic commissioning window during boot
+  (task 3's console capture shows `Updating services using commissioning mode
+  1` before `+MTREADY`), so `IsCommissioningWindowOpen()` is true and
+  `mt_matter_state()` answers `MT_STATE_COMMISSIONING`. `AT_MT_SPEC.md` 3.5 says
+  as much in its own note, and the harness agrees: `t_state_fabrics_consistent`
+  allows state 1 with a fabric count of 0 and only forbids state 2 with 0 and
+  state 0 with a non-zero count.
+- **`AT+MTNET?` reports `<enabled>` 0 before commissioning.** CHIP defines
+  `IsThreadEnabled()` as "the device role is not `DISABLED`"
+  (`GenericThreadStackManagerImpl_OpenThread.hpp:244-254`), and the Thread
+  interface is not brought up until a dataset arrives, so a device that has the
+  OpenThread task running and no network answers 0. It is the same generic CHIP
+  code on both Thread arms, so the nRF port answers the same. The trailing `0`
+  is `<mismatch>`, which this image can only ever answer 0 (Thread is its only
+  transport).
+- **`AT+MTCOMMISSION` on a device whose window is already open answers `OK` and
+  really does reopen it.** `CommissioningWindowManager::OpenBasicCommissioning
+  Window()` has no incorrect-state check; it restores the discriminator, resets
+  the failed-attempt counter and restarts the window. The console proves the
+  call reached CHIP rather than being a no-op: `Updating services using
+  commissioning mode 1` and the `Advertise commission parameter` line appear
+  again 2.4 s into the session, long after boot.
+
+`AT+MTFRESET` is **not** exercised here, and cannot be on this image.
+`mt_matter_factory_reset()` is transferred and correct, but `cmd_mtfreset()`
+erases the EVSE charging targets before it calls it
+(`core/mt/mt_at.c`, the "same reason, and the deliberate asymmetry" block), and
+`mt_matter_evse_targets_erase_all()` is still a stub returning -1, so the
+command answers `+MTERR:7` and never reaches the reset. That is a code reading,
+not a bench observation: the command was deliberately not sent, because its
+first half erases the stored composition and would leave the bench in a state
+no later task asked for. The row is the EVSE section's to close.
+
+#### Harness Phase 0 and Phase 1, task 4
+
+```
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+===== RESULT: 0 passed, 0 failed =====
+
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico \
+      --transport THREAD --phase 1
+===== RESULT: 264 passed, 32 failed =====
+```
+
+The run was compared against `platform/silabs/skeleton-phase1.json` **name by
+name, not count by count**: 296 rows on both sides, no row present on one side
+only, and **exactly three verdict differences, all FAIL to PASS**:
+
+- `MTCODES? format`
+- `MTCODES? stable across reads`
+- `MTTHREAD? shape by image (+MTERR:8 on WiFi, decoded line on Thread)`
+
+Nothing regressed. The baseline file is not rewritten: it is round 1's skeleton
+record, and the 32 rows still failing are listed in "The 35 failing rows" below
+minus those three.
+
+Host gates the same day, on the same tree: `make -C test/host run` green (exit
+0, zero `[FAIL]` lines; `check_decls.py` **61/61** with no missing and no
+duplicated across `mt_matter_stub.c` + `mt_matter_sl.cpp`, plus 4/4, 24/24 and
+1/1, and `check_slcp_sources.py` silent) and
+`python3 test/test_mt_regression.py` ran 467 tests, OK.
 
 ### Round 2 task 3: the Matter stack started
 
@@ -1889,6 +2109,13 @@ above says the figures are the second build's. Any later round that means to
 claim reproduction should redirect every measurement it intends to compare.
 
 ### The 35 failing rows: the upward port's starting checklist
+
+**Three of them are closed.** Round 2 task 4 turned `MTCODES? format`,
+`MTCODES? stable across reads` and `MTTHREAD? shape by image` green, so the
+current image fails 32 of the rows below ("Measured", "Round 2 task 4"). The
+list is left as it was recorded, because it is round 1's checklist and the
+baseline file it was captured in is not rewritten; each later section says which
+rows it closed.
 
 Every one of them needs a Matter data model, and the skeleton answers them from
 `port/mt_matter_stub.c` and `port/mt_devtypes_stub.c`. The shape of the stub
