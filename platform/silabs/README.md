@@ -1420,7 +1420,9 @@ Built 2026-09-18 from the committed tree at `97c6a31` in
 `~/silabs/work/hearth-matter-t5` by the "Building" recipe above (a clean `slc
 generate` into an empty directory), flashed with `fw/flash.py` and run on the
 MGM240PA32VNA3 on the iLabs RP2350 carrier. `hearth.bin`
-`md5sum 96e64e3fc7d93f9bd3b19bce8ffba21b`.
+`md5sum 96e64e3fc7d93f9bd3b19bce8ffba21b`; that file is still in the build
+directory and is the image every figure and every bench transcript below was
+taken from.
 
 This image is task 4's with `port/mt_devtypes_sl.cpp` and
 `port/mt_dyn_store.h` in it, the live endpoint table appended to
@@ -1436,6 +1438,33 @@ $ grep -c deprecated ~/silabs/work/hearth-matter-t5/build.log
 $ grep -ci warning ~/silabs/work/hearth-matter-t5/build.log
 0
 ```
+
+**That log is a reproduction run, and the honest provenance is worth four
+lines.** The first build of this task was captured without the documented
+`tee`, so the two greps above had no surviving log to stand on. The tree was
+rebuilt from `38802da` (the comment-only citation fix, no source change since
+`97c6a31`) with a fresh `slc generate` and the recipe exactly as written; the
+log is `~/silabs/work/hearth-matter-t5/build.log`, 113 906 B, and both greps
+answer 0 against it. Every `arm-none-eabi-size` figure below reproduced to the
+byte.
+
+**The image is NOT byte-reproducible, and that is a property of the SDK rather
+than of this project.** The rebuild produced `md5sum
+8b596ebb4325cc84e5b384967140cb08`, kept beside the flashed image as
+`hearth.rebuild-38802da.bin`, the same 842 912 bytes. `cmp -l` puts the whole
+difference at **six bytes**, all of them inside OpenThread's version banner at
+offset `0xB42E4`:
+
+```
+SL-OPENTHREAD/3.0.2.0_GitHub-61e43cffb; EFR32; Sep 18 2026 19:37:49   (flashed)
+SL-OPENTHREAD/3.0.2.0_GitHub-61e43cffb; EFR32; Sep 18 2026 20:08:20   (rebuild)
+```
+
+That string is `__DATE__ __TIME__` compiled into the OpenThread stack, so an
+`md5sum` recorded here identifies ONE build and can never be reproduced by a
+later one; only the six timestamp bytes may differ, and a difference anywhere
+else would be a real difference. The same six-byte result is also the evidence
+that the comment-only commit between the two trees moved no code byte.
 
 `arm-none-eabi-size ~/silabs/work/hearth-matter-t5/build/debug/hearth.out`,
 with task 4's figures beside it:
