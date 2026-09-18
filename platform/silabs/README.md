@@ -54,6 +54,21 @@ rebuild, which keeps the endpoints before them live. Phase 1 moves to
 verdict ("Measured", "Round 2 task 5"; "Port sections" for the transfer and the
 registry policy).
 
+**Task 6, 2026-09-18, made the attribute bridge real.** `AT+MTATTR` reads and
+writes reach the ember attribute store under the CHIP stack lock, and
+`MatterPostAttributeChangeCallback` raises the `+MTATTR` URC for every change
+that actually changes a value, controller-driven or local, in both notify
+modes. Two things came with it. The image formats with the SDK's tiny printf
+now, because newlib-nano cannot print a 64-bit integer at all and the first
+command to ask it to was this one ("The 64-bit value the libc could not print"
+below). And every stub for a family this image has not ported stopped answering
+"no such endpoint" for an endpoint that exists: it answers its own family's
+"no such cluster on that endpoint" code instead, from one lookup in the live
+endpoint table. Phase 1 moves to **291/5** ("Measured", "Round 2 task 6"),
+and all five remaining failures are named there with their causes; four of them
+need catalogue device types this round does not build and the fifth needs a
+read path this round does not port.
+
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
 `iLabs_Hearth_docs/superpowers/specs/2026-09-05-silabs-mg24-port-design.md`.
@@ -930,6 +945,7 @@ index, and a round that changes one arm finds the other through it.
 |---|---|---|---|
 | commissioning state, network, Thread | `platform/nrf54l15/port/mt_matter_zephyr.cpp` 388-602 | `port/mt_matter_sl.cpp` | round 2 task 4 |
 | the live endpoint table | `mt_matter_zephyr.cpp` 604-663 | `port/mt_matter_sl.cpp` | round 2 task 5 |
+| the attribute bridge and the `+MTATTR` URC | `mt_matter_zephyr.cpp` 665-1505 | `port/mt_matter_sl.cpp` | round 2 task 6 |
 | shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
@@ -996,6 +1012,152 @@ then OT lock, the same order the CHIP event loop uses. `mt_matter_thread_info()`
 takes the OT lock **alone** and never reaches for the CHIP lock underneath it,
 so the port has no path that acquires them the other way round. Keep it that
 way.
+
+#### What task 6's transfer rewrote, and the two things that came with it
+
+The attribute bridge itself transferred almost unchanged: `attr_type_info()`,
+`attr_locate()`, `attr_null_sentinel()`, `mt_matter_attr_read()`,
+`mt_matter_attr_write()` and `MatterPostAttributeChangeCallback()` are the nRF's
+functions with `LOG_ERR` spelled `HEARTH_LOGE` and `Status` written out in full.
+The as-built rules hold as stated: one external store, the ember path rather
+than `mt_dyn_attr_slot()`, both notify modes echo `+MTATTR`, a same-value write
+answers `OK` and echoes nothing, a transition to null never emits a URC, and
+`MT_ATTR_ERR_READONLY` is unreachable from this bridge (there is no
+Instance-served cluster in the image to make it reachable). All of those are
+bench transcripts under "Measured", "Round 2 task 6".
+
+Four things differ from the nRF arm, and each is stated in the source too.
+
+**The Instance-served carve-out is absent rather than reduced.** Not one of the
+clusters its table names is compiled into this image, which declares four
+(OnOff, Identify, Descriptor, TemperatureMeasurement) and serves none of them
+from a per-endpoint C++ object. An empty table is not even a legal array and a
+predicate with no caller is a warning in a build that claims to have none, so
+the table, its predicate and both dispatch arms are left out together. The
+section lists every removed row with the nRF batch that brings it back, and the
+rule for which rows exist at all.
+
+**The nRF's BooleanState bridge inside the change callback goes with it**, for
+the same reason: no endpoint in this image carries BooleanState, so the
+`FindClusterOnEndpoint()` call would answer `nullptr` every time.
+
+**`MatterPostAttributeChangeCallback`'s declaring header is included**, which
+the nRF arm does not do. A strong override whose signature has drifted from the
+weak default does not fail to link; it silently stops being called. Including
+`app/util/generic-callbacks.h` makes the compiler prove the match.
+
+**The read's failure arm is reachable here and the nRF calls it defensive.**
+See "Fixed endpoints are not readable through the ember path" below; the arm
+logs rather than failing silently.
+
+#### The 64-bit value the libc could not print
+
+`AT+MTATTR` is the first AT command on this image to print a 64-bit integer,
+and it did not print one. `AT+MTATTR=1,6,0` answered
+
+```
++MTATTR:1,6,0,lu
+```
+
+The ARM GNU 12.2 toolchain's **newlib-nano is compiled without
+`_WANT_IO_LONG_LONG`**, so its printf family does not know the `ll` length
+modifier at all: it consumes `%l`, meets a second `l`, treats that as an unknown
+conversion and copies the remainder out literally. `core/mt/mt_at.c` formats the
+value with `%llu` / `%lld` through the port's `hearth_link_write_line()`, a
+plain `vsnprintf()`, so the two characters `lu` went on the wire where the
+number belonged. Nothing failed, nothing warned. `AT_MT_SPEC.md` 3.8 makes the
+full width binding: "`<val>` is full-width 64-bit decimal ... so
+`18446744073709551615` round-trips on a u64 attribute".
+
+Fixed at the formatter rather than at the call site, because the gap was never
+this bridge's alone: CHIP logs node and fabric ids with `PRIx64` and OpenThread
+prints 64-bit extended addresses, so every one of those has been losing its
+value on this image since round 1. `hearth.slcp` now carries the SDK's
+**`printf`** component (third party, MIT, the mpaland implementation), which
+replaces `printf`, `sprintf`, `snprintf`, `vsnprintf`, `vprintf` and `puts`
+image-wide and supports `ll`. Cost: **3,272 B of `text`**, no `.bss` or `.data`
+change, no allocator change, no `memcpy` change.
+
+**`nano_c_libs: disabled` was tried first and rejected on evidence**, and it is
+recorded because it is the obvious thing to reach for. slc's own toolchain
+option drops `--specs=nano.specs` and links the full newlib, whose printf is
+correct. The image builds warning-free and then **hard faults during
+`Server::Init`**, before `+MTREADY`:
+
+```
+E chip: [-] HardFault:  0x48415244
+E chip: [-] SCB->CFSR   0x01000000      (UsageFault, UNALIGNED)
+E chip: [-] PC          0x0806684c      memcpy + 0x78
+E chip: [-] LR          0x08090f45      nvm3_halFlashReadWords + 0x2c
+E chip: [-] R0 0x20027204  R1 0x08175762  R2 0x00000004
+```
+
+`nvm3_hal_flash.c:159-167` calls `memcpy()` precisely and only when the source
+or destination is **not** word-aligned, which is what R1 shows, and full
+newlib's `memcpy` makes unaligned word accesses that this part traps.
+newlib-nano's byte-wise `memcpy` was quietly surviving that path. It also cost
+68,972 B of `text`. Do not re-try it without solving the NVM3 `memcpy` fault
+first.
+
+#### Fixed endpoints are not readable through the ember path
+
+`AT+MTATTR=0,0x0028,0x0002`, the root node's VendorID, answers a bare `ERROR`
+on this image, and it is the one Phase 1 `MTATTR` row that stays red. The cause
+is a tree difference, not a bug in the bridge.
+
+This SDK's CHIP serves the fixed endpoints' framework clusters through
+registered cluster objects: `autogen/zap-generated/CodeDrivenInitShutdown.cpp`
+constructs `BasicInformation`, `Descriptor`, `AccessControl` and the rest at
+endpoint 0, and ZAP therefore declares their attributes `EXTERNAL_STORAGE` so
+ember holds no bytes for them (`autogen/zap-generated/endpoint_config.h:76` is
+the VendorID row; 156 attributes in the generated config carry that mask). A
+controller's read never notices, because the data model provider asks the
+cluster registry before it reaches ember. `emberAfReadAttribute()` does not: it
+sees `EXTERNAL_STORAGE` and calls `emberAfExternalAttributeReadCallback()`,
+which is this port's and answers only for the dynamic endpoints' arena.
+
+`mt_matter_attr_read()` answers `MT_ATTR_ERR_FAILED` for it, which is the honest
+code: the attribute exists and is an integer, and this path could not read it.
+`MT_ATTR_ERR_ATTRIBUTE` would claim it does not exist. The failure is logged
+with the endpoint, cluster, attribute and ember status so the next bench session
+reads the cause instead of deriving it.
+
+Both arms' `hearth.zap` declare VendorID `External`, and the nRF arm passes this
+row, so the divergence is in what the two CHIP versions generate from that
+declaration rather than in the port. Reaching these values here needs a read
+path through the data model provider for endpoints this port did not create.
+That is a section of its own with no nRF counterpart to transfer, and it is left
+for the controller to schedule.
+
+#### The unported families' stubs know the live endpoints (step 1b)
+
+`port/mt_matter_stub.c` gained `stub_endpoint_live()`, one loop over the live
+endpoint table, and every stub that takes an endpoint id and whose
+`core/include/mt_matter.h` entry documents both an endpoint error and a
+cluster error now answers through it. Before this they all answered "no such
+endpoint" unconditionally, which was right only while no endpoint existed at
+all. It stopped being right the moment task 5 stood up the rig's light:
+eighteen Phase 1 rows exist precisely to prove a host can tell "that endpoint is
+not there" from "that endpoint is there and does not do this".
+
+Which code means "no such cluster" is read from each family's own header entry
+rather than assumed, and the three answers are not the same:
+
+| Stub | Live-endpoint answer | On the wire |
+|---|---|---|
+| `mt_matter_switch_click`, `mt_matter_temp_levels_set`, `mt_matter_lock_state_set`, `mt_matter_valve_state_set`, `mt_matter_modes_set`, `mt_matter_modebase_set`, `mt_matter_opstate_set`, `mt_matter_alarm_set`, `mt_matter_chime_sounds_set`, `mt_matter_chime_set`, `mt_matter_meas_set`, `mt_matter_demcap_set`, `mt_matter_evse_set` | `MT_ATTR_ERR_CLUSTER` | `+MTERR:3` |
+| `mt_matter_rows_apply`, `mt_matter_rows_get`, `mt_matter_rows_total`, `mt_matter_evse_targets_apply`, `mt_matter_evse_targets_get`, `mt_matter_evse_targets_total` | `MT_ROW_ERR_NO_PAYLOAD` | `+MTERR:4` |
+| `mt_matter_meter_set_identity` | `MT_ATTR_ERR_ATTRIBUTE` | `+MTERR:4` |
+
+The row family has no `MT_ROW_ERR_CLUSTER` at all: `mt_rows.h`'s codec owns that
+space and `mt_matter.h:1152-1163` says so. `mt_matter_meter_set_identity()`'s
+header entry says "deliberately not `MT_ATTR_ERR_CLUSTER`" and gives the reason,
+which is why it is the one row on its own. Stubs whose family takes no endpoint
+id are unchanged, and so is every delegate allocator: a pointer return has no
+error code to divide.
+
+Twenty stubs changed, no data model is touched by any of them, and each is
+replaced whole by the batch that ports its family.
 
 #### What task 5's transfer rewrote, and the registry policy it landed
 

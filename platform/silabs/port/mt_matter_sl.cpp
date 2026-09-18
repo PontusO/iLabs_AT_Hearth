@@ -44,6 +44,7 @@
  * no +MTATTR URC appears.
  */
 #include <app/util/generic-callbacks.h>
+#include <lib/support/TypeTraits.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/ConnectivityManager.h>
 #include <platform/ThreadStackManager.h>
@@ -575,8 +576,41 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
     chip::Protocols::InteractionModel::Status st =
         emberAfReadAttribute(ep, cluster, attr, buf, sizeof(buf));
     if (st != chip::Protocols::InteractionModel::Status::Success) {
-        /* Cannot happen once attr_locate() has already proven the
-         * endpoint/cluster/attribute triple exists; defensive only. */
+        /*
+         * The nRF arm calls this arm defensive ("cannot happen once
+         * attr_locate() has proven the triple exists"). IT IS REACHABLE IN
+         * THIS TREE and the difference is worth stating where it bites.
+         *
+         * This SDK's CHIP serves the fixed endpoints' framework clusters
+         * (BasicInformation, AccessControl, GeneralCommissioning, Descriptor
+         * and the rest of autogen/zap-generated/CodeDrivenInitShutdown.cpp)
+         * through registered cluster objects, and ZAP therefore declares
+         * their attributes EXTERNAL_STORAGE so ember holds no bytes for them.
+         * A CONTROLLER's read never notices: the data model provider asks the
+         * cluster registry first. emberAfReadAttribute() does not: it sees
+         * EXTERNAL_STORAGE and calls emberAfExternalAttributeReadCallback(),
+         * which is this port's (mt_devtypes_sl.cpp) and answers only for the
+         * dynamic endpoints' arena, so it returns UnsupportedAttribute for
+         * every fixed-endpoint attribute.
+         *
+         * Bench: AT+MTATTR=0,0x0028,0x0002 (the root VendorID) answers a bare
+         * ERROR here, and it is the harness Phase 1 row "MTATTR root VendorID
+         * read". MT_ATTR_ERR_FAILED is the honest code for it: the attribute
+         * exists and is an integer, and this path could not read it.
+         * MT_ATTR_ERR_ATTRIBUTE would claim it does not exist.
+         *
+         * Reaching those values needs a read path through the data model
+         * provider for endpoints this port did not create, which is a section
+         * of its own and has no nRF counterpart to transfer (the nRF's arm is
+         * genuinely unreachable, so the row passes there through ember). The
+         * log line is here so the next bench session reads the cause instead
+         * of deriving it again.
+         */
+        HEARTH_LOGE("matter", "attr read ep %u cluster 0x%04lX attr 0x%04lX: ember status %u "
+                              "(a fixed endpoint's code-driven cluster is not reachable through "
+                              "the ember path)",
+                    (unsigned)ep, (unsigned long)cluster, (unsigned long)attr,
+                    (unsigned)chip::to_underlying(st));
         return MT_ATTR_ERR_FAILED;
     }
 
@@ -707,6 +741,13 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
          * of the override flag noted above. */
         return MT_ATTR_ERR_VALUE;
     default:
+        /* Reachable for the same reason the read's failure arm is: a fixed
+         * endpoint's code-driven cluster has no ember bytes to write, so the
+         * external write callback answers UnsupportedAttribute. See the long
+         * comment in mt_matter_attr_read(). */
+        HEARTH_LOGE("matter", "attr write ep %u cluster 0x%04lX attr 0x%04lX: ember status %u",
+                    (unsigned)ep, (unsigned long)cluster, (unsigned long)attr,
+                    (unsigned)chip::to_underlying(st));
         return MT_ATTR_ERR_FAILED;
     }
 }
