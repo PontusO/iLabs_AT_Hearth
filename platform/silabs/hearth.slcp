@@ -36,8 +36,9 @@ description: >
   (FreeRTOS, EUSART0 on PA05/PA06 for the AT link, USART0 TX on PA00 for the
   console, NVM3 for the key-value store), Hearth's own data model, and the
   Matter stack over Thread and BLE. Round 2 task 3 starts the stack before
-  +MTREADY; the upward port is still stubbed, so the AT surface answers as the
-  skeleton did.
+  +MTREADY, task 4 answers the commissioning, network and Thread surface from
+  the running stack, and task 5 rebuilds the stored endpoint composition as
+  dynamic endpoints at boot.
 
 sdk_extension:
   # Silicon Labs Matter 2.8.1-1.5, prepared and patched into $MATTER_EXT_ROOT
@@ -73,6 +74,13 @@ source:
   # every declaration is defined in exactly one of the two.
   - path: port/mt_matter_sl.cpp
   - path: port/mt_matter_stub.c
+  # The device-type side of the upward port, round 2 task 5: the 52-row
+  # registry, the endpoint block arena, the external attribute store, the two
+  # device types this round builds and the ember external-attribute callbacks.
+  # mt_devtypes_stub.c below is now empty and kept only so the .slcp, the host
+  # Makefile's silabs-stubs target and check_decls.py keep naming the same
+  # pair; its own comment says what deleting it would cost.
+  - path: port/mt_devtypes_sl.cpp
   - path: port/mt_devtypes_stub.c
   # core/: mirrors core/sources.cmake, which is authoritative.
   - path: ../../core/at/at_parser.c

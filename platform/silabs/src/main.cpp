@@ -55,6 +55,11 @@
 #include "hearth_matter_init.h"
 #include "hearth_port.h"
 #include "mt_at.h"
+#include "mt_comp_store.h"
+#include "mt_composition.h"
+#include "mt_devtypes.h"
+#include "mt_dyn_store.h"
+#include "mt_matter.h"
 #include "mt_port_ids.h"
 
 extern "C" void app_init_early(void);
@@ -68,12 +73,21 @@ namespace {
  * the line references. */
 constexpr const char *kBleDeviceName = HEARTH_BLE_DEVICE_NAME;
 
-/* Rebuild the endpoints the host declared over AT+MTEP. Empty until the
- * upward port lands: it needs the dynamic endpoint machinery and the device
- * type catalogue, neither of which exists yet. It is called from where it has
- * to be called from, which is why the empty version is here rather than
- * nowhere: after Server::Init (the ember tables exist only then) and before
- * mt_at_start() (so no +MTATTR URC can precede +MTREADY). */
+/*
+ * Rebuild the endpoint composition the host declared over AT+MTEP. The
+ * device does this unaided so it rejoins its fabric after a power cut
+ * without waiting on the host (design spec section 5.3).
+ *
+ * Real since round 2 task 5; the body is platform/nrf54l15/src/main.cpp
+ * 40-108 with its Zephyr log macros replaced. It is called from where it has
+ * to be called from: after Server::Init (the ember tables
+ * emberAfSetDynamicEndpoint() writes exist only then) and before
+ * mt_at_start() (so no +MTATTR URC can precede +MTREADY).
+ *
+ * Order is what makes the endpoint ids reproducible: mt_devtype_create()
+ * hands out 1..N in composition order from a counter reset at every boot,
+ * so replaying the same stored composition yields the same ids.
+ */
 void rebuild_composition(void);
 
 /* mt_at_start() calls hearth_link_init() itself (core/mt/mt_at.c); a second
@@ -124,7 +138,85 @@ void hearth_boot_task(void *arg)
     vTaskDelete(NULL);
 }
 
-void rebuild_composition(void) {}
+void rebuild_composition(void)
+{
+    /*
+     * Run-once, made checkable here rather than left as a property of the
+     * single call site. mt_devtype_create() allocates each endpoint's block
+     * from a bump arena and never frees (port/mt_devtypes_sl.cpp explains why
+     * that is safe), and the whole argument rests on the allocation sequence
+     * being one monotonic run in composition order. A second call would stack
+     * a second set of blocks on the first and quietly halve the capacity the
+     * README documents, so say so locally instead of making a future reader
+     * trace callers to be sure.
+     */
+    static bool s_rebuilt;
+    if (s_rebuilt) {
+        HEARTH_LOGE("boot", "rebuild_composition() called twice; endpoint blocks are "
+                            "allocate-only");
+        return;
+    }
+    s_rebuilt = true;
+
+    mt_composition_t comp;
+    int rc = mt_comp_store_load(&comp);
+    if (rc < 0) {
+        HEARTH_LOGE("boot", "composition load failed, starting unconfigured");
+        comp.count = 0;
+    } else if (rc == 1) {
+        HEARTH_LOGI("boot", "no stored composition, starting unconfigured");
+        comp.count = 0;
+    }
+
+    for (uint16_t i = 0; i < comp.count; i++) {
+        uint16_t ep_id = 0;
+        uint32_t parent_devtype = 0;
+        uint16_t parent_ep_id = 0;
+        uint32_t dt = 0;
+        uint16_t eid = 0;
+        uint8_t var = 0;
+        uint8_t pidx = 0;
+        if (comp.parent[i] != MT_COMP_NO_PARENT) {
+            if (mt_matter_endpoint_info(comp.parent[i], &dt, &eid, &var, &pidx) != 0) {
+                /* The composition says this endpoint has a parent and the
+                 * parent is not live. Creating it unparented would present
+                 * the fabric a different device than the stored composition
+                 * describes: the same silently-wrong data model the abort
+                 * below exists to prevent. */
+                HEARTH_LOGE("boot", "endpoint %u parent index %u not live, aborting rebuild",
+                            (unsigned)i, (unsigned)comp.parent[i]);
+                break;
+            }
+            parent_devtype = dt;
+            parent_ep_id = eid;
+        }
+        if (mt_devtype_create(comp.devtype[i], comp.variant[i], parent_devtype, parent_ep_id,
+                              &ep_id) != 0) {
+            /*
+             * Abort the whole rebuild rather than skipping the failed entry.
+             * A failed create consumes no endpoint id, so every endpoint
+             * after it would shift down by one and a commissioned device
+             * would silently get the wrong data model. See design spec 12.1.
+             * The same abort covers a parenting failure (mt_devtype_create()
+             * returns -1 for that too) and, on this image, a device type the
+             * catalogue knows but this build does not yet construct: a
+             * live endpoint with the wrong parent, and a missing endpoint
+             * followed by renumbered ones, are the identical kind of
+             * silently-wrong data model.
+             */
+            HEARTH_LOGE("boot", "endpoint %u (0x%04X) failed, aborting rebuild", (unsigned)i,
+                        (unsigned)comp.devtype[i]);
+            break;
+        }
+        mt_matter_record_endpoint(comp.devtype[i], ep_id, comp.variant[i], comp.parent[i]);
+    }
+
+    HEARTH_LOGI("boot", "composition rebuilt: %u endpoint(s)",
+                (unsigned)mt_matter_endpoint_count());
+    /* Beside the line it explains: how much of the endpoint arena that
+     * composition actually cost. */
+    mt_dyn_arena_report();
+}
 
 } // namespace
 

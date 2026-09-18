@@ -36,26 +36,10 @@
 
 /* ---- live composition ---------------------------------------------------- */
 
-uint16_t mt_matter_endpoint_count(void) { return 0; }
-
-int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id, uint8_t *variant,
-                            uint8_t *parent_idx)
-{
-    (void)index;
-    if (devtype != NULL) *devtype = 0;
-    if (ep_id != NULL) *ep_id = 0;
-    if (variant != NULL) *variant = 0;
-    if (parent_idx != NULL) *parent_idx = 0;
-    return -1;
-}
-
-void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant, uint8_t parent_idx)
-{
-    (void)devtype;
-    (void)ep_id;
-    (void)variant;
-    (void)parent_idx;
-}
+/* Round 2 task 5 moved this section to port/mt_matter_sl.cpp, which answers
+ * it from the table the boot rebuild fills: mt_matter_endpoint_count,
+ * mt_matter_endpoint_info and mt_matter_record_endpoint. The banner stays so
+ * the section can be found by the same name in both files. */
 
 /* ---- attribute read/write ------------------------------------------------ */
 
@@ -318,4 +302,21 @@ int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total)
     return MT_ROW_ERR_ENDPOINT;
 }
 
-int mt_matter_evse_targets_erase_all(void) { return -1; }
+/*
+ * Ruling B493: this ANSWERS rather than refuses, and the 0 is the honest
+ * answer rather than a convenient one.
+ *
+ * core/mt/mt_at.c's cmd_mtfreset() calls this before mt_matter_factory_reset()
+ * so that a factory reset leaves no EVSE charging schedule behind. This image
+ * has no EVSE device type and therefore no targets store at all, so there is
+ * nothing to erase and erasing nothing SUCCEEDED. Returning -1 would make
+ * AT+MTFRESET fail on a device whose state is already exactly what the command
+ * asks for, which is the transport stub's precedent one command over: a stub
+ * for a capability the image does not have answers for the state it is in
+ * instead of refusing the question.
+ *
+ * The EVSE round's real implementation replaces this; until then AT+MTFRESET
+ * is exercised on the bench (round 2 task 5) and must answer OK, clear the
+ * composition and reboot.
+ */
+int mt_matter_evse_targets_erase_all(void) { return 0; }

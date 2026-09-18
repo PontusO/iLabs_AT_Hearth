@@ -8,10 +8,12 @@
  * size K_HEAP_DEFINE arenas in mt_devtypes_zephyr.cpp and mt_matter_zephyr.cpp
  * and their whole rationale is stated against a Zephyr allocator that does not
  * exist here; carrying them over as numbers with a foreign explanation would
- * be a comment that lies. The MG24 port's own allocation strategy belongs to
- * the task that builds the dynamic endpoints, and that task adds its budget
- * here with its own arithmetic beside it. The nRF file is the reference for
- * how that arithmetic is written down.
+ * be a comment that lies. Round 2 task 5 is the task that builds the dynamic
+ * endpoints, and HEARTH_EP_ARENA_BYTES below is its budget, with its own
+ * arithmetic beside it. There is still no object-arena budget here, because
+ * this round builds no device type whose cluster server needs a per-endpoint
+ * delegate; see the note beside the live endpoint table in
+ * port/mt_matter_sl.cpp.
  */
 
 #pragma once
@@ -59,3 +61,32 @@ constexpr uint16_t kCatalogueEndpointId = 240;
  * that capacity never exceeds acceptance.
  */
 constexpr uint16_t kServiceableEndpoints = 16;
+
+/*
+ * The endpoint block arena, round 2 task 5.
+ *
+ * One block per created dynamic endpoint, holding that endpoint's
+ * DataVersion array and its attribute slots (port/mt_devtypes_sl.cpp has the
+ * layout, the per-type sizing table and the compiler-checked floor). The
+ * arena is a static array with a bump allocator, not a heap: this image has
+ * exactly one heap (sl_memory_manager's, shared by FreeRTOS, CHIP, mbedTLS
+ * and OpenThread since freertos_heap_3 arrived with the Matter platform in
+ * task 2), and an endpoint composition must not be able to starve it. The
+ * cost model is therefore rounding alone, with no allocator overhead at all:
+ * a block costs its payload rounded up to 8, and the arena's usable bytes
+ * are its gross bytes. The nRF's equivalent numbers are not comparable and
+ * were deliberately not copied: they price Zephyr's sys_heap chunk header
+ * and bucket table.
+ *
+ * 3,072 is 16 x 192, i.e. kServiceableEndpoints blocks of the widest device
+ * type this build declares (the on/off light: 3 clusters and 11 attribute
+ * slots, 188 payload bytes, 192 after rounding). The temperature sensor, the
+ * only other type built this round, is 160. So every composition this image
+ * accepts, it can build, which is a stronger promise than the nRF arm makes
+ * (its 8,112 usable bytes hold eight of its widest type, not sixteen) and is
+ * affordable only while the catalogue is two device types deep. The floor
+ * assertion in mt_devtypes_sl.cpp is written to FAIL when a wider device
+ * type is added, so the batch that adds one has to choose between raising
+ * this number and lowering the promise, in the open.
+ */
+#define HEARTH_EP_ARENA_BYTES 3072

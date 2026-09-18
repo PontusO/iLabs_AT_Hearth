@@ -12,6 +12,7 @@
  * Sections present so far:
  *
  *   - commissioning state, network, Thread   nRF 388-602   (round 2 task 4)
+ *   - the live endpoint table                nRF 604-663   (round 2 task 5)
  *
  * Everything else in mt_matter.h is still answered by port/mt_matter_stub.c,
  * and the linker plus test/host's check_decls.py prove between them that every
@@ -45,6 +46,7 @@ extern "C" {
 }
 
 #include "hearth_log.h"
+#include "mt_port_ids.h"
 
 using chip::DeviceLayer::ConnectivityMgr;
 using chip::DeviceLayer::ThreadStackMgr;
@@ -265,3 +267,94 @@ extern "C" const char *mt_thread_role_name(uint8_t role)
     default: return nullptr;
     }
 }
+
+/* ---- the live endpoint table (nRF 604-663) ---------------------------- */
+
+/*
+ * What the boot rebuild actually created, in creation order. The stored
+ * composition (mt_comp_store.h) is the intent; this is the outcome, and
+ * AT+MTEP? reports this one. Parallel arrays rather than a struct array,
+ * mirroring the C6's s_live_* tables so the three ports read alike.
+ *
+ * Written only from the boot path in src/main.cpp, before mt_at_start() lets
+ * any AT command run, so there is no concurrent access to guard. It also
+ * touches no CHIP state, which is why it takes no stack lock while every
+ * other function in this file does.
+ *
+ * Depth is kServiceableEndpoints (capacity), not MT_COMP_MAX_ENDPOINTS
+ * (acceptance): the only writer is mt_matter_record_endpoint(), which
+ * main.cpp calls once per endpoint that mt_devtype_create() actually stood
+ * up, so an entry here can only exist for an endpoint this build is
+ * serving. A composition may DECLARE 28, but the seventeenth never gets
+ * created and so is never recorded. Nothing indexes these by composition
+ * index either: mt_matter_endpoint_info() bounds its caller against
+ * s_live_count, which is what main.cpp's parent lookup passes through.
+ */
+static uint32_t s_live_devtype[kServiceableEndpoints];
+static uint16_t s_live_ep_id[kServiceableEndpoints];
+static uint8_t s_live_variant[kServiceableEndpoints];
+static uint8_t s_live_parent[kServiceableEndpoints];
+static uint16_t s_live_count;
+
+extern "C" uint16_t mt_matter_endpoint_count(void)
+{
+    return s_live_count;
+}
+
+extern "C" int mt_matter_endpoint_info(uint16_t index, uint32_t *devtype, uint16_t *ep_id,
+                                       uint8_t *variant, uint8_t *parent_idx)
+{
+    if (index >= s_live_count) {
+        if (devtype) *devtype = 0;
+        if (ep_id) *ep_id = 0;
+        if (variant) *variant = 0;
+        if (parent_idx) *parent_idx = 0;
+        return -1;
+    }
+    if (devtype) *devtype = s_live_devtype[index];
+    if (ep_id) *ep_id = s_live_ep_id[index];
+    if (variant) *variant = s_live_variant[index];
+    if (parent_idx) *parent_idx = s_live_parent[index];
+    return 0;
+}
+
+extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint8_t variant,
+                                          uint8_t parent_idx)
+{
+    if (s_live_count >= kServiceableEndpoints) {
+        return;
+    }
+    s_live_devtype[s_live_count] = devtype;
+    s_live_ep_id[s_live_count] = ep_id;
+    s_live_variant[s_live_count] = variant;
+    s_live_parent[s_live_count] = parent_idx;
+    s_live_count++;
+}
+
+/*
+ * ---- what is NOT in this file, and what the batch that needs it brings ---
+ *
+ * THE CLUSTER-OBJECT ARENA (nRF mt_matter_zephyr.cpp 133-386, and its sizing
+ * tail at 9137-9472). On the nRF that arena replaced fourteen fixed pools,
+ * one slot per endpoint that COULD carry the family: the OperationalState,
+ * RvcOperationalState, ModeBase, Chime, valve, EPM, PowerTopology, WHM, DEM,
+ * MeterIdentification and EVSE Delegates and the raw storage for their
+ * cluster Instances, 14,368 B of .bss and .data before the change. Every one
+ * of those families belongs to a device type round 2 task 5 does not build:
+ * the two types it does build (the on/off light and the temperature sensor)
+ * carry OnOff, TemperatureMeasurement, Identify and Descriptor, none of which
+ * has a per-endpoint delegate at all.
+ *
+ * So the arena is absent rather than reduced. Carrying it would mean a static
+ * array sized for allocations nothing makes, a set of template helpers
+ * (obj_pair_new, obj_inst_storage, obj_new, obj_inst_new) with no caller, and
+ * a sizing tail every constant of which is a sizeof() of a class this image
+ * does not compile. The batch that ports the first delegate-bearing device
+ * type brings three things together, and they only make sense together: the
+ * arena, the family's pool with its depth constant, and mt_devtype_create()'s
+ * claim block in port/mt_devtypes_sl.cpp (the note there says the same thing
+ * from the other side). The arena mechanism itself is already here:
+ * hearth_arena in port/mt_dyn_store.h is the allocator both arenas use, and
+ * that batch adds an instance and a budget in port/mt_port_ids.h beside
+ * HEARTH_EP_ARENA_BYTES, not a new mechanism.
+ */
