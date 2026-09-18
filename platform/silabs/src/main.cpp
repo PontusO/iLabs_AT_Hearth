@@ -2,9 +2,23 @@
  * main.cpp - the sl_main hooks and Hearth's bootstrap task.
  *
  * Under sl_main with a kernel the SDK owns main(): main_retarget.c wraps
- * it, runs sl_main_init(), calls app_init_early() and app_init() from the
- * start task, and starts the scheduler. Nothing here starts the scheduler
- * and nothing here is called before the kernel exists.
+ * it and runs sl_main_init(), then sl_main_kernel_start(). The two hooks
+ * below do NOT run at the same point, and the difference decides what may
+ * go in each (SiSDK 2025.12.3,
+ * platform_core/platform/service/sl_main/src/sl_main_init.c):
+ *
+ *   app_init_early()  called from sl_main_init():353, after
+ *                     sl_clock_manager_init():319 and the device_init
+ *                     steps, and BEFORE osKernelInitialize():362. The
+ *                     clocks are up; the kernel does not exist yet, so
+ *                     nothing here may call an API that needs a running
+ *                     scheduler.
+ *   app_init()        called from the SDK's own main(), src/rtos/main.c:38,
+ *                     i.e. on the start task with the kernel running, after
+ *                     sl_main_second_stage_init() (sl_platform_init,
+ *                     sl_driver_init, sl_service_init, sl_stack_init).
+ *
+ * Nothing here starts the scheduler.
  *
  * Boot contract (layout spec section 5, MG24 spec section 6): platform up,
  * console, then mt_at_start() on a task, which emits +MTREADY. No URC

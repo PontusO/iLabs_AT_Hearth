@@ -46,9 +46,13 @@ def check(header, impls, label):
                 continue
             # A trailing comment is not part of the statement, so it is cut
             # before the semicolon test: "void f(void);  /* why */" is a
-            # declaration just as much as "void f(void);" is.
+            # declaration just as much as "void f(void);" is. The brace test
+            # is what keeps that cut safe: a one-line definition whose body
+            # holds a comment ("void f(int a) { g(a); /* why */ }") also cuts
+            # down to text ending in ';', and skipping it would hide a second
+            # definition, which is the case this gate exists to catch.
             code = re.sub(r'(/\*.*|//.*)$', '', line).rstrip()
-            if code.endswith(';'):
+            if code.endswith(';') and '{' not in code:
                 continue                    # a declaration, not a definition
             if '//' in line.split(name, 1)[0]:
                 continue                    # the name sits in a C++ comment
