@@ -37,3 +37,18 @@
  * app_init_early(): it allocates, takes mutexes and creates tasks.
  */
 CHIP_ERROR hearth_matter_init(const char *ble_name);
+
+/*
+ * Point CHIP's log output at Hearth's console. Separate from the bring-up, and
+ * called from app_init_early() right after hearth_console_init(), because the
+ * SDK's Bluetooth and OpenThread tasks start logging through CHIP as soon as
+ * the kernel does: installed inside hearth_matter_init() instead, everything
+ * those tasks say before the boot task is scheduled would be dropped (the RTT
+ * sink is silent until silabsInitLog(), which GetPlatform().Init() calls from
+ * inside the bring-up).
+ *
+ * It is one atomic store (TextOnlyLogging.cpp:121-124) and takes no lock, so it
+ * is safe before the scheduler starts. It must come after hearth_console_init()
+ * or the first line through it is dropped.
+ */
+void hearth_matter_log_route_init(void);

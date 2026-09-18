@@ -177,13 +177,15 @@ CHIP_ERROR InitOpenThread(void)
 
 } // namespace
 
-CHIP_ERROR hearth_matter_init(const char *ble_name)
+void hearth_matter_log_route_init(void)
 {
 #if HEARTH_CHIP_LOG_TO_CONSOLE
-    /* Before anything else, so the stack's own init lines are visible. */
     Logging::SetLogRedirectCallback(ChipLogToConsole);
 #endif
+}
 
+CHIP_ERROR hearth_matter_init(const char *ble_name)
+{
     /* SilabsMatterConfig::AppInit():238. NvmInit() (SilabsConfig::Init() plus
      * the NVM3 key migrations) is what KeyValueStoreManagerImpl and
      * ConfigurationManagerImpl read through, so this is not optional; it also

@@ -33,6 +33,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "cmsis_os2.h"
+
 /* Round 2 task 2: there is no separate FreeRTOS heap in this image any more.
  * matter_platform_mg requires freertos_heap_3, the port that forwards
  * pvPortMalloc() to the C library's malloc(), which the SDK's linker wraps into
@@ -123,22 +125,59 @@ void rebuild_composition(void) {}
 extern "C" void app_init_early(void)
 {
     hearth_console_init();
+    /* After the console and before everything else: the SDK's Bluetooth and
+     * OpenThread tasks log through CHIP from the moment the kernel starts, and
+     * those lines are the ones a boot-order question needs. */
+    hearth_matter_log_route_init();
     HEARTH_LOGI("boot", "Hearth on USART0 TX PA00, 115200 8N1 (sl_main)");
 }
 
 /* Runs on the sl_main start task with the kernel running. */
 extern "C" void app_init(void)
 {
-    /* 1,280 words is 5,120 bytes, the size of the sample's own bootstrap
-     * thread (kMainTaskStackSize, MatterConfig.cpp:192, where osThreadAttr_t's
-     * stack_size is in BYTES and xTaskCreate's depth is in WORDS). It was
-     * 1,024 words through round 1 and round 2 tasks 1 and 2, when the task's
-     * deepest call was mt_at_start(); it now runs the whole of
-     * hearth_matter_init(), which is the path the sample sized that thread
-     * for. The task is deleted a few instructions after +MTREADY, so this is
-     * not a standing cost. */
+    /* Stack: 1,280 words is 5,120 bytes, the size of the sample's own
+     * bootstrap thread (kMainTaskStackSize, MatterConfig.cpp:192, where
+     * osThreadAttr_t's stack_size is in BYTES and xTaskCreate's depth is in
+     * WORDS). It was 1,024 words through round 1 and round 2 tasks 1 and 2,
+     * when the task's deepest call was mt_at_start(); it now runs the whole of
+     * hearth_matter_init(), which is the path the sample sized that thread for.
+     *
+     * PRIORITY IS LOAD-BEARING, and it is the sample's for the same reason its
+     * stack is. kMainTaskAttr (MatterConfig.cpp:194-200) asks for
+     * osPriorityRealtime7, which the CMSIS-RTOS2 shim turns into FreeRTOS
+     * priority (prio - 1), i.e. 54 of configMAX_PRIORITIES 56.
+     *
+     * Through round 2 task 3 this task ran at tskIDLE_PRIORITY + 1, and the
+     * Matter stack then came up but never advertised over BLE. The cause,
+     * measured on the console once the CHIP log route was installed early
+     * enough to see it:
+     *
+     *   I chip: [DL] Bluetooth stack booted: v11.0.2-b0
+     *   E chip: [DL] Failed to schedule work: 1c
+     *   ... later ...
+     *   I chip: [DL] Init CHIP Stack
+     *
+     * sl_main creates the start task at osPriorityRealtime7 as well
+     * (sl_main_kernel.c:74-88, "the highest priority") and
+     * SL_MAIN_ENABLE_START_TASK_PRIORITY_CHANGE is 0, so it keeps that
+     * priority through app_init(). A boot task below the Bluetooth event
+     * handler task (SL_BT_RTOS_EVENT_HANDLER_TASK_PRIORITY 50, FreeRTOS 49)
+     * therefore runs AFTER the Bluetooth stack's boot event is dispatched.
+     * BLEManagerImpl::HandleBootEvent() (BLEManagerImpl.cpp:785-789) sets
+     * Flags::kSiLabsBLEStackInitialize and its ScheduleWork fails because the
+     * platform manager does not exist yet; then _Init() runs inside
+     * InitChipStack() and its mFlags.ClearAll() (:155) throws the flag away.
+     * No second boot event ever comes, so DriveBLEState() returns at its first
+     * line (:417) for the life of the image and CHIPoBLE never advertises.
+     *
+     * At the sample's priority the whole bring-up completes before the
+     * Bluetooth event handler is scheduled, which is what makes the flag
+     * arrive after _Init rather than before it. The cost is that the console's
+     * blocking writes (about 10 ms a line at 115200) hold the CPU against
+     * every lower task for the ~350 ms the init log takes; that is a boot-time
+     * cost on a task that deletes itself a few instructions after +MTREADY. */
     if (xTaskCreate(hearth_boot_task, "hearth_boot", 1280, NULL,
-                    tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+                    (UBaseType_t)(osPriorityRealtime7 - 1), NULL) != pdPASS) {
         /* Round 1 deferral: a boot task that fails to create was silent on
          * both UARTs. Say so on the console; there is nothing else to do. */
         HEARTH_LOGE("boot", "boot task could not be created (heap %u B free)",
