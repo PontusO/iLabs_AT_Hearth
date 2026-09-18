@@ -179,8 +179,9 @@ static_assert(kServiceableEndpoints <= MT_COMP_MAX_ENDPOINTS,
  * THE STANDING CONDITION. EVERY attribute row in every table in this file
  * must carry ZAP_ATTRIBUTE_MASK(EXTERNAL_STORAGE). Today every row gets it
  * for free: DECLARE_DYNAMIC_ATTRIBUTE() ORs it in unconditionally
- * (attribute-storage.h:73-77) and so does the cluster-revision row that
- * ..._LIST_END() appends (:57-59), and this file contains no hand-rolled
+ * (attribute-storage.h:73-77, the OR itself at :76) and so does the
+ * cluster-revision row that ..._LIST_END() appends (the macro is :57-61 and
+ * the row's EXTERNAL_STORAGE is on :59), and this file contains no hand-rolled
  * EmberAfAttributeMetadata row at all, so the condition holds
  * SYNTACTICALLY here. It does not hold that way on the nRF arm, which has
  * two hand-rolled MIN_MAX rows (the BatPercentRemaining entries in its two
