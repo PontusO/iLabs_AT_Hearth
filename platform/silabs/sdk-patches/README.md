@@ -98,12 +98,34 @@ its configuration macro, marked in place as downstream-only and to be dropped
 when upstreaming, and `HEARTH_EEM_PATCH_REV` in `toolchain.env` is the number
 this tree expects. Bump the two together when a patch is re-cut.
 
-Both branches were verified on 2026-09-18 rather than read off the code: the
-gate was run against the round 1 hand-made copy, which has no stamp, and
-refused; and against the prepared tree with the expected revision moved to 3,
-and refused. The prepare itself also has a positive control, a `grep` for the
-marker in the tree it has just patched, so a patch that applied to the wrong
-place cannot write a stamp.
+Both branches were verified on 2026-09-18 by running them, not by reading the
+code. Three cases, against the real files:
+
+```
+$ bash -c 'source platform/silabs/toolchain.env; echo "source returned $?"'
+  # round 1's hand-made copy, which has no stamp at all
+toolchain.env: /home/pontus/silabs/matter_extension-2.8.1 is not prepared at patch revision 2
+toolchain.env: run platform/silabs/fw/sdk-prepare.sh
+source returned 1
+
+$ echo "HEARTH_EEM_POOL_PATCH_REV 1" > "$MATTER_EXT_ROOT/.hearth-stamp"
+  # a prepared tree carrying an OLDER cut of the patch: the case a presence
+  # check would pass
+toolchain.env: ... is not prepared at patch revision 2
+toolchain.env: run platform/silabs/fw/sdk-prepare.sh
+source returned 1
+
+$ platform/silabs/fw/sdk-prepare.sh && source platform/silabs/toolchain.env
+source returned 0
+```
+
+The second case is the one that matters, and it is the reason the marker exists:
+the tree is fully patched, it builds and runs, and only the revision says the
+patch is not the one this repository ships.
+
+The prepare itself also has a positive control, a `grep` for the marker in the
+tree it has just patched, so a patch that applied to the wrong place cannot
+write a stamp.
 
 Adding a patch means one more `.patch` and `.sha256` pair in
 `matter_sdk/`; `sdk-prepare.sh` loops over the directory. A patch with its own

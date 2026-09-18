@@ -38,38 +38,29 @@
       "id": 1,
       "name": "MA-rootdevice",
       "deviceTypeRef": {
-        "code": 18,
+        "code": 22,
         "profileId": 259,
-        "label": "MA-otarequestor",
-        "name": "MA-otarequestor",
+        "label": "MA-rootdevice",
+        "name": "MA-rootdevice",
         "deviceTypeOrder": 0
       },
       "deviceTypes": [
-        {
-          "code": 18,
-          "profileId": 259,
-          "label": "MA-otarequestor",
-          "name": "MA-otarequestor",
-          "deviceTypeOrder": 0
-        },
         {
           "code": 22,
           "profileId": 259,
           "label": "MA-rootdevice",
           "name": "MA-rootdevice",
-          "deviceTypeOrder": 1
+          "deviceTypeOrder": 0
         }
       ],
       "deviceVersions": [
-        1,
         4
       ],
       "deviceIdentifiers": [
-        18,
         22
       ],
-      "deviceTypeName": "MA-otarequestor",
-      "deviceTypeCode": 18,
+      "deviceTypeName": "MA-rootdevice",
+      "deviceTypeCode": 22,
       "deviceTypeProfileId": 259,
       "clusters": [
         {

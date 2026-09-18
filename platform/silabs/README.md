@@ -467,13 +467,27 @@ why the two arms' models are comparable. What task 2 changed:
 - **Endpoint 240, the disabled catalogue endpoint**, keeps Identify, Groups,
   On/Off, Descriptor and Temperature Measurement enabled and every other
   catalogue cluster `"enabled": 0`. The entries are disabled, not deleted: a
-  later batch re-enables the clusters it needs with one flag each. The endpoint
-  type is still named `MA-dimmablelight` and still declares device type 0x0101,
-  inherited unchanged from the nRF file; the endpoint is disabled and its device
-  type list is never read, so the name is a label rather than a claim.
+  later batch re-enables the clusters it needs with one flag each.
 - **Endpoint 0** keeps the root-node set with **OTA Software Update Requestor
   and Provider disabled**: the update story is host-driven serial flashing
-  (`FIRMWARE_UPDATE_SPEC.md`), deliberately not Matter OTA.
+  (`FIRMWARE_UPDATE_SPEC.md`), deliberately not Matter OTA. **Its
+  `MA-otarequestor` DEVICE TYPE went with them**, so endpoint 0 declares Root
+  Node 0x0016 alone and `FIXED_DEVICE_TYPES` reads
+  `{{0x00000016,4},{0x00000101,3}}`. Disabling the clusters without removing the
+  device type left the root node advertising device type 0x0012 whose mandatory
+  cluster 0x002A is absent, which a certification tool reads as a broken
+  declaration and a controller can see the moment the stack runs. Endpoint 0 is
+  never disabled, so this one was not cosmetic.
+- **Endpoint 240's device type 0x0101 (dimmable light) is left as it is**, with
+  Level Control disabled under it. It is the same shape of inconsistency and it
+  is deliberately not the same problem: this endpoint is the CATALOGUE, the port
+  disables it at runtime before any fabric can read it (which is what "disabled
+  catalogue endpoint" means and is task 3's `emberAfEndpointEnableDisable`
+  call), and its device type list is never served. Removing it would diverge
+  this arm's model from the nRF arm's, which carries the same entry, for no wire
+  effect. A known artefact, recorded here so nobody has to rediscover it; the
+  round that gives endpoint 240 a device type it means is the one that should
+  change it, for both arms.
 - The two `"package"` paths point at the extension's `zcl.json` and
   `app-templates.json` as **absolute paths on this machine**, exactly as the nRF
   file points at its NCS workspace. They are overridden at every generation, by
@@ -496,6 +510,7 @@ Generated figures, read out of `data_model/zap-generated/endpoint_config.h`
 |---|---|
 | `FIXED_ENDPOINT_COUNT` | `(2)` |
 | `FIXED_ENDPOINT_ARRAY` | `{ 0x0000, 0x00F0 }` |
+| `FIXED_DEVICE_TYPES` | `{{0x00000016,4},{0x00000101,3}}` |
 | `GENERATED_CLUSTER_COUNT` | 18 |
 | `ATTRIBUTE_LARGEST` | `(66)` |
 | `ATTRIBUTE_MAX_SIZE` | `(46)` |

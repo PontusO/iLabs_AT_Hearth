@@ -86,14 +86,21 @@ generate() {
 }
 
 if [ "$CHECK" -eq 1 ]; then
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
-    generate "$tmp" > "$tmp.log" 2>&1 || { cat "$tmp.log"; exit 1; }
-    if diff -r -q "$OUT" "$tmp" > /dev/null; then
+    # One working directory holding BOTH the fresh tree and the generator log,
+    # so the trap takes the log with it. The log cannot sit beside the tree it
+    # describes: diff -r would then report it as a file the committed tree is
+    # missing, and every check would fail.
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
+    fresh="$work/zap-generated"
+    log="$work/zap.log"
+    mkdir -p "$fresh"
+    generate "$fresh" > "$log" 2>&1 || { cat "$log"; exit 1; }
+    if diff -r -q "$OUT" "$fresh" > /dev/null; then
         echo "zap-generated is current (zap $HEARTH_ZAP_VERSION)"
     else
         echo "zap-generated is STALE against $ZAP_FILE (zap $HEARTH_ZAP_VERSION):" >&2
-        diff -r -q "$OUT" "$tmp" >&2 || true
+        diff -r -q "$OUT" "$fresh" >&2 || true
         echo "run platform/silabs/fw/zap-regen.sh and commit the result" >&2
         exit 1
     fi
