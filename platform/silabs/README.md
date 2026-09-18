@@ -327,8 +327,9 @@ third for the Wi-Fi SDK that this Thread port does not need); one path alone
 cannot resolve `hearth.slcp`'s `sdk_extension:` stanza. `slc signature trust`
 was never needed: the extension's components generate without it.
 
-`~/silabs/work/hearth-matter-t3` is round 2 task 3's build directory, and the
-one the current image came from. Task 2's `~/silabs/work/hearth-matter`, round
+`~/silabs/work/hearth-matter-t3r` is round 2 task 3's build directory after its
+review fix, and the one the current image came from. Task 2's
+`~/silabs/work/hearth-matter`, round
 1's `~/silabs/work/hearth-skeleton` and task 1's `~/silabs/work/hearth-core` are
 left where they are: the figures under "Measured" that name them are those
 trees', and they are not re-derivable from a directory that has been rebuilt
@@ -730,6 +731,59 @@ the advertisement goes up. The cost is that the console's blocking writes (about
 ~350 ms the init log takes. That is a boot-time cost on a task that deletes
 itself a few instructions later.
 
+#### A log line from a fault handler does not wait for the mutex
+
+`hearth_log_write()` (`port/hearth_port_sl.c`) used to take the console mutex
+with `portMAX_DELAY` from whatever context called it. The log route above turned
+that into a hazard, because three of the callers
+`src/sdk/SoftwareFaultReports.cpp` adds are not task context:
+
+- `debugHardfault()`, reached from `HardFault_Handler`, `BusFault_Handler`,
+  `UsageFault_Handler`, `mpu_fault_handler`, `SecureFault_Handler`,
+  `DebugMon_Handler` and `WDOG0_IRQHandler`;
+- `vApplicationStackOverflowHook()`, called from `vTaskSwitchContext()` inside
+  the PendSV handler, i.e. during a context switch;
+- `RAILCb_AssertFailed()`, called from the radio interrupt.
+
+A FreeRTOS mutex must not be touched from an interrupt with any timeout, and if
+the faulting task happened to hold the lock the handler waited forever, which is
+the silent fault the strong hooks were added to end. `log_may_block()` now
+answers the question once for every caller: no lock in handler mode
+(`__get_IPSR() != 0`), none before the scheduler runs or while it is suspended,
+and a direct lock-free write at the peripheral instead. The cost is that a fault
+report can interleave with a line another task is mid-way through.
+
+Measured on the bench, 2026-09-18, with a scratch probe (never committed) that
+took `s_log_lock` and then wrote to `0xFFFFFFF0`. Before the guard, the console
+stopped dead at the probe's own line and the whole report was lost:
+
+```
+I boot: +MTREADY sent, free heap 98968 B
+I boot: fault probe: taking the log lock, then writing 0xFFFFFFF0
+                                     (nothing further, AT link 10 bytes)
+```
+
+After it, the report is complete:
+
+```
+I boot: fault probe: taking the log lock, then writing 0xFFFFFFF0
+E chip: [-] HardFault:  0x48415244
+E chip: [-] SCB->CFSR   0x00008200
+E chip: [-] SCB->HFSR   0x40000000
+E chip: [-] SCB->MMFAR  0xfffffff0
+E chip: [-] SCB->BFAR   0xfffffff0
+E chip: [-] SP          0x20025880
+... R0 through PSR ...
+```
+
+`0x48415244` is `debugHardfault`'s `'HARD'` tag; CFSR `0x00008200` is
+PRECISERR with BFARVALID, and BFAR is the address the probe wrote.
+
+**A probe that faulted WITHOUT holding the lock printed the report either way**,
+which is why the contended case is the one that was measured: an uncontended
+`xSemaphoreTake` from an interrupt happens to work on this port, so a check
+against the easy case would have passed with the bug still in.
+
 #### CHIP's log output is on the console now
 
 Round 2 task 2 recorded that CHIP logs reach a SEGGER RTT buffer and neither
@@ -772,15 +826,15 @@ linked image:
 
 ```
 $ arm-none-eabi-nm -C build/debug/hearth.out | grep -E " (vApplication|HardFault|BusFault|UsageFault|RAILCb|debugHardfault)"
-08052bc8 T BusFault_Handler
-08052a7c T debugHardfault
-08052ba0 T HardFault_Handler
-08052ccc T RAILCb_AssertFailed
-08052bdc T UsageFault_Handler
-08052c9c T vApplicationGetIdleTaskMemory
-0806e54e W vApplicationIdleHook
-08052c18 T vApplicationMallocFailedHook
-08052c4c T vApplicationStackOverflowHook
+08052bfc T BusFault_Handler
+08052ab0 T debugHardfault
+08052bd4 T HardFault_Handler
+08052d00 T RAILCb_AssertFailed
+08052c10 T UsageFault_Handler
+08052cd0 T vApplicationGetIdleTaskMemory
+0806e582 W vApplicationIdleHook
+08052c4c T vApplicationMallocFailedHook
+08052c80 T vApplicationStackOverflowHook
 ```
 
 `vApplicationIdleHook` stays weak on purpose: the sample's implementation lives
@@ -1166,31 +1220,35 @@ claims to be.
 
 ### Round 2 task 3: the Matter stack started
 
-Built 2026-09-18 from the committed tree at `21b0b8c` in
-`~/silabs/work/hearth-matter-t3` by the "Building" recipe above (a clean
+Built 2026-09-18 from the committed tree at `489531e` in
+`~/silabs/work/hearth-matter-t3r` by the "Building" recipe above (a clean
 `slc generate` into an empty directory), flashed with `fw/flash.py` and run on
 the MGM240PA32VNA3 on the iLabs RP2350 carrier. `hearth.bin`
-`md5sum 4fa64cbbc44eaadc9349fdc98daceb94`.
+`md5sum 0162cb7e0b7e8407323717465e793054`.
+
+These figures were re-recorded after the review fix (`489531e`), which adds 116
+bytes of `.text`; the tree at `21b0b8c` measured 824,560 / 827,928 and its
+directory `~/silabs/work/hearth-matter-t3` is left beside this one.
 
 This image initialises `chip::Server`, runs the CHIP event loop and advertises
 over BLE. The upward port is still `port/mt_matter_stub.c`, so the AT surface
 answers exactly as it did.
 
 ```
-$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-t3 \
-      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-t3/build.log
-$ grep -c deprecated ~/silabs/work/hearth-matter-t3/build.log
+$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-t3r \
+      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-t3r/build.log
+$ grep -c deprecated ~/silabs/work/hearth-matter-t3r/build.log
 0
-$ grep -ci warning ~/silabs/work/hearth-matter-t3/build.log
+$ grep -ci warning ~/silabs/work/hearth-matter-t3r/build.log
 0
 ```
 
-`arm-none-eabi-size ~/silabs/work/hearth-matter-t3/build/debug/hearth.out`, with
+`arm-none-eabi-size ~/silabs/work/hearth-matter-t3r/build/debug/hearth.out`, with
 task 2's figures beside it:
 
 | | Task 3, bytes | Task 2, bytes | Delta |
 |---|---|---|---|
-| `text` | 824 560 | 728 200 | +96 360 |
+| `text` | 824 676 | 728 200 | +96 476 |
 | `data` | 3 352 | 3 116 | +236 |
 | `bss` (size's, includes the heap section) | 258 340 | 258 576 | -236 |
 
@@ -1198,7 +1256,7 @@ task 2's figures beside it:
 
 | Section | Task 3, bytes | Task 2 | Where |
 |---|---|---|---|
-| `.text` | 823 724 | 727 364 | flash |
+| `.text` | 823 840 | 727 364 | flash |
 | `.vectors` | 368 | 368 | flash, at 0x08006000 |
 | `.ARM.exidx` | 8 | 8 | flash |
 | `.copy.table` | 12 | 12 | flash |
@@ -1221,12 +1279,12 @@ gives that back.
 
 ```
 $ ls -l hearth.bin hearth.gbl hearth.s37
--rwxrwxr-x 1 pontus pontus  827928 Sep 18 17:52 hearth.bin
--rw-rw-r-- 1 pontus pontus  828000 Sep 18 17:52 hearth.gbl
--rwxrwxr-x 1 pontus pontus 2483832 Sep 18 17:52 hearth.s37
+-rwxrwxr-x 1 pontus pontus  828044 Sep 18 18:28 hearth.bin
+-rw-rw-r-- 1 pontus pontus  828116 Sep 18 18:28 hearth.gbl
+-rwxrwxr-x 1 pontus pontus 2484176 Sep 18 18:28 hearth.s37
 ```
 
-The application image on flash is **827 928 B**, 53.76 % of the 1 540 096 B
+The application image on flash is **828 044 B**, 53.77 % of the 1 540 096 B
 application region, against task 2's 731 332 B and 47.49 %. The stock Silicon
 Labs `lighting-app` for this part was 1 025 140 B with the shell, the OTA
 requestor, scenes, level and colour control; the nRF54L15 core round shipped at
@@ -1234,14 +1292,14 @@ requestor, scenes, level and colour control; the nRF54L15 core round shipped at
 figure in this round where it is, and it carries a catalogue endpoint's worth of
 cluster servers that no composition serves yet.
 
-`hearth.gbl` is **828 000 B**, which `fw/flash.py` sent as 6 469 blocks in
+`hearth.gbl` is **828 116 B**, which `fw/flash.py` sent as 6 470 blocks in
 91.8 s with no retransmits (task 2: 5 715 blocks in 81.0 s).
 
 #### Free heap at `+MTREADY`, task 3
 
 **98 968 B free**, logged by `sl_memory_get_free_heap_size()` immediately after
-`mt_at_start()` returns, out of the 139 624 B `.memory_manager_heap`. Task 2's
-figure at the same point was 104 784 B, so the running stack has taken about
+`mt_at_start()` returns, out of the 139 624 B `.memory_manager_heap`, and
+unchanged by the review fix. Task 2's figure at the same point was 104 784 B, so the running stack has taken about
 5.8 KB of heap by the time the marker goes out.
 
 **The measurement point matters more than it used to, and this figure is not the
@@ -1262,11 +1320,11 @@ CDC with DTR and RTS cleared before the open, whose own reset is the reset being
 watched.
 
 ```
-AT in full: b'+MTREADY\r\n', 10 bytes        (first byte at 0.340 s)
+AT in full: b'+MTREADY\r\n', 10 bytes        (first byte at 0.343 s)
 ```
 
 **Nothing before it and nothing else**, with the whole Matter stack coming up in
-between. The marker arrives at 0.340 s against task 2's 0.151 s; the extra
+between. The marker arrives at 0.343 s against task 2's 0.151 s; the extra
 ~190 ms is `hearth_matter_init()`, most of it the console printing the stack's
 own init log at 115200.
 
@@ -1312,7 +1370,7 @@ I at_parser: parser started
 I boot: +MTREADY sent, free heap 98968 B
 I chip: [DL] Bluetooth stack booted: v11.0.2-b0
 I chip: [DL] RAIL version:, v3.0.3-b0
-I chip: [DL] BLE Static Device Address CC:0F:28:A4:A2:69
+I chip: [DL] BLE Static Device Address DB:60:00:F8:AF:DB
 I chip: [DL] Starting advertising with interval_min=32, intverval_max=96 (units of 625us)
 I chip: [DL] _OnPlatformEvent default:  event->Type = 32781
 I chip: [DL] _OnPlatformEvent default:  event->Type = 32779
@@ -1337,10 +1395,10 @@ The liveness proof this task owes, `bluetoothctl` on the dev box, 2026-09-18
 
 ```
 $ bluetoothctl     # scan le; the module was reset by the capture above
-[NEW] Device CC:0F:28:A4:A2:69 Hearth
+[NEW] Device DB:60:00:F8:AF:DB Hearth
 
-$ bluetoothctl info CC:0F:28:A4:A2:69
-Device CC:0F:28:A4:A2:69 (random)
+$ bluetoothctl info DB:60:00:F8:AF:DB
+Device DB:60:00:F8:AF:DB (random)
 	Name: Hearth
 	Alias: Hearth
 	UUID: Unknown                   (0000fff6-0000-1000-8000-00805f9b34fb)
