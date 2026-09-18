@@ -16,14 +16,18 @@
  *   app_init()        called from the SDK's own main(), src/rtos/main.c:38,
  *                     i.e. on the start task with the kernel running, after
  *                     sl_main_second_stage_init() (sl_platform_init,
- *                     sl_driver_init, sl_service_init, sl_stack_init).
+ *                     sl_driver_init, sl_service_init, sl_stack_init and
+ *                     sl_internal_app_init, sl_main_init.c:220-226). The last
+ *                     of those is where OpenThread's instance is created, and
+ *                     with it chip::Platform::MemoryInit(); see the note in
+ *                     port/hearth_matter_init.cpp.
  *
  * Nothing here starts the scheduler.
  *
  * Boot contract (layout spec section 5, MG24 spec section 6): platform up,
- * console, then mt_at_start() on a task, which emits +MTREADY. No URC
- * precedes the marker. The Matter stack init lands in hearth_boot_task()
- * in Task 3 of the matter-core plan, ahead of mt_at_start().
+ * console, the Matter stack, the endpoint composition, then mt_at_start() on
+ * a task, which emits +MTREADY. No URC precedes the marker, so everything
+ * that could raise one has to happen on the near side of it.
  */
 
 #include "FreeRTOS.h"
@@ -41,15 +45,34 @@
  */
 #include "sl_memory_manager.h"
 
+#include <app/util/endpoint-config-api.h>
+#include <platform/CHIPDeviceLayer.h>
+
 #include "hearth_console.h"
 #include "hearth_log.h"
+#include "hearth_matter_init.h"
 #include "hearth_port.h"
 #include "mt_at.h"
+#include "mt_port_ids.h"
 
 extern "C" void app_init_early(void);
 extern "C" void app_init(void);
 
 namespace {
+
+/* The name advertised while a commissioning window is open. It REPLACES the
+ * SDK's "<prefix><discriminator>" form rather than prefixing it; the note
+ * beside CHIP_DEVICE_CONFIG_BLE_DEVICE_NAME_PREFIX in CHIPProjectConfig.h has
+ * the line references. */
+constexpr const char *kBleDeviceName = HEARTH_BLE_DEVICE_NAME;
+
+/* Rebuild the endpoints the host declared over AT+MTEP. Empty until the
+ * upward port lands: it needs the dynamic endpoint machinery and the device
+ * type catalogue, neither of which exists yet. It is called from where it has
+ * to be called from, which is why the empty version is here rather than
+ * nowhere: after Server::Init (the ember tables exist only then) and before
+ * mt_at_start() (so no +MTATTR URC can precede +MTREADY). */
+void rebuild_composition(void);
 
 /* mt_at_start() calls hearth_link_init() itself (core/mt/mt_at.c); a second
  * call here would leak the RX semaphore and TX mutex and reconfigure EUSART0
@@ -58,11 +81,39 @@ void hearth_boot_task(void *arg)
 {
     (void)arg;
     HEARTH_LOGI("boot", "boot task up, model %s", hearth_port_model());
+
+    CHIP_ERROR err = hearth_matter_init(kBleDeviceName);
+    if (err != CHIP_NO_ERROR) {
+        /* Nothing to fall back to: an image whose stack did not come up
+         * cannot serve the AT+MT contract, and answering +MTREADY would be a
+         * lie. Say which error on the console and stop. fw/flash.py's exit
+         * status is the other half of this: no +MTREADY is a failed flash. */
+        HEARTH_LOGE("boot", "matter init failed: %" CHIP_ERROR_FORMAT, err.Format());
+        vTaskDelete(NULL);
+        return;
+    }
+
+    {
+        /* This runs on the boot task, not the CHIP event loop, so every call
+         * into the stack from here needs the lock (SL_MATTER_STACK_LOCK_-
+         * TRACKING_MODE is FATAL in config/sl_matter_config.h: a violation
+         * kills the device rather than racing quietly).
+         *
+         * The catalogue endpoint exists only to compile cluster server code
+         * into the image (MG24 spec section 3); it is never visible on the
+         * fabric, and this is where it stops being. */
+        chip::DeviceLayer::StackLock lock;
+        emberAfEndpointEnableDisable(kCatalogueEndpointId, false);
+    }
+
+    rebuild_composition();
     mt_at_start();          /* emits +MTREADY once the parser task is up */
     HEARTH_LOGI("boot", "+MTREADY sent, free heap %u B",
                 (unsigned)sl_memory_get_free_heap_size());
     vTaskDelete(NULL);
 }
+
+void rebuild_composition(void) {}
 
 } // namespace
 
@@ -78,7 +129,15 @@ extern "C" void app_init_early(void)
 /* Runs on the sl_main start task with the kernel running. */
 extern "C" void app_init(void)
 {
-    if (xTaskCreate(hearth_boot_task, "hearth_boot", 1024, NULL,
+    /* 1,280 words is 5,120 bytes, the size of the sample's own bootstrap
+     * thread (kMainTaskStackSize, MatterConfig.cpp:192, where osThreadAttr_t's
+     * stack_size is in BYTES and xTaskCreate's depth is in WORDS). It was
+     * 1,024 words through round 1 and round 2 tasks 1 and 2, when the task's
+     * deepest call was mt_at_start(); it now runs the whole of
+     * hearth_matter_init(), which is the path the sample sized that thread
+     * for. The task is deleted a few instructions after +MTREADY, so this is
+     * not a standing cost. */
+    if (xTaskCreate(hearth_boot_task, "hearth_boot", 1280, NULL,
                     tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
         /* Round 1 deferral: a boot task that fails to create was silent on
          * both UARTs. Say so on the console; there is nothing else to do. */

@@ -35,8 +35,9 @@ description: >
   carrier: the portable core/ engine, the Simplicity SDK downward port
   (FreeRTOS, EUSART0 on PA05/PA06 for the AT link, USART0 TX on PA00 for the
   console, NVM3 for the key-value store), Hearth's own data model, and the
-  Matter stack over Thread and BLE. Round 2 task 2 links the stack in; the
-  upward port is still stubbed, so the AT surface answers as the skeleton did.
+  Matter stack over Thread and BLE. Round 2 task 3 starts the stack before
+  +MTREADY; the upward port is still stubbed, so the AT surface answers as the
+  skeleton did.
 
 sdk_extension:
   # Silicon Labs Matter 2.8.1-1.5, prepared and patched into $MATTER_EXT_ROOT
@@ -47,6 +48,21 @@ sdk_extension:
 
 source:
   - path: src/main.cpp
+  # Hearth's own Matter bring-up: the load-bearing half of the sample's
+  # SilabsMatterConfig::InitMatter() without the sample's AppTask. It lives in
+  # the port and not in src/ because it is platform code, like everything else
+  # here that names an SDK symbol.
+  - path: port/hearth_matter_init.cpp
+  # The FreeRTOS fault hooks and the ARM fault handlers, a verbatim copy of the
+  # extension's examples/platform/silabs/SoftwareFaultReports.cpp. Copied into
+  # the repository rather than referenced because slc resolves these paths
+  # relative to THIS file and there is no portable relative path from here to
+  # $MATTER_EXT_ROOT; src/sdk/README.md carries the origin, the staleness check
+  # and why silabs_utils.cpp did not come with it. Without this file
+  # vApplicationStackOverflowHook, vApplicationMallocFailedHook and
+  # HardFault_Handler are the SDK's weak stubs and a fault is a silent hang.
+  # The samples get it from matter_platform_mg, which this project drops.
+  - path: src/sdk/SoftwareFaultReports.cpp
   - path: port/hearth_port_sl.c
   - path: port/hearth_ring.c
   - path: port/hearth_kvid.c

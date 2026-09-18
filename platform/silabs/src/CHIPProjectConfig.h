@@ -66,12 +66,49 @@
 #define CHIP_DEVICE_CONFIG_DEVICE_VENDOR_NAME "iLabs"
 #define CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME "Hearth"
 
-/* The name the device advertises over BLE while a commissioning window is open,
- * as "<prefix><4-digit discriminator>" (BLEManagerImpl.cpp). The SDK default is
- * "MATTER-", which would put the word on the air as this product's name; the
- * protocol is named, the product is Hearth.
+/* The name the device advertises over BLE while a commissioning window is open.
+ *
+ * There are TWO of these and only one of them is ever on the air.
+ *
+ * HEARTH_BLE_DEVICE_NAME is what src/main.cpp hands hearth_matter_init(), which
+ * passes it to ConnectivityMgr().SetBLEDeviceName(). That call sets
+ * Flags::kDeviceNameSet (BLEManagerImpl.cpp:251-266) and the advertisement then
+ * carries this string verbatim. It is the equivalent of the sample's
+ * BLE_DEV_NAME ("SL-Light", examples/lighting-app/silabs/include/AppConfig.h:35),
+ * which is why the stock example advertises as SL-Light and not as
+ * MATTER-<discriminator>.
+ *
+ * CHIP_DEVICE_CONFIG_BLE_DEVICE_NAME_PREFIX is the SDK's fallback, used to build
+ * "<prefix><4-digit discriminator>" only when no name has been set
+ * (BLEManagerImpl.cpp:466-471). Round 2 task 2 set it because the SDK default is
+ * "MATTER-", which would put the word on the air as this product's name: the
+ * protocol is named, the product is Hearth. Round 2 task 3 made it inert by
+ * setting a name, and it is kept because it is still the right answer for the
+ * path that does not.
+ *
+ * Which of the two a shipping product should advertise is a wire-surface
+ * question for the qualification round. A fixed name is easier for a host to
+ * recognise; the discriminator form tells two units apart, which on this build
+ * it would not, because the discriminator is the fixed test value below.
  */
+#define HEARTH_BLE_DEVICE_NAME "Hearth"
 #define CHIP_DEVICE_CONFIG_BLE_DEVICE_NAME_PREFIX "HEARTH-"
+
+/* The CHIP event loop task's stack, in bytes (PlatformManagerImpl_FreeRTOS).
+ *
+ * 8,192 is the SDK's own default for this platform and is written down rather
+ * than inherited: CHIPDevicePlatformConfig.h:133-146 records that a Thread
+ * lighting app's high stack watermark during commissioning is 5,232 bytes, and
+ * 6,576 when built with LTO. The sample's own CHIPProjectConfig.h sets 10,240
+ * only under __ZEPHYR__, so 8,192 is the value the shipping Silicon Labs
+ * examples actually run on.
+ *
+ * Hearth puts LESS on this task than the sample does, not more: it has no
+ * AppTask, and the AT command families run on the AT parser task and enter the
+ * stack under the lock. The number is here so that a later round that moves
+ * work onto the event loop changes it deliberately.
+ */
+#define CHIP_DEVICE_CONFIG_CHIP_TASK_STACK_SIZE (8 * 1024)
 
 /* Transport. BLE for commissioning, Thread for operation, and a router-capable
  * Full Thread Device: the role is a product capability and is stated here
