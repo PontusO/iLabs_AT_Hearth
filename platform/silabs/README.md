@@ -798,6 +798,26 @@ a number the Matter stack's interrupt handlers will share, so the first task
 that adds one should know it moved. `SL_STACK_SIZE` in the `.slcp`'s
 `configuration:` is the one line that raises it.
 
+The checked `xTaskCreate()` was proven by injecting the failure, 2026-09-18:
+the boot task's stack request was temporarily raised to 60 000 words, which
+`configTOTAL_HEAP_SIZE` cannot satisfy, and that image was built, flashed and
+watched on both ports. The console said so and the AT link stayed silent:
+
+```
+  0.062  CONSOLE b'I boot: Hearth on USART0 TX PA00, 11520'
+  0.072  CONSOLE b'0 8N1 (sl_main)\r\n'
+  0.092  CONSOLE b'E boot: boot task could not be created (FreeRTOS heap 20272 B free)\r\n'
+
+AT in full: b'', 0 bytes
+```
+
+`fw/flash.py` exited 1 on that image with "no +MTREADY within 20 s after the
+upload", which is the other half of the contract: a boot that fails is a flash
+that fails, not a flash that passes quietly. The tree was restored and the
+measured image reflashed immediately afterwards; the injected build is not a
+commit and its directory was deleted. Round 1's version of this path logged
+nothing on either UART, which is why the row existed.
+
 ### Free FreeRTOS heap at `+MTREADY`, round 2
 
 `configTOTAL_HEAP_SIZE` is unchanged at 24 576. `xPortGetFreeHeapSize()`
