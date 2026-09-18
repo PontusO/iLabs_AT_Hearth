@@ -1,6 +1,15 @@
 # Hearth on Silicon Labs EFR32MG24 (MGM240P)
 
-Status: **round 1 (bring-up, downward port, boot contract) is complete on
+Status: **round 2 (the Matter core) is complete and bench-accepted on
+`dev/silabs-mg24-bringup`, 2026-09-18.** The MGM240PA32VNA3 speaks Matter over
+Thread: it was commissioned onto the bench border router's fabric twice in one
+session (nodes `0x4901` and, after `AT+MTFRESET`, `0x4902`), a controller
+toggles the light and the `+MTATTR` URC reports it on the AT link, an AT-side
+write to the temperature sensor reads back from the controller, and harness
+Phase 1 is 292/4 while commissioned. What it does not do yet is on this page:
+"What round 2 leaves open" at the end. Round 1's own status, unchanged:
+
+**Round 1 (bring-up, downward port, boot contract) was complete on
 `dev/silabs-mg24-bringup`, 2026-09-17.** The Hearth skeleton boots on the
 MGM240PA32VNA3, prints its boot log on the console and answers the `AT+MT`
 surface: `+MTREADY` on the wire, the harness Phase 0 gate passed and Phase 1
@@ -67,6 +76,18 @@ below). And every stub for a family this image has not ported stopped answering
 endpoint table. Phase 1 moves to **292/4** ("Measured", "Round 2 task 6"),
 and all four remaining failures are named there with their cause: each stages a
 composition of catalogue device types this round does not build.
+
+**Task 7, 2026-09-18, proved the round on the bench and closed its memory
+record.** Two commissionings, both control directions, a factory reset between
+them, Phase 1 at 292/4 while commissioned, the first burst that ever fired the
+RX ring overflow warning, and the flash, RAM, arena and NVM3 figures with their
+provenance ("Measured", "Round 2 task 7"; "Commissioning" for the procedure and
+the transcripts). One source change came with it, the NVM3 occupancy boot line,
+because the bench has no other way to read that figure. Two things the
+acceptance could not answer are named rather than passed: the commissioning
+`+MTEVT` URCs, which no Thread arm emits because the platform event bridge is
+unported on both, and harness Phase 2, which aborts at its own `ot-ctl`
+precondition on this bench.
 
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
@@ -363,10 +384,13 @@ third for the Wi-Fi SDK that this Thread port does not need); one path alone
 cannot resolve `hearth.slcp`'s `sdk_extension:` stanza. `slc signature trust`
 was never needed: the extension's components generate without it.
 
-`~/silabs/work/hearth-matter-t6r` is round 2 task 6's build directory after its
-fix round, and the one the current image came from; `~/silabs/work/hearth-matter-t6`
-is the same task's pre-fix-round tree, kept because the tiny printf's own
-3,272 B figure is measured against it. Task 5's `~/silabs/work/hearth-matter-t5`,
+`~/silabs/work/hearth-matter-t7` is round 2 task 7's build directory and the
+one the current image came from. It is also the directory task 7's scratch heap
+probe was built and flashed from and then removed again, which the rebuilt
+`hearth.bin`'s md5 proves left nothing behind ("Round 2 task 7").
+`~/silabs/work/hearth-matter-t6r` is round 2 task 6's tree after its fix round;
+`~/silabs/work/hearth-matter-t6` is the same task's pre-fix-round tree, kept
+because the tiny printf's own 3,272 B figure is measured against it. Task 5's `~/silabs/work/hearth-matter-t5`,
 task 4's `~/silabs/work/hearth-matter-t4`,
 task 3's `~/silabs/work/hearth-matter-t3r` (its directory after the review
 fix), task 2's `~/silabs/work/hearth-matter`, round 1's
@@ -965,6 +989,18 @@ index, and a round that changes one arm finds the other through it.
 The nRF line ranges are against that file as it stands in the firmware
 repository on `dev/fota-firmware`; they are a reading aid, not a promise that
 the file has not moved since.
+
+**What is NOT in that table, and is not waiting on a catalogue batch either:
+the platform event bridge.** `+MTEVT` is core's surface (`mt_at_event()`,
+`core/mt/mt_at.c:1620`, with the subscription mask `AT_MT_SPEC.md` 3.11
+specifies), and the only call site in this repository is the ESP32-C6's
+`platform/esp32c6/main/main.cpp`. The nRF arm has none either, so there is no
+section to transfer: the row a future table gains is a CHIP platform event
+handler registered with `PlatformMgr().AddEventHandler()` mapping
+`DeviceEventType` to the bit numbers the spec allocates, written once for both
+Thread arms. Task 7 measured the consequence rather than inferring it (no URC
+of any kind during either commissioning, with the mask wide open); see
+"Commissioning" and "What round 2 leaves open".
 
 Everything in `core/include/mt_matter.h` that has no row above is still
 answered by `port/mt_matter_stub.c`. `test/host/check_decls.py` (run by
@@ -1592,14 +1628,18 @@ the whole reason the project builds its own.
 
 ## Commissioning
 
-Recorded 2026-09-17, stock Silabs `lighting-app` built for MGM240PA32VNA,
-flashed as a `.gbl` through the bootloader above, against the bench border
-router.
+**Hearth is commissioned on this carrier, twice, 2026-09-18** (round 2 task 7,
+the round's bench acceptance). The procedure below is the Hearth image's; the
+round 1 record of the stock Silicon Labs sample is kept after it, because it is
+what proved the radio and the border router before Hearth had a stack.
 
-The Thread operational dataset is a credential. `ot-ctl` could not be used: the
-control socket `/run/openthread-wpan0.sock` is `root:root` and a non-root user
-cannot connect to it. otbr-agent's D-Bus interface serves the same value
-without sudo and without touching the daemon:
+The Thread operational dataset is a credential. `ot-ctl` cannot be used on this
+bench for two independent reasons, both measured: it is not on this user's PATH
+at all (`ot-ctl state` exits 127), and `/run/openthread-wpan0.sock` is
+`srwxr-xr-x root:root`, so a non-root user cannot connect to it. otbr-agent's
+D-Bus property serves the same value without sudo and without touching the
+daemon, which stayed `active` throughout (`systemctl is-active otbr-agent`,
+checked before and after every step):
 
 ```bash
 DS="$(busctl --system get-property io.openthread.BorderRouter.wpan0 \
@@ -1607,12 +1647,163 @@ DS="$(busctl --system get-property io.openthread.BorderRouter.wpan0 \
         ActiveDatasetTlvs --json=short \
       | python3 -c 'import json,sys; print("".join("%02x"%b for b in json.load(sys.stdin)["data"]))')"
 CT=~/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool
-"$CT" pairing ble-thread 0x51 "hex:$DS" 20202021 3840 \
-      --storage-directory /tmp/ct-silabs-example 2>&1 | sed -E 's/[0-9a-fA-F]{24,}/[HEX]/g'
 ```
 
-The dataset stays in a shell variable, is never printed, and every hex run of
-24 characters or more in chip-tool's output is redacted. Result:
+The dataset stays in a shell variable, is never printed and never written to a
+file, and every hex run of 24 characters or more in chip-tool's output is
+replaced before anything is quoted here. The Thread extended PAN id and network
+name are redacted below as well: they are dataset fields, shorter than the
+24-character rule catches, and nothing on this page needs them.
+
+### The AT side, then the controller
+
+1. `AT+MTEPCLEAR`, `AT+MTEP=256`, `AT+MTEP=770`, `AT+MTEPAPPLY` stages the
+   acceptance composition (an on/off light and a temperature sensor). Apply
+   reboots the module; the composition is rebuilt as dynamic endpoints before
+   `+MTREADY`, so `AT+MTEP?` reads back what the device is serving.
+2. `AT+MTSTATE?` reads `+MTSTATE:1,0` on a factory-fresh device: `Server::Init`
+   opens the commissioning window on its own, so the window is already there.
+   `AT+MTCOMMISSION` re-opens it if it has closed; it answers `OK` either way,
+   and `AT+MTSTATE?` then reads `1,<fabrics>`.
+3. chip-tool pairs over BLE and hands the device the dataset:
+
+```bash
+"$CT" pairing ble-thread 0x4901 "hex:$DS" 20202021 3840 \
+      --storage-directory /tmp/ct-hearth-mg24
+```
+
+The discriminator `3840` and the passcode `20202021` are
+`src/CHIPProjectConfig.h`'s `CHIP_DEVICE_CONFIG_USE_TEST_SETUP_DISCRIMINATOR`
+(`0xF00`) and `..._USE_TEST_SETUP_PIN_CODE`. They are development credentials,
+as is the VID `0xFFF1`: consumer hubs are expected to refuse them.
+
+Both commissionings succeeded on the first attempt. **`fw/srp-aaaa-shim.sh` was
+not needed**: chip-tool's operational discovery found the device on the same
+host that runs the border router, and the CASE session came up without it. The
+nRF arm needs that workaround; this one did not on 2026-09-18, and nothing was
+changed on the border router to make that true.
+
+| | First | Second |
+|---|---|---|
+| Node id | `0x4901` | `0x4902` |
+| Before it | factory-fresh, `+MTSTATE:1,0`, `+MTFABRICS:0` | after `AT+MTFRESET`, composition restaged |
+| chip-tool | exit 0 | exit 0 |
+| Console | `Commissioning completed successfully` | `Commissioning completed successfully` |
+| Fabric | index `0x1`, compressed id `0xFA98BD812AC6C240` | index `0x1`, compressed id `0xFA98BD812AC6C240` |
+| `AT+MTSTATE?` after | `+MTSTATE:2,1` | `+MTSTATE:2,1` |
+| `AT+MTFABRICS?` after | `+MTFABRICS:1` | `+MTFABRICS:1` |
+| `AT+MTTHREAD?` after | `ROUTER`, attached | `REED`, attached |
+| `AT+MTNET?` after | `+MTNET:THREAD,1,1,0` | `+MTNET:THREAD,1,1,0` |
+
+The two Thread roles differ because they were read at different points in the
+same promotion: a freshly attached device is a REED and is promoted to ROUTER
+by the mesh a little later. Both are decoded from the running stack by
+`mt_matter_thread_info()`, and a read 25 s after a reboot shows the settled
+value:
+
+```
+AT+MTTHREAD?  ->  +MTTHREAD:UNASSIGNED,0,12,0x5CD1,0x[EXTPANID],0x00000000,"[NET]"
+                                                        (immediately after boot)
+AT+MTTHREAD?  ->  +MTTHREAD:ROUTER,1,12,0x5CD1,0x[EXTPANID],0x282CCFEA,"[NET]"
+                                                        (25 s later, attached)
+```
+
+### The URC order observed: there is none, and why
+
+**No URC of any kind reached the AT link during either commissioning.** The AT
+port was held open in listen mode for the whole of both runs, with no command
+in flight, and the count was zero both times.
+
+That is not a defect in this round's work and it is not a surprise once
+located: **nothing in this port emits `+MTEVT` at all, and nothing in the nRF
+port does either.** `mt_at_event()` is core's (`core/mt/mt_at.c:1620`), the
+subscription mask is core's and works here, and the only call site in the whole
+repository is the ESP32-C6's `platform/esp32c6/main/main.cpp`. Measured on this
+image rather than inferred:
+
+```
+AT+MTEVT?             ->  +MTEVTMASK:0x0800003F / OK     the default mask
+AT+MTEVT=0xFFFFFFFF   ->  OK                             subscribe to everything
+AT+MTEVT?             ->  +MTEVTMASK:0xFFFFFFFF / OK
+AT+MTCOMMISSION       ->  OK                             the window opens
+AT+MTSTATE?           ->  +MTSTATE:1,1                   ... and it IS open
+                          (no +MTEVT:0, and none for the 15 s after it)
+```
+
+So the surface exists and answers, and the platform half that would raise the
+events is unported on both Thread arms. It needs a CHIP platform event handler
+(`PlatformMgr().AddEventHandler()`) mapping `DeviceEventType` to the bit
+numbers `AT_MT_SPEC.md` 3.11 allocates, which is a section with no nRF
+counterpart to transfer. It is in "What round 2 leaves open" with its owner.
+
+The spec's acceptance item 4 asks for "the commissioning URCs arrive in order
+after `+MTREADY`". This round cannot answer it, and says so rather than
+quietly passing the item on the three checks it can answer.
+
+### Control both ways
+
+Both directions were exercised against both nodes. The AT port is held open in
+listen mode while chip-tool runs and no AT command is in flight then, because
+`ATLink` would otherwise absorb the URC into a command's response lines
+(the harness's standing rule, T1 design section 8 N23).
+
+```
+$ chip-tool onoff toggle 0x4901 1
+  Received Command Response Status for Endpoint=1 Cluster=0x0000_0006 Command=0x0000_0002 Status=0x0
+  [AT URC t+0.81] +MTATTR:1,6,0,1
+AT+MTATTR=1,6,0                  ->  +MTATTR:1,6,0,1 / OK
+$ chip-tool onoff read on-off 0x4901 1
+  OnOff: TRUE
+
+AT+MTATTR=2,1026,0,2222          ->  +MTATTR:2,1026,0,2222 / OK
+$ chip-tool temperaturemeasurement read measured-value 0x4901 2
+  MeasuredValue: 2222
+```
+
+The same pair on `0x4902`, after the factory reset and the second
+commissioning: the toggle's URC arrived at t+0.92 s, `AT+MTATTR=2,1026,0,1850`
+read back from chip-tool as `MeasuredValue: 1850`. Both directions go through
+the same arena slot (every attribute on a dynamic endpoint is
+`EXTERNAL_STORAGE`), which is what makes this one test rather than two.
+
+The controller sees the composition, not just the attributes:
+
+```
+$ chip-tool descriptor read parts-list 0x4901 0           PartsList: 2 entries
+$ chip-tool descriptor read device-type-list 0x4901 1      DeviceType: 256 (On/Off Light)
+$ chip-tool descriptor read device-type-list 0x4901 2      DeviceType: 770 (Temperature Sensor)
+$ chip-tool basicinformation read vendor-id 0x4901 0       VendorID: 65521
+$ chip-tool basicinformation read product-id 0x4901 0      ProductID: 32784
+```
+
+The last two are the other half of ruling F500: `AT+MTATTR=0,40,2` answers
+`65521` and `AT+MTATTR=0,40,4` answers `32784` on the same image, so the AT
+carve-out and the controller's own read of Basic Information agree.
+
+### Reset and recommission
+
+`AT+MTFRESET` erases the fabrics and the composition and reboots:
+
+```
+AT+MTFRESET   ->  OK          then +MTREADY
+AT+MTEP?      ->  OK          no rows: the composition is gone
+AT+MTSTATE?   ->  +MTSTATE:1,0
+AT+MTFABRICS? ->  +MTFABRICS:0
+```
+
+The console's own boot line for that reboot says the same from the other side:
+`no stored composition, starting unconfigured`, `composition rebuilt: 0
+endpoint(s)`, `endpoint arena: 0 of 3072 B handed out`. The composition was
+then restaged and the device commissioned again as `0x4902`, so two full
+commissionings happened in one session on one image.
+
+### Round 1: the stock Silicon Labs sample
+
+Recorded 2026-09-17, stock Silabs `lighting-app` built for MGM240PA32VNA,
+flashed as a `.gbl` through the bootloader above, against the same bench border
+router, with the same D-Bus dataset read and the same redaction. It is kept
+because it is what proved this module's radio and this bench's border router
+before Hearth had a Matter stack at all.
 
 | | |
 |---|---|
@@ -1627,10 +1818,13 @@ session, not BLE, so they prove the device joined the mesh.
 
 ## Measured
 
-Seven sets of figures live here. **"Round 2 task 6" immediately below is the
-current image**, the first one whose attributes are readable and writable over
-AT. "Round 2 task 5" after it is the same image with dynamic endpoints but no
-attribute bridge, which is what task 6's figures are measured against. "Round 2
+Eight sets of figures live here. **"Round 2 task 7" immediately below is the
+current image**, the round's bench acceptance and its memory record: it is task
+6's image plus one NVM3 boot line, commissioned onto the bench fabric twice.
+"Round 2 task 6" after it is the first image whose attributes are readable and
+writable over AT, and is what task 7's figures are measured against. "Round 2
+task 5" after that is the same image with dynamic endpoints but no attribute
+bridge, which is what task 6's figures are measured against. "Round 2
 task
 4" after that is the same image with the commissioning, network and Thread
 surface answering from the stack but every device-type function still a stub,
@@ -1657,6 +1851,319 @@ two are identical (see "Harness Phase 0 and Phase 1"). The two build logs
 differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
+
+### Round 2 task 7: the bench acceptance, and the round's memory record
+
+The current image, 2026-09-18, built from the committed tree at `a9d6ae6` in a
+fresh `~/silabs/work/hearth-matter-t7` by the "Building" recipe above, flashed
+with `fw/flash.py` over XMODEM. The only source change since task 6's fix round
+is the NVM3 boot line this section needed; everything else in this section is
+measurement, not change. `otbr-agent` was `active` before and after every step
+and was never started, stopped or reconfigured.
+
+```
+$ git status --porcelain      (clean)
+$ slc generate -d ~/silabs/work/hearth-matter-t7 --sdk-package-path "$SISDK_ROOT" \
+      --sdk-package-path "$MATTER_EXT_ROOT" -p platform/silabs/hearth.slcp \
+      --with MGM240PA32VNA --generator-timeout=180 -o makefile
+$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-t7 \
+      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-t7/build.log
+$ grep -ci warning   ~/silabs/work/hearth-matter-t7/build.log    0
+$ grep -c deprecated ~/silabs/work/hearth-matter-t7/build.log    0
+$ cd build/debug && commander gbl create hearth.gbl --app hearth.s37
+```
+
+#### Flash
+
+`arm-none-eabi-size` on `~/silabs/work/hearth-matter-t7/build/debug/hearth.out`,
+2026-09-18, against task 6's fix-round figures:
+
+| | Task 7 | Task 6 fix round | Delta |
+|---|---|---|---|
+| `text` | 845 340 | 844 956 | +384 |
+| `data` | 3 368 | 3 368 | 0 |
+| `bss` (size's, includes the heap section) | 258 324 | 258 324 | 0 |
+| `.text` (`-A`) | 844 504 | 844 120 | +384 |
+| `.bss` (`-A`) | 117 720 | 117 720 | 0 |
+| `.memory_manager_heap` | 135 992 | 135 992 | 0 |
+
+The whole `+384 B` is the NVM3 boot line (`src/main.cpp`'s
+`hearth_nvm3_report()`): a format string, three calls and the `nvm3_MemInfo_t`
+on the boot task's stack. Nothing in `.bss`, nothing in `.data`, nothing at run
+time.
+
+`hearth.bin` **848 724 B**, **55.11 %** of the 1 540 096 B application region,
+`md5sum b21e738ab19fbff624bd118dd63175f1`. `hearth.gbl` 848 796 B,
+`md5sum 132c1a95d461bf3b11bec654784e70ef`, sent by `fw/flash.py` as 6 632
+blocks with 0 retransmits in 94.2 s.
+
+**The md5 identifies this one build and is not reproducible across `slc
+generate` runs** (F497, proved with a `cmp` in task 5): OpenThread's version
+banner is built from `__DATE__ __TIME__`, so two generations of the same tree
+differ in the six bytes of the time-of-day digits at that string and nowhere
+else. This task sharpened the caveat by accident and the result is worth
+keeping: a **relink** inside one generated tree IS reproducible. The scratch
+heap probe below was added, built and flashed in this same directory and then
+removed, and the rebuild came back to `md5sum b21e738a...` exactly. The banner
+string is compiled once per generation, not once per link.
+
+##### Against the three yardsticks
+
+| Yardstick | Flash | This image |
+|---|---|---|
+| Round 1 skeleton, no Matter (`text`) | 47 596 B | 845 340 B `text` |
+| Stock Silicon Labs `lighting-app`, same SDK and extension | 1 025 140 B | 848 724 B `bin`, **176 416 B below it** |
+| nRF54L15 matter-core round, app image | 753 691 B | 848 724 B, **95 033 B (12.6 %) above it** |
+
+The stock light is the yardstick that controls for the SDK generation, and
+Hearth is comfortably under it with more of the data model reachable from the
+host. The nRF figure is the one the design spec says to explain rather than
+accept, so: **it is not explained by anything measured here, and the two are
+not the same build in any sense that would make the difference attributable.**
+Different silicon vendor, different SDK, different CHIP release (Matter 1.5
+through the Silicon Labs extension 2.8.1-1.5 against the nRF arm's NCS build),
+different radio stacks (Silicon Labs' own Bluetooth host and controller plus
+RAIL multiprotocol, against Nordic's SoftDevice), and this image carries SEGGER
+RTT whether or not anything uses it, because `matter_provision_default` is not
+optional and requires `iostream_rtt` ("The components, and the three that could
+not stay"). One contributor IS named and is this arm's own choice rather than
+an accident: the catalogue endpoint compiles a set of cluster servers into the
+image that no composition serves yet, and task 3 recorded it as the reason this
+arm first crossed the nRF's figure. What IS measured, in this arm's own terms,
+is every increment this
+round added: tiny printf 3 272 B, ruling F500's carve-out 396 B, the attribute
+bridge 1 760 B, the NVM3 line 384 B. A per-component decomposition against the
+nRF arm would need both images built from one matched source list and is not
+something this round did.
+
+#### RAM
+
+The design spec's section 6 asks for RAM in three parts. On this platform there
+are only two pools, not three, and the reason is structural rather than a
+measurement gap: `matter_platform_mg`'s replacement chain requires
+`freertos_heap_3`, which forwards `pvPortMalloc()` to the C library's `malloc()`
+and therefore into `sl_memory_manager`'s one pool ("The heap changed shape").
+There is no `configTOTAL_HEAP_SIZE` and no separate FreeRTOS high-water mark to
+report.
+
+| Part | Figure | Where from |
+|---|---|---|
+| Static image | `.bss` 117 720 B + `.data` 3 368 B = **121 088 B** | `arm-none-eabi-size -A` |
+| The one heap, reserved | **135 992 B** `.memory_manager_heap` | the same |
+| Free at `+MTREADY`, uncommissioned | **95 336 B** | `sl_memory_get_free_heap_size()`, the boot task's own line |
+| Free at `+MTREADY`, one fabric stored | **95 288 B** | the same line, on the boot after commissioning |
+| Free at the first controller-driven attribute change after commissioning | **104 216 B** | the scratch probe below |
+| Free at the second, a few seconds later | **104 160 B** | the same |
+
+Two of those rows need their explanation beside them.
+
+**The fabric costs 48 B of heap held at `+MTREADY`**, 95 336 against 95 288, and
+the figure is insensitive to the endpoint count: 0, 1 and 2 endpoints all
+report 95 336 uncommissioned, because an endpoint costs `.bss` arena and not the
+shared heap (task 5 measured the same thing).
+
+**The post-commissioning figure is HIGHER than the `+MTREADY` figure, by about
+8.9 KB, and that is not a mistake.** `+MTREADY` is logged from inside
+`hearth_boot_task`, which is still holding its own 5 120-byte stack and TCB and
+runs `vTaskDelete(NULL)` a few instructions later, and CHIP's init transients
+are still outstanding at that moment. So the `+MTREADY` figure is a floor
+measured at the worst moment of the boot, and **104 KB is the steady-state
+figure with a fabric, a CASE session and two endpoints live.** Anyone comparing
+this platform's free RAM against another arm's should quote the second number
+and say which it is.
+
+##### How the post-commissioning figure was measured, and that it is gone
+
+A scratch probe, a `HEARTH_LOGI` at the top of
+`MatterPostAttributeChangeCallback` in `port/mt_matter_sl.cpp` printing
+`sl_memory_get_free_heap_size()` for the first twelve attribute changes. It was
+never committed: built and flashed from a deliberately dirty tree, read, then
+reverted, and the rebuild produced a byte-identical `hearth.bin` (md5
+`b21e738a...`), which is the evidence that nothing of it is in the shipping
+image. Its own cost while it existed was **132 B of `text`** (845 472
+against 845 340), measured on the first of the two probe builds.
+
+The first version of the probe fired once and fired at the wrong moment, which
+is worth recording because it is a fact about the boot rather than about the
+probe:
+
+```
+I probe: attr change 1 on ep 240 cluster 0x0004: heap free 101912 B
+I probe: attr change 2 on ep 240 cluster 0x0004: heap free 101912 B
+I boot: composition rebuilt: 1 endpoint(s)
+...
+I probe: attr change 3 on ep 1 cluster 0x0006: heap free 104216 B
+I probe: attr change 4 on ep 1 cluster 0x0006: heap free 104160 B
+```
+
+The first two changes are the generated code-driven init writing Groups
+attributes on **endpoint 240**, the catalogue endpoint, before
+`hearth_boot_task` disables it. `MatterPostAttributeChangeCallback`'s first line
+filters endpoint 0 and `kCatalogueEndpointId` out, so neither reached the AT
+link, and this is the first direct evidence on the console that the filter is
+load-bearing rather than defensive. Changes 3 and 4 are the two controller
+toggles.
+
+#### The arenas
+
+```
+I devtypes: endpoint arena: 0 of 3072 B handed out, 3072 B free, 0 of 16 serviceable endpoints live
+I devtypes: endpoint arena: 192 of 3072 B handed out, 2880 B free, 1 of 16 serviceable endpoints live
+I devtypes: endpoint arena: 352 of 3072 B handed out, 2720 B free, 2 of 16 serviceable endpoints live
+```
+
+Those three lines are, in order, the factory-fresh boot, the harness rig (one
+on/off light) and the acceptance composition (light plus temperature sensor).
+The light costs 192 B and the temperature sensor 160 B, both after
+`hearth_arena_cost`'s rounding to 8. At 16 serviceable endpoints the arena has
+**2 720 B of 3 072 B still free with the acceptance composition live**, so the
+tier is not close to binding on these two types; a catalogue batch with wider
+blocks is what will move it.
+
+**The second arena does not exist in this image.** The cluster-object arena is
+deliberately absent until the first delegate-bearing device type arrives
+(catalogue batch 2; the reasoning is at the end of `port/mt_matter_sl.cpp`, and
+`hearth_arena` in `port/mt_dyn_store.h` is already the allocator both will
+use). The design spec asks for "the two arenas' occupancy"; there is one, and
+this is why.
+
+#### NVM3
+
+The region, from the generated linker file and confirmed against the running
+instance:
+
+| | |
+|---|---|
+| Configured size | `NVM3_DEFAULT_NVM_SIZE 40960` in `hearth.slcp` |
+| Placement | `.nvm` is a `DSECT` in `autogen/linkerfile.ld`; `__nvm3Base = linker_nvm_end - SIZEOF(.nvm)` |
+| Bounds in the map | `0x08174000` to `linker_nvm_end` `0x0817E000` |
+| Against the application region | `0x08006000` + `0x178000` = `0x0817E000`, so NVM3 is the top of it and the image (ending `0x080D5354`) never reaches it |
+| Cost to the image | none: a `DSECT` occupies no bytes in `hearth.bin` |
+| Read off the live handle | `nvm3: ... 40960 B at 0x08174000`, the boot line's own last two fields |
+
+A `.gbl` upload therefore leaves the instance intact, which was measured rather
+than assumed: the device stayed commissioned across three reflashes in this
+session, including the two that swapped the scratch probe in and out.
+
+Occupancy, all from the boot line, in the order the session produced them:
+
+| Moment | Objects | `availableMemory` | Erase count |
+|---|---|---|---|
+| Factory-fresh, one endpoint stored | 13 | 7 252 B | 1 |
+| Factory-fresh, two endpoints stored | 13 | 7 052 B | 1 |
+| **After commissioning one fabric** | **37** | **3 432 B** | 1 |
+| Immediately after `AT+MTFRESET` | 11 | 2 668 B | 1 |
+| After the Phase 1 reruns and the link burst | 37 | 480 B | 3 |
+| A few boots later | 37 | 5 392 B | 3 |
+| At the end of the session | 37 | 1 328 B | 3 |
+
+Commissioning costs **24 NVM3 objects and about 3.6 KB** of the available
+figure. Everything else in that table is one fact, and it is the same fact the
+nRF arm's ZMS watch item records in a different spelling: **NVM3 is
+log-structured, so `availableMemory` is not `size - used`.** A deleted object
+keeps its flash until a repack collects it, which is why the row straight after
+a factory reset has 26 fewer objects and LESS memory available than the row
+before it, and why the figure climbs again without anything being deleted (the
+erase count going 1 to 3 is the repack running twice). The 480 B row is a
+pre-repack trough, not an exhaustion, and the 5 392 B row three boots later is
+the same instance after collection.
+
+Against the nRF arm's 30 476 of 32 768 B raw ZMS occupancy after a day of
+commissioning churn: this instance is 40 960 B, and the comparison is not
+like-for-like (that figure is raw non-erased bytes, this one is usable bytes
+before a forced repack). What both say is the same thing: the settings region
+is the part of this product whose sizing needs a soak test, and it stays a
+watch item.
+
+#### Harness Phase 0 and Phase 1, commissioned
+
+Run twice on this image while commissioned as `0x4902`, with the rig's standard
+composition (a single on/off light), which is what Phase 1 stages for itself.
+
+```
+$ export MT_PORT=/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 1 \
+      --baseline platform/silabs/core-phase1.json
+  ===== RESULT: 292 passed, 4 failed =====
+```
+
+**292/4, row for row identical to task 6's uncommissioned run.** The result
+file `platform/silabs/core-phase1.json` is rewritten against this image; the
+only differences from task 6's are the header's `fw_repo_head` (`a9d6ae6...`),
+its timestamp, and `net`, which moves from `+MTNET:THREAD,0,0,0` to
+`+MTNET:THREAD,1,0,0` because Thread is enabled once the device has a fabric.
+No verdict changed. Being on a fabric costs the AT contract nothing, which is
+the thing this run existed to find out.
+
+The four parked rows are task 6's four, unchanged and with the same owners
+(catalogue batches 7a and 7b, the EVSE round): each stages a composition whose
+device types this build's registry has no cluster set for.
+
+#### Sustained traffic: the RX ring overflow warning has now fired
+
+Round 1 left an open item saying the warning was observable but had never
+fired, and that no run had pushed the link hard enough for its absence to be
+evidence. Both halves of that were tested here.
+
+**A Phase 1 run while commissioned does not fire it**, and the reason is
+structural rather than lucky: the harness is synchronous, so it never has more
+than one command line in flight and the 1 024-byte ring never holds more than
+one `MT_AT_LINE_MAX` line. 292 rows, nine module boots, 27 885 bytes of console
+captured, zero warnings. That is still not evidence of headroom.
+
+**A deliberate burst fires it, the first time in this port's life.** 300
+`AT+MTATTR=1,6,0` lines, 5 100 bytes, written back to back in 0.42 s with no
+waiting for terminal responses, while chip-tool toggled the light over Thread
+so controller-driven `+MTATTR` URCs interleaved with the responses:
+
+```
+W link: rx ring overflow, dropped 559 byte(s)
+W link: rx ring overflow, dropped 47 byte(s)
+W link: rx ring overflow, dropped 733 byte(s)
+... 12 warnings in all, 1 828 bytes dropped ...
+W link: rx ring overflow, dropped 11 byte(s)
+```
+
+62 of the 300 commands returned a terminal response, 63 controller toggles
+completed during the burst, and the device was healthy immediately afterwards
+(`+MTSTATE:2,1`, `+MTFABRICS:1`, the composition intact, chip-tool still able
+to toggle it). So the ring does what it says: it drops bytes, says how many on
+the console, and the link recovers at the next complete line.
+
+This is the contract working, not a defect. This carrier wires no RTS/CTS, so a
+host that writes faster than the parser drains has nothing to throttle it but
+the `OK`/`ERROR` handshake, and the warning is how the device says the host
+ignored it. What it does mean is that **the warning is now a proven diagnostic
+rather than an untested code path**, which is what the open item asked for.
+
+#### Harness Phase 2: not run, and the gate is not this image's
+
+```
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 2
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+  ABORT: otbr-agent is not answering (ot-ctl state failed): start it per the
+  T4 runbook (graph F36: run otbr-agent directly, D-Bus policy required)
+```
+
+**Zero rows ran.** The abort is `phase2_gate`'s own precondition
+(`test/mt_regression.py:6198`), which calls `ot-ctl state`, and on this bench
+`ot-ctl` cannot be used at all: it is not on this user's PATH (`ot-ctl state`
+exits 127) and `/run/openthread-wpan0.sock` is `srwxr-xr-x root:root`. The
+border router itself was fine throughout, which is the point:
+`systemctl is-active otbr-agent` answered `active` before and after, and the
+same daemon served the dataset over D-Bus for both commissionings in this
+session.
+
+So this is a harness-versus-bench mismatch, not a firmware failure and not a
+row to classify: the gate needs the same D-Bus route the dataset already takes
+before any Phase 2 row on this bench can run. It is a **Thread-arm allowance
+owned by the qualification round**, recorded under "What round 2 leaves open"
+and in `TESTING.md`. Phase 2's other precondition is worth naming with it: its
+2.8 warm reboot resets an RP2350 over SWD, which is the C6 carrier's contract
+and not this module's.
 
 ### Round 2 task 6: the attribute bridge and the `+MTATTR` URC
 
@@ -3066,11 +3573,14 @@ replacement is the list of rows that still fail.
 
 ### What is not measured here
 
-`hearth_log_write` now writes to the console, so the RX ring overflow warning
-is observable at last: `W link: rx ring overflow, dropped N byte(s)`. None
-appeared in any run above, but none of those runs pushed the link hard enough
-for that to be evidence. The ring is 1 024 bytes against a 512-byte
-`MT_AT_LINE_MAX`.
+**This section is closed as of round 2 task 7.** It said the RX ring overflow
+warning (`W link: rx ring overflow, dropped N byte(s)`) was observable but had
+never appeared, and that no run had pushed the link hard enough for its absence
+to be evidence. Task 7 pushed it deliberately and it fired twelve times,
+dropping 1 828 of 5 100 bytes; see "Sustained traffic: the RX ring overflow
+warning has now fired" under "Round 2 task 7". The ring is 1 024 bytes against a
+512-byte `MT_AT_LINE_MAX`, and this carrier wires no RTS/CTS, so the
+`OK`/`ERROR` handshake is the only thing throttling a host.
 
 ## First-compile checklist (Task 6): what each item turned out to be
 
@@ -3105,6 +3615,85 @@ Two more things the first build settled that were not on the list:
   that pairs with the `osKernelInitialize()` `sl_platform_init()` already ran.
   `main()` calls `sl_system_kernel_start()`.
 
+## What round 2 leaves open
+
+Round 2 is the Matter core: the stack started before `+MTREADY`, the
+commissioning, network, Thread, composition and attribute families answering
+from it, a stored composition rebuilt as dynamic endpoints, and two device
+types built. Everything it did not finish is here, and nothing here is unowned.
+Round 1's own table follows this one and is still live; the rows round 2 closed
+are marked there.
+
+### The catalogue
+
+The registry carries all 52 rows and the gate predicates; this build constructs
+two of them. The rest arrive in the nRF arm's own order, batch by batch, each
+copying its sections out of `platform/nrf54l15/port/mt_devtypes_zephyr.cpp` at
+the line ranges "Port sections" lists, adding its cluster components to
+`hearth.slcp` and its clusters to the catalogue endpoint, and recording RAM in
+the heap and the arenas.
+
+| Batch | Contents | Brings with it |
+|---|---|---|
+| 1 | attribute-only, 14 types | nothing structural |
+| 2 | server-interaction, 6 types | **the cluster-object arena** and the first delegate pool |
+| 3 | command-verdict, 2 types | the `+MTCMD` verdict path |
+| 4 | appliance, 7 types | OperationalState and Chime carve-out rows |
+| 5 | standalone, 7 types | the Rvc mode rows |
+| 7a | energy foundation, 6 types | the meter Instance pool, ElectricalPowerMeasurement, DEM |
+| 7b | delegate-served pair, 2 types | WaterHeaterManagement |
+| 8 | composed appliances, 7 types | the oven and refrigerator mode rows |
+| EVSE | 1 type | EnergyEvse and its sixteen attributes |
+
+**The four Phase 1 rows this round cannot pass belong to that list**, and they
+are one fact four times: each stages a composition whose device types this
+build's registry has no cluster set for, so the rebuild aborts at the first of
+them and `AT+MTEP?` answers the bare light. They are not defects and they are
+not a regression against the nRF arm.
+
+| Parked row | Waits for |
+|---|---|
+| `MTMEAS staged variant-1 water heater` | batch 7b |
+| `MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM` | batch 7a |
+| `MTROWAPPLY count-0 ... on a real EVSE endpoint` | the EVSE round plus 7a's meter |
+| `Utility meter pool exhaustion (MT_METER_MAX=2)` | 7a's meter, plus a meter Instance pool this image has none of |
+
+### The wire surface
+
+| Open item | Owner |
+|---|---|
+| **No `+MTEVT` is emitted at all.** The mask, the query and the suppression rules are core's and work here; the platform half that raises the events is unported on **both** Thread arms, so neither the commissioning group (bits 0-5) nor anything else reaches a host. Measured on this image with the mask at `0xFFFFFFFF` and a window open: nothing. It needs a CHIP platform event handler mapping `DeviceEventType` to `AT_MT_SPEC.md` 3.11's bit numbers, written once and used by both arms | the **qualification round**, which owns the wire surface for both arms at once. It is the one spec acceptance item this round could not answer |
+| **A fixed endpoint's code-driven attributes are unreadable through `AT+MTATTR` except where ruling F500's carve-out serves them.** Four Basic Information integers are carved out and answer; every other code-driven integer on endpoint 0 answers a bare `ERROR` with a console line saying why. Closing it means a read path through the data model provider for endpoints this port did not create, which changes the answer for every fixed-endpoint attribute at once | a **later round by ruling**, not by omission. Whether `AT+MTATTR` should reach fixed endpoints at all is a wire-contract question for both arms and the ruling belongs in `AT_MT_SPEC.md` 3.8 |
+| **`AT+MTNET?`'s enabled flag divides differently here** from the C6's (graph F494): this arm reports `+MTNET:THREAD,0,0,0` uncommissioned and `+MTNET:THREAD,1,0,0` once a fabric exists, and the harness's own baseline header records the change. It is a spec clarification, not a port fix | the **qualification round**, with `AT_MT_SPEC.md` |
+
+### The image
+
+| Open item | Owner |
+|---|---|
+| **The tiny printf faults on a NULL `%s`** rather than printing `(null)`, image-wide, for the SDK's, CHIP's and OpenThread's log call sites as much as Hearth's. `core/`, `port/` and `src/` were audited call site by call site and are clean, and the one place it could have happened is guarded deliberately (`core/mt/mt_at.c:1715-1719`); the SDK's, CHIP's and OpenThread's were not audited. The cheaper of the two fixes is to patch the component under `sdk-patches/` so `case 's'` prints `(null)` | the **qualification round**; both options and the line numbers are in the `.slcp` comment and "Where the tiny printf disagrees with newlib-nano" |
+| **The cluster-object arena does not exist yet.** The mechanism does (`hearth_arena`, `port/mt_dyn_store.h`); the instance, its budget beside `HEARTH_EP_ARENA_BYTES` and the family pool arrive together or not at all | **catalogue batch 2** |
+| **A fault before `hearth_console_init()` returns produces no output on any UART.** The console is the first thing `app_init_early()` does, so the window is small, but it covers `sl_clock_manager_init()` and the `device_init` steps | unowned by design: closing it means a pre-console sink (RTT is there, and is what the SDK's own early code uses). Listed so it is a known limit rather than a surprise |
+| **`b9fea7f` is a commit that was made and then reverted** in task 6 (`fix: the image links the full newlib ...`, undone by `8879199` with the fault registers). It is left in history deliberately, because the reversal is evidence; a reader diffing the branch meets a change that is not in the result | the branch's final review, if it wants it squashed |
+| **An md5 is not reproducible across `slc generate` runs** (F497): OpenThread's version banner is built from `__DATE__ __TIME__`. A relink inside one generated tree IS reproducible, which task 7 proved by accident. So an md5 identifies one generation, and a difference anywhere but the six time-of-day bytes is a real difference | settled, not open: stated wherever an md5 is quoted |
+
+### The bench and the harness
+
+| Open item | Owner |
+|---|---|
+| **Harness Phase 2 cannot run on this bench at all.** `phase2_gate` calls `ot-ctl state` (`test/mt_regression.py:6198`), and `ot-ctl` is not on this user's PATH and its socket is `root:root`. The gate needs the same otbr-agent D-Bus route the dataset already takes. Its other precondition, the 2.8 warm reboot over SWD, is the RP2350 carrier's contract and not this module's | the **qualification round**, which owns the Thread-arm allowances; noted in `TESTING.md` |
+| **NVM3's usable figure needs a soak.** 40 960 B configured, 24 objects and about 3.6 KB consumed by one commissioning, and `availableMemory` observed as low as 480 B during this session's write churn before a repack returned it to 5 392 B. Nothing failed and the repack is the mechanism working, but the trough is unmeasured over a long run, exactly as the nRF arm's 32 KB ZMS row is | the **qualification round**'s soak, with the nRF row |
+| **Phone commissioning over Thread has never been tried on this arm.** Both commissionings here are the CLI chip-tool on the border router's own host | the **qualification round** |
+| **`fw/flash.py`'s `read_until()` and the harness's own stream loops do the same job in two places.** A round 1 review minor, still true, still costing nothing | whoever next touches either; it is a tidy-up, not a defect |
+
+### Still owned elsewhere
+
+Signing, secure boot and the SE debug lock stay **pre-ship** (round 1 spec
+section 7, stage 2). Thread-arm baselines under `test/baselines/`,
+ARCHITECTURE 8.21 and the host library's variant table stay with the
+**qualification round**. Matter OTA stays never: the field update story is
+host-driven serial flashing (`FIRMWARE_UPDATE_SPEC.md`). Raising the memory
+tier above `kServiceableEndpoints` 16 is the **MG26 round**'s.
+
 ## What round 1 leaves open
 
 Round 1 is bring-up, the downward port and the boot contract. Everything it did
@@ -3126,12 +3715,19 @@ console. It added two rows of its own, and the first row below shrank again:
 `chip::Server` is started, the event loop runs and the catalogue endpoint is
 disabled, so what is left of it is the upward port proper.
 
+Round 2 Tasks 4 to 6 (2026-09-18) emptied the first row: the composition
+rebuild, the dynamic endpoint machinery, the endpoint arena and the first two
+device types are all in, and what is left of the catalogue is a table of its
+own under "What round 2 leaves open". Round 2 Task 7 (2026-09-18) closed the RX
+ring overflow row with a measurement, and the table's own remaining rows are
+unchanged and still owned.
+
 | Open item | Owner |
 |---|---|
-| The upward port: the composition rebuild, the dynamic endpoint machinery, the arenas and the device-type catalogue in audited batches, each batch retiring stubs from `port/mt_matter_stub.c` and `port/mt_devtypes_stub.c`. `chip::Server` is started and the event loop runs since task 3; `rebuild_composition()` in `src/main.cpp` is the empty hook they fill, and it is already called from the one place it can be called from | the **upward-port round** (graph T446). Its starting checklist is "The 35 failing rows" above, and the run they came from is the baseline `platform/silabs/skeleton-phase1.json` |
+| ~~The upward port: the composition rebuild, the dynamic endpoint machinery, the arenas and the device-type catalogue~~ | **closed as the core, round 2 tasks 3 to 7**: the stack is started, the composition rebuilds as dynamic endpoints, the endpoint arena is live, the attribute bridge answers and two device types are built. What is left is the catalogue itself, which has its own table under "What round 2 leaves open" |
 | Signing (ECDSA-P256 dev key under `keys/`, as the nRF port does), secure boot, and the SE debug lock after the one-time SWD install | **pre-ship** (design spec section 7, stage 2). The bootloader itself is built and installed already; it accepts an unsigned `.gbl` today |
 | Thread-arm baselines under `test/baselines/`, ARCHITECTURE 8.21 and its decision-log rows, and the host library's `fw/README` variant table | the **qualification round** (design spec section 8, steps 6 and 7). The skeleton's Phase 1 record deliberately stays out of `test/baselines/`, which holds shipping baselines only |
-| The RX ring overflow warning is observable but has never fired: no run so far pushed the link hard enough for its absence to be evidence | the **upward-port round**'s first sustained traffic; see "What is not measured here" |
+| ~~The RX ring overflow warning is observable but has never fired~~ | **closed, round 2 task 7**: a 300-line burst fired it twelve times and dropped 1 828 of 5 100 bytes, and the link recovered at the next complete line. See "Sustained traffic" under "Round 2 task 7" |
 | The console is TX only by design, so the port has no console input path and no shell | settled, not open: it is board contract item 6 and a CRA posture (`CRA_COMPLIANCE.md` in the docs repository). Listed here so nobody reopens it as an omission |
 | `CHIPProjectConfig.h` does not set `CHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION` or its string, so BasicInformation reports the SDK default `1` / `"1.0"` while `AT+CGMR` answers `MT_FW_VERSION`, 1.2.0. Two version surfaces, one of them wrong. A second hand-maintained copy of the version would drift, so the fix is to derive it | the **qualification round**, which is what makes the two surfaces answerable together |
 | Diagnostic Logs and Wi-Fi Network Diagnostics are disabled on THIS arm since task 3 and still enabled on the nRF arm's, so the two Thread ports' root nodes no longer answer the same | the **qualification round**, which owns the wire surface for both arms at once; see "Data model" |
