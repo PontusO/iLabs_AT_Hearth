@@ -22,9 +22,6 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::Descriptor::Id:
         emberAfDescriptorClusterInitCallback(endpoint);
         break;
-     case  app::Clusters::DiagnosticLogs::Id:
-        emberAfDiagnosticLogsClusterInitCallback(endpoint);
-        break;
      case  app::Clusters::GeneralCommissioning::Id:
         emberAfGeneralCommissioningClusterInitCallback(endpoint);
         break;
@@ -57,9 +54,6 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
         break;
      case  app::Clusters::ThreadNetworkDiagnostics::Id:
         emberAfThreadNetworkDiagnosticsClusterInitCallback(endpoint);
-        break;
-     case  app::Clusters::WiFiNetworkDiagnostics::Id:
-        emberAfWiFiNetworkDiagnosticsClusterInitCallback(endpoint);
         break;
     default:
         // Unrecognized cluster ID

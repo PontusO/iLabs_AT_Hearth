@@ -1575,7 +1575,7 @@
           "mfgCode": null,
           "define": "DIAGNOSTIC_LOGS_CLUSTER",
           "side": "server",
-          "enabled": 1,
+          "enabled": 0,
           "commands": [
             {
               "name": "RetrieveLogsRequest",
@@ -3125,7 +3125,7 @@
           "mfgCode": null,
           "define": "WIFI_NETWORK_DIAGNOSTICS_CLUSTER",
           "side": "server",
-          "enabled": 1,
+          "enabled": 0,
           "attributes": [
             {
               "name": "BSSID",
