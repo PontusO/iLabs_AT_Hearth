@@ -10,7 +10,8 @@
  * line numbers beside each step are MatterConfig.cpp's, so a future SDK bump
  * can be diffed against them.
  *
- * Three deliberate departures from the sample, each argued where it happens:
+ * Two deliberate departures from the sample, each argued again where it
+ * happens:
  *
  *   1. chip::Platform::MemoryInit() is NOT called. The sample calls it only
  *      under SL_WIFI (:235); on a Thread build sl_ot_create_instance() has
@@ -22,10 +23,11 @@
  *      key the Matter OTA image processor writes, and this product has no
  *      Matter OTA (FIRMWARE_UPDATE_SPEC.md): the key is never written, so the
  *      call can only ever be a no-op.
- *   3. The device attestation credentials provider is set where the sample
- *      sets it, in the caller's position (ApplicationStart():213-216, after
- *      InitMatter returns) rather than inside the Server::Init lock, because
- *      that is the order the shipping samples are tested in.
+ *
+ * One thing that looks like a departure and is not: the device attestation
+ * credentials provider is set LAST, after StartEventLoopTask(), because that is
+ * exactly where the sample sets it (ApplicationStart():213-216, on the far side
+ * of InitMatter's return) rather than inside the Server::Init lock.
  */
 
 #include "hearth_matter_init.h"
