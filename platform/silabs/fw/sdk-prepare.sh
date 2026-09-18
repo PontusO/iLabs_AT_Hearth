@@ -53,6 +53,23 @@ if [ ! -d "$MATTER_EXT_INSTALL/third_party/matter_sdk" ]; then
     exit 1
 fi
 
+# The copy is disposable, but only if what is there IS the copy. The next line
+# is an rm -rf of a path that arrives in a variable, from toolchain.env, which a
+# mistyped edit or a stray export in the shell can point anywhere. So the path
+# has to look like a prepared tree before it is deleted: either it does not
+# exist yet, or it carries this script's own stamp, or the extension's
+# third_party/matter_sdk is inside it. Anything else is refused by name, because
+# a wrong MATTER_EXT_ROOT is a lost directory and not a failed build.
+if [ -e "$MATTER_EXT_ROOT" ] \
+   && [ ! -e "$MATTER_EXT_ROOT/.hearth-stamp" ] \
+   && [ ! -d "$MATTER_EXT_ROOT/third_party/matter_sdk" ]; then
+    echo "sdk-prepare.sh: refusing to delete $MATTER_EXT_ROOT" >&2
+    echo "  it exists and carries neither .hearth-stamp nor third_party/matter_sdk," >&2
+    echo "  so it is not a tree this script prepared. Check MATTER_EXT_ROOT in" >&2
+    echo "  platform/silabs/toolchain.env, or move that directory aside yourself." >&2
+    exit 1
+fi
+
 echo "copying $MATTER_EXT_INSTALL"
 echo "     to $MATTER_EXT_ROOT (replacing whatever is there)"
 rm -rf "$MATTER_EXT_ROOT"

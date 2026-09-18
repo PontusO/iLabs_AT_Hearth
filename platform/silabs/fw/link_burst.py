@@ -164,8 +164,13 @@ def main():
 
     if not args.port:
         ap.error("--port (or MT_PORT) is required")
-    if "/dev/serial/by-id/" not in args.port:
-        ap.error("--port must be a /dev/serial/by-id path, not %r" % args.port)
+    # The same rule fw/flash.py's open_port() enforces, and the same test: the
+    # path must START with the by-id directory. A substring test passes a
+    # /dev/ttyACM<n> that merely mentions it.
+    if not args.port.startswith("/dev/serial/by-id/"):
+        ap.error("refusing %r: use the /dev/serial/by-id path (ttyACM<n> is not "
+                 "an identity, and on this bench ttyACM0 is the Thread RCP, "
+                 "where a stray write kills otbr-agent)" % args.port)
 
     port = open_port(args.port, args.baud)
     print("+MTREADY after open: %s"
