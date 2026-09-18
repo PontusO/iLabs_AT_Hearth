@@ -42,6 +42,18 @@ section transferred whole ("Port sections" below). Phase 1 moves to **264/32**:
 image` turn green and nothing else changes verdict ("Measured", "Round 2 task
 4").
 
+**Task 5, 2026-09-18, made the device-type side real.** `port/mt_devtypes_sl.cpp`
+carries the whole 52-row registry, the endpoint block arena, the port-owned
+external attribute store and its ember callbacks, and builds two of the
+catalogue's device types: the on/off light and the temperature sensor. A stored
+composition is rebuilt as dynamic endpoints at boot, before `+MTREADY`, so
+`AT+MTEP?` reports what the device is actually serving; the other 50 rows answer
+the `AT+MTEP=` gate predicates exactly as the nRF's do and are refused at the
+rebuild, which keeps the endpoints before them live. Phase 1 moves to
+**267/29**: the three parent-gate rows turn green and nothing else changes
+verdict ("Measured", "Round 2 task 5"; "Port sections" for the transfer and the
+registry policy).
+
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
 `iLabs_Hearth_docs/superpowers/specs/2026-09-05-silabs-mg24-port-design.md`.
@@ -337,10 +349,11 @@ third for the Wi-Fi SDK that this Thread port does not need); one path alone
 cannot resolve `hearth.slcp`'s `sdk_extension:` stanza. `slc signature trust`
 was never needed: the extension's components generate without it.
 
-`~/silabs/work/hearth-matter-t3r` is round 2 task 3's build directory after its
-review fix, and the one the current image came from. Task 2's
-`~/silabs/work/hearth-matter`, round
-1's `~/silabs/work/hearth-skeleton` and task 1's `~/silabs/work/hearth-core` are
+`~/silabs/work/hearth-matter-t5` is round 2 task 5's build directory and the
+one the current image came from. Task 4's `~/silabs/work/hearth-matter-t4`,
+task 3's `~/silabs/work/hearth-matter-t3r` (its directory after the review
+fix), task 2's `~/silabs/work/hearth-matter`, round 1's
+`~/silabs/work/hearth-skeleton` and task 1's `~/silabs/work/hearth-core` are
 left where they are: the figures under "Measured" that name them are those
 trees', and they are not re-derivable from a directory that has been rebuilt
 over.
@@ -916,6 +929,20 @@ index, and a round that changes one arm finds the other through it.
 | Section | nRF source and lines | Silabs file | Landed |
 |---|---|---|---|
 | commissioning state, network, Thread | `platform/nrf54l15/port/mt_matter_zephyr.cpp` 388-602 | `port/mt_matter_sl.cpp` | round 2 task 4 |
+| the live endpoint table | `mt_matter_zephyr.cpp` 604-663 | `port/mt_matter_sl.cpp` | round 2 task 5 |
+| shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| the endpoint block arena and its sizing | `mt_devtypes_zephyr.cpp` 4659-5978 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| the seed table and `seed_slots()` | `mt_devtypes_zephyr.cpp` 5979-7005 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| `mt_dyn_attr_slot()` | `mt_devtypes_zephyr.cpp` 7052-7069 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| the `mt_devtypes.h` quartet | `mt_devtypes_zephyr.cpp` 7189-8413 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| the ember external-attribute hooks | `mt_devtypes_zephyr.cpp` 8415-8451 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| the boot rebuild | `platform/nrf54l15/src/main.cpp` 40-108 | `src/main.cpp` | round 2 task 5 |
+| the store handle and the arena | `platform/nrf54l15/port/mt_dyn_store.h` | `port/mt_dyn_store.h` | round 2 task 5 |
 
 The nRF line ranges are against that file as it stands in the firmware
 repository on `dev/fota-firmware`; they are a reading aid, not a promise that
@@ -969,6 +996,96 @@ then OT lock, the same order the CHIP event loop uses. `mt_matter_thread_info()`
 takes the OT lock **alone** and never reaches for the CHIP lock underneath it,
 so the port has no path that acquires them the other way round. Keep it that
 way.
+
+#### What task 5's transfer rewrote, and the registry policy it landed
+
+The device-type side is the round's largest transfer and it changed three
+things about the nRF's shape. All three are stated in the source too; this is
+the index.
+
+**The two Zephyr `K_HEAP_DEFINE` arenas became one static bump arena**
+(`port/mt_dyn_store.h`, `hearth_arena`). There is no second heap on this
+platform to model, and drawing endpoint blocks from the one that exists would
+be drawing from the pool that holds FreeRTOS's objects, CHIP's allocations,
+mbedTLS and OpenThread ("The heap changed shape" above), so an oversized
+composition could starve the stack instead of failing at the endpoint that
+does not fit. A bump arena keeps all three properties the nRF's dedicated heap
+was chosen for (contained failure, a failure log that can name what was left,
+an auditable line item) and gives up nothing, because the nRF's heap is
+allocate-only as well: nothing frees, and a reboot resets it.
+
+**The cost model is therefore rounding and nothing else**, and every sizing
+assertion was recast on it. A block costs its payload rounded up to 8; the
+arena's usable bytes are its gross bytes. What went with the allocator: the
+nRF's `kHeapCostOf` (`roundup(payload + 4, 8)`, the `sys_heap` chunk header),
+its `kObjCostOf` (`roundup(payload, 8) + 8`), the 80-byte `kHeapOverheadBytes`
+derivation and the two bucket-band `BUILD_ASSERT`s that keep that 80 honest.
+Those are arithmetic about an allocator this image does not link.
+`BUILD_ASSERT` became `static_assert`, and
+`sys_heap_runtime_stats_get()` became `cap - used`.
+
+**The registry policy.** All 52 catalogue rows are present and every row keeps
+its identity: its device type id, its `max_variant`, and the parenting rule
+`parent_policy_ok()` keys on. That is what `mt_devtype_is_known()`,
+`mt_devtype_variant_ok()` and `mt_devtype_parent_ok()` answer from, and
+`core/mt/mt_at.c` calls all three on the `AT+MTEP=` line itself, so **the AT
+surface answers for the whole catalogue exactly as the nRF's does**: a cook
+surface with no cooktop parent is `+MTERR:1` here today, a water heater's
+variant 1 is accepted, and a device type outside the catalogue is `+MTERR:6`.
+What a row for an unported type does not carry is a cluster set, and
+`mt_devtype_create()` refuses such a row at its first check, so a composition
+naming one is staged and persisted like any other and then fails its rebuild
+at that entry, keeping the endpoints before it as a live prefix. The rows are
+kept rather than deleted deliberately: deleting them would make
+`AT+MTEP=0x000A` answer "unknown device type", which is a different and wrong
+statement about a product whose wire contract names all 52. Each unported row
+carries a comment naming the nRF batch that will build it.
+
+Three consequences of that policy are worth stating out loud:
+
+- **Two device types are creatable this round**, the on/off light (0x0100) and
+  the temperature sensor (0x0302). Every other row answers "not supported" at
+  apply, on the console, with the endpoints before it live.
+- **The compile-time proof that the parenting policy and the cluster sets
+  agree** (`shape_domain_matches_policy()`, nRF 4543-4641) is kept and recast:
+  it skips rows with no cluster set, because such a row has nothing for the
+  policy to leave unserved, and checks the creatable rows in full over the
+  whole 52-row parent universe. The day a batch gives the cabinet or the cook
+  surface an `ep_type` without a shape map, it fails this build exactly as it
+  would fail the nRF's.
+- **The floor under the arena sizing is STRONGER here than on the nRF**, and
+  deliberately so. The nRF demands room for eight of its widest uncapped
+  device type, because sizing for sixteen of its heaviest is a trade it
+  declined. This catalogue's widest block is the on/off light's 192 B, so the
+  arena holds `kServiceableEndpoints` of it in 3,072 B and the promise is
+  "every composition this build accepts, it can build". The first batch that
+  adds a wider type fails that assertion and has to choose, in the open,
+  between raising `HEARTH_EP_ARENA_BYTES` and dropping to the nRF's floor of
+  eight.
+
+Four parts of the nRF's device-type side are **absent rather than reduced**,
+each because every consumer it has belongs to an unported device type: the
+per-endpoint delegate handout in `mt_devtype_create()` and the
+cluster-object arena it draws on (`mt_matter_zephyr.cpp` 133-386 and
+9137-9472); the type-conditional trailing stores (`kStoreWalk` and the four
+host-fed store shapes); the DE407 quiet table; and the hand-called B388
+cluster-init call site (`LevelControl`, `ColorControl` and `ModeSelect`
+`ServerInit`, two of whose cluster servers are not even in this image). The
+sources say what the batch that needs each one has to bring back.
+
+`port/mt_devtypes_stub.c` is now an empty file, kept rather than deleted so
+that `hearth.slcp`, `test/host/Makefile`'s `silabs-stubs` target and
+`check_decls.py`'s pair list keep naming the same pair; `check_decls.py` proves
+the four `mt_devtypes.h` declarations have exactly one definition across the
+concatenation, which is the property that matters whether the split is 4/0 or
+0/4.
+
+One stub answer changed with this task, and it is a ruling rather than a
+convenience: `mt_matter_evse_targets_erase_all()` returns 0. `cmd_mtfreset()`
+calls it before `mt_matter_factory_reset()`, this image has no EVSE targets
+store at all, and erasing nothing succeeded. Returning -1 would fail
+`AT+MTFRESET` on a device whose state is already what the command asks for.
+`AT+MTFRESET` is exercised on the bench below.
 
 ## Flashing
 
@@ -1269,9 +1386,12 @@ session, not BLE, so they prove the device joined the mesh.
 
 ## Measured
 
-Five sets of figures live here. **"Round 2 task 4" immediately below is the
-current image**, the first one whose AT surface answers from the Matter stack.
-"Round 2 task 3" after it is the same image with the stack running but every
+Six sets of figures live here. **"Round 2 task 5" immediately below is the
+current image**, the first one that stands up dynamic endpoints. "Round 2 task
+4" after it is the same image with the commissioning, network and Thread
+surface answering from the stack but every device-type function still a stub,
+which is what task 5's figures are measured against.
+"Round 2 task 3" after that is the same image with the stack running but every
 `mt_matter.h` entry point still stubbed, which is what task 4's figures are
 measured against; "Round 2 task 2" is the stack linked but not started;
 "Round 2 baseline" is the skeleton on
@@ -1293,6 +1413,237 @@ two are identical (see "Harness Phase 0 and Phase 1"). The two build logs
 differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
+
+### Round 2 task 5: dynamic endpoints from the stored composition
+
+Built 2026-09-18 from the committed tree at `97c6a31` in
+`~/silabs/work/hearth-matter-t5` by the "Building" recipe above (a clean `slc
+generate` into an empty directory), flashed with `fw/flash.py` and run on the
+MGM240PA32VNA3 on the iLabs RP2350 carrier. `hearth.bin`
+`md5sum 96e64e3fc7d93f9bd3b19bce8ffba21b`.
+
+This image is task 4's with `port/mt_devtypes_sl.cpp` and
+`port/mt_dyn_store.h` in it, the live endpoint table appended to
+`port/mt_matter_sl.cpp` and `rebuild_composition()` filled in `src/main.cpp`
+("Port sections" above). It builds two device types out of the catalogue's 52
+and knows all 52 for the gate predicates.
+
+```
+$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-t5 \
+      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-t5/build.log
+$ grep -c deprecated ~/silabs/work/hearth-matter-t5/build.log
+0
+$ grep -ci warning ~/silabs/work/hearth-matter-t5/build.log
+0
+```
+
+`arm-none-eabi-size ~/silabs/work/hearth-matter-t5/build/debug/hearth.out`,
+with task 4's figures beside it:
+
+| | Task 5, bytes | Task 4, bytes | Delta |
+|---|---|---|---|
+| `text` | 839 528 | 828 260 | +11 268 |
+| `data` | 3 368 | 3 352 | +16 |
+| `bss` (size's, includes the heap section) | 258 324 | 258 340 | -16 |
+
+`arm-none-eabi-size -A` on the same file: `.text` 838 692 (task 4: 827 424,
+**+11 268**), `.data` 3 368 (+16), `.bss` 117 688 (task 4: 114 104, **+3 584**),
+`.memory_manager_heap` 136 024 (task 4: 139 624, **-3 600**), `.stack` 4 608,
+`.nvm` 40 960, `text_application_ram` 448, `.vectors` 368,
+`.bootloader_reset_section` 4, `.ARM.exidx` 8, `.copy.table` 12.
+
+Those three RAM rows are one story and it reconciles: the heap section is
+whatever the linker has left over, so the 3 584 B `.bss` gained and the 16 B
+`.data` gained come straight out of it (3 584 + 16 = 3 600). The `.bss` is
+**3 072 B of endpoint arena** (`HEARTH_EP_ARENA_BYTES`) plus about 512 B of
+tables: `s_dyn[16]` (the dynamic endpoint headers), the live endpoint table's
+five parallel arrays and the two counters. The `.data` 16 B is the
+`hearth_arena` object itself, which has an initialised base pointer. The flash
+is the 52-row registry, the seed table, the two device types' const metadata in
+`.rodata`, the create path and the ember callbacks.
+
+```
+$ ls -l hearth.bin hearth.gbl hearth.s37
+-rwxrwxr-x 1 pontus pontus  842912 Sep 18 19:39 hearth.bin
+-rw-rw-r-- 1 pontus pontus  842984 Sep 18 19:39 hearth.gbl
+-rwxrwxr-x 1 pontus pontus 2528792 Sep 18 19:39 hearth.s37
+```
+
+The application image on flash is **842 912 B**, 54.73 % of the 1 540 096 B
+application region, against task 4's 831 628 B and 54.00 %. `hearth.gbl` is
+**842 984 B**, which `fw/flash.py` sent as 6 586 blocks in 93.6 s with no
+retransmits (task 4: 6 498 blocks in 92.2 s).
+
+#### Free heap at `+MTREADY`, task 5
+
+**95 368 B free**, logged by `sl_memory_get_free_heap_size()` immediately after
+`mt_at_start()` returns, out of the 136 024 B `.memory_manager_heap`. Task 4's
+figure was 98 968 B out of 139 624 B: the heap section shrank by exactly the
+3 600 B the new statics took, and the free figure moved by exactly the same
+3 600. **The composition itself costs the heap nothing**, which is the whole
+point of the arena: the figure is identical with 0, 1 and 2 endpoints rebuilt,
+because every endpoint block comes out of `.bss` and not out of this pool.
+
+#### The endpoint arena's occupancy
+
+`rebuild_composition()` logs it once per boot, beside the line it explains.
+Three of the boots below are in "The bench proofs" section; the numbers are the
+sizing table in `port/mt_devtypes_sl.cpp` exactly:
+
+```
+I boot: composition rebuilt: 0 endpoint(s)
+I devtypes: endpoint arena: 0 of 3072 B handed out, 3072 B free, 0 of 16 serviceable endpoints live
+
+I boot: composition rebuilt: 1 endpoint(s)
+I devtypes: endpoint arena: 192 of 3072 B handed out, 2880 B free, 1 of 16 serviceable endpoints live
+
+I boot: composition rebuilt: 2 endpoint(s)
+I devtypes: endpoint arena: 352 of 3072 B handed out, 2720 B free, 2 of 16 serviceable endpoints live
+```
+
+192 is the on/off light (3 clusters, 11 attribute slots, 188 payload bytes
+rounded up to 8) and 160 is the temperature sensor (3 clusters, 9 slots, 156
+payload). Handed out plus free equals the arena's capacity on every line,
+because the cost model is rounding alone.
+
+### Endpoint capacity, round 2 task 5
+
+| | |
+|---|---|
+| A host may DECLARE | 28 endpoints (`MT_COMP_MAX_ENDPOINTS`, the AT contract, both arms) |
+| This build can SERVE | 16 endpoints (`kServiceableEndpoints`, `CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT`) |
+| The arena holds | 16 on/off lights (3 072 B, exactly full) or 19 temperature sensors, were the header table deeper |
+| Creatable device types | 2 of the catalogue's 52: 0x0100 and 0x0302 |
+| Every other catalogue id | known to `AT+MTEP=` with its real `max_variant` and parenting rule; refused at the boot rebuild, which then keeps the prefix |
+
+A composition longer than 16, or one naming a device type this build does not
+construct, fails at that entry and **keeps the endpoints before it live with
+their ids unchanged** (`AT_MT_SPEC.md` 501-506). It is stop-at-failure, not
+roll-back and not skip-and-continue: skipping would renumber every later
+endpoint and hand a commissioned controller a silently different data model.
+
+#### The bench proofs, task 5
+
+Captured 2026-09-18, both ports at once: the console on the Debug Probe's UART
+CDC at 115200 with DTR asserted, the AT link on the carrier's CDC with DTR and
+RTS cleared before the open. `otbr-agent` was not touched and nothing was
+commissioned.
+
+An empty composition, and a light plus a temperature sensor:
+
+```
+AT+MTEPCLEAR   -> OK
+AT+MTEPAPPLY   -> OK, reboot
+AT+MTEP?       -> OK                      (no rows)
+   console: composition rebuilt: 0 endpoint(s)
+
+AT+MTEPCLEAR   -> OK
+AT+MTEP=256    -> OK                      (on/off light, 0x0100)
+AT+MTEP=770    -> OK                      (temperature sensor, 0x0302)
+AT+MTEPAPPLY   -> OK, reboot
+AT+MTEP?       -> +MTEP:0,1,0x0100
+                  +MTEP:1,2,0x0302        OK
+   console: composition rebuilt: 2 endpoint(s)
+```
+
+The gate predicates, answered from the registry on the `AT+MTEP=` line with an
+on/off light staged at index 0. `+MTERR:n` is followed by `ERROR` on the wire;
+only the code is shown:
+
+```
+AT+MTEP=0x0071,0,0  -> +MTERR:1   cabinet under a light: not a fridge or an oven
+AT+MTEP=0x0077      -> +MTERR:1   cook surface unparented: it REQUIRES a cooktop
+AT+MTEP=0x0077,0,0  -> +MTERR:1   cook surface under a light
+AT+MTEP=0x0071      -> OK         the positive control: unparented IS legal for a cabinet
+AT+MTEP=0x0100,1    -> +MTERR:1   the light's max_variant is 0
+AT+MTEP=0x050F,1    -> OK         an UNPORTED row's max_variant is real: 0x050F has two variants
+AT+MTEP=0x0050      -> +MTERR:6   not a catalogue device type at all
+```
+
+An unported type is accepted at staging and refused at the rebuild, with the
+prefix kept:
+
+```
+AT+MTEPCLEAR  -> OK
+AT+MTEP=256   -> OK
+AT+MTEP=0x000A -> OK              door lock: a real catalogue id, nRF batch 3
+AT+MTEP=770   -> OK
+AT+MTEPAPPLY  -> OK, reboot
+AT+MTEP?      -> +MTEP:0,1,0x0100    OK    the prefix, not the declared three
+```
+
+```
+I mt_comp_store: loaded composition: 3 endpoint(s)
+E devtypes: devtype 0x000A is in this build's registry but has no cluster set: the
+            catalogue batch that builds it has not been ported yet, so the
+            composition naming it cannot be rebuilt
+E boot: endpoint 1 (0x000A) failed, aborting rebuild
+I boot: composition rebuilt: 1 endpoint(s)
+```
+
+`AT+MTFRESET` completes, which is what ruling B493's `return 0` in
+`mt_matter_evse_targets_erase_all()` buys:
+
+```
+AT+MTEP?     -> +MTEP:0,1,0x0100   OK
+AT+MTFRESET  -> OK, reboot
+AT+MTEP?     -> OK                 (erased)
+AT+MTFABRICS? -> +MTFABRICS:0      OK
+   console: mt_comp_store: composition erased, device is unconfigured
+            composition rebuilt: 0 endpoint(s)
+```
+
+#### Harness Phase 0 and Phase 1, round 2 task 5
+
+Phase 0 green, and Phase 1 run with the rig's standard composition, a single
+on/off light on endpoint 1, staged and applied before the run:
+
+```
+$ export MT_PORT=/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+  ===== RESULT: 0 passed, 0 failed =====
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 1
+  ===== RESULT: 267 passed, 29 failed =====
+```
+
+**267/29, against task 4's 264/32**, and the three rows that moved are exactly
+the three parent-gate rows, all of them now answered by the registry rather
+than by an accept-all stub:
+
+- `[AT-] MTEP=0x0071,0,0 under a light -> +MTERR:1`
+- `[AT-] MTEP=0x0077 unparented -> +MTERR:1`
+- `[AT-] MTEP=0x0077,0,0 under a light -> +MTERR:1`
+
+Nothing else changed verdict in either direction.
+
+**Some rows this task was expected to close did not close, and the reason is
+one fact rather than eighteen.** The task brief predicted that `MTALARM`, the
+`MTROW*`, `MTMETERID` and `MTMEAS` wrong-cluster rows would turn green once an
+endpoint existed for them to land on, because each expects `+MTERR:3` or
+`+MTERR:4` (cluster or attribute not found on an endpoint that DOES exist)
+rather than `+MTERR:2` (endpoint not found). Endpoint 1 now does exist, and
+those rows still answer `+MTERR:2`, because **their bridge functions do not
+consult the data model at all**: `mt_matter_alarm_set()`,
+`mt_matter_meas_set()`, `mt_matter_row_*()` and `mt_matter_meterid_set()` are
+still `port/mt_matter_stub.c` bodies that return `MT_ATTR_ERR_ENDPOINT`
+unconditionally, whatever the endpoint table says. Measured directly, with the
+light live on endpoint 1:
+
+```
+AT+MTALARM=1,0,0          -> +MTERR:2   (wanted 3)
+AT+MTROWGET=1,1           -> +MTERR:2   (wanted 4)
+AT+MTMEAS=1,153,0,1       -> +MTERR:2   (wanted 3)
+```
+
+The 29 remaining failures therefore divide cleanly: **eleven are `MTATTR`
+rows** waiting on Task 6's attribute bridge, and **eighteen belong to
+upward-port sections that have not moved at all** (the alarm bridge, the
+measurement bridge, the row-staging bridge, the meter identity bridge), each of
+which needs its own transfer before it can tell "that endpoint has no such
+cluster" from "there is no such endpoint". That is a plan finding rather than a
+defect in this task: nothing on the device-type side can make a stub that never
+looks at the data model answer a data-model question.
 
 ### Round 2 task 4: the AT surface answers from the stack
 
@@ -2138,9 +2489,11 @@ claim reproduction should redirect every measurement it intends to compare.
 
 ### The 35 failing rows: the upward port's starting checklist
 
-**Three of them are closed.** Round 2 task 4 turned `MTCODES? format`,
-`MTCODES? stable across reads` and `MTTHREAD? shape by image` green, so the
-current image fails 32 of the rows below ("Measured", "Round 2 task 4"). The
+**Six of them are closed.** Round 2 task 4 turned `MTCODES? format`,
+`MTCODES? stable across reads` and `MTTHREAD? shape by image` green, and round
+2 task 5 turned the three parent-gate rows (`MTEP=0x0071,0,0`, `MTEP=0x0077`
+unparented and `MTEP=0x0077,0,0`) green, so the current image fails 29 of the
+rows below ("Measured", "Round 2 task 5"). The
 list is left as it was recorded, because it is round 1's checklist and the
 baseline file it was captured in is not rewritten; each later section says which
 rows it closed.
