@@ -1174,9 +1174,15 @@ set) and substitutes a number; `:1646-1651` and `:2180-2186` branch on their
 optional argument instead of formatting it.
 
 **The SDK's, CHIP's and OpenThread's call sites were not audited**, and that is
-the open half. A guard belongs to the qualification round, and there are two
-ways to give it: patch the component under `sdk-patches/` so `case 's'` prints
-`(null)` for a NULL pointer, or audit the call sites. Patching is the cheaper
+the open half. The one exception is the one SDK file this tree compiles,
+`src/sdk/SoftwareFaultReports.cpp`, which was audited: its three `%s` arguments
+(`filename` at `:112`, `pcTaskName` at `:241`, `errorMessage` at `:323`) are
+non-NULL by construction, from `__FILE__` at the assert site, from the task's
+own TCB and from a table lookup whose default is the literal `"Unknown"`; the
+rest of the SDK, CHIP and OpenThread remain unaudited. A guard belongs to the
+qualification round, and there are two ways to give it: patch the component
+under `sdk-patches/` so `case 's'` prints `(null)` for a NULL pointer, or audit
+the call sites. Patching is the cheaper
 and the more honest of the two, because it fixes every call site including the
 ones a future SDK version adds.
 
@@ -3761,6 +3767,7 @@ not a regression against the nRF arm.
 | **The tiny printf faults on a NULL `%s`** rather than printing `(null)`, image-wide, for the SDK's, CHIP's and OpenThread's log call sites as much as Hearth's. `core/`, `port/` and `src/` were audited call site by call site and are clean, and the one place it could have happened is guarded deliberately (`core/mt/mt_at.c:1715-1719`); the SDK's, CHIP's and OpenThread's were not audited. The cheaper of the two fixes is to patch the component under `sdk-patches/` so `case 's'` prints `(null)` | the **qualification round**; both options and the line numbers are in the `.slcp` comment and "Where the tiny printf disagrees with newlib-nano" |
 | **The cluster-object arena does not exist yet.** The mechanism does (`hearth_arena`, `port/mt_dyn_store.h`); the instance, its budget beside `HEARTH_EP_ARENA_BYTES` and the family pool arrive together or not at all | **catalogue batch 2** |
 | **A fault before `hearth_console_init()` returns produces no output on any UART.** The console is the first thing `app_init_early()` does, so the window is small, but it covers `sl_clock_manager_init()` and the `device_init` steps | unowned by design: closing it means a pre-console sink (RTT is there, and is what the SDK's own early code uses). Listed so it is a known limit rather than a surprise |
+| **A fault report is proven only as far as its log line.** The HardFault probe proved the report itself ("A log line from a fault handler does not wait for the mutex"), and `debugHardfault()` ends there. Three other hooks in `src/sdk/SoftwareFaultReports.cpp` do not end there: `vApplicationMallocFailedHook` (`:226`), `vApplicationStackOverflowHook` (`:246`, called from `vTaskSwitchContext()` inside PendSV) and `RAILCb_AssertFailed` (`:329`, the radio interrupt) all continue into `Silabs::OnSoftwareFaultEventHandler()` (`:75-99`), which is live because the generated `gen_config.h` defines `MATTER_DM_PLUGIN_SOFTWARE_DIAGNOSTICS_SERVER`, and which calls `vTaskGetInfo()`, `SystemLayer().ScheduleLambda()` and `osDelay(1000)` from handler mode. (`halInternalAssertFailed`, `:107-116`, does not: it logs and asserts.) The file is a verbatim SDK copy and is not edited here, so what follows the log line is the SDK's own contract, shared with every Silicon Labs sample, and nothing on this bench has exercised it | the **qualification round**, with two options: an `sdk-patches/` entry that makes the handler safe in handler mode, or dropping `matter_software_diagnostics` so the handler compiles to nothing |
 | **`b9fea7f` is a commit that was made and then reverted** in task 6 (`fix: the image links the full newlib ...`, undone by `8879199` with the fault registers). It is left in history deliberately, because the reversal is evidence; a reader diffing the branch meets a change that is not in the result | the branch's final review, if it wants it squashed |
 | **An md5 is not reproducible across `slc generate` runs** (F497): OpenThread's version banner is built from `__DATE__ __TIME__`. A relink inside one generated tree IS reproducible, which task 7 proved by accident. So an md5 identifies one generation, and a difference anywhere but the six time-of-day bytes is a real difference | settled, not open: stated wherever an md5 is quoted |
 
@@ -3773,6 +3780,12 @@ not a regression against the nRF arm.
 | **Phone commissioning over Thread has never been tried on this arm.** Both commissionings here are the CLI chip-tool on the border router's own host | the **qualification round** |
 | **The EUSART's own RX overflow is neither enabled nor counted.** `EUSART0_RX_IRQHandler` drains the FIFO while `STATUS.RXFL` is set and never looks at `EUSART_IF_RXOF`, so a peripheral-level overrun would lose bytes that `s_rx_ring.dropped` cannot see and the console never reports. Not observed: task 7's burst accounting is fully explained by the ring's own counter plus a lossy host-side bridge. It is an accounting hole, not a known defect, and the cheap close is to enable `RXOF` and fold it into the same warning | whoever next touches `port/hearth_port_sl.c`; see "Sustained traffic" |
 | **`fw/flash.py`'s `read_until()` and the harness's own stream loops do the same job in two places.** A round 1 review minor, still true, still costing nothing | whoever next touches either; it is a tidy-up, not a defect |
+
+### The branch
+
+| Open item | Owner |
+|---|---|
+| **This branch has not been rebased onto `dev/fota-firmware`**, which is where the user ruled it lands (graph **DE484**). Against the merge base `1842af3` that branch adds four declarations to `core/include/mt_matter.h` (`mt_matter_ota_set_mode`, `mt_matter_ota_block_acked`, `mt_matter_ota_staged`, `mt_matter_swver_set`), which `port/mt_matter_stub.c` has to answer or `check_decls.py` reads 61/65 and the image does not link; it adds `core/mt/mt_ota.c` to `core/sources.cmake`, which `hearth.slcp` has to list or `check_slcp_sources.py` fails; and it edits `test/host/Makefile`'s `TESTS` and its `run:` recipe, both of which this branch also edits (`run: all boundary silabs-stubs`), so that one is a textual conflict whose resolution is to keep both sides | **the rebase, before the first batch plan**. None of the three is discovered at merge time: each has a check on this branch that names it |
 
 ### Still owned elsewhere
 
