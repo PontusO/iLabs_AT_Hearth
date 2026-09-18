@@ -12,7 +12,16 @@ the upward-port round, whose starting checklist is "The 35 failing rows" below
 **Round 2 (the Matter core) has started on the same branch.** Its first task,
 2026-09-18, moved the skeleton onto the SDK's `sl_main` entry point and closed
 four round 1 deferrals; the image it produced is measured under "Measured",
-"Round 2 baseline". There is still no Matter component in the build.
+"Round 2 baseline".
+
+**Task 2, 2026-09-18, put the Matter stack in the image.** The extension is
+prepared and patched by `fw/sdk-prepare.sh` behind a revision gate, Hearth's
+own data model is generated and committed ("Data model" below), and
+`hearth.slcp` carries the Matter components: 728,200 B of `text` against the
+skeleton's 48,336, and it boots to `+MTREADY` unchanged, 296 Phase 1 rows
+identical to the baseline row for row ("Measured", "Round 2 task 2"). **The
+stack is linked, not started.** Nothing calls `Server::Init`, the upward port
+is still stubbed and the same 35 rows still fail; starting the stack is task 3.
 
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
@@ -263,8 +272,8 @@ not give one.
 ## Building
 
 The Hearth project is `platform/silabs/hearth.slcp`, an slc project against the
-Simplicity SDK alone: there is no Matter in the skeleton image, so the Matter
-extension is not in this build at all. `core/sources.cmake` is the source list
+Simplicity SDK **and the Silicon Labs Matter extension** since round 2 task 2.
+`core/sources.cmake` is the source list
 of record for `core/`; the `.slcp` writes the same seven paths out in slc's
 syntax and says so at the top, and the two must be changed together. That
 agreement is enforced since round 2 Task 1 by `test/host/check_slcp_sources.py`,
@@ -283,20 +292,43 @@ SDK owns `main`. See "Migrating to sl_main" below for what the move changed.
 ```bash
 cd <repo root>
 source platform/silabs/toolchain.env
-git status --porcelain            # build from a committed tree
-slc generate -d ~/silabs/work/hearth-core --sdk-package-path "$SISDK_ROOT" \
+platform/silabs/fw/sdk-prepare.sh   # once per SDK install; see "SDK patches"
+git status --porcelain              # build from a committed tree
+slc generate -d ~/silabs/work/hearth-matter --sdk-package-path "$SISDK_ROOT" \
+    --sdk-package-path "$MATTER_EXT_ROOT" \
     -p platform/silabs/hearth.slcp --with MGM240PA32VNA \
     --generator-timeout=180 -o makefile
-POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-core \
+POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter \
     -f hearth.Makefile -j8
-cd ~/silabs/work/hearth-core/build/debug
+cd ~/silabs/work/hearth-matter/build/debug
 commander gbl create hearth.gbl --app hearth.s37
 ```
 
-`~/silabs/work/hearth-core` is round 2's build directory. Round 1's
-`~/silabs/work/hearth-skeleton` is left where it is: the figures under
-"Measured" that name it are that tree's, and they are not re-derivable from a
-directory that has been rebuilt over.
+**Step one is `fw/sdk-prepare.sh`, and on a machine that has never run it the
+`source` above prints two lines and returns 1**: that is the patch gate at the
+end of `toolchain.env`, which refuses an extension copy that is unprepared or
+prepared at the wrong patch revision. Every variable is exported before the
+gate runs, so the shell is still usable and the prepare runs straight
+afterwards; source the file again and it returns 0. Details in
+`sdk-patches/README.md`.
+
+**Two `--sdk-package-path` arguments**, the SDK and the extension. That is the
+form the extension's own `slc/build.sh` uses (line 353, which also passes a
+third for the Wi-Fi SDK that this Thread port does not need); one path alone
+cannot resolve `hearth.slcp`'s `sdk_extension:` stanza. `slc signature trust`
+was never needed: the extension's components generate without it.
+
+`~/silabs/work/hearth-matter` is round 2 task 2's build directory. Round 1's
+`~/silabs/work/hearth-skeleton` and task 1's `~/silabs/work/hearth-core` are
+left where they are: the figures under "Measured" that name them are those
+trees', and they are not re-derivable from a directory that has been rebuilt
+over.
+
+One thing the prepare takes with it, worth knowing before running it: it
+replaces `$MATTER_EXT_ROOT` **whole**, so an `out/` tree from building a stock
+example inside it (the recipe under "Building a stock example") goes too. The
+round 1 stock-light figures below stand on their own record; rebuild the example
+if it is wanted again.
 
 `--with MGM240PA32VNA`, the module id, never a board id; see "Do not build for
 BRD2704A". Since Task 6 a wrong target is a compile error rather than a bench
@@ -324,7 +356,229 @@ One build note worth keeping:
 
 Round 1's second note said two `sl_system` deprecation warnings were expected.
 They are gone with `sl_system` itself; the build is warning-free, and
-`grep -c deprecated` over the build log is the check that says so.
+`grep -c deprecated` over the build log is the check that says so. **It is still
+warning-free with the whole Matter stack in it**, `grep -ci warning` 0 as well,
+and keeping it that way cost one component: see "The components, and the three
+that could not stay".
+
+### The components, and the three that could not stay
+
+Task 2's component set is the Silicon Labs Matter samples' minus the shell, the
+OTA support and requestor, the LCD, the buttons and LEDs, and the lighting
+application. `hearth.slcp` carries the reasoning next to each line; three
+entries are worth repeating here, because each was a build failure and not a
+preference.
+
+- **`matter_platform_mg` could not stay.** It is what every sample lists, and it
+  compiles the sample APPLICATION framework alongside the platform layer:
+  `BaseApplication.cpp` and `MatterConfig.cpp`, which include `"AppEvent.h"`,
+  `"AppConfig.h"` and `<AppTask.h>` and call
+  `AppTask::GetAppTask().StartAppTask()`. With it in the project the build stops
+  at `BaseApplication.cpp:25:10: fatal error: AppEvent.h: No such file or
+  directory`. The headers are the sample application's; supplying Hearth
+  versions of them would mean carrying the sample's app-event, button, LED and
+  LCD framework to satisfy a bootstrap this product does not use. **The CHIP
+  platform layer it wraps is the `efr32` component**, which `hearth.slcp` lists
+  instead (`PlatformManagerImpl`, `BLEManagerImpl`, `ThreadStackManagerImpl`,
+  `ConfigurationManagerImpl`, `KeyValueStoreManagerImpl`, `CHIPMem-Platform`,
+  `Logging`, the PSA keystore), together with the platform components
+  `matter_platform_mg` required and nothing else pulls in: `sleeptimer`,
+  `dmadrv`, `mpu`, `udelay`, `component_catalog`, `rail_lib_multiprotocol`,
+  `hal_wdog`, `gpiointerrupt`, `emlib`. Hearth's own Matter bootstrap, for which
+  `MatterConfig.cpp` is the reference to read, belongs in the port and arrives
+  with task 3.
+- **`matter_temperature_measurement` does not exist.** `slc` stops with
+  "Referenced project component matter_temperature_measurement not in
+  framework", and nothing is missing: Temperature Measurement has no cluster
+  server in connectedhomeip (there is no `temperature-measurement-server`
+  directory) and no row in the extension's own
+  `cluster-to-component-dependencies.json`. It is served entirely out of ember
+  attribute storage, which for this port means the external-attribute callbacks
+  the upward port provides.
+- **`rail_util_pti` went with `matter_platform_mg`**, which was the only thing
+  requiring it. On the bare module target the generated config sets
+  `SL_RAIL_UTIL_PTI_MODE` to `SL_RAIL_PTI_MODE_DISABLED` and leaves the pin
+  block unset, so it contributed one disabled peripheral and the build's only
+  warning (`#warning "RAIL PTI peripheral not configured"`). This carrier does
+  not route the Packet Trace pins; the sample dev kits do, which is why the
+  samples carry it.
+
+Two components are here for the opposite reason, demanded rather than chosen:
+`matter_configuration_over_swo`, because `matter` requires the
+`configuration_over_swo` api and the Simplicity SDK's own provider drags in
+`iostream_rtt` and SEGGER RTT; and `matter_segger_rtt`, because
+`matter_provision_default` requires `iostream_rtt` which requires `segger_rtt`,
+and `matter_provision_default` is not optional (`matter` requires the
+`matter_provision` api, and the only other provider requires `iostream_rtt`
+too). So SEGGER RTT is in the image whether or not anything uses it.
+
+**Where CHIP's own log output goes: an RTT buffer.**
+`src/platform/silabs/Logging.cpp` writes to `SEGGER_RTT_WriteNoLock` unless
+`SILABS_LOG_OUT_UART` is 1, and setting that needs `matter_uart`, the SDK's UART
+driver, on a peripheral Hearth drives itself with bare emlib. So CHIP logs reach
+neither of this board's UARTs and are readable only over SWD. That is the right
+default for a product whose AT link must carry nothing but the AT protocol, and
+it is a thing task 3 should know before it looks for stack logs on the console.
+
+### The heap changed shape: there is no FreeRTOS heap any more
+
+`matter_platform_mg`'s replacement chain requires **`freertos_heap_3`**, and
+heap_3 and heap_4 are exclusive (both provide the `freertos_heap` api), so slc
+refuses a project carrying `freertos_heap_4` and the Matter platform at once:
+
+```
+Exclusivity Issue with freertos from silabs.simplicity_sdk from freertos_heap
+within rule Requires freertos_heap: ... freertos_heap_4 ... freertos_heap_3 ...
+```
+
+heap_3 forwards `pvPortMalloc()` to the C library's `malloc()`, which the SDK's
+linker wraps into `sl_memory_manager`'s `.memory_manager_heap`. Two consequences
+that a memory measurement here has to respect from now on:
+
+- **`configTOTAL_HEAP_SIZE` is gone from `hearth.slcp`**, not raised. Under
+  heap_3 there is no `ucHeap` array for it to size and nothing reads it. Round
+  1 and round 2 task 1 measured a 24,576 B FreeRTOS pool; that pool does not
+  exist in this image.
+- **`xPortGetFreeHeapSize()` is gone from `src/main.cpp`.** `heap_3.c` does not
+  define it, which is a link error rather than a wrong number.
+  `sl_memory_get_free_heap_size()` replaced it, and it measures the one pool
+  that now holds kernel objects, CHIP's allocations and everything else.
+
+The design spec's section 6 asks for RAM in three parts, one of them "the
+FreeRTOS heap high-water mark ... 24,576 B configured". That part does not apply
+to this platform as built; the two pools are one.
+
+### Data model
+
+`data_model/hearth.zap` is the data model, and `fw/zap-regen.sh` is the only
+thing in this repository that writes `data_model/zap-generated/`. The generated
+files are committed and **never hand-edited**; a data-model change is one `.zap`
+edit and one script run, in one commit.
+
+```bash
+source platform/silabs/toolchain.env
+platform/silabs/fw/zap-regen.sh          # write data_model/zap-generated
+platform/silabs/fw/zap-regen.sh --check  # regenerate to a temp dir and diff
+```
+
+The file started as the nRF54L15 arm's `src/default_zap/hearth.zap`, which is
+why the two arms' models are comparable. What task 2 changed:
+
+- **Endpoint 240, the disabled catalogue endpoint**, keeps Identify, Groups,
+  On/Off, Descriptor and Temperature Measurement enabled and every other
+  catalogue cluster `"enabled": 0`. The entries are disabled, not deleted: a
+  later batch re-enables the clusters it needs with one flag each. The endpoint
+  type is still named `MA-dimmablelight` and still declares device type 0x0101,
+  inherited unchanged from the nRF file; the endpoint is disabled and its device
+  type list is never read, so the name is a label rather than a claim.
+- **Endpoint 0** keeps the root-node set with **OTA Software Update Requestor
+  and Provider disabled**: the update story is host-driven serial flashing
+  (`FIRMWARE_UPDATE_SPEC.md`), deliberately not Matter OTA.
+- The two `"package"` paths point at the extension's `zcl.json` and
+  `app-templates.json` as **absolute paths on this machine**, exactly as the nRF
+  file points at its NCS workspace. They are overridden at every generation, by
+  `-z`/`-g` from `zap-regen.sh` and by the SDK-provided properties slc reads out
+  of `matter.slsdk`, so nothing depends on them resolving; they are a record of
+  which tree the file was last edited against.
+
+Two clusters are enabled on endpoint 0 with **no server component** in
+`hearth.slcp`: Diagnostic Logs and Wi-Fi Network Diagnostics. That is not a link
+error, the generated `callback-stub.cpp` defines every cluster init callback
+weakly, so both advertise metadata with nothing behind them. They are kept
+because this data model is the nRF arm's and the two Thread ports should answer
+the same; whether a Thread-only product should carry Wi-Fi diagnostics at all is
+a wire-surface question for BOTH arms and belongs to the qualification round.
+
+Generated figures, read out of `data_model/zap-generated/endpoint_config.h`
+(2026-09-18, zap 2026.6.18):
+
+| | |
+|---|---|
+| `FIXED_ENDPOINT_COUNT` | `(2)` |
+| `FIXED_ENDPOINT_ARRAY` | `{ 0x0000, 0x00F0 }` |
+| `GENERATED_CLUSTER_COUNT` | 18 |
+| `ATTRIBUTE_LARGEST` | `(66)` |
+| `ATTRIBUTE_MAX_SIZE` | `(46)` |
+| `ATTRIBUTE_SINGLETONS_SIZE` | `(0)` |
+
+`ATTRIBUTE_LARGEST` is the size of the generated ember IO buffer, and it is the
+number the Descriptor declaration has to stay under: the upstream bridge
+examples declare Descriptor with 254-byte attribute arrays, which is why the nRF
+port declares it with an empty attribute list instead (design spec fact 8).
+
+#### How the generation actually happens, and why there are two of them
+
+The extension ships `matter_zap_custom_generation`, a component with no
+generator of its own, and the obvious reading is that a custom data model opts
+into it. **That reading is wrong and the build proves it.** What runs ZAP is
+slc-cli itself, for any project carrying a `config_file:` with
+`file_id: zap_config`, through the ZAP adapter pack it finds at
+`STUDIO_ADAPTER_PACK_PATH`; the stock `lighting-app`, which does not list the
+component, gets a full `autogen/zap-generated/` tree all the same. What
+`matter_zap_custom_generation` does is flip the `unless:` conditions inside
+`matter_static_generated_zap_content`, **removing** the pre-generated
+`third_party/matter_sdk/zzz_generated/app-common` include path. Generated with
+the component, `grep -c zzz_generated hearth.project.mak` is 0; without it, 1.
+That include path is where the per-cluster headers live (`clusters/OnOff/*.h`
+and 140 more, which the SDK's own cluster servers include), and a generation run
+does not produce them: 28 files out, `clusters/shared` only, the same 28 the
+stock light's run produces. The component is for a project that adds a CUSTOM
+CLUSTER XML, which is what the one app using it, `performance-test-app`, does.
+Hearth's data model is custom but its clusters are all standard, so the
+component would take headers away and put none back. It is not in the project.
+
+That leaves two runs of the same generator over the same input: `zap-regen.sh`
+into the repository, and slc into the build directory. They were compared file
+by file on 2026-09-18 and agree on 27 of 28 files. The 28th is `access.h`, where
+the build's copy carries three extra privilege rows for
+`BasicInformation::LocalConfigDisabled`, an attribute this data model does not
+declare and cannot reach. The cause is zap's persistent sqlite state directory,
+which on this bench is the SLT `zap` package itself, because `toolchain.env`
+exports `ZAP_DIR` for slt and zap reads `ZAP_DIR` as its own state directory: a
+state database with other ZCL packages loaded emits those rows, a fresh one does
+not, verified with `--tempState` and with a fresh `--stateDirectory` both. So
+`zap-regen.sh` takes a fresh state directory, and the committed tree is the one
+that regenerates identically on any machine.
+
+### SDK patches
+
+`sdk-patches/README.md` is the mechanism, the patch, and how a reader tells
+whether a tree is patched. The short version: the extension is copied out of the
+Conan cache by `fw/sdk-prepare.sh`, which applies
+`sdk-patches/matter_sdk/*.patch` after checking each against its `.sha256`, and
+stamps the copy with `HEARTH_EEM_PATCH_REV`; `toolchain.env` returns 1 naming
+the prepare script if that stamp is missing or at the wrong revision. It is a
+revision check and not a presence check because the patch defaults to stock
+behaviour when its macro is unset, so a stale cut of it looks exactly like a
+current one.
+
+The one patch caps `ElectricalEnergyMeasurement`'s `gMeasurements` table at
+`CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES` (8, in
+`src/CHIPProjectConfig.h`) instead of the whole dynamic endpoint space. The
+cluster is not in this round's build, so the reclaim is not measured here.
+
+### The OpenThread override
+
+`config/sl_openthread_features_config.h` is the SDK's own
+`openthread/config/sl_openthread_features_config.h` with **one line changed**:
+`OPENTHREAD_CONFIG_MLE_MAX_CHILDREN` is 16 rather than the SDK's 10, so the two
+Thread ports of this product answer the same (the nRF arm runs 16, ruling DE412:
+the router role is a kept product capability and the mesh sizing is stated
+rather than inherited). `hearth.slcp` binds it with a `config_file:`/`override:`
+stanza naming `ot_stack_ftd`, which is the component owning that `file_id`
+(`ot_stack_mtd` and `ot_stack_rcp` declare the same one and are not in this
+build). A project's own `config/` directory is not picked up by slc on its own;
+the same stanza shape is what binds the bootloader project's two headers.
+
+It is a frozen copy of a 444-line SDK file, and that is its cost: **on an SDK
+bump, diff it against the SDK's** and carry any new options across.
+
+```bash
+diff "$SISDK_ROOT/openthread/config/sl_openthread_features_config.h" \
+     platform/silabs/config/sl_openthread_features_config.h
+```
+
+Today that diff is the changed value and the comment above it, nothing else.
 
 ### The console this image drives
 
@@ -707,11 +961,13 @@ session, not BLE, so they prove the device joined the mesh.
 
 ## Measured
 
-Two rounds of figures live here. **"Round 2 baseline" immediately below is the
-current image**: the same skeleton on `sl_main`, 2026-09-18. Everything after
-it is round 1's `sl_system` image, kept because the Phase 1 result set, the 35
-failing rows and the bench facts are still the record round 2 works from, and
-because a figure is only worth what its provenance says.
+Three sets of figures live here. **"Round 2 task 2" immediately below is the
+current image**, the first one with the Matter stack linked in. "Round 2
+baseline" after it is the same skeleton on `sl_main` with no Matter, which is
+what task 2's figures are measured against; everything after that is round 1's
+`sl_system` image, kept because the Phase 1 result set, the 35 failing rows and
+the bench facts are still the record round 2 works from, and because a figure is
+only worth what its provenance says.
 
 The round 1 figures: the skeleton image, 2026-09-17, built from the committed
 tree at `233778c` in `~/silabs/work/hearth-skeleton` by the "Building" recipe
@@ -726,6 +982,146 @@ two are identical (see "Harness Phase 0 and Phase 1"). The two build logs
 differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
+
+### Round 2 task 2: the Matter stack linked, not started
+
+Built 2026-09-18 from the committed tree at `4c0f989` in
+`~/silabs/work/hearth-matter` by the "Building" recipe above (a clean
+`slc generate` into an empty directory), flashed with `fw/flash.py` and run on
+the MGM240PA32VNA3 on the iLabs RP2350 carrier. `hearth.bin`
+`md5sum 27ee249b15246bc8e31b07f450c9cd94`.
+
+Nothing in this image calls into the stack: `Server::Init` is never reached, the
+upward port is still `port/mt_matter_stub.c`, and the figures below are what the
+stack costs by being LINKED. They are the baseline task 3's "started" figures
+are compared against.
+
+```
+$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter \
+      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter/build.log
+$ grep -c deprecated ~/silabs/work/hearth-matter/build.log
+0
+$ grep -ci warning ~/silabs/work/hearth-matter/build.log
+0
+```
+
+`arm-none-eabi-size ~/silabs/work/hearth-matter/build/debug/hearth.out`, with
+the round 2 baseline beside it:
+
+| | Task 2, bytes | Round 2 baseline, bytes | Delta |
+|---|---|---|---|
+| `text` | 728 200 | 48 336 | +679 864 |
+| `data` | 3 116 | 176 | +2 940 |
+| `bss` | 258 576 | 261 536 | -2 960 |
+
+`bss` goes DOWN because `arm-none-eabi-size` counts `.memory_manager_heap` in
+it, and that section is whatever RAM is left over: the stack's static RAM came
+out of the heap, not out of the part. The `-A` split is where the real movement
+is.
+
+`arm-none-eabi-size -A` on the same file:
+
+| Section | Bytes | Round 2 baseline | Where |
+|---|---|---|---|
+| `.text` | 727 364 | 47 520 | flash |
+| `.vectors` | 368 | 368 | flash, at 0x08006000 |
+| `.ARM.exidx` | 8 | 8 | flash |
+| `.copy.table` | 12 | 12 | flash |
+| `.zero.table` | 0 | 0 | flash |
+| `.data` | 3 116 | 176 | RAM, loaded from flash |
+| `.nvm` | 40 960 | 40 960 | flash, at the top of the application region |
+| `.bss` | 110 264 | 42 928 | RAM |
+| `.memory_manager_heap` | 143 700 | 217 580 | RAM, whatever is left |
+| `.stack` | 4 608 | 1 024 | RAM, the C stack; raised by `SL_STACK_SIZE` |
+| `text_application_ram` | 448 | 428 | RAM |
+| `.bootloader_reset_section` | 4 | 4 | RAM, at 0x20000000 |
+
+The RAM rows sum to 262 140 B again, the same 4 B of alignment padding below the
+part's 262 144 that round 1's section explains. **The stack costs 67,336 B of
+`.bss` and 2,940 B of `.data` before it is ever started**, and the
+memory-manager heap gives up 73,880 B to pay for that plus the bigger C stack.
+
+```
+$ ls -l hearth.bin hearth.gbl hearth.s37
+-rwxrwxr-x 1 pontus pontus  731332 Sep 18 16:41 hearth.bin
+-rw-rw-r-- 1 pontus pontus  731404 Sep 18 16:41 hearth.gbl
+-rwxrwxr-x 1 pontus pontus 2194048 Sep 18 16:41 hearth.s37
+```
+
+The application image on flash is **731 332 B**, 47.49 % of the 1 540 096 B
+application region, against the skeleton's 48 516 B and 3.15 %. For scale, the
+stock Silicon Labs `lighting-app` for this part was 1 025 140 B with the shell,
+the OTA requestor, scenes, level and colour control compiled in, and the
+nRF54L15 core round shipped at 753,691 B of flash. That is the yardstick the
+design spec asks this figure to be read against, and this image is about 22 KB
+below it. The two are not built the same way and the comparison is an order of
+magnitude rather than a like-for-like difference; what it settles is the
+question the spec actually asks, whether this image is materially ABOVE the
+nRF's for the same coverage. It is not.
+
+`hearth.gbl` is **731 404 B**, which `fw/flash.py` sent as 5 715 blocks in
+81.0 s with no retransmits (the skeleton was 374 blocks in 5.4 s; the bootloader
+runs about 14 ms per 128-byte block, so the transfer time is the image size).
+
+#### Free heap at `+MTREADY`, task 2
+
+**104 784 B free**, logged by `sl_memory_get_free_heap_size()` immediately after
+`mt_at_start()` returns, out of the 143 700 B `.memory_manager_heap`.
+
+This is NOT comparable with round 1's 13 768 B or task 1's 9 560 B: those were
+`xPortGetFreeHeapSize()` over a separate 24 576 B FreeRTOS pool that no longer
+exists (see "The heap changed shape"). The pools are one now, and this figure
+counts everything the kernel and the SDK have taken, including the boot task's
+own 4 KiB stack and TCB, which are released a few instructions later. CHIP has
+allocated nothing at this point: the stack is not started.
+
+#### The boot log and `+MTREADY`, task 2
+
+Captured 2026-09-18, both ports at once with timestamps: the console on the
+Debug Probe's UART CDC at 115200 with DTR asserted, the AT link on the carrier's
+CDC with DTR and RTS cleared before the open, whose own reset is the reset being
+watched.
+
+```
+  0.010  CONSOLE b'\x00'
+  0.091  CONSOLE b'I boot: Hearth on USART0 TX PA00, 115200 8N1 (sl_main)\r\n'
+  0.151  CONSOLE b'I boot: boot task up, model MGM240P Hearth\r\nI at_parser: parser started\r\n'
+  0.151  AT      b'+MTR'
+  0.161  CONSOLE b'I boot: +MTREADY sent, free heap 104784 B\r\n'
+  0.161  AT      b'EADY\r\n'
+```
+
+AT link, in full: `b'+MTREADY\r\n'`, 10 bytes, nothing before it and nothing
+else. **The boot contract is unchanged by linking the stack in**, and this
+capture is the evidence: the same three console lines, in the same order, before
+the first byte of the marker, and no URC precedes it. The marker arrives at
+0.151 s against the baseline's 0.102 s; the extra ~50 ms is the SDK's second
+stage bringing up the larger image.
+
+#### Harness Phase 0 and Phase 1, task 2
+
+```
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+===== RESULT: 0 passed, 0 failed =====
+
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico \
+      --transport THREAD --phase 1
+===== RESULT: 261 passed, 35 failed =====
+```
+
+The run was redirected to a file and compared against
+`platform/silabs/skeleton-phase1.json` **name by name, not count by count**: 296
+rows on both sides, no row present on one side only, and **zero verdict
+differences**. The same 261 pass and the same 35 fail. The baseline file is not
+rewritten, because nothing it records changed; the 35 rows below are still this
+round's checklist, and they stay failing until the stack is started and the
+stubs are retired.
+
+Host gates the same day, on the same tree: `make -C test/host run` green
+(including `check_decls.py` 61/61 + 4/4 + 24/24 + 1/1 and
+`check_slcp_sources.py`), and `python3 test/test_mt_regression.py` ran 467 tests,
+OK.
 
 ### Round 2 baseline: the same skeleton on `sl_main`
 
@@ -1152,10 +1548,18 @@ missing peripheral-ready guard, the unchecked `xTaskCreate()` return, the
 ad-hoc `hearth_console_init()` declaration, and the unenforced agreement
 between `hearth.slcp` and `core/sources.cmake`.
 
+Round 2 Task 2 (2026-09-18) took the static ZAP and the disabled catalogue
+endpoint 240 out of the first row below, and added four rows of its own at the
+bottom of the table.
+
 | Open item | Owner |
 |---|---|
-| The Matter stack: `chip::Server` with the minimal static ZAP, the disabled catalogue endpoint 240, the composition rebuild, the arenas and the device-type catalogue in audited batches, each batch retiring stubs from `port/mt_matter_stub.c` and `port/mt_devtypes_stub.c` | the **upward-port round** (graph T446). Its starting checklist is "The 35 failing rows" above, and the run they came from is the baseline `platform/silabs/skeleton-phase1.json` |
+| The Matter stack: `chip::Server` started, the composition rebuild, the arenas and the device-type catalogue in audited batches, each batch retiring stubs from `port/mt_matter_stub.c` and `port/mt_devtypes_stub.c`. The data model and the components are in the image since task 2; nothing calls into them | the **upward-port round** (graph T446). Its starting checklist is "The 35 failing rows" above, and the run they came from is the baseline `platform/silabs/skeleton-phase1.json` |
 | Signing (ECDSA-P256 dev key under `keys/`, as the nRF port does), secure boot, and the SE debug lock after the one-time SWD install | **pre-ship** (design spec section 7, stage 2). The bootloader itself is built and installed already; it accepts an unsigned `.gbl` today |
 | Thread-arm baselines under `test/baselines/`, ARCHITECTURE 8.21 and its decision-log rows, and the host library's `fw/README` variant table | the **qualification round** (design spec section 8, steps 6 and 7). The skeleton's Phase 1 record deliberately stays out of `test/baselines/`, which holds shipping baselines only |
 | The RX ring overflow warning is observable but has never fired: no run so far pushed the link hard enough for its absence to be evidence | the **upward-port round**'s first sustained traffic; see "What is not measured here" |
 | The console is TX only by design, so the port has no console input path and no shell | settled, not open: it is board contract item 6 and a CRA posture (`CRA_COMPLIANCE.md` in the docs repository). Listed here so nobody reopens it as an omission |
+| `CHIPProjectConfig.h` does not set `CHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION` or its string, so BasicInformation reports the SDK default `1` / `"1.0"` while `AT+CGMR` answers `MT_FW_VERSION`, 1.2.0. Two version surfaces, one of them wrong. A second hand-maintained copy of the version would drift, so the fix is to derive it | the **qualification round**, which is what makes the two surfaces answerable together |
+| Diagnostic Logs and Wi-Fi Network Diagnostics are enabled on endpoint 0 with no server component behind them: metadata with nothing serving it, and Wi-Fi diagnostics on a Thread-only product besides. Inherited from the nRF arm's data model, which is why it is not fixed here | the **qualification round**, for BOTH Thread arms at once; see "Data model" |
+| CHIP's own log output goes to a SEGGER RTT buffer, readable only over SWD, because routing it to a UART needs `matter_uart` on a peripheral Hearth drives itself. Nothing is lost today, but a stack that is started logs a great deal | the **upward-port round**, at its first debugging session; see "The components" |
+| `config/sl_openthread_features_config.h` is a frozen 444-line copy of an SDK file with one value changed. It goes stale silently on an SDK bump | whoever bumps the SDK; the diff command is under "The OpenThread override" |

@@ -74,8 +74,10 @@ config_file:
   # The data model. slc runs ZAP over this file and writes the result into the
   # build directory's autogen/zap-generated/, which is what the build compiles.
   # data_model/zap-generated/ in this repository is the committed record of that
-  # same output, produced by fw/zap-regen.sh from the same generator, templates
-  # and .zap; README, "Data model", has the diff that proves the two agree.
+  # same output, produced by fw/zap-regen.sh from the same generator, the same
+  # templates and this same file. The two were compared file by file and agree
+  # except for three inert privilege rows in access.h that depend on zap's
+  # persistent state database; README, "Data model", has the comparison.
   - path: data_model/hearth.zap
     directory: common
     file_id: zap_config
