@@ -9,8 +9,12 @@
  * 0-on-success convention -> -1; mt_attr_result_t -> MT_ATTR_ERR_ENDPOINT
  * (no endpoints exist here) or MT_ATTR_ERR_CLUSTER where the comment names
  * it; MT_ROW_* -> MT_ROW_ERR_ENDPOINT; counts 0; bool false; pointer NULL;
- * void empty; mt_matter_state() -> MT_STATE_UNINIT. Every out-parameter is
- * zeroed (after a NULL check) before the failure return.
+ * void empty. Every out-parameter is zeroed (after a NULL check) before the
+ * failure return.
+ *
+ * Round 2 task 4 retired the first nine: the commissioning state, network
+ * and Thread answers come from the running stack in port/mt_matter_sl.cpp
+ * now. What is left below is everything the data model has to exist for.
  */
 
 #include <stddef.h>
@@ -19,47 +23,16 @@
 #include "mt_matter.h"
 
 /* ---- commissioning state and identity ----------------------------------- */
-
-int mt_matter_state(void) { return MT_STATE_UNINIT; }
-
-int mt_matter_fabric_count(void) { return 0; }
-
-int mt_matter_open_commissioning(int timeout_s) { (void)timeout_s; return -1; }
-
-int mt_matter_onboarding_codes(char *qr, size_t qr_len, char *manual, size_t manual_len)
-{
-    if (qr != NULL && qr_len > 0) qr[0] = '\0';
-    if (manual != NULL && manual_len > 0) manual[0] = '\0';
-    return -1;
-}
-
-void mt_matter_factory_reset(void) {}
-
 /* ---- network transport (C3) -------------------------------------------- */
-
-/* The one stub that answers rather than refuses: the transport is a
- * platform fact (Thread by construction, MT_COMBINED_IMAGE=0), so the
- * skeleton can state it truthfully. cmd_mtnet() renders a non-zero return
- * as a bare ERROR, which would hide that fact from Phase 1's identity rows. */
-int mt_matter_net_info(int *transport, int *enabled, int *connected)
-{
-    if (transport != NULL) *transport = MT_NET_THREAD;
-    if (enabled != NULL) *enabled = 0;     /* no Thread stack on the skeleton */
-    if (connected != NULL) *connected = 0;
-    return 0;
-}
-
-int mt_matter_transport_mismatch(void) { return 0; }
-
 /* ---- Thread role and mesh identity -------------------------------------- */
 
-int mt_matter_thread_info(mt_thread_info_t *out)
-{
-    if (out != NULL) memset(out, 0, sizeof(*out));
-    return MT_ATTR_ERR_CLUSTER;
-}
-
-const char *mt_thread_role_name(uint8_t role) { (void)role; return NULL; }
+/* Round 2 task 4 moved all three sections to port/mt_matter_sl.cpp, which
+ * answers them from the running Matter stack: mt_matter_state,
+ * mt_matter_fabric_count, mt_matter_open_commissioning,
+ * mt_matter_onboarding_codes, mt_matter_factory_reset, mt_matter_net_info,
+ * mt_matter_transport_mismatch, mt_matter_thread_info and
+ * mt_thread_role_name. The banners stay so the next section to move can be
+ * found by the same name in both files. */
 
 /* ---- live composition ---------------------------------------------------- */
 

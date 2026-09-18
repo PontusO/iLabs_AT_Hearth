@@ -66,6 +66,12 @@ source:
   - path: port/hearth_port_sl.c
   - path: port/hearth_ring.c
   - path: port/hearth_kvid.c
+  # The ported half of the mt_matter.h bridge: the nRF port's sections
+  # transferred one round at a time. Round 2 task 4 is its first, the
+  # commissioning state, network and Thread answers; mt_matter_stub.c below
+  # holds whatever has not moved yet, and test/host's check_decls.py proves
+  # every declaration is defined in exactly one of the two.
+  - path: port/mt_matter_sl.cpp
   - path: port/mt_matter_stub.c
   - path: port/mt_devtypes_stub.c
   # core/: mirrors core/sources.cmake, which is authoritative.
