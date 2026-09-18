@@ -64,10 +64,9 @@ command to ask it to was this one ("The 64-bit value the libc could not print"
 below). And every stub for a family this image has not ported stopped answering
 "no such endpoint" for an endpoint that exists: it answers its own family's
 "no such cluster on that endpoint" code instead, from one lookup in the live
-endpoint table. Phase 1 moves to **291/5** ("Measured", "Round 2 task 6"),
-and all five remaining failures are named there with their causes; four of them
-need catalogue device types this round does not build and the fifth needs a
-read path this round does not port.
+endpoint table. Phase 1 moves to **292/4** ("Measured", "Round 2 task 6"),
+and all four remaining failures are named there with their cause: each stages a
+composition of catalogue device types this round does not build.
 
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
@@ -364,8 +363,10 @@ third for the Wi-Fi SDK that this Thread port does not need); one path alone
 cannot resolve `hearth.slcp`'s `sdk_extension:` stanza. `slc signature trust`
 was never needed: the extension's components generate without it.
 
-`~/silabs/work/hearth-matter-t6` is round 2 task 6's build directory and the
-one the current image came from. Task 5's `~/silabs/work/hearth-matter-t5`,
+`~/silabs/work/hearth-matter-t6r` is round 2 task 6's build directory after its
+fix round, and the one the current image came from; `~/silabs/work/hearth-matter-t6`
+is the same task's pre-fix-round tree, kept because the tiny printf's own
+3,272 B figure is measured against it. Task 5's `~/silabs/work/hearth-matter-t5`,
 task 4's `~/silabs/work/hearth-matter-t4`,
 task 3's `~/silabs/work/hearth-matter-t3r` (its directory after the review
 fix), task 2's `~/silabs/work/hearth-matter`, round 1's
@@ -1659,8 +1660,8 @@ claims to be.
 
 ### Round 2 task 6: the attribute bridge and the `+MTATTR` URC
 
-The current image, 2026-09-18, built from the committed tree at `3ab8128` in a
-fresh `~/silabs/work/hearth-matter-t6` by the "Building" recipe above, flashed
+The current image, 2026-09-18, built from the committed tree at `cca6e0c` in a
+fresh `~/silabs/work/hearth-matter-t6r` by the "Building" recipe above, flashed
 with `fw/flash.py` over XMODEM. The AT link is the CPico carrier's CDC at
 `/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00` with DTR and RTS
 cleared before the open, the console is the Debug Probe's second CDC with DTR
@@ -1669,40 +1670,42 @@ task 7's.
 
 ```
 $ git status --porcelain      (clean)
-$ slc generate -d ~/silabs/work/hearth-matter-t6 --sdk-package-path "$SISDK_ROOT" \
+$ slc generate -d ~/silabs/work/hearth-matter-t6r --sdk-package-path "$SISDK_ROOT" \
       --sdk-package-path "$MATTER_EXT_ROOT" -p platform/silabs/hearth.slcp \
       --with MGM240PA32VNA --generator-timeout=180 -o makefile
-$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-t6 \
-      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-t6/build.log
-$ grep -ci warning   ~/silabs/work/hearth-matter-t6/build.log     0
-$ grep -c deprecated ~/silabs/work/hearth-matter-t6/build.log     0
+$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-t6r \
+      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-t6r/build.log
+$ grep -ci warning   ~/silabs/work/hearth-matter-t6r/build.log    0
+$ grep -c deprecated ~/silabs/work/hearth-matter-t6r/build.log    0
 ```
 
 Sizes, with provenance (`arm-none-eabi-size` on
-`~/silabs/work/hearth-matter-t6/build/debug/hearth.out`, 2026-09-18, against
+`~/silabs/work/hearth-matter-t6r/build/debug/hearth.out`, 2026-09-18, against
 task 5's `~/silabs/work/hearth-matter-t5` figures):
 
 | | Task 6 | Task 5 | Delta |
 |---|---|---|---|
-| `text` | 844 560 | 839 528 | +5 032 |
+| `text` | 844 956 | 839 528 | +5 428 |
 | `data` | 3 368 | 3 368 | 0 |
 | `bss` (size's, includes the heap section) | 258 324 | 258 324 | 0 |
-| `.text` (`-A`) | 843 724 | 838 692 | +5 032 |
+| `.text` (`-A`) | 844 120 | 838 692 | +5 428 |
 | `.bss` (`-A`) | 117 720 | 117 688 | +32 |
 | `.memory_manager_heap` | 135 992 | 136 024 | -32 |
 
-The `+5 032 B` of `text` splits two ways and both halves were measured
+The `+5 428 B` of `text` splits three ways and each part was measured
 separately, because they are separate decisions: **3 272 B is the tiny printf
-component** (measured as its own build before the bridge's own comment and log
-lines were added: 844 288 against the same tree's 841 016 with newlib-nano) and
-the remaining 1 760 B is the attribute bridge itself. The 32 B of `.bss` comes
-out of the heap section exactly, which is the linker's leftover, so the two rows
-reconcile.
+component** (measured as its own build of the same source, 844 288 with it
+against 841 016 with newlib-nano), **396 B is ruling F500's carve-out** (the
+table, the predicate, the live reader and the two dispatch arms: 844 956 against
+the pre-ruling build's 844 560) and the remaining **1 760 B is the attribute
+bridge itself**. The 32 B of `.bss` comes out of the heap section exactly, which
+is the linker's leftover, so the two RAM rows reconcile; the carve-out's table
+is `const` and lives in `text`.
 
-`hearth.bin` 847 944 B (**55.06 %** of the 1 540 096 B application region, task
-5: 842 912 B / 54.73 %), `md5sum 3da8d75f07c6205aa3ddf5891c231099`.
-`hearth.gbl` 848 016 B, `md5sum 4f26c18294f550e1f0242334a1dac891`, sent by
-`fw/flash.py` as 6 626 blocks with 0 retransmits.
+`hearth.bin` 848 340 B (**55.08 %** of the 1 540 096 B application region, task
+5: 842 912 B / 54.73 %), `md5sum 374a5cc6342a97e2f0fec1a9d94bb9dd`.
+`hearth.gbl` 848 412 B, `md5sum 33eb0dbcb6a8f4eb6ab4fb4a64703dd8`, sent by
+`fw/flash.py` as 6 629 blocks with 0 retransmits.
 
 **The md5 identifies this one build and is not reproducible**, for the reason
 task 5 recorded and proved with a `cmp`: OpenThread's version banner is built
@@ -1716,11 +1719,12 @@ but those six bytes would be a real difference.
 the single-light rig composition rebuilt), out of the 135 992 B
 `.memory_manager_heap`. Task 5's was 95 368 out of 136 024: the pool shrank by
 the 32 B the new statics took and the free figure moved by exactly the same 32.
-The bridge itself allocates nothing at run time.
+The bridge itself allocates nothing at run time, and the figure is unchanged by
+ruling F500's carve-out, which is `const` data and four accessor calls.
 
 #### The bench proofs, task 6
 
-Every transcript below is from the flashed `3da8d75f` image. The driver prints
+Every transcript below is from the flashed `374a5cc6` image. The driver prints
 every line the device sends until `OK` or `ERROR`, so a `+MTATTR` URC that
 arrives between a write and its `OK` is visible rather than absorbed;
 `+MTERR:n` is always followed by `ERROR` on the wire and the collector returns
@@ -1737,7 +1741,7 @@ AT+MTEP?                  -> +MTEP:0,1,0x0100 / +MTEP:1,2,0x0302 / OK
 AT+MTATTR=1,6,0           -> +MTATTR:1,6,0,0 / OK       the light is off
 AT+MTATTR=1,6,0,1         -> +MTATTR:1,6,0,1 / OK       the URC, then OK
 AT+MTATTR=1,6,0           -> +MTATTR:1,6,0,1 / OK
-AT+MTATTR=0,40,2          -> ERROR                      see the FAIL below
+AT+MTATTR=0,40,2          -> +MTATTR:0,40,2,65521 / OK  the root VendorID, F500
 AT+MTATTR=2,1026,0,2222   -> +MTATTR:2,1026,0,2222 / OK
 AT+MTATTR=2,1026,0        -> +MTATTR:2,1026,0,2222 / OK
 AT+MTATTR=1,6,0,-1        -> +MTERR:1 / ERROR           minus on an unsigned
@@ -1745,18 +1749,45 @@ AT+MTATTR=1,0xFFFF,0      -> +MTERR:3 / ERROR           no such cluster on ep 1
 AT+MTATTR=1,6,0xFFFF      -> +MTERR:4 / ERROR           no such attribute
 ```
 
-Seven of the eight rows the task brief asked for. The eighth,
-`AT+MTATTR=0,40,2`, is the root VendorID and it answers a bare `ERROR`; the
-cause is "Fixed endpoints are not readable through the ember path" above, and
-the same line appears on the console every time:
+All eight rows the task brief asked for. The root VendorID needed ruling F500's
+carve-out, below; it answered a bare `ERROR` before that.
+
+##### Ruling F500: the root node's identity, and the limit around it
 
 ```
-E matter: attr read ep 0 cluster 0x0028 attr 0x0002: ember status 134 (a fixed
+AT+MTATTR=0,40,2          -> +MTATTR:0,40,2,65521 / OK   VendorID  0xFFF1
+AT+MTATTR=0,40,4          -> +MTATTR:0,40,4,32784 / OK   ProductID 0x8010
+AT+MTATTR=0,40,7          -> +MTATTR:0,40,7,1 / OK       HardwareVersion
+AT+MTATTR=0,40,9          -> +MTATTR:0,40,9,1 / OK       SoftwareVersion
+AT+MTATTR=0,0x0028,0x0002 -> +MTATTR:0,40,2,65521 / OK   hex form, same answer
+
+AT+MTATTR=0,40,2,1        -> +MTERR:11 / ERROR           READONLY, now reachable
+AT+MTATTR=0,40,4,1        -> +MTERR:11 / ERROR
+AT+MTATTR=0,40,7,2        -> +MTERR:11 / ERROR
+AT+MTATTR=0,40,9,2        -> +MTERR:11 / ERROR
+
+AT+MTATTR=0,40,0          -> ERROR      DataModelRevision: NOT carved out
+AT+MTATTR=0,49,0          -> ERROR      General Commissioning Breadcrumb: nor is it
+AT+MTATTR=0,40,5          -> +MTERR:5 / ERROR   NodeLabel, a CHAR_STRING
+AT+MTATTR=0,40,1          -> +MTERR:5 / ERROR   VendorName, the same
+```
+
+The last four rows are the limit, on the wire: the carve-out serves four named
+attributes, every other code-driven integer on a fixed endpoint still answers a
+bare `ERROR`, and every non-integer still answers `+MTERR:5` on type before
+ember is reached. The bare `ERROR` carries its console line every time:
+
+```
+E matter: attr read ep 0 cluster 0x0028 attr 0x0000: ember status 134 (a fixed
           endpoint's code-driven cluster is not reachable through the ember path)
 ```
 
 134 is `0x86`, `Status::UnsupportedAttribute`, from this port's own external
 attribute read callback.
+
+The dynamic endpoint is untouched by the carve-out: `AT+MTATTR=1,6,0` reads
+`0`, a write to `1` echoes `+MTATTR:1,6,0,1` and answers `OK`, and a write back
+to `0` echoes again, all in the same batch.
 
 ##### The as-built URC rules, and the seed values
 
@@ -1832,32 +1863,31 @@ $ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
 
 $ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 1 \
       --baseline platform/silabs/core-phase1.json
-  ===== RESULT: 291 passed, 5 failed =====
+  ===== RESULT: 292 passed, 4 failed =====
 ```
 
-**291/5 against task 5's 267/29.** The full result set is committed as
+**292/4 against task 5's 267/29.** The full result set is committed as
 `platform/silabs/core-phase1.json`, beside round 1's
-`platform/silabs/skeleton-phase1.json`. Twenty-four rows moved, all in the same
-direction: the eleven `MTATTR` rows but one, and thirteen of the eighteen
-step 1b rows.
+`platform/silabs/skeleton-phase1.json`. Twenty-five rows moved, all in the same
+direction: all eleven `MTATTR` rows (the root VendorID read with ruling F500's
+carve-out) and thirteen of the eighteen step 1b rows, plus the `MTATTR hex
+equals decimal` row.
 
-The five that remain, each with its cause:
+The four that remain, each with its cause, and they are one fact four times:
 
 | Row | Cause |
 |---|---|
-| `MTATTR root VendorID read` | The ember read path cannot reach a fixed endpoint's code-driven cluster in this SDK; "Fixed endpoints are not readable through the ember path" above. Needs a read path through the data model provider for endpoints this port did not create, which has no nRF counterpart to transfer. |
 | `MTMEAS staged variant-1 water heater` | Stages `0x0100, 0x050F,1` and needs the water heater to rebuild. Catalogue batch 7b. |
 | `MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM` | Stages `0x0100, 0x0017,1, 0x0018,1, 0x050D,1`. Catalogue batch 7a. |
 | `MTROWAPPLY count-0 ... on a real EVSE endpoint` | Stages `0x0100, 0x050C,1, 0x0511`. The EVSE round and batch 7a's meter. |
 | `Utility meter pool exhaustion (MT_METER_MAX=2)` | Stages a light and three meters (`0x0511`) and wants the two-meter prefix back. Batch 7a's meter, plus a meter Instance pool this image has none of. |
 
-The last four are the same fact four times: each stages a composition whose
-device types this build's registry has no cluster set for, so the rebuild stops
-at the first of them and `AT+MTEP?` answers the bare light. Each one's
-diagnosis line says exactly that ("composition readback wrong:
-['+MTEP:0,1,0x0100']"). They were not reachable by this task and they are not
-defects: they close when their catalogue batch lands. The first is a genuine
-open question for the controller.
+Each stages a composition whose device types this build's registry has no
+cluster set for, so the rebuild stops at the first of them and `AT+MTEP?`
+answers the bare light. Each one's diagnosis line says exactly that
+("composition readback wrong: ['+MTEP:0,1,0x0100']"). They were not reachable
+by this task and they are not defects: they close when their catalogue batch
+lands.
 
 ### Round 2 task 5: dynamic endpoints from the stored composition
 
@@ -2966,10 +2996,10 @@ claim reproduction should redirect every measurement it intends to compare.
 **Thirty of them are closed.** Round 2 task 4 turned `MTCODES? format`,
 `MTCODES? stable across reads` and `MTTHREAD? shape by image` green; round
 2 task 5 turned the three parent-gate rows (`MTEP=0x0071,0,0`, `MTEP=0x0077`
-unparented and `MTEP=0x0077,0,0`) green; and round 2 task 6 turned twenty-four
-more green, every `MTATTR` row but the root VendorID read and every step 1b row
-that does not need a device type this build cannot create. The current image
-fails **5** of the rows below, each named with its cause under "Measured",
+unparented and `MTEP=0x0077,0,0`) green; and round 2 task 6 turned twenty-five
+more green, every `MTATTR` row and every step 1b row that does not need a
+device type this build cannot create. The current image
+fails **4** of the rows below, each named with its cause under "Measured",
 "Round 2 task 6". The
 list is left as it was recorded, because it is round 1's checklist and the
 baseline file it was captured in is not rewritten; each later section says which

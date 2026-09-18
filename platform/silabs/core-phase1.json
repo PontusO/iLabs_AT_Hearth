@@ -1,13 +1,13 @@
 {
   "header": {
     "cgmr": "1.2.0",
-    "fw_repo_head": "3ab81286d862323c5d7b8ac72fa76f98773f37ce",
+    "fw_repo_head": "cca6e0c8e7ba4b68040500bc92226159010824f5",
     "manual_code": "34970112332",
     "net": "+MTNET:THREAD,0,0,0",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "qr_payload": "MT:SAGA442C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-09-18T19:13:16+00:00",
+    "timestamp": "2026-09-18T19:42:37+00:00",
     "transport": "THREAD"
   },
   "results": {
@@ -31,7 +31,7 @@
     "MTATTR NodeLabel -> +MTERR:5": "PASS",
     "MTATTR hex equals decimal": "PASS",
     "MTATTR read 1,6,0": "PASS",
-    "MTATTR root VendorID read": "FAIL",
+    "MTATTR root VendorID read": "PASS",
     "MTATTR six params -> +MTERR:1": "PASS",
     "MTATTR=1,0xFFFF,0 -> +MTERR:3": "PASS",
     "MTATTR=1,6 -> +MTERR:1": "PASS",
