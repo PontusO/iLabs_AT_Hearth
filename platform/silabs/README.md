@@ -735,6 +735,11 @@ Built 2026-09-18 from the committed tree at `188dee5` in
 round 1 skeleton with the entry point moved and the four round 1 deferrals
 closed, measured once so the stack has a clean baseline to be compared against.
 
+`6a52f84`, a later comment-only fix to `src/main.cpp`, was rebuilt from a clean
+`slc generate` and produces a byte-identical `hearth.bin` (`md5sum`
+`4b311f1cb4f1b66e2ef7eefb54da6048` from both trees), so every figure here still
+belongs to the build it names.
+
 ```
 $ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-core \
       -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-core/build.log
