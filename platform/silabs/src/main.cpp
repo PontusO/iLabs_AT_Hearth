@@ -105,7 +105,16 @@ void hearth_boot_task(void *arg)
          * into the image (MG24 spec section 3); it is never visible on the
          * fabric, and this is where it stops being. */
         chip::DeviceLayer::StackLock lock;
-        emberAfEndpointEnableDisable(kCatalogueEndpointId, false);
+        if (!emberAfEndpointEnableDisable(kCatalogueEndpointId, false)) {
+            /* It returns false only for an endpoint index it cannot find
+             * (attribute-storage.cpp), which would mean the generated
+             * FIXED_ENDPOINT_ARRAY and mt_port_ids.h have drifted apart. Not
+             * fatal: the endpoint would simply stay visible on the fabric, and
+             * a device that still answers the AT contract is more use than one
+             * that stops. Say so, loudly. */
+            HEARTH_LOGE("boot", "catalogue endpoint %u not disabled: no such endpoint",
+                        (unsigned)kCatalogueEndpointId);
+        }
     }
 
     rebuild_composition();

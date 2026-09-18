@@ -494,6 +494,56 @@ void hearth_console_init(void)
     s_console_ready = true;
 }
 
+/* Put one already-formatted line on the wire with no mutex and no yield.
+ * Blocking on TXC is a spin, not a scheduler call, so it is legal anywhere. */
+static void console_write_raw(const char *line, int len)
+{
+    for (int i = 0; i < len; i++) USART_Tx(LOG_USART, (uint8_t)line[i]);
+    while (!(LOG_USART->STATUS & USART_STATUS_TXC)) {}
+}
+
+/* May this call wait on s_log_lock, or must it write straight at the
+ * peripheral?
+ *
+ * THIS IS THE FAULT PATH'S QUESTION, and getting it wrong is the silent hang
+ * that strong fault hooks exist to prevent. src/sdk/SoftwareFaultReports.cpp
+ * emits ChipLogError from three places that are not ordinary task context, and
+ * CHIP's log redirect (port/hearth_matter_init.cpp) brings every one of them
+ * here:
+ *
+ *   - debugHardfault(), reached from HardFault_Handler, BusFault_Handler,
+ *     UsageFault_Handler, mpu_fault_handler, SecureFault_Handler,
+ *     DebugMon_Handler and WDOG0_IRQHandler: handler mode.
+ *   - vApplicationStackOverflowHook(), called from vTaskSwitchContext() inside
+ *     the PendSV handler: handler mode, and inside a context switch.
+ *   - RAILCb_AssertFailed(), called from the radio interrupt: handler mode.
+ *
+ * A FreeRTOS mutex must not be touched from an interrupt AT ALL, with any
+ * timeout: xSemaphoreTakeFromISR() is documented as unusable with mutexes, and
+ * xSemaphoreTake(x, 0) enters a taskENTER_CRITICAL() section that is illegal
+ * from an ISR on Cortex-M because its exit unconditionally unmasks. So the
+ * answer in handler mode is not a shorter wait, it is no mutex.
+ *
+ * Measured on the bench, 2026-09-18, with a scratch probe that took s_log_lock
+ * and then wrote to 0xFFFFFFF0: before this guard the console stopped dead at
+ * the probe's own line and the whole fault report was lost; after it, the
+ * report is complete. The mutex being FREE is what made the unguarded version
+ * look like it worked, which is the worst way for this to be wrong.
+ *
+ * The scheduler-state test covers the other half: app_init_early() logs before
+ * the kernel exists, and a suspended scheduler is not a place to block either.
+ *
+ * The cost of the lock-free path is interleaving: a fault report can cut into a
+ * line another task is mid-way through writing. Interleaved output beats no
+ * output. */
+static bool log_may_block(void)
+{
+    if (s_log_lock == NULL) return false;
+    if (__get_IPSR() != 0U) return false;                        /* handler mode */
+    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return false;
+    return true;
+}
+
 void hearth_log_write(hearth_log_level_t level, const char *tag, const char *fmt, ...)
 {
     static const char lvl[] = { 'E', 'W', 'I' };
@@ -517,8 +567,11 @@ void hearth_log_write(hearth_log_level_t level, const char *tag, const char *fmt
     if ((size_t)n > sizeof(line) - 3) n = (int)sizeof(line) - 3;
     line[n] = '\r'; line[n + 1] = '\n';
 
-    if (s_log_lock != NULL) xSemaphoreTake(s_log_lock, portMAX_DELAY);
-    for (int i = 0; i < n + 2; i++) USART_Tx(LOG_USART, (uint8_t)line[i]);
-    while (!(LOG_USART->STATUS & USART_STATUS_TXC)) {}
-    if (s_log_lock != NULL) xSemaphoreGive(s_log_lock);
+    if (!log_may_block()) {
+        console_write_raw(line, n + 2);
+        return;
+    }
+    xSemaphoreTake(s_log_lock, portMAX_DELAY);
+    console_write_raw(line, n + 2);
+    xSemaphoreGive(s_log_lock);
 }
