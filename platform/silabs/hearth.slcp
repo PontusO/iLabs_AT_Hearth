@@ -177,6 +177,45 @@ component:
   # address in one, and on device_series_2 this component requires
   # wireless_stack, which matter_ble brings.
   - id: common_token_manager_dynamic
+  # Round 2 task 6: the SDK's "Tiny printf" (third_party, MIT, the mpaland
+  # implementation), which REPLACES printf, sprintf, snprintf, vsnprintf,
+  # vprintf and puts image-wide.
+  #
+  # It is here for one capability newlib-nano does not have: the `ll` length
+  # modifier. The ARM GNU 12.2 toolchain's newlib-nano is compiled without
+  # _WANT_IO_LONG_LONG, so its printf family does not know `ll` at all. It
+  # consumes `%l`, meets a second `l`, treats that as an unknown conversion
+  # and prints the remainder literally, so `%llu` puts the two characters
+  # `lu` on the wire where the number should be. Nothing fails and nothing
+  # warns. Bench-confirmed on this part before this component was added:
+  # AT+MTATTR=1,6,0 answered `+MTATTR:1,6,0,lu`.
+  #
+  # AT+MTATTR is the first AT command on this image to print a 64-bit value
+  # and AT_MT_SPEC.md 3.8 makes the full width binding ("<val> is full-width
+  # 64-bit decimal ... so 18446744073709551615 round-trips on a u64
+  # attribute"); core/mt/mt_at.c formats it with %llu / %lld through the
+  # port's hearth_link_write_line(), a plain vsnprintf(). The same gap was
+  # eating CHIP's PRIx64 node and fabric ids and OpenThread's extended
+  # addresses, silently, since round 1, which is why the fix is at the
+  # formatter and not at the one call site.
+  #
+  # REJECTED, with the evidence, because the next person here will think of
+  # it: slc's `nano_c_libs: disabled` toolchain option, which drops
+  # --specs=nano.specs and links the full newlib. It builds warning-free and
+  # its printf is correct, but the image HARD FAULTS during Server::Init,
+  # before +MTREADY. Full newlib's memcpy performs unaligned word accesses
+  # this part traps (UsageFault UNALIGNED, CFSR 0x01000000, PC in memcpy+0x78,
+  # LR in nvm3_halFlashReadWords+0x2c), and nvm3_hal_flash.c:159-167 calls
+  # memcpy precisely and only when the source or destination is NOT
+  # word-aligned, which is the path newlib-nano's byte-wise memcpy was
+  # quietly surviving. It also cost 68,972 B of flash. Do not re-try it
+  # without solving the NVM3 memcpy fault first.
+  #
+  # What this component does NOT change: the allocator, memcpy and the rest
+  # of libc stay newlib-nano's. Only the formatting family is replaced, and
+  # `_putchar` (which only bare printf/puts reach, and the port calls
+  # neither) goes to the default iostream, which is this image's console.
+  - id: printf
 
   # ------------------------------------------------------- the Matter stack ---
   # The set the samples carry minus everything this product does not have or
@@ -304,37 +343,6 @@ toolchain_settings:
   # the extension's own slc/apps/lighting-app/thread/lighting-app.slcp sets.
   - option: cxx_standard
     value: gnu++17
-  # Round 2 task 6: the full newlib, not newlib-nano.
-  #
-  # The default (and what every Silicon Labs sample builds with) is
-  # `--specs=nano.specs`, and the ARM GNU 12.2 toolchain's newlib-nano is
-  # compiled WITHOUT _WANT_IO_LONG_LONG. Its printf family therefore does not
-  # know the `ll` length modifier at all: it consumes `%l`, meets a second
-  # `l`, treats it as an unknown conversion and prints the remainder
-  # literally, so `%llu` puts the two characters `lu` on the wire in place of
-  # the number. Nothing fails, nothing warns, and the value is simply gone.
-  #
-  # AT+MTATTR is the first AT command on this image to print a 64-bit value,
-  # and AT_MT_SPEC.md 3.8 makes the full width binding: "<val> is full-width
-  # 64-bit decimal ... so 18446744073709551615 round-trips on a u64
-  # attribute". core/mt/mt_at.c formats it with %llu / %lld through the port's
-  # hearth_link_write_line(), which is a plain vsnprintf(). Bench-confirmed on
-  # this part before the change: AT+MTATTR=1,6,0 answered
-  # `+MTATTR:1,6,0,lu`.
-  #
-  # Fixed at the libc rather than at the call site deliberately. The gap is
-  # not this bridge's: CHIP logs node and fabric ids with PRIx64 and
-  # OpenThread prints 64-bit extended addresses, so on nano every one of those
-  # was losing its value too, silently, since round 1. A port-local formatter
-  # would have fixed one caller and left the rest broken.
-  #
-  # What this does NOT change: the allocator. The image already wraps
-  # _malloc_r / _free_r / _calloc_r / _realloc_r onto sl_memory_manager
-  # (LD_FLAGS, from the memory-manager component), so which libc supplies the
-  # unwrapped malloc is irrelevant. The cost is flash; it is measured in the
-  # README's "Measured" section beside the figures it moved.
-  - option: nano_c_libs
-    value: disabled
 
 configuration:
   # configTOTAL_HEAP_SIZE was here through round 1 and round 2 task 1, at
