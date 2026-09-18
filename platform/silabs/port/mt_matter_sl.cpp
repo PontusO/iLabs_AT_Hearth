@@ -17,10 +17,13 @@
  * and the linker plus test/host's check_decls.py prove between them that every
  * declaration has exactly one definition across the pair.
  *
- * The stack lock is not advisory here: config/sl_matter_config.h sets
- * SL_MATTER_STACK_LOCK_TRACKING_MODE to SL_MATTER_STACK_LOCK_TRACKING_FATAL,
- * so a CHIP call made from the AT parser task without chip::DeviceLayer::
- * StackLock kills the device rather than racing quietly.
+ * The stack lock is not advisory here: SL_MATTER_STACK_LOCK_TRACKING_MODE is
+ * SL_MATTER_STACK_LOCK_TRACKING_FATAL, so a CHIP call made from the AT parser
+ * task without chip::DeviceLayer::StackLock kills the device rather than
+ * racing quietly. That setting is NOT a file in this repository: it is the
+ * Matter extension's own slc/config/sl_matter_config.h (where FATAL is also
+ * the documented default), which slc copies into the generated project as
+ * config/sl_matter_config.h.
  */
 
 #include <app/server/CommissioningWindowManager.h>

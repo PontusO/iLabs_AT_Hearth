@@ -940,10 +940,18 @@ What the transfer rewrites rather than copies, for this first section:
   it sets the device type to Router. Same conclusion, this tree's spelling:
   `otThreadIsRouterEligible()` is always reachable and needs no `#if`.
 - `chip::DeviceLayer::StackLock` stays exactly as it was. It is CHIP's, not
-  Zephyr's, and on this platform it is load-bearing in a way it was not on the
-  nRF: `config/sl_matter_config.h` sets `SL_MATTER_STACK_LOCK_TRACKING_MODE` to
-  `SL_MATTER_STACK_LOCK_TRACKING_FATAL`, so an unlocked CHIP call from the AT
-  parser task kills the device instead of racing quietly.
+  Zephyr's, and on this platform it is load-bearing:
+  `SL_MATTER_STACK_LOCK_TRACKING_MODE` is `SL_MATTER_STACK_LOCK_TRACKING_FATAL`,
+  so an unlocked CHIP call from the AT parser task kills the device instead of
+  racing quietly. That setting is **not** a file in this repository. It is the
+  extension's own `slc/config/sl_matter_config.h`
+  (`$MATTER_EXT_ROOT/slc/config/sl_matter_config.h:12`, where FATAL is also the
+  documented default), which slc copies into the generated project as
+  `config/sl_matter_config.h`; `~/silabs/work/hearth-matter-t4/config/
+  sl_matter_config.h:12` is the copy this image was built against. The only
+  header `platform/silabs/config/` holds is
+  `sl_openthread_features_config.h`. Whether the nRF arm's lock discipline is
+  enforced the same way was not checked and nothing here claims it.
 - The OpenThread reads keep the OT API and take the instance from
   `ThreadStackMgrImpl().OTInstance()` under
   `ThreadStackMgr().LockThreadStack()` / `UnlockThreadStack()`, which is the
@@ -1382,14 +1390,34 @@ a first guess predicts:
   as much in its own note, and the harness agrees: `t_state_fabrics_consistent`
   allows state 1 with a fabric count of 0 and only forbids state 2 with 0 and
   state 0 with a non-zero count.
-- **`AT+MTNET?` reports `<enabled>` 0 before commissioning.** CHIP defines
-  `IsThreadEnabled()` as "the device role is not `DISABLED`"
-  (`GenericThreadStackManagerImpl_OpenThread.hpp:244-254`), and the Thread
-  interface is not brought up until a dataset arrives, so a device that has the
-  OpenThread task running and no network answers 0. It is the same generic CHIP
-  code on both Thread arms, so the nRF port answers the same. The trailing `0`
-  is `<mismatch>`, which this image can only ever answer 0 (Thread is its only
-  transport).
+- **`AT+MTNET?` reports `<enabled>` 0 before commissioning, and that is a known
+  divergence between the arms rather than a settled answer.** This port takes
+  the figure from `ConnectivityMgr().IsThreadEnabled()`, which CHIP defines as
+  "the device role is not `DISABLED`"
+  (`GenericThreadStackManagerImpl_OpenThread.hpp:244-254`); the Thread interface
+  is not brought up until a dataset arrives, so a device with the OpenThread
+  task running and no network answers 0. **The C6 answers 1 in the same state**,
+  because it does not ask: `platform/esp32c6/main/main.cpp:990-992` assigns
+  `*enabled = 1` unconditionally under `CHIP_DEVICE_CONFIG_ENABLE_THREAD` and
+  only `<connected>` is read from the stack. `AT_MT_SPEC.md:1022` defines
+  `<enabled>` as "1 when the transport is compiled in and started", which is
+  readable either way: compiled in and its task started (the C6's reading), or
+  the interface actually up (CHIP's `IsThreadEnabled()`, this port's). **The
+  spec has to say which**, and until it does a host that reads `<enabled>` gets
+  a different answer from a C6 and an MG24 in the same state. Routed as a spec
+  clarification, graph **F494**; nothing is changed here on one port's say-so.
+
+  Nothing fails today: the Phase 1 row is `MTNET? format`, whose regex is
+  `\+MTNET:(WIFI|THREAD),[01],[01],[01]` (`test/mt_regression.py:6374-6375`), a
+  shape assertion that accepts either value, and the skeleton's stub answered 0
+  as well, so the row's verdict did not move.
+
+  The nRF arm compiles the same generic CHIP code and so should answer as this
+  port does, but **that is an inference from shared source, not a measurement**:
+  no `AT+MTNET?` transcript from the nRF bench was read for this report.
+
+  The trailing `0` is `<mismatch>`, which this image can only ever answer 0
+  (Thread is its only transport).
 - **`AT+MTCOMMISSION` on a device whose window is already open answers `OK` and
   really does reopen it.** `CommissioningWindowManager::OpenBasicCommissioning
   Window()` has no incorrect-state check; it restores the discriminator, resets
