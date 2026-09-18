@@ -37,11 +37,13 @@ test_hearth_ring: test_hearth_ring.c $(SILABS_PORT)/hearth_ring.c $(SILABS_PORT)
 
 # Compile the Silabs skeleton's pure-C files against core/ headers on the
 # host. Catches a signature drift between the stubs and the headers before
-# a toolchain exists to link them.
+# a toolchain exists to link them, and the .slcp drifting away from
+# core/sources.cmake, which no build catches at all.
 silabs-stubs:
 	$(CC) $(CFLAGS) -fsyntax-only -I$(CORE)/include $(SILABS_PORT)/mt_matter_stub.c
 	$(CC) $(CFLAGS) -fsyntax-only -I$(CORE)/include $(SILABS_PORT)/mt_devtypes_stub.c
 	python3 check_decls.py
+	python3 check_slcp_sources.py
 
 run: all boundary silabs-stubs
 	./test_mt_composition

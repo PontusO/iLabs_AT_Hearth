@@ -32,7 +32,7 @@ description: >
   upward port round.
 
 source:
-  - path: src/main.c
+  - path: src/main.cpp
   - path: port/hearth_port_sl.c
   - path: port/hearth_ring.c
   - path: port/hearth_kvid.c
@@ -58,9 +58,12 @@ define:
     value: "0"
 
 component:
-  # main() is this project's own (src/main.c), so sl_system, not sl_main:
-  # sl_system's kernel implementation is the one that requires custom_main.
-  - id: sl_system
+  # sl_main, the SDK's mandated entry point since SiSDK 2025.12: it owns
+  # main(), and src/main.cpp provides its app_init_early()/app_init() hooks.
+  # sl_system, which this project used in round 1, is deprecated and its
+  # kernel implementation declares conflicts: sl_main, so the Matter stack
+  # (whose components list sl_main) forced the move rather than offered it.
+  - id: sl_main
   # Without this the image links at 0x08000000, on top of the project's own
   # Gecko Bootloader, and there is nothing in the build that says so: it
   # compiles, it produces a .gbl, and the bootloader writes it over itself.
@@ -68,7 +71,6 @@ component:
   # linker file and pulls in bootloader_app_properties, which is what
   # `commander gbl create --app` needs.
   - id: bootloader_interface
-  - id: sl_main_custom_main
   - id: device_init
   - id: clock_manager
   - id: freertos
@@ -79,6 +81,12 @@ component:
   - id: emlib_gpio
   - id: emlib_usart
   - id: nvm3_default
+
+toolchain_settings:
+  # src/main.cpp and the Matter port's .cpp files; the same option and value
+  # the extension's own slc/apps/lighting-app/thread/lighting-app.slcp sets.
+  - option: cxx_standard
+    value: gnu++17
 
 configuration:
   # The default 8 KiB does not hold the boot task (4 KiB of stack) and the

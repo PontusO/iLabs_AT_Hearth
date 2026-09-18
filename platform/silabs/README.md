@@ -261,26 +261,37 @@ The Hearth project is `platform/silabs/hearth.slcp`, an slc project against the
 Simplicity SDK alone: there is no Matter in the skeleton image, so the Matter
 extension is not in this build at all. `core/sources.cmake` is the source list
 of record for `core/`; the `.slcp` writes the same seven paths out in slc's
-syntax and says so at the top, and the two must be changed together. Nothing
-enforces that agreement: a path added to `sources.cmake` and forgotten in the
-`.slcp` shows up only as a link error for the missing symbol, and a source
-dropped from `sources.cmake` while the `.slcp` still lists it is not caught at
-all: the file is still on disk, so slc compiles it and the build is green
-against a list that is no longer the list of record. The check is manual, and
-it is in the open table below.
+syntax and says so at the top, and the two must be changed together. That
+agreement is enforced since round 2 Task 1 by `test/host/check_slcp_sources.py`,
+which `make -C test/host run` calls: it compares the `.slcp`'s `source:` block
+with `HEARTH_CORE_SOURCES` and fails on a difference in either direction.
+Neither direction is caught by a build. A path added to `sources.cmake` and
+forgotten in the `.slcp` shows up only as a link error for the missing symbol,
+and a source dropped from `sources.cmake` while the `.slcp` still lists it is
+not caught at all: the file is still on disk, so slc compiles it and the build
+is green against a list that is no longer the list of record.
+
+The entry point is **`sl_main`**, so the project has no `main()` of its own:
+`src/main.cpp` provides the `app_init_early()` and `app_init()` hooks and the
+SDK owns `main`. See "Migrating to sl_main" below for what the move changed.
 
 ```bash
 cd <repo root>
 source platform/silabs/toolchain.env
 git status --porcelain            # build from a committed tree
-slc generate -d ~/silabs/work/hearth-skeleton --sdk-package-path "$SISDK_ROOT" \
+slc generate -d ~/silabs/work/hearth-core --sdk-package-path "$SISDK_ROOT" \
     -p platform/silabs/hearth.slcp --with MGM240PA32VNA \
     --generator-timeout=180 -o makefile
-POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-skeleton \
+POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-core \
     -f hearth.Makefile -j8
-cd ~/silabs/work/hearth-skeleton/build/debug
+cd ~/silabs/work/hearth-core/build/debug
 commander gbl create hearth.gbl --app hearth.s37
 ```
+
+`~/silabs/work/hearth-core` is round 2's build directory. Round 1's
+`~/silabs/work/hearth-skeleton` is left where it is: the figures under
+"Measured" that name it are that tree's, and they are not re-derivable from a
+directory that has been rebuilt over.
 
 `--with MGM240PA32VNA`, the module id, never a board id; see "Do not build for
 BRD2704A". Since Task 6 a wrong target is a compile error rather than a bench
@@ -295,7 +306,7 @@ the `.s37`. There is no `artifact/` directory and no post-build size report,
 because the `.slcp` declares no `post_build:` profile; `arm-none-eabi-size` is
 where the figures below come from.
 
-Two build notes worth keeping:
+One build note worth keeping:
 
 - **`bootloader_interface` is not optional.** Without that component the
   generated linker file puts `FLASH` at `ORIGIN = 0x8000000`, on top of the
@@ -305,18 +316,18 @@ Two build notes worth keeping:
   0x178000` and `bootloader_app_properties` comes along, which is what
   `commander gbl create --app` wants. This was caught by reading the `size -A`
   output of the first build, not by anything failing.
-- **Two deprecation warnings are expected**, both in `main.c`:
-  `sl_system_init` and `sl_system_kernel_start` are deprecated in SiSDK
-  2025.12 in favour of `sl_main`, and Silicon Labs says `sl_system` goes away
-  in sisdk-2026.6. They are left visible rather than silenced; see "Migrating
-  to sl_main" below.
+
+Round 1's second note said two `sl_system` deprecation warnings were expected.
+They are gone with `sl_system` itself; the build is warning-free, and
+`grep -c deprecated` over the build log is the check that says so.
 
 ### The console this image drives
 
 Hearth's own console is **USART0 TX on PA00, 115200 8N1, TX only**, brought up
-by `hearth_console_init()` in `port/hearth_port_sl.c` and called once from
-`main()` after `sl_system_init()`, which is what brings the device clocks up.
-It was wired in Task 6 (ruling of 2026-09-17) rather than left to the
+by `hearth_console_init()` in `port/hearth_port_sl.c`, declared in
+`port/hearth_console.h` and called once from `app_init_early()` in
+`src/main.cpp`, which `sl_main` runs after the clock manager and before the
+kernel. It was wired in Task 6 (ruling of 2026-09-17) rather than left to the
 upward-port round, because the first bench session must not be blind; the
 capture is under "Measured".
 
@@ -339,30 +350,58 @@ Two properties of it worth knowing before touching the log path:
 
 ### Migrating to sl_main
 
-This project uses `sl_system` because the skeleton's `main()` is its own
-(`platform/silabs/src/main.c`) and `sl_system_implementation_kernel` is the
-component that requires `custom_main`. That choice has a deadline and a
-conflict, and both belong to the upward-port round (graph F477):
+**Done, round 2 Task 1, 2026-09-18.** Round 1 ran on `sl_system` because the
+skeleton's `main()` was its own (`src/main.c`) and
+`sl_system_implementation_kernel` is the component that requires
+`custom_main`. That had a deadline and a conflict, and the round that adds the
+Matter stack had to move rather than choose (graph F477): `sl_system` is
+`quality: deprecated` in SiSDK 2025.12.3 and goes away in sisdk-2026.6;
+`sl_system_implementation_kernel` declares `conflicts: sl_main` while the stock
+Silicon Labs Matter 2.8.1 `lighting-app.slcp` lists `sl_main`; and
+`sl_system_compatibility`, the aliasing shim, declares `conflicts: kernel`,
+i.e. baremetal only, so it was no way out either.
 
-- `sl_system` is marked `quality: deprecated` in SiSDK 2025.12.3 and its own
-  description says to replace it with `sl_main` by sisdk-2026.6.
-- `sl_system_implementation_kernel` declares `conflicts: sl_main`, and the
-  stock Silicon Labs Matter 2.8.1 `lighting-app.slcp` lists `sl_main`. So the
-  round that adds the Matter stack will have to move, not choose.
-- `sl_system_compatibility`, the aliasing shim, is not a way out: it declares
-  `conflicts: kernel`, i.e. baremetal only.
+What the move changed, and nothing else did:
 
-The move is not a rename, so read the SDK before doing it. Under `sl_main`
-with a kernel the SDK **wraps** `main`: `sl_main_retarget.c` links a
-`__wrap_main` that calls `sl_main_init()` and `sl_main_kernel_start()`, and the
-application's own `main()` then runs inside the start task (see the SDK's
-`platform/service/sl_main/src/rtos/main.c`, which calls
-`sl_main_second_stage_init()` and returns into
-`sl_main_start_task_should_continue()`). So this project's `main()` stops being
-the entry point and becomes the start-task body, and stops starting the
-scheduler. What must not change is the ordering the boot contract depends on:
-platform init, then the console, then `mt_at_start()` on a task, with nothing
-on the AT link before `+MTREADY`.
+- `src/main.c` became `src/main.cpp`, and its `main()` became the two hooks
+  `app_init_early()` and `app_init()`, both `extern "C"`. The project has no
+  `main()`: with a kernel the SDK's `sl_main_init` component compiles its own
+  `src/rtos/main.c` and links `main_retarget.c`'s `__wrap_main` over it
+  (`toolchain_settings: gcc_linker_option -Wl,--wrap=main`, in
+  `sl_main_init.slcc`).
+- The `.slcp` lists `- id: sl_main` and no longer lists `sl_system` or
+  `sl_main_custom_main`, and gained `toolchain_settings: cxx_standard
+  gnu++17`, the option the extension's own `lighting-app.slcp` sets.
+- `main()`'s two explicit calls are gone. `sl_system_init()` is the SDK's
+  business now (`sl_main_init()` from `__wrap_main`), and
+  `sl_system_kernel_start()` likewise (`sl_main_kernel_start()`), so the two
+  deprecation warnings are gone with them.
+
+Where the hooks run, read in the SDK at
+`$SISDK_ROOT/platform_core/platform/service/sl_main/`:
+
+| Hook | Called from | When |
+|---|---|---|
+| `app_init_early()` | `src/sl_main_init.c:353` in `sl_main_init()` | after `sl_clock_manager_init()` (`:319`) and the `device_init` steps, **before** `osKernelInitialize()` (`:362`) |
+| `app_init()` | `src/rtos/main.c:38` | on the start task, after `sl_main_second_stage_init()` (`sl_platform_init`, `sl_driver_init`, `sl_service_init`, `sl_stack_init`), kernel running |
+
+So the console comes up in `app_init_early()`: its clocks are up there, and it
+is the earliest point at which a log line exists. It creates its mutex before
+the kernel starts, which is ordinary FreeRTOS (`configAPPLICATION_ALLOCATED_HEAP`
+is 0, so heap\_4's `ucHeap` is a static array and needs no kernel), and it is
+the same thing `hearth_link_init()` does later from a task.
+
+The boot order the contract depends on is unchanged: platform init, then the
+console, then `mt_at_start()` on a task, with nothing on the AT link before
+`+MTREADY`. The bench capture that proves it for this image is under "Measured",
+"Round 2 baseline".
+
+One `sl_main` behaviour to know before adding to `app_init()`: the start task
+runs `while (sl_main_start_task_should_continue()) app_process_action();` after
+the hook, and `sl_main_start_task_should_continue()` returns false by default
+(`src/sl_main_kernel.c:105`),
+so the start task ends there. Hearth's work therefore goes on its own task,
+which is what `app_init()` creates.
 
 ## Flashing
 
@@ -928,7 +967,7 @@ person to touch this file will ask the same questions.
 | `CORE_atomicState_t` | **WRONG, fixed.** No such type. emlib has one type for both section kinds, `CORE_irqState_t` (`typedef uint32_t`, `sl_core.h`), and `CORE_EnterAtomic()` / `CORE_ExitAtomic()` take and return it. The function-pair form itself was right. |
 | The Hearth NVM3 key range `0x0A000..0x0AFFF` | **No collision.** CHIP's `SilabsConfig` uses `kMatterNvm3KeyDomain` 0x087000, range 0x087200 to 0x087FFF; the OpenThread EFR32 settings backend uses `NVM3KEY_DOMAIN_OPENTHREAD` 0x20000 upward. Hearth's range sits inside the user domain (0x000000 to 0x00FFFF) that neither touches. |
 | The part define for `hearth_port_model()` | **Was a family catch-all, fixed.** The generated makefile carries `-DMGM240PA32VNA=1`, and `hearth_port_model()` now names that alone. A project generated for BRD2704A gets `MGM240PB32VNA` and now fails to compile, instead of building an image that RAIL-asserts on this module. |
-| `sl_system_init()` against `sl_main` | **Resolves, via `sl_system`, which is deprecated.** The project lists `sl_system`, whose kernel implementation is the component that requires `custom_main`, which is what lets `main()` be this project's own. It compiles with two `-Wdeprecated-declarations` warnings, left visible on purpose. The migration and its deadline are in "Migrating to sl_main" above; it is the upward-port round's, because `sl_system_implementation_kernel` declares `conflicts: sl_main` and the stock Matter 2.8.1 app uses `sl_main`. |
+| `sl_system_init()` against `sl_main` | **Resolves, via `sl_system`, which is deprecated.** The project lists `sl_system`, whose kernel implementation is the component that requires `custom_main`, which is what lets `main()` be this project's own. It compiles with two `-Wdeprecated-declarations` warnings, left visible on purpose. The migration and its deadline are in "Migrating to sl_main" above; round 2 Task 1 did it, because `sl_system_implementation_kernel` declares `conflicts: sl_main` and the stock Matter 2.8.1 app uses `sl_main`. |
 | The RX IRQ priority against `configMAX_SYSCALL_INTERRUPT_PRIORITY` | **Correct, and exactly at the boundary.** `CORE_ATOMIC_BASE_PRIORITY_LEVEL` is 3, `__NVIC_PRIO_BITS` is 4, so `NVIC_SetPriority(EUSART0_RX_IRQn, 3)` writes 3 << 4 = 48 into the IPR byte. `configMAX_SYSCALL_INTERRUPT_PRIORITY` is 48, and FreeRTOS's check is `>=`, so `xSemaphoreGiveFromISR()` from that handler is legal. `CORE_EnterAtomic()` sets `BASEPRI` to the same 48, which masks priority values at or above it, so the atomic sections really do exclude this ISR: both halves of the Task 4 reasoning hold, and they hold because the two numbers are equal, not by a margin. Anything that changes either one breaks both at once. |
 | `configTICK_RATE_HZ` | **1000, not 1024.** So `portTICK_PERIOD_MS` is 1 and does not truncate to 0, and `pdMS_TO_TICKS()` cannot overflow a 32-bit `TickType_t` at the header's one-hour ceiling. The tick-rate-independent `hearth_now_ms()` and the 60-second wait slicing are therefore belt and braces on this project as configured, and they stay: the value is one line in a generated config header, and the failure they prevent is silent. |
 | The port's second `nvm3_initDefault()` | **A documented no-op.** `sl_platform_init()` (generated `autogen/sl_event_handler.c`) calls `nvm3_initDefault()`, so the lazy `nvm3_ensure_init()` is a second `nvm3_open()` with the same handle and init data, which `nvm3_generic.h` says "will be regarded as a no operation and the function will return the same status as the previous call". Kept, because it costs nothing and keeps the KV store usable if a future project drops the component. Note the return type is `sl_status_t` now, with `ECODE_NVM3_OK` defined as `SL_STATUS_OK`; the comparison is still correct. |
@@ -948,15 +987,16 @@ Two more things the first build settled that were not on the list:
 Round 1 is bring-up, the downward port and the boot contract. Everything it did
 not finish is here, and nothing here is unowned.
 
+Round 2 Task 1 (2026-09-18) closed five of these rows and they are gone from
+the table: the `sl_system` to `sl_main` migration, `hearth_link_write()`'s
+missing peripheral-ready guard, the unchecked `xTaskCreate()` return, the
+ad-hoc `hearth_console_init()` declaration, and the unenforced agreement
+between `hearth.slcp` and `core/sources.cmake`.
+
 | Open item | Owner |
 |---|---|
 | The Matter stack: `chip::Server` with the minimal static ZAP, the disabled catalogue endpoint 240, the composition rebuild, the arenas and the device-type catalogue in audited batches, each batch retiring stubs from `port/mt_matter_stub.c` and `port/mt_devtypes_stub.c` | the **upward-port round** (graph T446). Its starting checklist is "The 35 failing rows" above, and the run they came from is the baseline `platform/silabs/skeleton-phase1.json` |
-| The `sl_system` to `sl_main` migration, due by sisdk-2026.6 and forced earlier than that by the Matter app | the **upward-port round** (graph F477): `sl_system_implementation_kernel` declares `conflicts: sl_main` and the stock Silicon Labs Matter 2.8.1 app lists `sl_main`, so that round has to move rather than choose. What the move changes is in "Migrating to sl_main"; the two deprecation warnings are left visible until it happens |
 | Signing (ECDSA-P256 dev key under `keys/`, as the nRF port does), secure boot, and the SE debug lock after the one-time SWD install | **pre-ship** (design spec section 7, stage 2). The bootloader itself is built and installed already; it accepts an unsigned `.gbl` today |
 | Thread-arm baselines under `test/baselines/`, ARCHITECTURE 8.21 and its decision-log rows, and the host library's `fw/README` variant table | the **qualification round** (design spec section 8, steps 6 and 7). The skeleton's Phase 1 record deliberately stays out of `test/baselines/`, which holds shipping baselines only |
 | The RX ring overflow warning is observable but has never fired: no run so far pushed the link hard enough for its absence to be evidence | the **upward-port round**'s first sustained traffic; see "What is not measured here" |
-| `hearth_link_write()` has no peripheral-ready guard. It skips the TX mutex while `s_tx_lock` is NULL, but the `EUSART_Tx` loop under it would still run against an unclocked, disabled EUSART0, which on Series 2 hangs or faults. Unreachable in this image (`mt_at_start()` calls `hearth_link_init()` first and no stack callback exists yet), so it is a latent trap the Matter callbacks would arm | the **upward-port round**, as its first change: mirror `s_console_ready` with an `s_link_ready` flag set at the end of `hearth_link_init()`. Deferred so the round 1 figures stay attributed to the commit that built them; the comment in `port/hearth_port_sl.c` says the same |
-| `src/main.c` ignores `xTaskCreate()`'s return value, so a boot task that fails to create is silent on both UARTs: no console line, no `+MTREADY`, and nothing to distinguish it from a hung image | the **upward-port round**. Deferred so the round 1 figures stay attributed to the commit that built them |
-| `hearth_console_init()` is declared ad hoc in `src/main.c` rather than in a header, so it is invisible to `test/host/check_decls.py` and a signature drift between the declaration and `port/hearth_port_sl.c` would not be caught | the **upward-port round**. Deferred so the round 1 figures stay attributed to the commit that built them |
-| Nothing enforces the agreement between `hearth.slcp`'s source list and `core/sources.cmake`: an addition missed in the `.slcp` surfaces as a link error, but a core source dropped from `sources.cmake` is not caught at all | the **upward-port round**, which adds core sources in batches and is where the lists drift first; see "Building" |
 | The console is TX only by design, so the port has no console input path and no shell | settled, not open: it is board contract item 6 and a CRA posture (`CRA_COMPLIANCE.md` in the docs repository). Listed here so nobody reopens it as an omission |

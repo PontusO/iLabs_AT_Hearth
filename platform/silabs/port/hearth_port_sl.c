@@ -25,6 +25,7 @@
 #include "nvm3.h"
 #include "nvm3_default.h"
 
+#include "hearth_console.h"
 #include "hearth_kvid.h"
 #include "hearth_log.h"
 #include "hearth_port.h"
@@ -206,6 +207,10 @@ static SemaphoreHandle_t s_rx_sem;
 static SemaphoreHandle_t s_tx_lock;
 static uint32_t          s_rx_dropped_seen;
 static int               s_baud = 115200;
+/* The link's mirror of s_console_ready (declared with the console's own
+ * statics further down, where its peripheral is): false until EUSART0 is
+ * clocked and configured. hearth_link_write() reads it. */
+static volatile bool     s_link_ready;
 
 void EUSART0_RX_IRQHandler(void)
 {
@@ -267,29 +272,21 @@ void hearth_link_init(void)
     s_rx_sem = xSemaphoreCreateBinary();
     s_tx_lock = xSemaphoreCreateMutex();
     link_configure(s_baud);
+    s_link_ready = true;
 }
 
 void hearth_link_write(const void *data, size_t len)
 {
     const uint8_t *p = data;
-    /* hearth_port.h documents that a URC can fire from a stack callback
-     * before hearth_link_init() has run. Only HALF of that case is handled
-     * here. The mutex half is: s_tx_lock is NULL until init runs, and
-     * xSemaphoreTake(NULL, ...) is a hard fault rather than a no-op, so the
-     * NULL checks below write unlocked instead of locking against a mutex
-     * that does not exist yet. The PERIPHERAL half is NOT: the EUSART_Tx
-     * loop would run against an EUSART0 that is still unclocked and
-     * disabled, and on Series 2 that either hangs waiting on TXFL or faults
-     * on the register read itself.
-     *
-     * The path is unreachable in this image: mt_at_start() calls
-     * hearth_link_init() before anything else (core/mt/mt_at.c), and no
-     * stack callback that could emit a URC exists yet in round 1. The guard
-     * is the upward-port round's first change: mirror s_console_ready with
-     * an s_link_ready flag set at the end of hearth_link_init(), and return
-     * early here when it is clear. Deliberately not added now, so round 1's
-     * measured image figures stay attributed to the commit that built
-     * them. */
+    /* A URC from a stack callback can arrive before hearth_link_init()
+     * (hearth_port.h says so). Before init EUSART0 is unclocked and
+     * disabled, and EUSART_Tx on it hangs on TXFL or faults on the
+     * register read; the mutex guard below covered only the lock half.
+     * Drop the write: the boot contract drops pre-+MTREADY output anyway. */
+    if (!s_link_ready) return;
+    /* The peripheral guard is s_link_ready, set at the end of
+     * hearth_link_init(); the mutex guard is the s_tx_lock NULL check
+     * below, because xSemaphoreTake(NULL, ...) faults rather than no-ops. */
     if (s_tx_lock != NULL) xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     for (size_t i = 0; i < len; i++) EUSART_Tx(AT_EUSART, p[i]);
     while (!(AT_EUSART->STATUS & EUSART_STATUS_TXC)) {}   /* off the wire */
@@ -351,10 +348,12 @@ int hearth_link_set_baud(int baud)
     /* cmd_mtbaud writes its OK at the OLD rate; drain, then switch under
      * the tx lock so nothing queues into the gap (the nRF port's
      * contract). Guarded against s_tx_lock == NULL the same way
-     * hearth_link_write is: AT+MTBAUD is a command reply, not a stack
-     * callback, so in practice hearth_link_init() has always run by the
-     * time this is reachable, but the guard is one line and keeps both
-     * paths consistent rather than relying on that distinction. */
+     * hearth_link_write's mutex half is: AT+MTBAUD is a command reply, not
+     * a stack callback, so in practice hearth_link_init() has always run by
+     * the time this is reachable, but the guard is one line and keeps both
+     * paths consistent rather than relying on that distinction. No
+     * s_link_ready check here for the same reason: this one is reached only
+     * from the parser task, which exists only after mt_at_start(). */
     if (s_tx_lock != NULL) xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     while (!(AT_EUSART->STATUS & EUSART_STATUS_TXC)) {}
     NVIC_DisableIRQ(EUSART0_RX_IRQn);
@@ -472,10 +471,11 @@ int hearth_kv_delete(const char *ns, const char *key)
 static SemaphoreHandle_t s_log_lock;
 static volatile bool     s_console_ready;
 
-/* Called once from main() after sl_system_init(), which is what brings the
- * device clocks up. Declared at its one call site rather than in a header
- * of its own. Logs raised before it are dropped: the peripheral is not
- * configured yet, and s_console_ready is the gate that says so. */
+/* Called once from app_init_early() (src/main.cpp), which sl_main runs
+ * after the clock manager and before the kernel. Declared in
+ * port/hearth_console.h, so check_decls.py sees it. Logs raised before it
+ * are dropped: the peripheral is not configured yet, and s_console_ready
+ * is the gate that says so. */
 void hearth_console_init(void)
 {
     USART_InitAsync_TypeDef init = USART_INITASYNC_DEFAULT;
