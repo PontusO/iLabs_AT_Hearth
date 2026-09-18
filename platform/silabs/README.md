@@ -85,9 +85,10 @@ provenance ("Measured", "Round 2 task 7"; "Commissioning" for the procedure and
 the transcripts). One source change came with it, the NVM3 occupancy boot line,
 because the bench has no other way to read that figure. Two things the
 acceptance could not answer are named rather than passed: the commissioning
-`+MTEVT` URCs, which no Thread arm emits because the platform event bridge is
-unported on both, and harness Phase 2, which aborts at its own `ot-ctl`
-precondition on this bench.
+`+MTEVT` URCs, which this arm does not emit because the platform event bridge
+is unported (graph B502, and the nRF arm is inferred to be in the same
+position), and harness Phase 2, which aborts at its own precondition because
+the bench's OpenThread control socket is root-owned (graph F503).
 
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
@@ -991,15 +992,16 @@ repository on `dev/fota-firmware`; they are a reading aid, not a promise that
 the file has not moved since.
 
 **What is NOT in that table, and is not waiting on a catalogue batch either:
-the platform event bridge.** `+MTEVT` is core's surface (`mt_at_event()`,
-`core/mt/mt_at.c:1620`, with the subscription mask `AT_MT_SPEC.md` 3.11
-specifies), and the only call site in this repository is the ESP32-C6's
-`platform/esp32c6/main/main.cpp`. The nRF arm has none either, so there is no
-section to transfer: the row a future table gains is a CHIP platform event
-handler registered with `PlatformMgr().AddEventHandler()` mapping
-`DeviceEventType` to the bit numbers the spec allocates, written once for both
-Thread arms. Task 7 measured the consequence rather than inferring it (no URC
-of any kind during either commissioning, with the mask wide open); see
+the platform event bridge** (graph B502). `+MTEVT` is core's surface
+(`mt_at_event()`, `core/mt/mt_at.c:1620`, with the subscription mask
+`AT_MT_SPEC.md` 3.11 specifies), and the only call site in this repository is
+the ESP32-C6's `platform/esp32c6/main/main.cpp`. **On this arm the consequence
+is measured** (no URC of any kind during either commissioning, with the mask
+wide open); **that the nRF arm is in the same position is inferred** from that
+same call-site grep, not from an nRF board on a bench. So there is no section
+to transfer: the row a future table gains is a CHIP platform event handler
+registered with `PlatformMgr().AddEventHandler()` mapping `DeviceEventType` to
+the bit numbers the spec allocates, written once for both Thread arms. See
 "Commissioning" and "What round 2 leaves open".
 
 Everything in `core/include/mt_matter.h` that has no row above is still
@@ -1633,10 +1635,12 @@ the round's bench acceptance). The procedure below is the Hearth image's; the
 round 1 record of the stock Silicon Labs sample is kept after it, because it is
 what proved the radio and the border router before Hearth had a stack.
 
-The Thread operational dataset is a credential. `ot-ctl` cannot be used on this
-bench for two independent reasons, both measured: it is not on this user's PATH
-at all (`ot-ctl state` exits 127), and `/run/openthread-wpan0.sock` is
-`srwxr-xr-x root:root`, so a non-root user cannot connect to it. otbr-agent's
+The Thread operational dataset is a credential, and `ot-ctl` cannot be used to
+read it here. The reason is the socket, not the binary:
+`/run/openthread-wpan0.sock` is `srwxr-xr-x root:root`, so any `ot-ctl` run as
+this user answers `connect session failed: Permission denied` (measured, both
+with the ot-br-posix build tree's own binary and with none on the shell's PATH
+at all). otbr-agent's
 D-Bus property serves the same value without sudo and without touching the
 daemon, which stayed `active` throughout (`systemctl is-active otbr-agent`,
 checked before and after every step):
@@ -1715,11 +1719,15 @@ port was held open in listen mode for the whole of both runs, with no command
 in flight, and the count was zero both times.
 
 That is not a defect in this round's work and it is not a surprise once
-located: **nothing in this port emits `+MTEVT` at all, and nothing in the nRF
-port does either.** `mt_at_event()` is core's (`core/mt/mt_at.c:1620`), the
-subscription mask is core's and works here, and the only call site in the whole
-repository is the ESP32-C6's `platform/esp32c6/main/main.cpp`. Measured on this
-image rather than inferred:
+located: **nothing in this port emits `+MTEVT` at all** (graph B502).
+`mt_at_event()` is core's (`core/mt/mt_at.c:1620`), the subscription mask is
+core's and works here, and the only call site in the whole repository is the
+ESP32-C6's `platform/esp32c6/main/main.cpp`. **The nRF arm is therefore
+expected to be silent too, but that half is inferred from that call-site grep
+and from the committed `test/baselines/thread-lifecycle.json` having been
+recorded on a Challenger port (the C6's Thread image). No nRF board was put on
+the bench to confirm it.** The MG24 half is measured on this image rather than
+inferred:
 
 ```
 AT+MTEVT?             ->  +MTEVTMASK:0x0800003F / OK     the default mask
@@ -1734,7 +1742,8 @@ So the surface exists and answers, and the platform half that would raise the
 events is unported on both Thread arms. It needs a CHIP platform event handler
 (`PlatformMgr().AddEventHandler()`) mapping `DeviceEventType` to the bit
 numbers `AT_MT_SPEC.md` 3.11 allocates, which is a section with no nRF
-counterpart to transfer. It is in "What round 2 leaves open" with its owner.
+counterpart to transfer. It is graph B502, and it is in "What round 2 leaves
+open" with its owner.
 
 The spec's acceptance item 4 asks for "the commissioning URCs arrive in order
 after `+MTREADY`". This round cannot answer it, and says so rather than
@@ -2106,7 +2115,10 @@ device types this build's registry has no cluster set for.
 
 Round 1 left an open item saying the warning was observable but had never
 fired, and that no run had pushed the link hard enough for its absence to be
-evidence. Both halves of that were tested here.
+evidence. Both halves of that were tested here, with
+`platform/silabs/fw/link_burst.py`, which is committed beside `fw/flash.py` so
+the measurement has a command like every other figure on this page. It is a
+measurement tool, not a test: no pass criterion, exit 0 whatever it observes.
 
 **A Phase 1 run while commissioned does not fire it**, and the reason is
 structural rather than lucky: the harness is synchronous, so it never has more
@@ -2114,30 +2126,84 @@ than one command line in flight and the 1 024-byte ring never holds more than
 one `MT_AT_LINE_MAX` line. 292 rows, nine module boots, 27 885 bytes of console
 captured, zero warnings. That is still not evidence of headroom.
 
-**A deliberate burst fires it, the first time in this port's life.** 300
-`AT+MTATTR=1,6,0` lines, 5 100 bytes, written back to back in 0.42 s with no
-waiting for terminal responses, while chip-tool toggled the light over Thread
-so controller-driven `+MTATTR` URCs interleaved with the responses:
+**A back-to-back burst fires it, the first time in this port's life.** 300
+`AT+MTATTR=1,6,0` lines, 5 100 bytes, written with no waiting for terminal
+responses:
 
-```
-W link: rx ring overflow, dropped 559 byte(s)
-W link: rx ring overflow, dropped 47 byte(s)
-W link: rx ring overflow, dropped 733 byte(s)
-... 12 warnings in all, 1 828 bytes dropped ...
-W link: rx ring overflow, dropped 11 byte(s)
+```bash
+export MT_PORT=/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00
+python3 platform/silabs/fw/link_burst.py --port "$MT_PORT" --lines 300
 ```
 
-62 of the 300 commands returned a terminal response, 63 controller toggles
-completed during the burst, and the device was healthy immediately afterwards
-(`+MTSTATE:2,1`, `+MTFABRICS:1`, the composition intact, chip-tool still able
-to toggle it). So the ring does what it says: it drops bytes, says how many on
-the console, and the link recovers at the next complete line.
+```
+sent      300 line(s) of 17 B = 5100 B, written in 0.42 s (back to back)
+drained   4.2 s (stopped after 4.0 s of silence; cap 120 s)
+back      1334 B, 128 complete line(s)
+          OK 59, ERROR 5, +MTERR 5, +MTATTR 59, unrecognised 0
+terminals 64 of 300 command line(s) answered
+```
+
+and on the console, eleven warnings summing to **1 581 bytes dropped**:
+
+```
+W link: rx ring overflow, dropped 5 byte(s)
+W link: rx ring overflow, dropped 45 byte(s)
+... eight more ...
+W link: rx ring overflow, dropped 584 byte(s)
+```
+
+Those counts are trustworthy in one specific way: `s_rx_ring.dropped` is
+incremented per byte and never reset, and `hearth_link_read()` reports the
+delta since the last read (`port/hearth_port_sl.c`), so the warnings sum to the
+true total the ring rejected. The same burst run twice more gave 23 warnings and
+1 261 bytes, and (with a controller toggling the light concurrently over
+Thread, `--toggle-node 0x4902`) 12 warnings and 1 828 bytes: the shape repeats,
+the exact figures do not, which is what a contended measurement looks like.
+
+##### What the terminal count is NOT a measurement of
+
+64 answered of 300 sent does **not** reconcile with 1 581 bytes dropped: 3 519
+bytes reached the ring, which is 207 whole command lines, and only 64 were
+answered. The gap is not in Hearth, and the paced control is what shows it.
+Same tool, same device, same command, pacing the writes instead of bursting
+them:
+
+| Offered | Lines | Answered | Ring drops |
+|---|---|---|---|
+| 60 lines paced 2 ms apart (8 500 B/s) | 60 | **60 of 60** | none |
+| 30 lines paced 5, 10 or 20 ms apart | 30 | **30 of 30** each time | none |
+| 60 lines paced 1 ms apart (17 000 B/s) | 60 | 27 of 60 | **none** |
+| 30 lines back to back (25 000 B/s) | 30 | 22 of 30 | **none** |
+| 120 lines back to back | 120 | 43 of 120 | none |
+| 300 lines back to back | 300 | 64 of 300 | 11 warnings, 1 581 B |
+
+The break is between 1 ms and 2 ms per 17-byte line, and it is exactly where
+arithmetic says it should be: **2 ms per line is 8 500 B/s, under the wire's
+11 520 B/s at 115200; 1 ms per line is 17 000 B/s, over it.** Below the wire
+rate the module answers every single line. Above it the excess cannot be
+carried, and the three rows that lose lines while the module's own drop counter
+reads zero (1 ms paced, 30 back to back, 120 back to back) are the proof of
+where it goes: the loss is in the host-side CPico USB-CDC-to-UART bridge, which has no
+way to push back on a host writing into a USB endpoint faster than 115200 can
+drain it, and whose losses the module can neither see nor count. Only the
+largest burst overruns the module's own ring on top of that.
+
+So the honest split is: **the answered count measures the bench's write path,
+and the warning measures Hearth.** What this section closes is the round 1 open
+item, and only that: the ring drops bytes under real overrun, says how many on
+the console, and the link recovers at the next complete line. The device was
+healthy after every row of that table, checked after the contended 300-line
+burst (`+MTSTATE:2,1`, `+MTFABRICS:1`, the composition intact, chip-tool still
+able to toggle it, `AT+MTTHREAD?` settling to `ROUTER`) and again after the
+whole sweep.
 
 This is the contract working, not a defect. This carrier wires no RTS/CTS, so a
-host that writes faster than the parser drains has nothing to throttle it but
-the `OK`/`ERROR` handshake, and the warning is how the device says the host
-ignored it. What it does mean is that **the warning is now a proven diagnostic
-rather than an untested code path**, which is what the open item asked for.
+host that writes faster than the link can carry has nothing to throttle it but
+the `OK`/`ERROR` handshake, and a host that honours that handshake never
+reaches any of these rows. One accounting hole found while chasing the figures
+is recorded under "What round 2 leaves open": the EUSART's own `RXOF` interrupt
+is neither enabled nor checked, so a peripheral-level overrun would lose bytes
+that `s_rx_ring.dropped` cannot count.
 
 #### Harness Phase 2: not run, and the gate is not this image's
 
@@ -2148,22 +2214,41 @@ $ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 2
   T4 runbook (graph F36: run otbr-agent directly, D-Bus policy required)
 ```
 
-**Zero rows ran.** The abort is `phase2_gate`'s own precondition
-(`test/mt_regression.py:6198`), which calls `ot-ctl state`, and on this bench
-`ot-ctl` cannot be used at all: it is not on this user's PATH (`ot-ctl state`
-exits 127) and `/run/openthread-wpan0.sock` is `srwxr-xr-x root:root`. The
-border router itself was fine throughout, which is the point:
-`systemctl is-active otbr-agent` answered `active` before and after, and the
-same daemon served the dataset over D-Bus for both commissionings in this
-session.
+**Zero rows ran** (graph F503). The abort is `phase2_gate`'s own precondition
+(`test/mt_regression.py:6198`), which calls `otctl(["state"], args.ot_ctl)`.
+The binary is not a PATH lookup and the gate is not a missing-tool problem:
+`DEFAULT_OTCTL` (`test/mt_regression.py:5200`) is an absolute path into the
+ot-br-posix build tree, that file exists and is executable, and running it by
+hand shows exactly what the gate hits:
+
+```
+$ /mnt/.../ot-br-posix/build/otbr/third_party/openthread/repo/src/posix/ot-ctl state
+connect session failed: Permission denied          exit 1
+$ ls -l /run/openthread-wpan0.sock
+srwxr-xr-x 1 root root 0 Sep 16 09:39 /run/openthread-wpan0.sock
+$ systemctl is-active otbr-agent
+active
+```
+
+**It is the socket** (graph F474, round 1's finding, which is why the dataset
+read goes through D-Bus in the first place), not the tool and not the daemon:
+otbr-agent is healthy and served the dataset over D-Bus for both commissionings
+in this same session. The fix is to give the gate the same D-Bus route the
+dataset already takes; `--dataset` / `MT_DATASET` covers the dataset half
+already, and the liveness check has no override.
 
 So this is a harness-versus-bench mismatch, not a firmware failure and not a
-row to classify: the gate needs the same D-Bus route the dataset already takes
-before any Phase 2 row on this bench can run. It is a **Thread-arm allowance
-owned by the qualification round**, recorded under "What round 2 leaves open"
-and in `TESTING.md`. Phase 2's other precondition is worth naming with it: its
-2.8 warm reboot resets an RP2350 over SWD, which is the C6 carrier's contract
-and not this module's.
+row to classify. It is a **Thread-arm allowance owned by the qualification
+round**, recorded under "What round 2 leaves open" and in `TESTING.md`. Two
+facts belong with it, both in that `TESTING.md` note:
+
+- Phase 2's other precondition is `openocd`, because its 2.8 warm reboot resets
+  an **RP2350** over SWD. That is the C6 carrier's contract, not this module's.
+- Phase 2 asserts `+MTEVT` in eight of its steps (and Phase 3 in one more), and
+  no non-C6 arm raises any event at all (graph B502). Those rows will fail for
+  that one reason even once the gate is fixed. The exact steps and codes are
+  listed in the `TESTING.md` note, derived from the harness source rather than
+  from memory.
 
 ### Round 2 task 6: the attribute bridge and the `+MTATTR` URC
 
@@ -3576,9 +3661,12 @@ replacement is the list of rows that still fail.
 **This section is closed as of round 2 task 7.** It said the RX ring overflow
 warning (`W link: rx ring overflow, dropped N byte(s)`) was observable but had
 never appeared, and that no run had pushed the link hard enough for its absence
-to be evidence. Task 7 pushed it deliberately and it fired twelve times,
-dropping 1 828 of 5 100 bytes; see "Sustained traffic: the RX ring overflow
-warning has now fired" under "Round 2 task 7". The ring is 1 024 bytes against a
+to be evidence. Task 7 pushed it deliberately with
+`platform/silabs/fw/link_burst.py` and it fired: eleven to twenty-three
+warnings per 300-line burst, 1 261 to 1 828 bytes dropped, and the link
+recovering at the next complete line. See "Sustained traffic: the RX ring
+overflow warning has now fired" under "Round 2 task 7", which also says what
+that run's terminal count does NOT measure. The ring is 1 024 bytes against a
 512-byte `MT_AT_LINE_MAX`, and this carrier wires no RTS/CTS, so the
 `OK`/`ERROR` handshake is the only thing throttling a host.
 
@@ -3662,7 +3750,7 @@ not a regression against the nRF arm.
 
 | Open item | Owner |
 |---|---|
-| **No `+MTEVT` is emitted at all.** The mask, the query and the suppression rules are core's and work here; the platform half that raises the events is unported on **both** Thread arms, so neither the commissioning group (bits 0-5) nor anything else reaches a host. Measured on this image with the mask at `0xFFFFFFFF` and a window open: nothing. It needs a CHIP platform event handler mapping `DeviceEventType` to `AT_MT_SPEC.md` 3.11's bit numbers, written once and used by both arms | the **qualification round**, which owns the wire surface for both arms at once. It is the one spec acceptance item this round could not answer |
+| **No `+MTEVT` is emitted at all** (graph **B502**). The mask, the query and the suppression rules are core's and work here; the platform half that raises the events is unported. Measured on this image with the mask at `0xFFFFFFFF` and a window open: nothing. The nRF arm is expected to be identical, but that half is **inferred** from the call-site grep (`mt_at_event()`'s only caller is the C6's `main.cpp`) and from the committed Thread lifecycle baseline having been recorded on a Challenger port, not measured on an nRF board. It needs a CHIP platform event handler mapping `DeviceEventType` to `AT_MT_SPEC.md` 3.11's bit numbers, written once and used by both arms | the **qualification round**, which owns the wire surface for both arms at once. It is the one spec acceptance clause this round could not answer |
 | **A fixed endpoint's code-driven attributes are unreadable through `AT+MTATTR` except where ruling F500's carve-out serves them.** Four Basic Information integers are carved out and answer; every other code-driven integer on endpoint 0 answers a bare `ERROR` with a console line saying why. Closing it means a read path through the data model provider for endpoints this port did not create, which changes the answer for every fixed-endpoint attribute at once | a **later round by ruling**, not by omission. Whether `AT+MTATTR` should reach fixed endpoints at all is a wire-contract question for both arms and the ruling belongs in `AT_MT_SPEC.md` 3.8 |
 | **`AT+MTNET?`'s enabled flag divides differently here** from the C6's (graph F494): this arm reports `+MTNET:THREAD,0,0,0` uncommissioned and `+MTNET:THREAD,1,0,0` once a fabric exists, and the harness's own baseline header records the change. It is a spec clarification, not a port fix | the **qualification round**, with `AT_MT_SPEC.md` |
 
@@ -3680,9 +3768,10 @@ not a regression against the nRF arm.
 
 | Open item | Owner |
 |---|---|
-| **Harness Phase 2 cannot run on this bench at all.** `phase2_gate` calls `ot-ctl state` (`test/mt_regression.py:6198`), and `ot-ctl` is not on this user's PATH and its socket is `root:root`. The gate needs the same otbr-agent D-Bus route the dataset already takes. Its other precondition, the 2.8 warm reboot over SWD, is the RP2350 carrier's contract and not this module's | the **qualification round**, which owns the Thread-arm allowances; noted in `TESTING.md` |
-| **NVM3's usable figure needs a soak.** 40 960 B configured, 24 objects and about 3.6 KB consumed by one commissioning, and `availableMemory` observed as low as 480 B during this session's write churn before a repack returned it to 5 392 B. Nothing failed and the repack is the mechanism working, but the trough is unmeasured over a long run, exactly as the nRF arm's 32 KB ZMS row is | the **qualification round**'s soak, with the nRF row |
+| **Harness Phase 2 cannot run on this bench at all** (graph **F503**). `phase2_gate` (`test/mt_regression.py:6198`) calls the absolute `DEFAULT_OTCTL` binary (`:5200`), which exists and runs; it fails on the root-owned control socket with `connect session failed: Permission denied` (graph F474, the underlying cause). The gate needs the same otbr-agent D-Bus route the dataset already takes. Its other precondition, the 2.8 warm reboot over SWD, is the RP2350 carrier's contract and not this module's; and its `+MTEVT` assertions need B502 above | the **qualification round**, which owns the Thread-arm allowances; noted in `TESTING.md` |
+| **NVM3's usable figure needs a soak** (graph **F503**). 40 960 B configured, 24 objects and about 3.6 KB consumed by one commissioning, and `availableMemory` observed as low as 480 B during this session's write churn before a repack returned it to 5 392 B. Nothing failed and the repack is the mechanism working, but the trough is unmeasured over a long run, exactly as the nRF arm's 32 KB ZMS row is | the **qualification round**'s soak, with the nRF row |
 | **Phone commissioning over Thread has never been tried on this arm.** Both commissionings here are the CLI chip-tool on the border router's own host | the **qualification round** |
+| **The EUSART's own RX overflow is neither enabled nor counted.** `EUSART0_RX_IRQHandler` drains the FIFO while `STATUS.RXFL` is set and never looks at `EUSART_IF_RXOF`, so a peripheral-level overrun would lose bytes that `s_rx_ring.dropped` cannot see and the console never reports. Not observed: task 7's burst accounting is fully explained by the ring's own counter plus a lossy host-side bridge. It is an accounting hole, not a known defect, and the cheap close is to enable `RXOF` and fold it into the same warning | whoever next touches `port/hearth_port_sl.c`; see "Sustained traffic" |
 | **`fw/flash.py`'s `read_until()` and the harness's own stream loops do the same job in two places.** A round 1 review minor, still true, still costing nothing | whoever next touches either; it is a tidy-up, not a defect |
 
 ### Still owned elsewhere
@@ -3727,7 +3816,7 @@ unchanged and still owned.
 | ~~The upward port: the composition rebuild, the dynamic endpoint machinery, the arenas and the device-type catalogue~~ | **closed as the core, round 2 tasks 3 to 7**: the stack is started, the composition rebuilds as dynamic endpoints, the endpoint arena is live, the attribute bridge answers and two device types are built. What is left is the catalogue itself, which has its own table under "What round 2 leaves open" |
 | Signing (ECDSA-P256 dev key under `keys/`, as the nRF port does), secure boot, and the SE debug lock after the one-time SWD install | **pre-ship** (design spec section 7, stage 2). The bootloader itself is built and installed already; it accepts an unsigned `.gbl` today |
 | Thread-arm baselines under `test/baselines/`, ARCHITECTURE 8.21 and its decision-log rows, and the host library's `fw/README` variant table | the **qualification round** (design spec section 8, steps 6 and 7). The skeleton's Phase 1 record deliberately stays out of `test/baselines/`, which holds shipping baselines only |
-| ~~The RX ring overflow warning is observable but has never fired~~ | **closed, round 2 task 7**: a 300-line burst fired it twelve times and dropped 1 828 of 5 100 bytes, and the link recovered at the next complete line. See "Sustained traffic" under "Round 2 task 7" |
+| ~~The RX ring overflow warning is observable but has never fired~~ | **closed, round 2 task 7**: a 300-line back-to-back burst (`fw/link_burst.py`) fired it eleven times for 1 581 bytes, and the link recovered at the next complete line. See "Sustained traffic" under "Round 2 task 7" |
 | The console is TX only by design, so the port has no console input path and no shell | settled, not open: it is board contract item 6 and a CRA posture (`CRA_COMPLIANCE.md` in the docs repository). Listed here so nobody reopens it as an omission |
 | `CHIPProjectConfig.h` does not set `CHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION` or its string, so BasicInformation reports the SDK default `1` / `"1.0"` while `AT+CGMR` answers `MT_FW_VERSION`, 1.2.0. Two version surfaces, one of them wrong. A second hand-maintained copy of the version would drift, so the fix is to derive it | the **qualification round**, which is what makes the two surfaces answerable together |
 | Diagnostic Logs and Wi-Fi Network Diagnostics are disabled on THIS arm since task 3 and still enabled on the nRF arm's, so the two Thread ports' root nodes no longer answer the same | the **qualification round**, which owns the wire surface for both arms at once; see "Data model" |
