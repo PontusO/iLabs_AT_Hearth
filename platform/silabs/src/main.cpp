@@ -47,6 +47,13 @@
  */
 #include "sl_memory_manager.h"
 
+/* Round 2 task 7: the NVM3 occupancy line below. nvm3_default.h is where
+ * nvm3_defaultHandle lives; nvm3_generic.h declares nvm3_getEraseCount(),
+ * nvm3_getMemInfo() and the inline nvm3_countObjects(). Both are already in
+ * the image through port/hearth_port_sl.c's key-value store. */
+#include "nvm3.h"
+#include "nvm3_default.h"
+
 #include <app/util/endpoint-config-api.h>
 #include <platform/CHIPDeviceLayer.h>
 
@@ -89,6 +96,9 @@ constexpr const char *kBleDeviceName = HEARTH_BLE_DEVICE_NAME;
  * so replaying the same stored composition yields the same ids.
  */
 void rebuild_composition(void);
+
+/* One console line of NVM3 occupancy per boot; see the definition. */
+void hearth_nvm3_report(void);
 
 /* mt_at_start() calls hearth_link_init() itself (core/mt/mt_at.c); a second
  * call here would leak the RX semaphore and TX mutex and reconfigure EUSART0
@@ -135,7 +145,59 @@ void hearth_boot_task(void *arg)
     mt_at_start();          /* emits +MTREADY once the parser task is up */
     HEARTH_LOGI("boot", "+MTREADY sent, free heap %u B",
                 (unsigned)sl_memory_get_free_heap_size());
+    hearth_nvm3_report();
     vTaskDelete(NULL);
+}
+
+/*
+ * One line of NVM3 occupancy, once per boot, after the marker.
+ *
+ * Round 2 task 7 added it because the design spec's section 6 asks for NVM3
+ * occupancy after commissioning and there is no other way to read it on this
+ * bench: the part's debug lock is open but Commander drives J-Link probes
+ * only, so an SWD read of the region is not available here, and the AT surface
+ * has no command for it. A boot line is enough, because the figure that
+ * matters is the one at the boot AFTER a commissioning; it costs one enumerate
+ * pass over the objects the driver has already cached.
+ *
+ * What the three numbers are:
+ *   objects      valid objects in the instance (nvm3_countObjects(), which is
+ *                nvm3_enumObjects() over the whole key range)
+ *   free         availableMemory from nvm3_getMemInfo(): usable bytes before a
+ *                repack is triggered, NOT the erased-byte count. NVM3 is
+ *                log-structured, so a deleted or rewritten object keeps
+ *                occupying flash until the repack collects it, and this figure
+ *                already accounts for that.
+ *   erase        the highest erase count over the instance's pages
+ *                (nvm3_getEraseCount()), the flash-wear figure.
+ *
+ * The region itself is fixed at build time: NVM3_DEFAULT_NVM_SIZE 40960 in
+ * hearth.slcp, placed by the generated linker file at __nvm3Base
+ * (linker_nvm_end - SIZEOF(.nvm)), i.e. the top of the application region. The
+ * section is a DSECT, so it costs the image nothing and a .gbl upload that
+ * stops short of it leaves the instance intact. The base and the size are read
+ * off the live handle rather than from the config macro, so the line reports
+ * where the instance ACTUALLY is and a linker change cannot make it lie.
+ */
+void hearth_nvm3_report(void)
+{
+    nvm3_MemInfo_t info = { false, 0, false, 0 };
+    uint32_t erase = 0;
+    size_t objects = nvm3_countObjects(nvm3_defaultHandle);
+    sl_status_t mem_rc = nvm3_getMemInfo(nvm3_defaultHandle, &info);
+    sl_status_t era_rc = nvm3_getEraseCount(nvm3_defaultHandle, &erase);
+
+    if (mem_rc != SL_STATUS_OK || era_rc != SL_STATUS_OK) {
+        /* Say which call failed rather than printing a zero that reads like a
+         * measurement. Not fatal: nothing in the boot contract depends on it. */
+        HEARTH_LOGE("boot", "nvm3: %u object(s), meminfo rc 0x%08lX, erasecount rc 0x%08lX",
+                    (unsigned)objects, (unsigned long)mem_rc, (unsigned long)era_rc);
+        return;
+    }
+    HEARTH_LOGI("boot", "nvm3: %u object(s), %u B free of %u B at 0x%08lX, erase count %lu",
+                (unsigned)objects, (unsigned)info.availableMemory,
+                (unsigned)nvm3_defaultHandle->nvmSize,
+                (unsigned long)(uintptr_t)nvm3_defaultHandle->nvmAdr, (unsigned long)erase);
 }
 
 void rebuild_composition(void)
