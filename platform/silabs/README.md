@@ -19,9 +19,18 @@ prepared and patched by `fw/sdk-prepare.sh` behind a revision gate, Hearth's
 own data model is generated and committed ("Data model" below), and
 `hearth.slcp` carries the Matter components: 728,200 B of `text` against the
 skeleton's 48,336, and it boots to `+MTREADY` unchanged, 296 Phase 1 rows
-identical to the baseline row for row ("Measured", "Round 2 task 2"). **The
-stack is linked, not started.** Nothing calls `Server::Init`, the upward port
-is still stubbed and the same 35 rows still fail; starting the stack is task 3.
+identical to the baseline row for row ("Measured", "Round 2 task 2"). The stack
+was linked, not started.
+
+**Task 3, 2026-09-18, started it.** `port/hearth_matter_init.cpp` is Hearth's
+own bring-up, and the boot task runs it before `mt_at_start()`: the server is
+initialised over the committed data model, the CHIP event loop runs, the
+catalogue endpoint is disabled, and the device advertises over BLE as `Hearth`
+with the Matter commissionable service UUID. `+MTREADY` still follows the boot
+log with nothing before it on the AT port, and Phase 1 is still 261/35, row for
+row ("Measured", "Round 2 task 3"; "Boot flow" for what runs in what order).
+The upward port is still stubbed, so the same 35 rows still fail; retiring them
+is the upward-port round's.
 
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
@@ -318,8 +327,9 @@ third for the Wi-Fi SDK that this Thread port does not need); one path alone
 cannot resolve `hearth.slcp`'s `sdk_extension:` stanza. `slc signature trust`
 was never needed: the extension's components generate without it.
 
-`~/silabs/work/hearth-matter` is round 2 task 2's build directory. Round 1's
-`~/silabs/work/hearth-skeleton` and task 1's `~/silabs/work/hearth-core` are
+`~/silabs/work/hearth-matter-t3` is round 2 task 3's build directory, and the
+one the current image came from. Task 2's `~/silabs/work/hearth-matter`, round
+1's `~/silabs/work/hearth-skeleton` and task 1's `~/silabs/work/hearth-core` are
 left where they are: the figures under "Measured" that name them are those
 trees', and they are not re-derivable from a directory that has been rebuilt
 over.
@@ -412,13 +422,16 @@ and `matter_provision_default` is not optional (`matter` requires the
 `matter_provision` api, and the only other provider requires `iostream_rtt`
 too). So SEGGER RTT is in the image whether or not anything uses it.
 
-**Where CHIP's own log output goes: an RTT buffer.**
+**Where CHIP's own log output goes: the console, since round 2 task 3.**
 `src/platform/silabs/Logging.cpp` writes to `SEGGER_RTT_WriteNoLock` unless
 `SILABS_LOG_OUT_UART` is 1, and setting that needs `matter_uart`, the SDK's UART
-driver, on a peripheral Hearth drives itself with bare emlib. So CHIP logs reach
-neither of this board's UARTs and are readable only over SWD. That is the right
-default for a product whose AT link must carry nothing but the AT protocol, and
-it is a thing task 3 should know before it looks for stack logs on the console.
+driver, on a peripheral Hearth drives itself with bare emlib. Task 2 therefore
+recorded that CHIP logs reach neither of this board's UARTs. Task 3 took the
+third way, `chip::Logging::SetLogRedirectCallback()`, which needs no SDK driver
+and no strong symbol; see "CHIP's log output is on the console now" under "Boot
+flow". Two sinks still go to RTT and always will: `silabsLog()` and
+`otPlatLog()`, which call `PrintLog` directly. The AT link is untouched either
+way, which is the property that matters.
 
 ### The heap changed shape: there is no FreeRTOS heap any more
 
@@ -495,13 +508,17 @@ why the two arms' models are comparable. What task 2 changed:
   of `matter.slsdk`, so nothing depends on them resolving; they are a record of
   which tree the file was last edited against.
 
-Two clusters are enabled on endpoint 0 with **no server component** in
-`hearth.slcp`: Diagnostic Logs and Wi-Fi Network Diagnostics. That is not a link
-error, the generated `callback-stub.cpp` defines every cluster init callback
-weakly, so both advertise metadata with nothing behind them. They are kept
-because this data model is the nRF arm's and the two Thread ports should answer
-the same; whether a Thread-only product should carry Wi-Fi diagnostics at all is
-a wire-surface question for BOTH arms and belongs to the qualification round.
+**Round 2 task 3 disabled Diagnostic Logs (0x0032) and Wi-Fi Network
+Diagnostics (0x0036) on endpoint 0.** Both were enabled with no server component
+in `hearth.slcp`, which is not a link error (the generated `callback-stub.cpp`
+defines every cluster init callback weakly) but is metadata with nothing behind
+it, and the second is Wi-Fi diagnostics on a Thread-only product besides. Task 2
+kept them because the data model is the nRF arm's and the two Thread ports
+should answer the same; task 3 started the stack, at which point a controller
+could read them, and a cluster that answers nothing is worse than an absent one.
+They are disabled rather than deleted, so re-enabling either is one flag and one
+`fw/zap-regen.sh` run. **The nRF arm still carries both**, and reconciling the
+two arms' root-node surface is still the qualification round's.
 
 Generated figures, read out of `data_model/zap-generated/endpoint_config.h`
 (2026-09-18, zap 2026.6.18):
@@ -511,9 +528,9 @@ Generated figures, read out of `data_model/zap-generated/endpoint_config.h`
 | `FIXED_ENDPOINT_COUNT` | `(2)` |
 | `FIXED_ENDPOINT_ARRAY` | `{ 0x0000, 0x00F0 }` |
 | `FIXED_DEVICE_TYPES` | `{{0x00000016,4},{0x00000101,3}}` |
-| `GENERATED_CLUSTER_COUNT` | 18 |
+| `GENERATED_CLUSTER_COUNT` | 16 (18 before task 3 disabled the two above) |
 | `ATTRIBUTE_LARGEST` | `(66)` |
-| `ATTRIBUTE_MAX_SIZE` | `(46)` |
+| `ATTRIBUTE_MAX_SIZE` | `(40)` (46 before task 3) |
 | `ATTRIBUTE_SINGLETONS_SIZE` | `(0)` |
 
 `ATTRIBUTE_LARGEST` is the size of the generated ember IO buffer, and it is the
@@ -621,6 +638,154 @@ Two properties of it worth knowing before touching the log path:
 - Anything logged before `hearth_console_init()` returns is **dropped**: the
   peripheral is not configured yet, and `s_console_ready` is the gate that says
   so.
+
+### Boot flow: what starts the Matter stack, and in what order
+
+Added round 2 task 3, 2026-09-18. Everything below runs before the AT link
+carries its first byte.
+
+| Step | Where | Notes |
+|---|---|---|
+| `hearth_console_init()` | `app_init_early()`, `src/main.cpp` | USART0 TX on PA00. Before the kernel; see "Migrating to sl_main" |
+| `hearth_matter_log_route_init()` | `app_init_early()` | CHIP's log output onto that console, below |
+| SDK second stage | `sl_main_second_stage_init()` | `sl_platform_init`, `sl_driver_init`, `sl_service_init`, `sl_stack_init` (the Bluetooth stack starts here), `sl_internal_app_init` (OpenThread's instance, and with it `chip::Platform::MemoryInit()`) |
+| `xTaskCreate(hearth_boot_task, ...)` | `app_init()` | 1,280 words, **`osPriorityRealtime7 - 1`**; both numbers are the sample's and both are load-bearing, below |
+| `hearth_matter_init("Hearth")` | `port/hearth_matter_init.cpp` | the bring-up, below |
+| `emberAfEndpointEnableDisable(240, false)` | `hearth_boot_task`, under `StackLock` | the catalogue endpoint stops being visible. It has to be after `Server::Init`, because the ember tables exist only then |
+| `rebuild_composition()` | `hearth_boot_task` | empty until the upward port lands. It is called from where it has to be called from: after `Server::Init`, before the marker |
+| `mt_at_start()` | `hearth_boot_task` | emits `+MTREADY` and starts the AT parser task |
+| `vTaskDelete(NULL)` | `hearth_boot_task` | the task and its 5 KiB go back to the heap |
+
+#### `hearth_matter_init()`, and what it keeps from the sample
+
+There is no `SilabsMatterConfig::InitMatter()` in this image: that lives in
+`MatterConfig.cpp`, which only `matter_platform_mg` compiles, and this project
+does not carry that component ("The components, and the three that could not
+stay"). So the bring-up is Hearth's own, written from the sample's, with the
+`MatterConfig.cpp` line number beside each step in the source so that an SDK
+bump can be diffed against it. In order:
+
+`GetPlatform().Init()` (NVM3 plus the key migrations, the reset cause, and
+`silabsInitLog()`), `PlatformMgr().InitChipStack()`,
+`ConnectivityMgr().SetBLEDeviceName()`, `Provision::Manager::Init()` and the
+device-instance-info and commissionable-data providers, `InitOpenThread()`
+(`ThreadStackMgr().InitThreadStack()`, `SetThreadDeviceType(Router)`, the
+Network Commissioning driver's `Init()`, `ThreadStackMgrImpl().StartThreadTask()`),
+the OpenThread endpoint native params (the instance pointer and the two lock
+callbacks CHIP's Inet layer needs), then under the stack lock: the report
+scheduler, the `Efr32PsaOperationalKeystore`,
+`InitializeStaticResourcesBeforeServerInit()`, the codegen data model provider,
+the device info provider, and `Server::GetInstance().Init()`. Then
+`PlatformMgr().StartEventLoopTask()` and, last, the device attestation
+credentials provider, which is where the sample sets it too.
+
+Three steps of the sample are deliberately absent:
+
+- **`chip::Platform::MemoryInit()` is not called.** The sample calls it only
+  under `SL_WIFI`; on a Thread build `sl_ot_create_instance()` has already
+  called it (`ThreadStackManagerImpl.cpp:184`) from `sl_ot_rtos_stack_init()`,
+  which `sl_main_second_stage_init()` runs before `app_init()`. A second call
+  is not idempotent: `CHIPMem-Platform.cpp:82-87` `abort()`s on it.
+- **`GetPlatform().VerifyIfUpdated()`** clears an NVM3 key only the Matter OTA
+  image processor writes, and this product's update story is host-driven serial
+  flashing (`FIRMWARE_UPDATE_SPEC.md`), so the call could only ever be a no-op.
+- **`AppTask::GetAppTask().StartAppTask()`**, `BaseApplication::sAppDelegate`,
+  the shell, the LCD, RPC, tracing, ICD and the Wi-Fi arms: the sample's
+  application layer, which this product does not have.
+
+#### The boot task's priority is why BLE advertises
+
+`sl_main` creates its start task at `osPriorityRealtime7`, "the highest
+priority" (`sl_main_kernel.c:74-88`), and `SL_MAIN_ENABLE_START_TASK_PRIORITY_CHANGE`
+is 0, so it keeps that priority through `app_init()`. The Silicon Labs sample
+creates its own bootstrap thread at the same `osPriorityRealtime7`
+(`kMainTaskAttr`, `MatterConfig.cpp:194-200`). That attribute is not decoration,
+and task 3 found out the hard way what it is for.
+
+With the boot task at `tskIDLE_PRIORITY + 1`, which is where round 1 left it,
+the whole stack came up and the device never advertised. The console said why,
+once the CHIP log route was installed early enough to catch it:
+
+```
+I chip: [DL] Bluetooth stack booted: v11.0.2-b0
+E chip: [DL] Failed to schedule work: 1c
+... twenty lines later ...
+I chip: [DL] Init CHIP Stack
+```
+
+The Bluetooth event handler task runs at `SL_BT_RTOS_EVENT_HANDLER_TASK_PRIORITY`
+50 (FreeRTOS 49), so a boot task below it is scheduled only after the Bluetooth
+stack's boot event has been dispatched.
+`BLEManagerImpl::HandleBootEvent()` (`BLEManagerImpl.cpp:785-789`) sets
+`Flags::kSiLabsBLEStackInitialize` and then fails to `ScheduleWork`, because the
+platform manager does not exist yet; `BLEManagerImpl::_Init()` runs later inside
+`InitChipStack()` and its `mFlags.ClearAll()` (`:155`) throws the flag away. No
+second boot event ever arrives, so `DriveBLEState()` returns at its first line
+(`:417`) for the life of the image.
+
+At the sample's priority the bring-up finishes before the Bluetooth event
+handler is scheduled, the flag arrives after `_Init` rather than before it, and
+the advertisement goes up. The cost is that the console's blocking writes (about
+10 ms a line at 115200) hold the CPU against every lower-priority task for the
+~350 ms the init log takes. That is a boot-time cost on a task that deletes
+itself a few instructions later.
+
+#### CHIP's log output is on the console now
+
+Round 2 task 2 recorded that CHIP logs reach a SEGGER RTT buffer and neither
+UART. Task 3 routed them to Hearth's console instead, with
+`chip::Logging::SetLogRedirectCallback()` (`TextOnlyLogging.cpp:121-124`), which
+`TextOnlyLogging.cpp:157-168` checks before calling the platform's `LogV`. That
+needs neither `matter_uart` (the reason `SILABS_LOG_OUT_UART` is not an option
+here) nor a strong symbol over a component source (`LogV` in
+`src/platform/silabs/Logging.cpp:227` is a plain definition and cannot be
+overridden).
+
+The route is installed in `app_init_early()`, right after the console, not
+inside the bring-up: the SDK's Bluetooth and OpenThread tasks log through CHIP
+from the moment the kernel starts, and those lines are exactly the ones a
+boot-order question needs. Installed later, they are lost, because the RTT sink
+is silent until `silabsInitLog()`, which `GetPlatform().Init()` calls from inside
+the bring-up.
+
+**Two sinks are not captured** and still go to RTT: `silabsLog()` / `SILABS_LOG`
+(`Logging.cpp:175`) and `otPlatLog()` (`:309`), both of which call `PrintLog`
+directly. Nothing in this image uses the first; OpenThread's own logging is the
+second.
+
+`HEARTH_CHIP_LOG_TO_CONSOLE 0` in `port/hearth_matter_init.cpp` puts CHIP's logs
+back on RTT alone. That switch exists because `hearth_log_write()` blocks the
+calling task until the last byte is out of the USART
+(`port/hearth_port_sl.c`), and the calling task is usually the CHIP event loop.
+A round that finds the event loop starved under commissioning traffic turns this
+off first and measures second.
+
+#### The fault hooks are strong symbols now
+
+`src/sdk/SoftwareFaultReports.cpp` is a verbatim copy of the extension's
+`examples/platform/silabs/SoftwareFaultReports.cpp`, compiled by `hearth.slcp`.
+Copied rather than referenced because `slc` resolves a project's `source:` paths
+relative to the `.slcp` and there is no portable relative path from this
+repository to `$MATTER_EXT_ROOT`; `src/sdk/README.md` carries the origin, the
+staleness check and why `silabs_utils.cpp` did not come with it. Proven in the
+linked image:
+
+```
+$ arm-none-eabi-nm -C build/debug/hearth.out | grep -E " (vApplication|HardFault|BusFault|UsageFault|RAILCb|debugHardfault)"
+08052bc8 T BusFault_Handler
+08052a7c T debugHardfault
+08052ba0 T HardFault_Handler
+08052ccc T RAILCb_AssertFailed
+08052bdc T UsageFault_Handler
+08052c9c T vApplicationGetIdleTaskMemory
+0806e54e W vApplicationIdleHook
+08052c18 T vApplicationMallocFailedHook
+08052c4c T vApplicationStackOverflowHook
+```
+
+`vApplicationIdleHook` stays weak on purpose: the sample's implementation lives
+in `MatterConfig.cpp`, which this project does not compile, and its whole body is
+behind `SLI_SI91X`, ICD and watchdog conditions that are all off here.
 
 ### Migrating to sl_main
 
@@ -976,10 +1141,11 @@ session, not BLE, so they prove the device joined the mesh.
 
 ## Measured
 
-Three sets of figures live here. **"Round 2 task 2" immediately below is the
-current image**, the first one with the Matter stack linked in. "Round 2
-baseline" after it is the same skeleton on `sl_main` with no Matter, which is
-what task 2's figures are measured against; everything after that is round 1's
+Four sets of figures live here. **"Round 2 task 3" immediately below is the
+current image**, the first one with the Matter stack running. "Round 2 task 2"
+after it is the same image with the stack linked but not started, which is what
+task 3's figures are measured against; "Round 2 baseline" is the skeleton on
+`sl_main` with no Matter at all; and everything after that is round 1's
 `sl_system` image, kept because the Phase 1 result set, the 35 failing rows and
 the bench facts are still the record round 2 works from, and because a figure is
 only worth what its provenance says.
@@ -997,6 +1163,220 @@ two are identical (see "Harness Phase 0 and Phase 1"). The two build logs
 differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
+
+### Round 2 task 3: the Matter stack started
+
+Built 2026-09-18 from the committed tree at `21b0b8c` in
+`~/silabs/work/hearth-matter-t3` by the "Building" recipe above (a clean
+`slc generate` into an empty directory), flashed with `fw/flash.py` and run on
+the MGM240PA32VNA3 on the iLabs RP2350 carrier. `hearth.bin`
+`md5sum 4fa64cbbc44eaadc9349fdc98daceb94`.
+
+This image initialises `chip::Server`, runs the CHIP event loop and advertises
+over BLE. The upward port is still `port/mt_matter_stub.c`, so the AT surface
+answers exactly as it did.
+
+```
+$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-t3 \
+      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-t3/build.log
+$ grep -c deprecated ~/silabs/work/hearth-matter-t3/build.log
+0
+$ grep -ci warning ~/silabs/work/hearth-matter-t3/build.log
+0
+```
+
+`arm-none-eabi-size ~/silabs/work/hearth-matter-t3/build/debug/hearth.out`, with
+task 2's figures beside it:
+
+| | Task 3, bytes | Task 2, bytes | Delta |
+|---|---|---|---|
+| `text` | 824 560 | 728 200 | +96 360 |
+| `data` | 3 352 | 3 116 | +236 |
+| `bss` (size's, includes the heap section) | 258 340 | 258 576 | -236 |
+
+`arm-none-eabi-size -A` on the same file:
+
+| Section | Task 3, bytes | Task 2 | Where |
+|---|---|---|---|
+| `.text` | 823 724 | 727 364 | flash |
+| `.vectors` | 368 | 368 | flash, at 0x08006000 |
+| `.ARM.exidx` | 8 | 8 | flash |
+| `.copy.table` | 12 | 12 | flash |
+| `.zero.table` | 0 | 0 | flash |
+| `.data` | 3 352 | 3 116 | RAM, loaded from flash |
+| `.nvm` | 40 960 | 40 960 | flash, at the top of the application region |
+| `.bss` | 114 104 | 110 264 | RAM |
+| `.memory_manager_heap` | 139 624 | 143 700 | RAM, whatever is left |
+| `.stack` | 4 608 | 4 608 | RAM, the C stack |
+| `text_application_ram` | 448 | 448 | RAM |
+| `.bootloader_reset_section` | 4 | 4 | RAM, at 0x20000000 |
+
+The RAM rows sum to 262 140 B, the same 4 B of alignment padding below the
+part's 262 144 that round 1's section explains. **Calling into the stack costs
+96,360 B of flash** over linking it, which is the code the linker could discard
+while nothing reached it: `Server`, the interaction model, the codegen data
+model provider, the BLE manager's advertising path and the OpenThread
+network-commissioning driver. `.bss` grows 3,840 B and the memory-manager heap
+gives that back.
+
+```
+$ ls -l hearth.bin hearth.gbl hearth.s37
+-rwxrwxr-x 1 pontus pontus  827928 Sep 18 17:52 hearth.bin
+-rw-rw-r-- 1 pontus pontus  828000 Sep 18 17:52 hearth.gbl
+-rwxrwxr-x 1 pontus pontus 2483832 Sep 18 17:52 hearth.s37
+```
+
+The application image on flash is **827 928 B**, 53.76 % of the 1 540 096 B
+application region, against task 2's 731 332 B and 47.49 %. The stock Silicon
+Labs `lighting-app` for this part was 1 025 140 B with the shell, the OTA
+requestor, scenes, level and colour control; the nRF54L15 core round shipped at
+753 691 B. This image is now about 74 KB above the nRF's, which is the first
+figure in this round where it is, and it carries a catalogue endpoint's worth of
+cluster servers that no composition serves yet.
+
+`hearth.gbl` is **828 000 B**, which `fw/flash.py` sent as 6 469 blocks in
+91.8 s with no retransmits (task 2: 5 715 blocks in 81.0 s).
+
+#### Free heap at `+MTREADY`, task 3
+
+**98 968 B free**, logged by `sl_memory_get_free_heap_size()` immediately after
+`mt_at_start()` returns, out of the 139 624 B `.memory_manager_heap`. Task 2's
+figure at the same point was 104 784 B, so the running stack has taken about
+5.8 KB of heap by the time the marker goes out.
+
+**The measurement point matters more than it used to, and this figure is not the
+steady state.** The boot task runs at `osPriorityRealtime7`, so it logs this line
+before the Bluetooth event handler task is ever scheduled: the Bluetooth stack's
+boot-time allocations and the advertising set are NOT counted. The same image
+built with the boot task at `tskIDLE_PRIORITY + 1` (the version that did not
+advertise, "The boot task's priority is why BLE advertises") logged 96 944 B at
+the same line with those allocations already made, so the difference is about
+2 KB. As before, the figure also still counts the boot task's own 5 KiB stack
+and TCB, which are released a few instructions later.
+
+#### The boot log and `+MTREADY`, task 3
+
+Captured 2026-09-18, both ports at once with timestamps: the console on the
+Debug Probe's UART CDC at 115200 with DTR asserted, the AT link on the carrier's
+CDC with DTR and RTS cleared before the open, whose own reset is the reset being
+watched.
+
+```
+AT in full: b'+MTREADY\r\n', 10 bytes        (first byte at 0.340 s)
+```
+
+**Nothing before it and nothing else**, with the whole Matter stack coming up in
+between. The marker arrives at 0.340 s against task 2's 0.151 s; the extra
+~190 ms is `hearth_matter_init()`, most of it the console printing the stack's
+own init log at 115200.
+
+The console, in full:
+
+```
+I boot: Hearth on USART0 TX PA00, 115200 8N1 (sl_main)
+I boot: boot task up, model MGM240P Hearth
+I chip: [DL] Init CHIP Stack
+I chip: [DL] Setting device name to : "Hearth"
+I chip: [DL] Provision mode disabled
+I chip: [DL] Initializing OpenThread stack
+I chip: [DL] OpenThread started: OK
+I chip: [DL] Setting OpenThread device type to ROUTER
+I chip: [DL] Starting OpenThread task
+I chip: [SVR] Initializing subscription resumption storage...
+I chip: [SVR] Server initializing...
+I chip: [TS] Last Known Good Time: 2023-10-10T16:28:52
+I chip: [DMG] AccessControl: initializing
+I chip: [DMG] Examples::AccessControlDelegate::Init
+I chip: [DMG] AccessControl: setting
+I chip: [DMG] DefaultAclStorage: initializing
+I chip: [DMG] DefaultAclStorage: 0 entries loaded
+I chip: [SVR] WARNING: mTestEventTriggerDelegate is null
+I chip: [ZCL] Using ZAP configuration...
+I chip: [ZCL] Endpoint f0 On/off already set to new value
+I chip: [DMG] AccessControlCluster: initializing
+I chip: [DIS] Updating services using commissioning mode 1
+E chip: [DIS] Failed to remove advertised services: 3
+I chip: [DIS] Advertise commission parameter vendorID=65521 productID=32784 discriminator=3840/15 cm=1 cp=0 jf=0
+E chip: [DIS] Failed to advertise commissionable node: 3
+E chip: [DIS] Failed to finalize service update: 3
+I chip: [DIS] Updating services using commissioning mode 1
+E chip: [DIS] Failed to remove advertised services: 3
+I chip: [DIS] Advertise commission parameter vendorID=65521 productID=32784 discriminator=3840/15 cm=1 cp=0 jf=0
+E chip: [DIS] Failed to advertise commissionable node: 3
+E chip: [DIS] Failed to finalize service update: 3
+I chip: [IN] CASE Server enabling CASE session setups
+I chip: [SVR] Server Listening...
+I matter: stack up: server initialised, event loop running
+I chip: [ZCL] Shuting down on/off server cluster on endpoint 240
+I at_parser: parser started
+I boot: +MTREADY sent, free heap 98968 B
+I chip: [DL] Bluetooth stack booted: v11.0.2-b0
+I chip: [DL] RAIL version:, v3.0.3-b0
+I chip: [DL] BLE Static Device Address CC:0F:28:A4:A2:69
+I chip: [DL] Starting advertising with interval_min=32, intverval_max=96 (units of 625us)
+I chip: [DL] _OnPlatformEvent default:  event->Type = 32781
+I chip: [DL] _OnPlatformEvent default:  event->Type = 32779
+```
+
+Three lines in that log are expected and are not defects:
+
+- **`Shuting down on/off server cluster on endpoint 240`** (the SDK's spelling)
+  is the catalogue endpoint being disabled, which is the port doing its job.
+- **`Failed to advertise commissionable node: 3`**, three times over, is DNS-SD.
+  The commissionable advertisement goes out over Thread through the SRP client,
+  and this device has no dataset and no network, so there is no SRP server to
+  register with. BLE is the commissioning path until then, and it is up.
+- **`WARNING: mTestEventTriggerDelegate is null`** is the sample's
+  `SL_MATTER_TEST_EVENT_TRIGGER_ENABLED` block, which this project does not
+  define and which exists for certification test harnesses.
+
+#### BLE, task 3
+
+The liveness proof this task owes, `bluetoothctl` on the dev box, 2026-09-18
+(commissioning itself belongs to a later task):
+
+```
+$ bluetoothctl     # scan le; the module was reset by the capture above
+[NEW] Device CC:0F:28:A4:A2:69 Hearth
+
+$ bluetoothctl info CC:0F:28:A4:A2:69
+Device CC:0F:28:A4:A2:69 (random)
+	Name: Hearth
+	Alias: Hearth
+	UUID: Unknown                   (0000fff6-0000-1000-8000-00805f9b34fb)
+	ServiceData.0000fff6-0000-1000-8000-00805f9b34fb:
+  00 00 0f f1 ff 10 80 00
+```
+
+`scan le` matters; a plain `scan on` reports nothing here, exactly as it did for
+the stock example. The address is the one the console printed as the BLE static
+device address on that boot, and it is regenerated at every boot by design
+(`BLEManagerImpl::_Init`). The service data decodes to Hearth's own identity:
+commissioning flag `00`, discriminator `0x0F00` = 3840, vendor `0xFFF1`, product
+`0x8010`, which is `CHIPProjectConfig.h` read back off the air.
+
+#### Harness Phase 0 and Phase 1, task 3
+
+```
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+===== RESULT: 0 passed, 0 failed =====
+
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico \
+      --transport THREAD --phase 1
+===== RESULT: 261 passed, 35 failed =====
+```
+
+The run was redirected to a file and compared against
+`platform/silabs/skeleton-phase1.json` **name by name, not count by count**: 296
+rows on both sides, no row present on one side only, and **zero verdict
+differences**. The same 261 pass and the same 35 fail. The baseline file is not
+rewritten.
+
+Host gates the same day, on the same tree: `make -C test/host run` green (zero
+`[FAIL]` lines; `check_decls.py` 61/61 + 4/4 + 24/24 + 1/1 and
+`check_slcp_sources.py` silent), `python3 test/test_mt_regression.py` ran 467
+tests, OK, and `fw/zap-regen.sh --check` reported the committed tree current.
 
 ### Round 2 task 2: the Matter stack linked, not started
 
@@ -1567,14 +1947,21 @@ Round 2 Task 2 (2026-09-18) took the static ZAP and the disabled catalogue
 endpoint 240 out of the first row below, and added four rows of its own at the
 bottom of the table.
 
+Round 2 Task 3 (2026-09-18) closed two of task 2's rows: the two serverless
+endpoint 0 clusters are disabled on this arm, and CHIP's log output is on the
+console. It added two rows of its own, and the first row below shrank again:
+`chip::Server` is started, the event loop runs and the catalogue endpoint is
+disabled, so what is left of it is the upward port proper.
+
 | Open item | Owner |
 |---|---|
-| The Matter stack: `chip::Server` started, the composition rebuild, the arenas and the device-type catalogue in audited batches, each batch retiring stubs from `port/mt_matter_stub.c` and `port/mt_devtypes_stub.c`. The data model and the components are in the image since task 2; nothing calls into them | the **upward-port round** (graph T446). Its starting checklist is "The 35 failing rows" above, and the run they came from is the baseline `platform/silabs/skeleton-phase1.json` |
+| The upward port: the composition rebuild, the dynamic endpoint machinery, the arenas and the device-type catalogue in audited batches, each batch retiring stubs from `port/mt_matter_stub.c` and `port/mt_devtypes_stub.c`. `chip::Server` is started and the event loop runs since task 3; `rebuild_composition()` in `src/main.cpp` is the empty hook they fill, and it is already called from the one place it can be called from | the **upward-port round** (graph T446). Its starting checklist is "The 35 failing rows" above, and the run they came from is the baseline `platform/silabs/skeleton-phase1.json` |
 | Signing (ECDSA-P256 dev key under `keys/`, as the nRF port does), secure boot, and the SE debug lock after the one-time SWD install | **pre-ship** (design spec section 7, stage 2). The bootloader itself is built and installed already; it accepts an unsigned `.gbl` today |
 | Thread-arm baselines under `test/baselines/`, ARCHITECTURE 8.21 and its decision-log rows, and the host library's `fw/README` variant table | the **qualification round** (design spec section 8, steps 6 and 7). The skeleton's Phase 1 record deliberately stays out of `test/baselines/`, which holds shipping baselines only |
 | The RX ring overflow warning is observable but has never fired: no run so far pushed the link hard enough for its absence to be evidence | the **upward-port round**'s first sustained traffic; see "What is not measured here" |
 | The console is TX only by design, so the port has no console input path and no shell | settled, not open: it is board contract item 6 and a CRA posture (`CRA_COMPLIANCE.md` in the docs repository). Listed here so nobody reopens it as an omission |
 | `CHIPProjectConfig.h` does not set `CHIP_DEVICE_CONFIG_DEVICE_SOFTWARE_VERSION` or its string, so BasicInformation reports the SDK default `1` / `"1.0"` while `AT+CGMR` answers `MT_FW_VERSION`, 1.2.0. Two version surfaces, one of them wrong. A second hand-maintained copy of the version would drift, so the fix is to derive it | the **qualification round**, which is what makes the two surfaces answerable together |
-| Diagnostic Logs and Wi-Fi Network Diagnostics are enabled on endpoint 0 with no server component behind them: metadata with nothing serving it, and Wi-Fi diagnostics on a Thread-only product besides. Inherited from the nRF arm's data model, which is why it is not fixed here | the **qualification round**, for BOTH Thread arms at once; see "Data model" |
-| CHIP's own log output goes to a SEGGER RTT buffer, readable only over SWD, because routing it to a UART needs `matter_uart` on a peripheral Hearth drives itself. Nothing is lost today, but a stack that is started logs a great deal | the **upward-port round**, at its first debugging session; see "The components" |
+| Diagnostic Logs and Wi-Fi Network Diagnostics are disabled on THIS arm since task 3 and still enabled on the nRF arm's, so the two Thread ports' root nodes no longer answer the same | the **qualification round**, which owns the wire surface for both arms at once; see "Data model" |
+| `src/sdk/SoftwareFaultReports.cpp` is a verbatim copy of an extension source, carried because slc cannot reference a file outside the project by a portable relative path. It goes stale silently on an SDK bump, exactly like the OpenThread override | whoever bumps the SDK; the diff command is in `src/sdk/README.md` |
+| The Matter BLE advertisement carries the fixed name `Hearth` rather than the SDK's `<prefix><discriminator>` form, because `SetBLEDeviceName()` replaces that form rather than decorating it. Two units on one bench are indistinguishable by name, though on this build they would be anyway: the discriminator is the fixed test value | the **qualification round**; both macros and the reasoning are in `src/CHIPProjectConfig.h` |
 | `config/sl_openthread_features_config.h` is a frozen 444-line copy of an SDK file with one value changed. It goes stale silently on an SDK bump | whoever bumps the SDK; the diff command is under "The OpenThread override" |
