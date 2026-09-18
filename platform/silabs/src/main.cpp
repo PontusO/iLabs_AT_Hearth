@@ -29,6 +29,18 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+/* Round 2 task 2: there is no separate FreeRTOS heap in this image any more.
+ * matter_platform_mg requires freertos_heap_3, the port that forwards
+ * pvPortMalloc() to the C library's malloc(), which the SDK's linker wraps into
+ * sl_memory_manager's .memory_manager_heap. So configTOTAL_HEAP_SIZE is gone
+ * from hearth.slcp (heap_3 does not read it), kernel objects and CHIP's
+ * allocations now share one pool, and xPortGetFreeHeapSize() does not exist:
+ * heap_3.c does not define it, which is a LINK error rather than a wrong
+ * number. sl_memory_get_free_heap_size() is the figure that replaced it, and it
+ * measures the pool that now holds everything.
+ */
+#include "sl_memory_manager.h"
+
 #include "hearth_console.h"
 #include "hearth_log.h"
 #include "hearth_port.h"
@@ -47,8 +59,8 @@ void hearth_boot_task(void *arg)
     (void)arg;
     HEARTH_LOGI("boot", "boot task up, model %s", hearth_port_model());
     mt_at_start();          /* emits +MTREADY once the parser task is up */
-    HEARTH_LOGI("boot", "+MTREADY sent, free FreeRTOS heap %u B",
-                (unsigned)xPortGetFreeHeapSize());
+    HEARTH_LOGI("boot", "+MTREADY sent, free heap %u B",
+                (unsigned)sl_memory_get_free_heap_size());
     vTaskDelete(NULL);
 }
 
@@ -70,7 +82,7 @@ extern "C" void app_init(void)
                     tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
         /* Round 1 deferral: a boot task that fails to create was silent on
          * both UARTs. Say so on the console; there is nothing else to do. */
-        HEARTH_LOGE("boot", "boot task could not be created (FreeRTOS heap %u B free)",
-                    (unsigned)xPortGetFreeHeapSize());
+        HEARTH_LOGE("boot", "boot task could not be created (heap %u B free)",
+                    (unsigned)sl_memory_get_free_heap_size());
     }
 }

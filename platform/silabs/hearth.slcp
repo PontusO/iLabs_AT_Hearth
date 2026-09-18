@@ -1,35 +1,49 @@
-# hearth.slcp - the Hearth skeleton application for the MGM240PA32VNA3.
+# hearth.slcp - the Hearth application for the MGM240PA32VNA3.
 #
 # THE SOURCE LIST OF RECORD FOR core/ IS core/sources.cmake. The seven
 # core/ paths below are that file's HEARTH_CORE_SOURCES written out in
 # slc's syntax, because slc reads no CMake; the two must agree, and a
 # source added there must be added here in the same commit.
+# test/host/check_slcp_sources.py enforces that agreement.
 #
 # Generate and build (platform/silabs/README.md, "Building"):
 #
 #   source platform/silabs/toolchain.env
+#   platform/silabs/fw/sdk-prepare.sh          # once per SDK install
 #   slc generate -d <builddir> --sdk-package-path "$SISDK_ROOT" \
+#       --sdk-package-path "$MATTER_EXT_ROOT" \
 #       -p platform/silabs/hearth.slcp --with MGM240PA32VNA \
 #       --generator-timeout=180 -o makefile
 #   POST_BUILD_EXE=$(which commander) make all -C <builddir> -f hearth.Makefile -j8
 #
+# TWO --sdk-package-path arguments since round 2: the Simplicity SDK and the
+# Matter extension. That is the form the extension's own slc/build.sh uses
+# (line 353); one path alone cannot resolve the sdk_extension below.
+#
 # --with MGM240PA32VNA, the MODULE id, never the BRD2704A board id: that
 # board carries the MGM240P*B* part and its image RAIL-asserts on this
-# module (README, "Do not build for BRD2704A"). hearth_port_model() now
+# module (README, "Do not build for BRD2704A"). hearth_port_model()
 # #errors on anything but MGM240PA32VNA, so a wrong target fails here
 # rather than on the bench.
 
 project_name: hearth
 package: platform
 quality: production
-label: Hearth - AT+MT co-processor skeleton (MGM240PA32VNA)
+label: Hearth - AT+MT co-processor (MGM240PA32VNA)
 description: >
   The Hearth AT+MT co-processor for the MGM240PA32VNA3 on the iLabs RP2350
-  carrier, skeleton round: the portable core/ engine, the Simplicity SDK
-  downward port (FreeRTOS, EUSART0 on PA05/PA06 for the AT link, USART0 TX
-  on PA00 for the console, NVM3 for the key-value store) and the stubbed
-  upward port. There is no Matter stack in this image; it arrives with the
-  upward port round.
+  carrier: the portable core/ engine, the Simplicity SDK downward port
+  (FreeRTOS, EUSART0 on PA05/PA06 for the AT link, USART0 TX on PA00 for the
+  console, NVM3 for the key-value store), Hearth's own data model, and the
+  Matter stack over Thread and BLE. Round 2 task 2 links the stack in; the
+  upward port is still stubbed, so the AT surface answers as the skeleton did.
+
+sdk_extension:
+  # Silicon Labs Matter 2.8.1-1.5, prepared and patched into $MATTER_EXT_ROOT
+  # by fw/sdk-prepare.sh. The id and version are matter.slce's, verbatim.
+  - id: matter
+    version: "2.8.1"
+    vendor: silabs
 
 source:
   - path: src/main.cpp
@@ -50,12 +64,50 @@ source:
 include:
   - path: ../../core/include
   - path: port
+  # src/ is on the include path for one file: CHIPProjectConfig.h. CHIP finds
+  # it by NAME (the extension's slc/inc/system/SystemBuildConfig.h defines
+  # CHIP_PROJECT_CONFIG_INCLUDE as <CHIPProjectConfig.h>), which is the same
+  # way the stock lighting-app's is found.
+  - path: src
+
+config_file:
+  # The data model. slc runs ZAP over this file and writes the result into the
+  # build directory's autogen/zap-generated/, which is what the build compiles.
+  # data_model/zap-generated/ in this repository is the committed record of that
+  # same output, produced by fw/zap-regen.sh from the same generator, templates
+  # and .zap; README, "Data model", has the diff that proves the two agree.
+  - path: data_model/hearth.zap
+    directory: common
+    file_id: zap_config
+  # The Thread child table, 16 rather than the SDK's 10, so that the two Thread
+  # ports of this product answer the same (DE412). A project's own config/
+  # directory is NOT picked up by slc on its own: this stanza is what binds the
+  # header to the component that owns the file_id, exactly as the bootloader
+  # project's two stanzas do. ot_stack_ftd owns it; ot_stack_mtd and
+  # ot_stack_rcp declare the same file_id and are not in this build.
+  - override:
+      component: ot_stack_ftd
+      file_id: openthread_features
+    path: config/sl_openthread_features_config.h
 
 define:
   # Single-transport image: the combined-image command surface is compiled
   # out (spec 3.12.2).
   - name: MT_COMBINED_IMAGE
     value: "0"
+  # The four the Silicon Labs Matter samples carry and the stack needs:
+  # the PSA/SE crypto backend rather than the software one, newlib's small
+  # reentrant structure, and NVM3 sized for Matter's key domain. The first two
+  # are compile-time contracts inside CHIP; the last two must agree with the
+  # .nvm region the linker reserves.
+  - name: CHIP_CRYPTO_PLATFORM
+    value: "1"
+  - name: _WANT_REENT_SMALL
+    value: "1"
+  - name: NVM3_DEFAULT_NVM_SIZE
+    value: "40960"
+  - name: NVM3_DEFAULT_MAX_OBJECT_SIZE
+    value: "4092"
 
 component:
   # sl_main, the SDK's mandated entry point since SiSDK 2025.12: it owns
@@ -74,13 +126,146 @@ component:
   - id: device_init
   - id: clock_manager
   - id: freertos
-  - id: freertos_heap_4
+  # No freertos_heap_4 since round 2 task 2: matter_platform_mg REQUIRES
+  # freertos_heap_3, and the two are exclusive (both provide freertos_heap), so
+  # slc refuses a project carrying heap_4 and the Matter platform at once.
+  # heap_3 forwards pvPortMalloc() to the C library's malloc(), which the SDK's
+  # linker wraps into sl_memory_manager's .memory_manager_heap. The consequence
+  # is not only which allocator runs: THERE IS NO SEPARATE FREERTOS HEAP ANY
+  # MORE. configTOTAL_HEAP_SIZE is gone from the configuration below because
+  # heap_3 does not read it, and xPortGetFreeHeapSize() is gone from
+  # src/main.cpp because heap_3.c does not define it.
   - id: emlib_cmu
   - id: emlib_core
   - id: emlib_eusart
   - id: emlib_gpio
   - id: emlib_usart
   - id: nvm3_default
+  # NVM3-backed dynamic tokens. The Bluetooth stack stores its identity
+  # address in one, and on device_series_2 this component requires
+  # wireless_stack, which matter_ble brings.
+  - id: common_token_manager_dynamic
+
+  # ------------------------------------------------------- the Matter stack ---
+  # The set the samples carry minus everything this product does not have or
+  # does not want: no matter_shell (a shipping image has no console input path,
+  # board contract item 6), no matter_ota_support or matter_ota_requestor (the
+  # update story is host-driven serial flashing, FIRMWARE_UPDATE_SPEC.md, and
+  # both OTA clusters are disabled in the data model), no LCD, buttons or LEDs
+  # (this carrier has none), no matter_lighting and none of the sample's
+  # application files: Hearth's own main.cpp provides the hooks and the port
+  # provides the callbacks.
+  - id: matter
+  # `efr32` is the CHIP platform layer for this part: PlatformManagerImpl,
+  # BLEManagerImpl, ThreadStackManagerImpl, ConfigurationManagerImpl,
+  # KeyValueStoreManagerImpl, CHIPMem-Platform, Logging, the PSA keystore.
+  #
+  # It is listed INSTEAD of matter_platform_mg, which is what the samples list
+  # and which requires it. matter_platform_mg additionally compiles the sample
+  # application framework: BaseApplication.cpp and MatterConfig.cpp, which
+  # include "AppConfig.h", "AppEvent.h" and <AppTask.h> and call
+  # AppTask::GetAppTask().StartAppTask(). Those headers and that class are the
+  # sample application's, and a Hearth image that supplied them would be
+  # carrying the sample's button, LED, LCD and app-event framework to satisfy a
+  # bootstrap it does not use. Measured, not assumed: with matter_platform_mg in
+  # the project the build stops at
+  #   BaseApplication.cpp:25:10: fatal error: AppEvent.h: No such file or directory
+  # Hearth's own Matter bootstrap (the equivalent of
+  # SilabsMatterConfig::AppInit(), which MatterConfig.cpp is the reference for)
+  # belongs in the port, and arrives with task 3.
+  #
+  # The component block below is matter_platform_mg's own `requires:` list for
+  # device_series_2, minus what this project already lists: without the wrapper
+  # component nothing else pulls them in.
+  - id: efr32
+  - id: sleeptimer
+  - id: dmadrv
+  - id: mpu
+  - id: udelay
+  - id: component_catalog
+  - id: rail_lib_multiprotocol
+  - id: hal_wdog
+  - id: gpiointerrupt
+  - id: emlib
+  - id: matter_ble
+  - id: matter_thread
+  - id: matter_crypto
+  - id: matter_gatt_static
+  - id: matter_provision_default
+  - id: app_common
+  # There is deliberately no rail_util_pti, which every Silicon Labs Matter
+  # sample lists and which the brief for this task carried over. It was in those
+  # samples' lists because matter_platform_mg requires it and their dev kits
+  # route the Packet Trace Interface pins; this carrier does not (board contract
+  # table), and with matter_platform_mg dropped nothing else requires it. On the
+  # bare MGM240PA32VNA target the generated config sets SL_RAIL_UTIL_PTI_MODE to
+  # SL_RAIL_PTI_MODE_DISABLED and leaves the pin block unset, so the component
+  # compiled in as one disabled peripheral and the build's ONLY warning:
+  #   config/sl_rail_util_pti_config.h:56:2: warning: #warning "RAIL PTI
+  #   peripheral not configured"
+  # Round 1 made a warning-free build a checked property of this project
+  # (README, "Building"); a warning about pins nobody configured, for a mode
+  # that is off, is not worth spending it on.
+  # Demanded by `matter`, which requires the api `configuration_over_swo`.
+  # This component provides that api and NOTHING else: it exists to override
+  # the Simplicity SDK's own configuration_over_swo, which pulls in iostream_rtt
+  # and therefore SEGGER RTT. Without it slc stops with "iostream_rtt from
+  # silabs.simplicity_sdk needs segger_rtt" and offers matter_segger_rtt or
+  # segger_rtt, both of which would add a second log sink this product does not
+  # want. The samples list it for the same reason.
+  - id: matter_configuration_over_swo
+  # Demanded, transitively, by matter_provision_default: that component requires
+  # iostream_rtt (its provisioning channel can run over RTT), and iostream_rtt
+  # requires segger_rtt, which nothing in the Simplicity SDK provides on its own
+  # here. This is the extension's own SEGGER RTT component and is what the
+  # samples list. matter_provision_default is not optional: `matter` requires the
+  # api matter_provision, and the only other provider (matter_provision_flash)
+  # requires iostream_rtt too.
+  #
+  # It is also where CHIP's own log output goes. src/platform/silabs/Logging.cpp
+  # writes to SEGGER RTT unless SILABS_LOG_OUT_UART is 1, and setting that would
+  # need matter_uart, the SDK's UART driver, on a peripheral Hearth drives
+  # itself. So CHIP logs land in an RTT buffer, readable over SWD and on neither
+  # of this board's two UARTs, which is the right default for a product whose AT
+  # link must carry nothing but the AT protocol.
+  - id: matter_segger_rtt
+
+  # The cluster servers the data model declares. One component per enabled
+  # cluster; a cluster enabled in data_model/hearth.zap with no component here
+  # is metadata with nothing serving it.
+  - id: matter_access_control
+  - id: matter_administrator_commissioning
+  - id: matter_basic_information
+  - id: matter_descriptor
+  - id: matter_general_commissioning
+  - id: matter_general_diagnostics
+  - id: matter_group_key_mgmt
+  - id: matter_groups
+  - id: matter_identify
+  - id: matter_network_commissioning
+  - id: matter_on_off
+  - id: matter_operational_credentials
+  - id: matter_software_diagnostics
+  - id: matter_thread_network_diagnostics
+  # There is deliberately no matter_temperature_measurement: no such component
+  # exists, and none is needed. Temperature Measurement has no cluster server in
+  # connectedhomeip at all (src/app/clusters/ has no temperature-measurement
+  # directory) and no row in the extension's own
+  # cluster-to-component-dependencies.json. It is served entirely out of ember
+  # attribute storage, which for this port means the external-attribute
+  # callbacks the upward port provides. Asking slc for it fails the generate
+  # outright: "Referenced project component matter_temperature_measurement not
+  # in framework".
+  #
+  # Two clusters this data model enables on endpoint 0 have a component that is
+  # NOT listed here: Diagnostic Logs (matter_diagnostic_logs) and Wi-Fi Network
+  # Diagnostics (matter_wifi_network_diagnostics). Neither is a link error, the
+  # generated callback-stub.cpp defines every cluster init callback weakly, so
+  # both advertise metadata with no server behind them. They are kept enabled
+  # because the data model is the nRF54L15 arm's and the two Thread ports must
+  # answer the same; whether a Thread-only product should carry Wi-Fi
+  # diagnostics at all is a wire-surface question for BOTH arms and belongs to
+  # the qualification round, not to this one.
 
 toolchain_settings:
   # src/main.cpp and the Matter port's .cpp files; the same option and value
@@ -89,8 +274,37 @@ toolchain_settings:
     value: gnu++17
 
 configuration:
-  # The default 8 KiB does not hold the boot task (4 KiB of stack) and the
-  # AT parser task (MT_PARSER_TASK_STACK, 6 KiB) at the same time. Measured
-  # free heap at +MTREADY is recorded in the README's "Measured" section.
-  - name: configTOTAL_HEAP_SIZE
-    value: "24576"
+  # configTOTAL_HEAP_SIZE was here through round 1 and round 2 task 1, at
+  # 24,576. It is gone rather than raised: under freertos_heap_3 (see the
+  # component list) there is no ucHeap array for it to size, and a configuration
+  # entry that nothing reads is worse than no entry, because the next person to
+  # tune memory here would tune it. The free-heap figure at +MTREADY, now the
+  # memory manager's, is in the README's "Measured" section.
+  # The C stack, shared by sl_main_init() before the scheduler and by every
+  # ISR afterwards. Under sl_main with a kernel the SDK picks 1,024 B
+  # (memory_manager_region.slcc chooses a different config file per entry
+  # point); every Silicon Labs Matter sample raises it to 4,608, and the
+  # Matter stack's interrupt handlers are why. Round 2 task 1 measured the
+  # drop to 1,024 and flagged that the first task to add an interrupt-driven
+  # stack should raise it. This is that task.
+  - name: SL_STACK_SIZE
+    value: "4608"
+  # OpenThread runs under CHIP's own task here, not its own app or CLI task.
+  - name: SL_OPENTHREAD_ENABLE_APP_TASK
+    value: 0
+  - name: SL_OPENTHREAD_ENABLE_CLI_TASK
+    value: 0
+  # The sample's Bluetooth RTOS event handler stack, series 2 value.
+  - name: SL_BT_RTOS_EVENT_HANDLER_STACK_SIZE
+    value: "1536"
+  # The key exchanges CASE and PASE need from mbedTLS, and the buffer
+  # assumption the PSA driver layer is built with. All four are the samples'.
+  - name: SL_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
+    value: 1
+    condition: [matter_thread_cert_libs]
+  - name: SL_MBEDTLS_KEY_EXCHANGE_PSK_ENABLED
+    value: 1
+  - name: SL_MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS
+    value: 1
+  - name: CIRCULAR_QUEUE_LEN_MAX
+    value: 16
