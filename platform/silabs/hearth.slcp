@@ -215,6 +215,33 @@ component:
   # of libc stay newlib-nano's. Only the formatting family is replaced, and
   # `_putchar` (which only bare printf/puts reach, and the port calls
   # neither) goes to the default iostream, which is this image's console.
+  #
+  # WHERE IT DISAGREES WITH newlib-nano, read out of the component's own
+  # source ($SISDK_ROOT/printf/printf.c) rather than assumed. One of these is
+  # a fault and the rest are cosmetic:
+  #
+  #  - A NULL `%s` ARGUMENT IS DEREFERENCED AND FAULTS. `case 's'` takes the
+  #    pointer and hands it straight to `_strnlen_s()` (printf.c:801-804,
+  #    :177-182), which reads `*s` with no NULL check. newlib printed
+  #    "(null)". So a NULL string in ANY log line in this image, the SDK's,
+  #    CHIP's or OpenThread's, is now a hard fault rather than an ugly line.
+  #    Nothing in core/ or in this port passes one: every `%s` argument is a
+  #    string literal, a fixed-size buffer, or a value already NULL-guarded at
+  #    the call site (core/mt/mt_at.c:1715-1719 tests mt_thread_role_name()'s
+  #    NULL return and substitutes a number; :1646-1651 and :2180-2186 branch
+  #    on the optional argument instead of formatting it). The SDK, CHIP and
+  #    OpenThread call sites were NOT audited. A guard belongs to the
+  #    qualification round, and there are two ways to give it: patch the
+  #    component under sdk-patches/ to print "(null)", or audit the call
+  #    sites. Patching is the cheaper and more honest of the two.
+  #  - `%n` and `%a` are unimplemented: the default arm prints the conversion
+  #    character itself (printf.c:851-854). Nothing in this image uses either.
+  #  - `%p` is uppercase hex, zero-padded to the pointer width, with NO `0x`
+  #    prefix (printf.c:828-830, which sets FLAGS_ZEROPAD | FLAGS_UPPERCASE
+  #    and width 8). CHIP logs pointers with %p; the lines are still readable,
+  #    they just look different from every earlier build's.
+  #  - `%f` above PRINTF_MAX_FLOAT (1e9, printf.c:86-88) switches to
+  #    exponential (:366) instead of printing the long decimal form.
   - id: printf
 
   # ------------------------------------------------------- the Matter stack ---

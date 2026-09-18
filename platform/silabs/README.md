@@ -1029,14 +1029,17 @@ bench transcripts under "Measured", "Round 2 task 6".
 
 Four things differ from the nRF arm, and each is stated in the source too.
 
-**The Instance-served carve-out is absent rather than reduced.** Not one of the
-clusters its table names is compiled into this image, which declares four
-(OnOff, Identify, Descriptor, TemperatureMeasurement) and serves none of them
-from a per-endpoint C++ object. An empty table is not even a legal array and a
-predicate with no caller is a warning in a build that claims to have none, so
-the table, its predicate and both dispatch arms are left out together. The
-section lists every removed row with the nRF batch that brings it back, and the
-rule for which rows exist at all.
+**The Instance-served carve-out mechanism is present, and its rows are not the
+nRF's.** Not one of the clusters the nRF's table names is compiled into this
+image, which declares four (OnOff, Identify, Descriptor, TemperatureMeasurement)
+and serves none of them from a per-endpoint C++ object; the section lists every
+one of those rows with the batch that brings it back, and the rule for which
+rows exist at all. What this image needs the mechanism for is the FIXED
+endpoint: ruling F500's four Basic Information integer attributes, read from the
+device instance info provider and refused on write. See "Fixed endpoints are not
+readable through the ember path" below. The first landing of this section left
+the mechanism out because the table would have been empty; the fix round put it
+back with rows of its own.
 
 **The nRF's BooleanState bridge inside the change callback goes with it**, for
 the same reason: no endpoint in this image carries BooleanState, so the
@@ -1050,6 +1053,12 @@ weak default does not fail to link; it silently stops being called. Including
 **The read's failure arm is reachable here and the nRF calls it defensive.**
 See "Fixed endpoints are not readable through the ember path" below; the arm
 logs rather than failing silently.
+
+**`MT_ATTR_ERR_READONLY` is reachable here and unreachable on the nRF arm at
+the same point in its history**, for the same reason: the carve-out has rows.
+It is still not reached by an `IsWritable()` check, which would wrongly refuse
+`MeasuredValue` and `IdentifyType`; the whole argument is carried in the source
+with this tree's own citation (`attribute-table.h:74-85`).
 
 #### The 64-bit value the libc could not print
 
@@ -1100,6 +1109,38 @@ newlib-nano's byte-wise `memcpy` was quietly surviving that path. It also cost
 68,972 B of `text`. Do not re-try it without solving the NVM3 `memcpy` fault
 first.
 
+##### Where the tiny printf disagrees with newlib-nano
+
+Read out of the component's own source (`$SISDK_ROOT/printf/printf.c`) rather
+than assumed. One of these is a fault and the rest are cosmetic.
+
+| Case | Tiny printf | newlib-nano |
+|---|---|---|
+| `%s` with a NULL argument | **dereferences it and faults** (`case 's'` at `printf.c:801-804` hands the pointer straight to `_strnlen_s()` at `:177-182`, which reads `*s` with no NULL check) | printed `(null)` |
+| `%n`, `%a` | unimplemented: the default arm prints the conversion character itself (`printf.c:851-854`) | `%n` implemented, `%a` implemented |
+| `%p` | uppercase hex, zero-padded to the pointer width, **no `0x` prefix** (`printf.c:828-830`) | lowercase with `0x` |
+| `%f` above 1e9 | switches to exponential (`PRINTF_MAX_FLOAT`, `printf.c:86-88`, the switch at `:366`) | prints the long decimal form |
+
+**The NULL `%s` is the one that matters**, and it changes the severity of a
+class of defect rather than the look of a line: a NULL string in any log line in
+this image, the SDK's, CHIP's or OpenThread's, is now a hard fault where it used
+to be an ugly line.
+
+**Nothing in `core/` or in this port passes one.** Every `%s` argument is a
+string literal, a fixed-size buffer, or a value already NULL-guarded at the call
+site, and the one place it could have happened is guarded deliberately rather
+than by luck: `core/mt/mt_at.c:1715-1719` tests `mt_thread_role_name()`'s NULL
+return (this port's own function returns `nullptr` for a role outside the known
+set) and substitutes a number; `:1646-1651` and `:2180-2186` branch on their
+optional argument instead of formatting it.
+
+**The SDK's, CHIP's and OpenThread's call sites were not audited**, and that is
+the open half. A guard belongs to the qualification round, and there are two
+ways to give it: patch the component under `sdk-patches/` so `case 's'` prints
+`(null)` for a NULL pointer, or audit the call sites. Patching is the cheaper
+and the more honest of the two, because it fixes every call site including the
+ones a future SDK version adds.
+
 #### Fixed endpoints are not readable through the ember path
 
 `AT+MTATTR=0,0x0028,0x0002`, the root node's VendorID, answers a bare `ERROR`
@@ -1117,18 +1158,54 @@ cluster registry before it reaches ember. `emberAfReadAttribute()` does not: it
 sees `EXTERNAL_STORAGE` and calls `emberAfExternalAttributeReadCallback()`,
 which is this port's and answers only for the dynamic endpoints' arena.
 
-`mt_matter_attr_read()` answers `MT_ATTR_ERR_FAILED` for it, which is the honest
-code: the attribute exists and is an integer, and this path could not read it.
-`MT_ATTR_ERR_ATTRIBUTE` would claim it does not exist. The failure is logged
-with the endpoint, cluster, attribute and ember status so the next bench session
-reads the cause instead of deriving it.
-
-Both arms' `hearth.zap` declare VendorID `External`, and the nRF arm passes this
+Both arms' `hearth.zap` declare VendorID `External`, and the nRF arm passes the
 row, so the divergence is in what the two CHIP versions generate from that
-declaration rather than in the port. Reaching these values here needs a read
-path through the data model provider for endpoints this port did not create.
-That is a section of its own with no nRF counterpart to transfer, and it is left
-for the controller to schedule.
+declaration rather than in either port.
+
+**Controller ruling F500 carved out the four that the wire contract asks for.**
+The Instance-served carve-out mechanism the nRF arm uses for its dynamic
+endpoints (the table, `instance_attr_served()`, a read dispatch and a write
+disposition) is present in `port/mt_matter_sl.cpp`, and its rows here are Basic
+Information's four integer attributes on the root node:
+
+| Attribute | Id | Source | Value on this image |
+|---|---|---|---|
+| VendorID | `0x0002` | `GetDeviceInstanceInfoProvider()->GetVendorId()` | 65521 (`0xFFF1`) |
+| ProductID | `0x0004` | `...->GetProductId()` | 32784 (`0x8010`) |
+| HardwareVersion | `0x0007` | `...->GetHardwareVersion()` | 1 |
+| SoftwareVersion | `0x0009` | `ConfigurationMgr().GetSoftwareVersion()` | 1 |
+
+The provider is the same source the registered `BasicInformationCluster` object
+reads from, so an `AT+MTATTR` read answers what a subscribed controller sees
+rather than a second copy of it that can drift. SoftwareVersion comes from
+`ConfigurationMgr()` because that is where this tree's interface puts it:
+`DeviceInstanceInfoProvider.h` declares `GetVendorId`, `GetProductId` and
+`GetHardwareVersion` but no `GetSoftwareVersion`, and
+`ConfigurationManager.h:105` declares it instead.
+
+**They are read-only.** A write answers `MT_ATTR_ERR_READONLY`, `+MTERR:11`,
+which `AT_MT_SPEC.md` 3.8 defines for "an attribute that exists but is served by
+a cluster Instance and cannot be written over AT". **That code became reachable
+on this image for the first time with this change**; it was unreachable when
+the bridge first landed, and the comment in `mt_matter_attr_write()` records the
+transition rather than restating the old claim.
+
+**The known limit, stated plainly: fixed-endpoint code-driven clusters are
+readable through `AT+MTATTR` only where the carve-out serves them. The general
+provider read path is a later round's.** Everything else on endpoint 0 answers
+as before: Basic Information's strings and its `CapabilityMinima` struct answer
+`+MTERR:5` on type, before ember is reached, and every integer attribute of
+Access Control, General Commissioning, General Diagnostics and the rest answers
+`MT_ATTR_ERR_FAILED`, a bare `ERROR`, with the log line above naming the
+endpoint, cluster, attribute and ember status. `MT_ATTR_ERR_FAILED` is the
+honest code for those: the attribute exists and is an integer, and this path
+could not read it; `MT_ATTR_ERR_ATTRIBUTE` would claim it does not exist.
+
+The four rows are deliberately four rows and not a mechanism for reaching the
+provider. A general path needs an `AttributeValueEncoder` over a TLV writer and
+a decode back, it has no nRF counterpart to transfer, and it would change the
+answer for every fixed-endpoint attribute rather than the ones the contract
+names.
 
 #### The unported families' stubs know the live endpoints (step 1b)
 

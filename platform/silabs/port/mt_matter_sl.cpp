@@ -28,6 +28,8 @@
  * config/sl_matter_config.h.
  */
 
+#include <app-common/zap-generated/ids/Attributes.h>
+#include <app-common/zap-generated/ids/Clusters.h>
 #include <app/ConcreteAttributePath.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>
@@ -46,7 +48,9 @@
 #include <app/util/generic-callbacks.h>
 #include <lib/support/TypeTraits.h>
 #include <platform/CHIPDeviceLayer.h>
+#include <platform/ConfigurationManager.h>
 #include <platform/ConnectivityManager.h>
+#include <platform/DeviceInstanceInfoProvider.h>
 #include <platform/ThreadStackManager.h>
 #include <setup_payload/OnboardingCodesUtil.h>
 
@@ -416,28 +420,52 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
 /*
  * ---- the Instance-served attribute carve-out (nRF 755-935, DE397) -------
  *
- * ABSENT THIS ROUND, and absent rather than reduced: the carve-out's table,
- * its instance_attr_served() predicate, the per-cluster read dispatch in
- * mt_matter_attr_read() and the two-way write disposition in
- * mt_matter_attr_write() are all left out together, because not one of the
- * clusters they name is compiled into this image. This build declares exactly
- * four clusters (OnOff, Identify, Descriptor, TemperatureMeasurement,
- * port/mt_devtypes_sl.cpp) and none of them is served by a per-endpoint C++
- * object. An empty table would not even compile (a zero-length array), and a
- * predicate with no caller is a warning in a build whose standing claim is
- * that it has none.
+ * The mechanism is the nRF's: a list of (cluster, attribute) pairs whose ember
+ * slot cannot answer, because something other than ember storage owns the
+ * value. It is consulted only AFTER attr_locate() has proven the endpoint
+ * carries the cluster, so it can never change the
+ * ENDPOINT/CLUSTER/ATTRIBUTE error division below. Reads answer the live
+ * owner; writes answer MT_ATTR_ERR_READONLY.
  *
- * What the carve-out IS, so the batch that brings it back knows what it is
- * bringing: a list of (cluster, attribute) pairs whose ember slot is an inert
- * shadow because a registered Instance answers for them, matched only AFTER
- * attr_locate() has proven the endpoint carries the cluster, so it can never
- * change the ENDPOINT/CLUSTER/ATTRIBUTE error division below. Reads answer the
- * live object; writes answer MT_ATTR_ERR_READONLY, except the Chime pair,
- * which routes to the live ChimeServer's own setters and raises no +MTATTR URC
- * in either notify mode because it bypasses emberAfWriteAttribute entirely.
+ * WHAT IS IN IT HERE IS NOT WHAT IS IN IT ON THE nRF, and the difference is
+ * the point of this comment. On the nRF every row is an attribute a
+ * per-endpoint cluster Instance serves on a DYNAMIC endpoint, and the ember
+ * slot beneath it is an inert shadow. Not one of those clusters is compiled
+ * into this image: this build declares four (OnOff, Identify, Descriptor,
+ * TemperatureMeasurement, port/mt_devtypes_sl.cpp) and none of them is served
+ * by a per-endpoint object. Every one of the nRF's rows is listed below with
+ * the batch that brings it back.
+ *
+ * What this image needs the mechanism for instead is the FIXED endpoint.
+ * This SDK's CHIP serves endpoint 0's framework clusters through registered
+ * cluster objects (autogen/zap-generated/CodeDrivenInitShutdown.cpp builds
+ * BasicInformation, Descriptor, AccessControl and the rest), and ZAP therefore
+ * declares their attributes EXTERNAL_STORAGE so ember holds no bytes for them.
+ * A controller's read never notices, because the data model provider asks the
+ * cluster registry before it reaches ember. emberAfReadAttribute() does not:
+ * it sees EXTERNAL_STORAGE and calls emberAfExternalAttributeReadCallback(),
+ * which is this port's and answers only for the dynamic endpoints' arena, so
+ * every fixed-endpoint attribute came back UnsupportedAttribute and
+ * AT+MTATTR=0,0x0028,0x0002 (the root VendorID, a harness Phase 1 row) was a
+ * bare ERROR.
+ *
+ * Controller ruling F500: the four integer attributes of Basic Information are
+ * carved out and served from the device instance info provider, which is where
+ * the registered cluster object reads them from too, so the AT answer and a
+ * controller's answer are the same value from the same source rather than two
+ * copies that can drift.
+ *
+ * THIS IS NOT A GENERAL FIXED-ENDPOINT READ PATH and must not be mistaken for
+ * one. Every other code-driven attribute on endpoint 0 (Basic Information's
+ * strings and its CapabilityMinima struct, and all of Access Control, General
+ * Commissioning, General Diagnostics and the rest) still answers
+ * MT_ATTR_ERR_FAILED with the log line in mt_matter_attr_read(). Reaching
+ * those needs a read path through the data model provider, which is a later
+ * round's and has no nRF counterpart to transfer. The four rows below are the
+ * ones the wire contract actually asks for.
  *
  * Every row of the nRF's table, and the batch that ports the device type it
- * belongs to (nRF README batch roster):
+ * belongs to (nRF README batch roster), none of them present here:
  *
  *   OperationalState OperationalState, CurrentPhase           batch 4
  *   Chime SelectedChime, Enabled                              batch 4
@@ -479,6 +507,120 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * this image declares no such endpoint, and FindClusterOnEndpoint() would
  * answer nullptr on every call.
  */
+struct instance_served_attr {
+    uint32_t cluster;
+    uint32_t attr;
+};
+
+/*
+ * Basic Information's four integer attributes on the root node (ruling F500).
+ * The strings (VendorName, ProductName, NodeLabel, Location and the rest) and
+ * CapabilityMinima are deliberately NOT here: CHAR_STRING and STRUCT fall out
+ * of attr_type_info() and answer +MTERR:5 on the generic path before ember is
+ * ever reached, which is the same code the other two arms answer for them and
+ * is what AT_MT_SPEC.md 3.8 says a non-integer attribute gets. A row for one
+ * would be dead text.
+ *
+ * DataModelRevision, SpecificationVersion, MaxPathsPerInvoke, FeatureMap and
+ * ClusterRevision are integers and are also not here: the ruling names four,
+ * nothing on the wire asks for the others, and each extra row is another
+ * accessor to keep true. They answer MT_ATTR_ERR_FAILED with the log line,
+ * like every other code-driven attribute on the fixed endpoint.
+ */
+static const instance_served_attr k_instance_served[] = {
+    { chip::app::Clusters::BasicInformation::Id,
+      chip::app::Clusters::BasicInformation::Attributes::VendorID::Id },
+    { chip::app::Clusters::BasicInformation::Id,
+      chip::app::Clusters::BasicInformation::Attributes::ProductID::Id },
+    { chip::app::Clusters::BasicInformation::Id,
+      chip::app::Clusters::BasicInformation::Attributes::HardwareVersion::Id },
+    { chip::app::Clusters::BasicInformation::Id,
+      chip::app::Clusters::BasicInformation::Attributes::SoftwareVersion::Id },
+};
+
+static bool instance_attr_served(uint32_t cluster, uint32_t attr)
+{
+    for (auto &e : k_instance_served) {
+        if (e.cluster == cluster && e.attr == attr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * The live reader for the rows above. No endpoint argument, and it does not
+ * need one: Basic Information is a singleton cluster that exists on the root
+ * node alone in this image's ZAP, so attr_locate() has already answered
+ * MT_ATTR_ERR_CLUSTER for any other endpoint before this is reached. The nRF's
+ * live readers take an endpoint because theirs index per-endpoint pools; the
+ * batch that brings one of those here brings its own signature with it.
+ *
+ * chip::DeviceLayer::GetDeviceInstanceInfoProvider() is the same source the
+ * registered BasicInformationCluster object reads from, so an AT read answers
+ * what a subscribed controller sees rather than a second copy of it.
+ * SoftwareVersion comes from ConfigurationMgr() because that is where this
+ * tree's interface puts it: DeviceInstanceInfoProvider.h declares
+ * GetVendorId, GetProductId and GetHardwareVersion but no GetSoftwareVersion,
+ * and ConfigurationManager.h:105 declares it instead.
+ *
+ * All four are unsigned, so is_unsigned is set once, up front, and stays valid
+ * on every failure return (core/include/mt_matter.h's rule that the flag is
+ * valid even when the result is an error).
+ *
+ * Runs under the caller's StackLock, like the nRF's live readers.
+ */
+static int mt_basic_info_attr_read_live(uint32_t attr, int64_t *out, bool *is_unsigned)
+{
+    if (is_unsigned != nullptr) {
+        *is_unsigned = true;
+    }
+
+    chip::DeviceLayer::DeviceInstanceInfoProvider *p =
+        chip::DeviceLayer::GetDeviceInstanceInfoProvider();
+    if (p == nullptr) {
+        HEARTH_LOGE("matter", "basic info attr 0x%04lX: no device instance info provider",
+                    (unsigned long)attr);
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    CHIP_ERROR err = CHIP_NO_ERROR;
+    uint16_t v16 = 0;
+    uint32_t v32 = 0;
+
+    switch (attr) {
+    case chip::app::Clusters::BasicInformation::Attributes::VendorID::Id:
+        err = p->GetVendorId(v16);
+        *out = (int64_t)v16;
+        break;
+    case chip::app::Clusters::BasicInformation::Attributes::ProductID::Id:
+        err = p->GetProductId(v16);
+        *out = (int64_t)v16;
+        break;
+    case chip::app::Clusters::BasicInformation::Attributes::HardwareVersion::Id:
+        err = p->GetHardwareVersion(v16);
+        *out = (int64_t)v16;
+        break;
+    case chip::app::Clusters::BasicInformation::Attributes::SoftwareVersion::Id:
+        err = chip::DeviceLayer::ConfigurationMgr().GetSoftwareVersion(v32);
+        *out = (int64_t)v32;
+        break;
+    default:
+        /* A row was added to k_instance_served above and no case added here.
+         * Fails loudly rather than answering whichever value the switch fell
+         * past, which is the nRF's rule for its own default arm. */
+        HEARTH_LOGE("matter", "basic info attr 0x%04lX is carved out with no reader",
+                    (unsigned long)attr);
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "basic info attr 0x%04lX: %" CHIP_ERROR_FORMAT,
+                    (unsigned long)attr, err.Format());
+        return MT_ATTR_ERR_FAILED;
+    }
+    return MT_ATTR_OK;
+}
 
 /*
  * Locate an attribute's metadata, splitting endpoint/cluster/attribute absence
@@ -550,6 +692,21 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         return r;
     }
 
+    /* Ruling F500: the carved-out attributes answer their live owner, not
+     * ember; see the carve-out comment above attr_locate(). Every cluster in
+     * k_instance_served has its own explicit arm and default: fails loudly,
+     * the nRF's rule: a future table row whose case someone forgets would
+     * otherwise be answered silently by whichever reader default routed to,
+     * and a bare ERROR at the bench is the drift alarm this arm exists to be. */
+    if (instance_attr_served(cluster, attr)) {
+        switch (cluster) {
+        case chip::app::Clusters::BasicInformation::Id:
+            return mt_basic_info_attr_read_live(attr, out, is_unsigned);
+        default:
+            return MT_ATTR_ERR_FAILED;
+        }
+    }
+
     bool unsigned_type;
     uint8_t bytes;
     if (!attr_type_info(md->attributeType, &unsigned_type, &bytes)) {
@@ -591,20 +748,25 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
          * EXTERNAL_STORAGE and calls emberAfExternalAttributeReadCallback(),
          * which is this port's (mt_devtypes_sl.cpp) and answers only for the
          * dynamic endpoints' arena, so it returns UnsupportedAttribute for
-         * every fixed-endpoint attribute.
+         * every fixed-endpoint attribute THE CARVE-OUT ABOVE DOES NOT SERVE.
          *
-         * Bench: AT+MTATTR=0,0x0028,0x0002 (the root VendorID) answers a bare
-         * ERROR here, and it is the harness Phase 1 row "MTATTR root VendorID
-         * read". MT_ATTR_ERR_FAILED is the honest code for it: the attribute
+         * Basic Information's four integer attributes are carved out (ruling
+         * F500) and never reach here. Everything else on the fixed endpoints
+         * does: Basic Information's own strings and CapabilityMinima answer
+         * +MTERR:5 earlier on type, and every integer attribute of Access
+         * Control, General Commissioning, General Diagnostics and the rest
+         * lands in this arm.
+         *
+         * MT_ATTR_ERR_FAILED is the honest code for those: the attribute
          * exists and is an integer, and this path could not read it.
          * MT_ATTR_ERR_ATTRIBUTE would claim it does not exist.
          *
          * Reaching those values needs a read path through the data model
          * provider for endpoints this port did not create, which is a section
-         * of its own and has no nRF counterpart to transfer (the nRF's arm is
-         * genuinely unreachable, so the row passes there through ember). The
-         * log line is here so the next bench session reads the cause instead
-         * of deriving it again.
+         * of its own and has no nRF counterpart to transfer. The carve-out is
+         * deliberately not that path: it is four named rows, not a mechanism
+         * for reaching the provider. The log line is here so the next bench
+         * session reads the cause instead of deriving it again.
          */
         HEARTH_LOGE("matter", "attr read ep %u cluster 0x%04lX attr 0x%04lX: ember status %u "
                               "(a fixed endpoint's code-driven cluster is not reachable through "
@@ -646,6 +808,26 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
         return r;
     }
 
+    /*
+     * Ruling F500: the carved-out attributes refuse the write. All four are
+     * Basic Information identity values that the device instance info provider
+     * owns and that ZAP declares READABLE without WRITABLE; there is nowhere
+     * for a write to land and nothing on the wire asks to change them.
+     * MT_ATTR_ERR_READONLY (+MTERR:11) is the code AT_MT_SPEC.md 3.8 defines
+     * for exactly this: "an attribute that exists but is served by a cluster
+     * Instance and cannot be written over AT".
+     *
+     * The nRF splits this arm two ways, refusing everything but the Chime
+     * pair, which routes to the live ChimeServer's own setters and raises no
+     * +MTATTR URC in either notify mode because it bypasses
+     * emberAfWriteAttribute entirely. There is no writable carved-out
+     * attribute in this image, so the split has no second half to have; the
+     * batch that brings the chime brings it.
+     */
+    if (instance_attr_served(cluster, attr)) {
+        return MT_ATTR_ERR_READONLY;
+    }
+
     bool unsigned_type;
     uint8_t bytes;
     if (!attr_type_info(md->attributeType, &unsigned_type, &bytes)) {
@@ -685,19 +867,26 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
      * that the device knows what it is doing." A locally originated write is
      * trusted; this bridge's caller IS the local host.
      *
-     * mt_matter.h's MT_ATTR_ERR_READONLY comment is scoped narrower than "no
-     * WRITABLE flag": it names a specific mechanism, an attribute "served by a
-     * cluster Instance (ATTRIBUTE_FLAG_MANAGED_INTERNALLY without
-     * ATTRIBUTE_FLAG_WRITABLE)". This image has no Instance-served cluster at
-     * all (see the absent carve-out above), so that condition cannot occur and
-     * MT_ATTR_ERR_READONLY IS UNREACHABLE FROM THIS BRIDGE THIS ROUND, exactly
-     * as it is on the nRF arm at the same point in its history. A gate on
-     * IsWritable() alone would be a different and wrong thing: it would answer
-     * READONLY for TemperatureMeasurement MeasuredValue and Identify
-     * IdentifyType, both declared here without WRITABLE, and the bench
-     * requires a host write of MeasuredValue to succeed. The batch that adds
-     * the first Instance-served cluster makes the code reachable by bringing
-     * back the carve-out, not by adding a blanket flag check.
+     * MT_ATTR_ERR_READONLY IS REACHABLE ON THIS IMAGE, and it is reached from
+     * exactly one place: the carve-out arm above, ruling F500's four Basic
+     * Information identity attributes. It was unreachable when this section
+     * first landed and the comment here said so; the fix round that carved out
+     * the root node's identity made it reachable, and this paragraph is the
+     * record of that change rather than a restatement of the old claim.
+     *
+     * It is still NOT reached by a flag check, and that is the part worth
+     * keeping. mt_matter.h's MT_ATTR_ERR_READONLY comment is scoped narrower
+     * than "no WRITABLE flag": it names a specific mechanism, an attribute
+     * "served by a cluster Instance (ATTRIBUTE_FLAG_MANAGED_INTERNALLY without
+     * ATTRIBUTE_FLAG_WRITABLE)". The carved-out four are that mechanism's
+     * fixed-endpoint equivalent in this tree (a registered cluster object owns
+     * the value, ember holds no bytes), which is why they answer it and why
+     * nothing else does. A gate on IsWritable() alone would be a different and
+     * wrong thing: it would answer READONLY for TemperatureMeasurement
+     * MeasuredValue and Identify IdentifyType, both declared here without
+     * WRITABLE, and the bench requires a host write of MeasuredValue to
+     * succeed. The batch that adds the first Instance-served cluster adds
+     * rows to the carve-out, not a blanket flag check.
      */
 
     uint8_t buf[8] = { 0 };
