@@ -82,6 +82,13 @@ source:
   # pair; its own comment says what deleting it would cost.
   - path: port/mt_devtypes_sl.cpp
   - path: port/mt_devtypes_stub.c
+  # The +MTEVT mapping, shared with the nRF arm (platform/chip/, not port/,
+  # because it names stock CHIP symbols only and no SDK of either vendor).
+  # It is the C6's app_event_cb() over stock CHIP's device events, plus the
+  # commissioning-window AppDelegate and the FabricTable::Delegate that stock
+  # CHIP uses where esp-matter's fork posts device events. Not covered by
+  # check_slcp_sources.py, which reads the ../../core/ paths alone.
+  - path: ../chip/mt_chip_events.cpp
   # core/: mirrors core/sources.cmake, which is authoritative.
   - path: ../../core/at/at_parser.c
   - path: ../../core/mt/mt_at.c
@@ -94,6 +101,8 @@ source:
 include:
   - path: ../../core/include
   - path: port
+  # mt_chip_events.h, beside its .cpp above.
+  - path: ../chip
   # src/ is on the include path for one file: CHIPProjectConfig.h. CHIP finds
   # it by NAME (the extension's slc/inc/system/SystemBuildConfig.h defines
   # CHIP_PROJECT_CONFIG_INCLUDE as <CHIPProjectConfig.h>), which is the same

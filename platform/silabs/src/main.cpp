@@ -62,6 +62,7 @@
 #include "hearth_matter_init.h"
 #include "hearth_port.h"
 #include "mt_at.h"
+#include "mt_chip_events.h"
 #include "mt_comp_store.h"
 #include "mt_composition.h"
 #include "mt_devtypes.h"
@@ -139,10 +140,29 @@ void hearth_boot_task(void *arg)
             HEARTH_LOGE("boot", "catalogue endpoint %u not disabled: no such endpoint",
                         (unsigned)kCatalogueEndpointId);
         }
+
+        /* The +MTEVT sources, under the same lock and for the same reason:
+         * AddEventHandler, SetAppDelegate and AddFabricDelegate all touch
+         * stack-owned state from a task that is not the CHIP event loop. It
+         * has to be after Server::Init (the window manager and the fabric
+         * table exist only then) and before mt_at_start(), so the window the
+         * server opened during its own init is already being tracked when the
+         * marker goes out. Nothing the delegates emit can precede +MTREADY:
+         * mt_at_event() goes through mt_at_urc()'s s_at_up guard. */
+        CHIP_ERROR evt_err = mt_chip_events_register();
+        if (evt_err != CHIP_NO_ERROR) {
+            /* Not fatal, unlike a failed stack init: the AT surface still
+             * answers every command, the host simply has to poll AT+MTSTATE?
+             * instead of being told. Say which error, loudly. */
+            HEARTH_LOGE("boot", "event registration failed: %" CHIP_ERROR_FORMAT, evt_err.Format());
+        }
     }
 
     rebuild_composition();
     mt_at_start();          /* emits +MTREADY once the parser task is up */
+    /* The boot replay of +MTEVT:0, after the marker and with no lock held:
+     * it reads mt_matter_state(), which takes the stack lock itself. */
+    mt_chip_events_after_ready();
     HEARTH_LOGI("boot", "+MTREADY sent, free heap %u B",
                 (unsigned)sl_memory_get_free_heap_size());
     hearth_nvm3_report();
