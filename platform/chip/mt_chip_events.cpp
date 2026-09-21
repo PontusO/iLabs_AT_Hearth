@@ -19,6 +19,7 @@
 #include <app/server/AppDelegate.h>
 #include <app/server/Server.h>
 #include <credentials/FabricTable.h>
+#include <lib/support/logging/CHIPLogging.h>
 #include <platform/CHIPDeviceEvent.h>
 #include <platform/CHIPDeviceLayer.h>
 
@@ -141,24 +142,36 @@ public:
          * exists to make.
          *
          * So do what esp-matter does: ask again off the CHIP event queue.
-         * ScheduleWork() posts a kCallWorkFunct behind everything already
-         * queued, which is both what makes ResetState() have run by then and
-         * what puts the +MTEVT:4 after the +MTEVT:3 of the same completion
-         * (the window manager's own handler is registered during
-         * Server::Init, ahead of ours, so it runs Cleanup() before our
-         * handler emits bit 3 for that same kCommissioningComplete).
+         * ScheduleWork() posts a kCallWorkFunct onto the SAME FIFO queue the
+         * device events come from, so the re-query is processed only once the
+         * entire dispatch of the event that caused this close has finished.
+         * That is what makes ResetState() have run by then, and it is also
+         * what puts the +MTEVT:4 after the +MTEVT:3 of the same
+         * kCommissioningComplete: our handler's bit-3 emission is part of
+         * that same dispatch. The queue is the whole reason, and handler
+         * order has nothing to do with it. (Do not reason from registration
+         * order here: the window manager registers its platform handler in
+         * OnSessionEstablished(), CommissioningWindowManager.cpp:241, not in
+         * Server::Init, and _AddEventHandler PREPENDS,
+         * GenericPlatformManagerImpl.ipp:199-203, so the order is both
+         * different from the obvious guess and not something to depend on.)
          *
          * No stack lock either way: this callback and the scheduled work both
          * run on the CHIP task.
          */
-        if (PlatformMgr().ScheduleWork(window_closed_check, 0) != CHIP_NO_ERROR)
+        CHIP_ERROR err = PlatformMgr().ScheduleWork(window_closed_check, 0);
+        if (err != CHIP_NO_ERROR)
         {
-            /* The event queue is full. Degrade to the immediate re-query
-             * rather than to nothing: it answers "still open" on both paths,
-             * so this window's +MTEVT:4 is lost and the flag stays set, which
-             * is the same outcome as not scheduling and is bounded by the
-             * next reboot. Not reachable in any bench run so far. */
-            window_closed_check(0);
+            /* The event queue is full, and there is no fallback to degrade
+             * to: every path into this callback runs before ResetState(), so
+             * an immediate re-query here would answer "still open" and emit
+             * nothing at all. This window's +MTEVT:4 is therefore lost, and
+             * s_window_evt_sent stays set, which also suppresses the next
+             * window's +MTEVT:0 until a reboot. Say that on the console
+             * rather than dropping it silently. Not reached in any bench run
+             * so far. */
+            ChipLogError(AppServer, "Hearth: +MTEVT:4 lost, ScheduleWork failed: %" CHIP_ERROR_FORMAT,
+                         err.Format());
         }
     }
 

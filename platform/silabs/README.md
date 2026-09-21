@@ -1909,13 +1909,30 @@ the window manager has finished; stock CHIP CALLS
 inside it. Measured, the first cut of this file: a full commissioning produced
 1, 25, 28, 3 and **no 4 at all**, for 148 s after completion.
 
-The fix is to do what esp-matter does and ask again off the queue:
-`PlatformMgr().ScheduleWork()` posts the re-query behind everything already
-queued. That is both what makes `ResetState()` have run by then and what puts
-the `+MTEVT:4` after the `+MTEVT:3` of the same completion, because the window
-manager's own event handler is registered during `Server::Init`, ahead of
-Hearth's, and therefore runs `Cleanup()` before Hearth's handler emits bit 3
-for that same `kCommissioningComplete`.
+The fix is to do what esp-matter does and ask again off the queue.
+`PlatformMgr().ScheduleWork()` posts a `kCallWorkFunct` onto the **same FIFO
+queue the device events come from**, so the re-query is processed only once
+the whole dispatch of the event that caused the close has finished. That is
+what makes `ResetState()` have run by then, and it is also what puts the
+`+MTEVT:4` after the `+MTEVT:3` of the same `kCommissioningComplete`: Hearth's
+bit-3 emission is part of that same dispatch. The queue is the whole reason,
+and handler order has nothing to do with it.
+
+Do not reason from registration order here. That is the obvious-looking
+argument and it is wrong twice over: the window manager registers its platform
+handler inside `OnSessionEstablished()`
+(`CommissioningWindowManager.cpp:241`), not in `Server::Init`, and
+`_AddEventHandler` **prepends** (`GenericPlatformManagerImpl.ipp:199-203`), so
+the later registration is dispatched first. The ordering this port depends on
+survives either way, because it is the queue's.
+
+If `ScheduleWork()` itself fails, which needs a full event queue, there is no
+fallback to degrade to: every path into the callback runs before
+`ResetState()`, so an immediate re-query would answer "still open" and emit
+nothing. That window's `+MTEVT:4` is lost and the next window's `+MTEVT:0` is
+suppressed with it until a reboot. The code says so on the console
+(`ChipLogError`, `AppServer`) rather than dropping it silently. It has not
+been reached on the bench.
 
 ### What was observed, 2026-09-21
 
@@ -1969,9 +1986,13 @@ the 3** rather than racing it, for the queue reason above. And there was
 far past the 10 s the round asked for), so the session pause that also fires
 `OnCommissioningWindowClosed()` produced nothing.
 
-`+MTEVT:2` is absent and that is correct: stock CHIP calls
-`OnCommissioningSessionStopped()` only when PASE failed or the fail-safe
-expired, never on a successful commissioning.
+`+MTEVT:2` is absent and that is correct, and the reason is narrower than the
+header comment on `AppDelegate::OnCommissioningSessionStopped()` suggests. Its
+only call site is `HandleFailedAttempt()`
+(`CommissioningWindowManager.cpp:179-184`), and it is reached only when that
+function's `AdvertiseAndListenForPASE()` failed or was never attempted because
+the 20-attempt limit had been passed. A failed PASE attempt below the limit
+does not produce it, and neither does a successful commissioning.
 
 **The window reopened by hand**, which is what proves the delegate's own bit-0
 path rather than only the boot replay, and that the 0/4 pair cycles:
@@ -2008,6 +2029,14 @@ deferred re-query, so the outstanding 0 is closed by the reboot rather than by
 a 4. `+MTREADY` is the host's resynchronisation point by contract, and the
 mask resets with it, so this is a session boundary rather than a broken pair;
 a Phase 2 row must not assert a 4 there.
+
+The deferred re-query has a second consequence worth stating beside it, and it
+is benign: **a window re-opened between the close callback and the queued
+check reports as one window, not two.** The check finds the window open, emits
+no 4, and leaves `s_window_evt_sent` set, so the re-opened window raises no
+second `+MTEVT:0` either. The host sees one 0 and, when that window really
+ends, one 4. The pair count stays balanced, which is what the contract is
+about; what is lost is only the knowledge that the window blinked.
 
 ### The cost
 
