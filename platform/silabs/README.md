@@ -6,7 +6,10 @@ Thread: it was commissioned onto the bench border router's fabric twice in one
 session (nodes `0x4901` and, after `AT+MTFRESET`, `0x4902`), a controller
 toggles the light and the `+MTATTR` URC reports it on the AT link, an AT-side
 write to the temperature sensor reads back from the controller, and harness
-Phase 1 is 292/4 while commissioned. What it does not do yet is on this page:
+Phase 1 is 292/4 while commissioned. Since the `+MTEVT` parity round,
+2026-09-21, it also emits the `+MTEVT` URCs ("Events (`+MTEVT`)") and passes
+harness Phase 2, the Matter lifecycle chain, at **98/2/1 with every event row
+passing** ("Harness Phase 2"). What it does not do yet is on this page:
 "What round 2 leaves open" at the end. Round 1's own status, unchanged:
 
 **Round 1 (bring-up, downward port, boot contract) was complete on
@@ -89,6 +92,13 @@ acceptance could not answer are named rather than passed: the commissioning
 is unported (graph B502, and the nRF arm is inferred to be in the same
 position), and harness Phase 2, which aborts at its own precondition because
 the bench's OpenThread control socket is root-owned (graph F503).
+
+**The `+MTEVT` parity round, 2026-09-21, answered both.** The events are
+emitted from a file shared with the nRF arm ("Events (`+MTEVT`)"), and harness
+Phase 2 now runs here end to end: **98 passed, 2 failed, 1 not applicable**,
+every event row passing ("Harness Phase 2"). The two failures are one port
+defect, dynamic-endpoint attribute values not surviving a reboot, which the nRF
+arm shares by construction and which is listed with its owner below.
 
 The third Hearth platform, mimicking the nRF54L15 port: a Thread FTD + BLE
 co-processor serving the `AT+MT` contract over one UART. Design:
@@ -1580,6 +1590,30 @@ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 0
 not race the boot. The default, `--bridge challenger`, is the C6 contract and
 is unchanged.
 
+**Phase 2 needs a second carrier fact**, `--openocd-config`, because its steps
+2.8, 2.13 and 2.14 reboot the co-processor over SWD:
+
+```bash
+python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 2 \
+        --openocd-config platform/silabs/mg24-swd.cfg \
+        --include-slow --include-manual --baseline platform/silabs/core-phase2.json
+```
+
+The harness's built-in argv resets an **RP2350** through
+`interface/cmsis-dap.cfg`: on the C6 rig the probe is on the Challenger's
+bridge and the bridge sketch's `setup()` pulses the C6's reset line. Here the
+Debug Probe is on the MGM240P's own SWD, so `platform/silabs/mg24-swd.cfg`
+names the target (`target/silabs/xg24.cfg`, `reset_config none`, so `reset run`
+goes through the Cortex-M33's `SYSRESETREQ`) and, because this bench carries
+**two** CMSIS-DAP probes that both answer SWD with a Cortex-M33, names the
+adapter by serial as well. Without the serial `interface/cmsis-dap.cfg` picks
+whichever enumerates first and resets the wrong board, silently. Only the two
+`-f` arguments change; the reset command is the harness's for every carrier.
+
+`--baseline` with `--phase 2` requires `--include-slow` and `--include-manual`
+by the harness's own door check, so a Phase 2 record here always includes the
+200 s window-expiry row and the operator-driven cold boot.
+
 ### Recovery semantics
 
 | Reset with | Result |
@@ -2064,6 +2098,170 @@ uncommissioned boot quoted above
 (`I boot: +MTREADY sent, free heap 95304 B`), which is the same measurement
 point and the same state as task 7's 95 336 B row under "Measured".
 
+## Harness Phase 2
+
+Phase 2 is the Matter lifecycle chain: factory reset, commissioning, attribute
+round trips in both directions, a second fabric and its removal, a warm reboot
+over SWD, a cold boot, an unattended window expiring, the two resets, and the
+rig restored to the bench's standard state. Round 2 recorded it as **not run**
+(graph **F503**): the gate aborted on the bench's root-owned OpenThread socket,
+zero rows executed, and the `+MTEVT` assertions in eight of its steps had
+nothing to assert against (graph **B502**). The `+MTEVT` parity round closed
+both halves, the events in task 1 and the gate's D-Bus route in task 3, and
+this is the run they were for.
+
+### 2026-09-21: 98 passed, 2 failed, 1 not applicable
+
+```
+$ export MT_PORT=/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 2 \
+      --openocd-config platform/silabs/mg24-swd.cfg \
+      --include-slow --include-manual \
+      --baseline platform/silabs/core-phase2.json
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+  ...
+  ===== RESULT: 98 passed, 2 failed, 1 n/a =====
+  baseline written: platform/silabs/core-phase2.json
+```
+
+Image `~/silabs/work/hearth-evt` at `679e3d8`, the same image the Events
+section above was measured on: **nothing in the firmware changed for this
+run**. Harness at `5c51204`, which the result file's own `fw_repo_head`
+records. Device state at the start was the documented bench convention,
+factory-fresh with the acceptance composition staged (`AT+MTFRESET`, then
+`AT+MTEPCLEAR` / `AT+MTEP=256` / `AT+MTEP=770` / `AT+MTEPAPPLY`); 2.12 returns
+it to exactly that at the end, and it was verified there afterwards
+(`+MTEP:0,1,0x0100`, `+MTEP:1,2,0x0302`, `+MTFABRICS:0`, `+MTSTATE:1,0`,
+`+MTEVTMASK:0x0800003F`). Three chip-tool commissionings, each exit 0 on the
+first attempt. `otbr-agent` was `active` before and after and was never
+started, stopped or reconfigured; the dataset reached chip-tool through the
+harness's own D-Bus route and appears nowhere in the run log or the result
+file.
+
+**101 rows, the same row set the C6's Thread arm records** in
+`test/baselines/thread-lifecycle.json` (100 passed, 1 N/A there).
+
+### Every `+MTEVT` row passed
+
+These are the eight steps `TESTING.md` section 7 lists as event-asserting, and
+they are the reason this round exists. Verdicts are from the run above.
+
+| Step | Event rows | Verdict |
+|---|---|---|
+| 2.1 factory fresh | `+MTEVT:0` after the `AT+MTRESET` reboot | PASS |
+| 2.3 commission | `+MTEVT:1`; `+MTEVT:3`; exactly one `+MTEVT:4` after the 3, with 10 s of quiet; `+MTEVT:28` with a legal role token during the join; `+MTEVT:25` during the join | PASS (6 rows) |
+| 2.7 second fabric | `+MTEVT:0` on the host-opened window; `+MTEVT:1`; `+MTEVT:3`; exactly one `+MTEVT:4` after the 3 | PASS (4 rows) |
+| 2.8 warm reboot | no `+MTEVT:0` on a commissioned device's boot (a negative) | PASS |
+| 2.10 window expiry | `+MTEVT:0`; `+MTEVT:4` at the end of an unattended 180 s window; no duplicate close | PASS (3 rows) |
+| 2.11 two resets | `+MTEVT:3` on the re-commission | PASS |
+| 2.12 rig restore | `+MTEVT:0` after the factory reset | PASS |
+| 2.14 transport switch | `+MTEVT:27` on a mismatched boot | **not applicable**, self-declared |
+
+The 2.8 negative deserves its own line because round 2's note warned it would
+"pass for the wrong reason" on a silent arm: it does not now. The device raises
+`+MTEVT:0` on every window that really opens in this run (2.1, 2.7, 2.10,
+2.12) and does not raise one on the commissioned boot in 2.8, so the row is
+measuring what it claims to.
+
+2.14 needed no harness change. `AT+MTTRANSPORT?` answers `+MTERR:8` on this
+single-transport image, and `main()` reads that as "not the combined image"
+straight from the device, so the step reports itself through
+`Suite.not_applicable()` exactly as it does on the nRF and the C6's Thread
+image.
+
+### The two failing rows, and why they are one fact
+
+| Row | Assertion | Cause |
+|---|---|---|
+| `2.8 attribute value survived (B63 guard)` | `AT+MTATTR=1,6,0` reads `+MTATTR:1,6,0,1` after a warm SWD reboot of a value written 1 before it | **port defect**, below |
+| `2.9 value survived cold boot (B63 guard)` | the same read after a true power cycle | the same defect, the other reboot path |
+
+**A dynamic endpoint's attribute values do not survive any reboot on this
+port.** Reproduced outside the harness twice: write `AT+MTATTR=1,6,0,1`, read
+back `1`, reset the module over SWD, read `+MTATTR:1,6,0,0`.
+
+The cause is in the dynamic-endpoint mechanism, not in a flag:
+
+- Every attribute on every dynamic endpoint is `EXTERNAL_STORAGE`
+  (`port/mt_devtypes_sl.cpp`, "THE STANDING CONDITION"), so CHIP holds no value
+  bytes and `emberAfExternalAttribute{Read,Write}Callback` serve every read and
+  write out of the endpoint arena's RAM.
+- CHIP's write path does call `emAfSaveAttributeToStorageIfNeeded()`
+  unconditionally (`app/util/attribute-table.cpp:467`), so a row marked
+  `NONVOLATILE` would be written to the attribute persistence provider.
+- Nothing reads it back. `emAfLoadAttributeDefaults()` is never called for a
+  dynamic endpoint at all (`emberAfSetDynamicEndpoint()` goes to
+  `initializeEndpoint()`, which runs cluster init and nothing else), and where
+  it does run it discards the stored bytes for an `EXTERNAL` row
+  (`attribute-storage.cpp:1322`, `if (!am->IsExternal())`).
+
+So the fix is a **restore path in the port**, next to `rebuild_composition()`
+and before `+MTREADY`, plus a ruling on which attributes carry the Matter
+spec's N quality and a write-churn budget against the NVM3 soak row that is
+already open. It is deliberately not made here: the nRF arm's
+`platform/nrf54l15/port/mt_devtypes_zephyr.cpp` declares the identical
+`onOffAttrs` table through the identical external-storage mechanism and
+contains no `NONVOLATILE` either, so this is **one gap for both Thread arms**,
+not a Silabs porting omission, and it will fail the same two rows on the nRF.
+Listed under "What round 2 leaves open".
+
+The C6 passes these rows because esp-matter creates the light through its own
+endpoint machinery with real attribute storage behind it; B63 itself was a
+different bug on that arm (a `StartUpOnOff` default of 0 overwriting a
+persistence path that worked).
+
+### What the run measured on the way past
+
+**The 2.8 reboot happens twice here**, and that is the carrier, not a fault.
+`relink()` closes the port, runs openocd, and reopens; opening this CDC resets
+the module on its own (see "Recovery semantics"), so the console shows two
+complete boots 1.2 s apart. Both are warm: the fabric, the dataset and the
+composition survive, which is what the row asserts.
+
+**The cold boot in 2.9 is real.** The module is powered from the carrier's
+USB, so cutting the hub port cuts the MGM240P too: SWD stops answering
+(`Error connecting DP: cannot read IDR`) for as long as the port is down.
+
+Boot figures from the run's console, the Debug Probe's UART CDC at 115200 with
+DTR asserted:
+
+| Boot | Free heap at `+MTREADY` | Endpoint arena | NVM3 |
+|---|---|---|---|
+| factory-fresh, composition of 2 | 95 304 B | 352 of 3 072 B, 2 of 16 endpoints live | 13 objects, 708 B free of 40 960 B, erase count 5 |
+| commissioned (2.8's reboots, 2.9's cold boot) | 95 256 B | 352 of 3 072 B | 38 objects, 5 724 B then 4 508 B free, erase count 5 |
+
+The 48 B between the two heap rows is the fabric; the NVM3 free figure is
+`availableMemory` at that instant and moves with the repack, which is the same
+caveat the soak row carries.
+
+### The bench limit this run found, and its recipe
+
+The first attempt at this run **failed 2.9 and lost the six rows after it**.
+`operator_power_cycle()` waits for the `/dev/serial/by-id` path to disappear
+before it counts the cycle as having happened, and on this bench's hub a
+per-port `uhubctl -l 3-1.3 -p 3 -a off` cuts power (the module goes dark, SWD
+stops answering) **without the kernel ever seeing the disconnect**: the device
+node stays, stale, and every read through it returns `EPIPE`. Worse, the
+matching `-a on` does not bring the port back, so the carrier stays dark.
+
+The recipe that works, and the one to use at the 2.9 prompt:
+
+```bash
+uhubctl -l 3-1.3 -a cycle -d 5      # ALL ports of the hub, not -p 3
+```
+
+That produces a real disconnect and reconnect: the path vanishes for about
+half a second and the harness's poll catches it. It also drops both Debug
+Probes for the duration, so a console capture has to be restarted afterwards.
+Cycling only the CPico's port does not, and `-a on` on that port alone will
+not recover it either; the same all-ports cycle is what brought the carrier
+back. The hub is on `3-1.3` and the CPico is its **port 3** (port 1 a Pico 2,
+port 2 the other Debug Probe, port 4 the MGM240P's probe and console).
+
+This is a bench fact, not a harness allowance and not a port defect: the
+harness's observed-rather-than-trusted power cycle is right, and it is the hub
+that lies.
+
 ## Measured
 
 Eight sets of figures live here. **"Round 2 task 7" immediately below is the
@@ -2445,6 +2643,13 @@ is neither enabled nor checked, so a peripheral-level overrun would lose bytes
 that `s_rx_ring.dropped` cannot count.
 
 #### Harness Phase 2: not run, and the gate is not this image's
+
+**Closed 2026-09-21**, all three of the obstacles this subsection names: the
+gate takes otbr-agent's D-Bus route now, the SWD reset takes this carrier's
+openocd config, and the `+MTEVT` assertions have events to assert against. The
+run and its 98/2/1 are under "Harness Phase 2" above. What follows is round 2's
+record of why it could not run, kept because it is the measurement the three
+fixes were written against.
 
 ```
 $ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 2
@@ -4008,7 +4213,9 @@ not a regression against the nRF arm.
 
 | Open item | Owner |
 |---|---|
-| **Harness Phase 2 cannot run on this bench at all** (graph **F503**). `phase2_gate` (`test/mt_regression.py:6198`) calls the absolute `DEFAULT_OTCTL` binary (`:5200`), which exists and runs; it fails on the root-owned control socket with `connect session failed: Permission denied` (graph F474, the underlying cause). The gate needs the same otbr-agent D-Bus route the dataset already takes. Its other precondition, the 2.8 warm reboot over SWD, is the RP2350 carrier's contract and not this module's; and its `+MTEVT` assertions needed B502, which is closed above since 2026-09-21, so the D-Bus route for the gate is all that is left | the **qualification round**, which owns the Thread-arm allowances; noted in `TESTING.md` |
+| **Harness Phase 2 ran on this bench: closed 2026-09-21** (graph **F503**). All three obstacles are gone: the gate falls back to otbr-agent's D-Bus property when `ot-ctl` cannot open the root-owned socket (the `+MTEVT` round's task 3), the SWD reset takes this carrier's own openocd config (`--openocd-config platform/silabs/mg24-swd.cfg`, task 4), and the `+MTEVT` assertions have events (task 1). **98 passed, 2 failed, 1 not applicable**, every event row passing, result file `platform/silabs/core-phase2.json`; see "Harness Phase 2" | **closed here**. What is left of the row is the two failures, which are the attribute-persistence gap below, and Phase 3, which has never run on this arm |
+| **A dynamic endpoint's attribute value does not survive a reboot**, warm or cold. Measured 2026-09-21 by harness rows 2.8 and 2.9 (`attribute value survived (B63 guard)`) and reproduced by hand: write `AT+MTATTR=1,6,0,1`, reset over SWD, read back `0`. Every attribute on every dynamic endpoint is `EXTERNAL_STORAGE`, so the value lives in the endpoint arena's RAM; CHIP's write path would persist a `NONVOLATILE` row, but nothing restores one, because `emAfLoadAttributeDefaults()` never runs for a dynamic endpoint and discards `EXTERNAL` rows where it does. The fix is a restore path in the port beside `rebuild_composition()`, before `+MTREADY`, and it needs a ruling on which attributes carry the spec's N quality plus a write-churn budget against the NVM3 row below. **The nRF arm declares the same tables through the same mechanism and carries no `NONVOLATILE` either**, so this is one gap for both Thread arms and will fail the same two rows there | the **qualification round**, with the nRF arm; the full account is under "Harness Phase 2" |
+| **Harness Phase 2's cold boot needs this bench's hub recipe.** `uhubctl -l 3-1.3 -p 3 -a off` cuts the carrier's power without the kernel ever seeing the disconnect, so the device node goes stale rather than vanishing and step 2.9 times out; the matching `-a on` does not restore the port either. `uhubctl -l 3-1.3 -a cycle -d 5`, all ports, is what produces a real disconnect and what recovers a carrier left dark. A bench fact, recorded under "Harness Phase 2" | the bench; nothing in the harness or the port is wrong here |
 | **NVM3's usable figure needs a soak** (graph **F503**). 40 960 B configured, 24 objects and about 3.6 KB consumed by one commissioning, and `availableMemory` observed as low as 480 B during this session's write churn before a repack returned it to 5 392 B. Nothing failed and the repack is the mechanism working, but the trough is unmeasured over a long run, exactly as the nRF arm's 32 KB ZMS row is | the **qualification round**'s soak, with the nRF row |
 | **Phone commissioning over Thread has never been tried on this arm.** Both commissionings here are the CLI chip-tool on the border router's own host | the **qualification round** |
 | **The EUSART's own RX overflow is neither enabled nor counted.** `EUSART0_RX_IRQHandler` drains the FIFO while `STATUS.RXFL` is set and never looks at `EUSART_IF_RXOF`, so a peripheral-level overrun would lose bytes that `s_rx_ring.dropped` cannot see and the console never reports. Not observed: task 7's burst accounting is fully explained by the ring's own counter plus a lossy host-side bridge. It is an accounting hole, not a known defect, and the cheap close is to enable `RXOF` and fold it into the same warning | whoever next touches `port/hearth_port_sl.c`; see "Sustained traffic" |
