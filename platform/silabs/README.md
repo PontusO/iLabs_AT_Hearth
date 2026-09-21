@@ -1936,8 +1936,11 @@ been reached on the bench.
 
 ### What was observed, 2026-09-21
 
-Image `~/silabs/work/hearth-evt`, commit `ca62f42`, flashed with
-`fw/flash.py`. The AT port was opened with DTR and RTS cleared before the open
+Image `~/silabs/work/hearth-evt`, commit `679e3d8`, flashed with
+`fw/flash.py`. Every capture below was re-taken on that image after the review
+fix; the run on `ca62f42` before it gave the same event set in the same order,
+which is what was expected, because the only code that fix changed is a
+console line on a path no run has reached. The AT port was opened with DTR and RTS cleared before the open
 (the `--bridge cpico` contract) and held open with no command in flight while
 chip-tool ran. Timestamps are seconds from the port open, which is also the
 module's reset. The dataset came from the D-Bus recipe above into a shell
@@ -1960,29 +1963,29 @@ first attempt, no `fw/srp-aaaa-shim.sh`):
 
 ```
 t+  2.000  >>> AT+MTEVT?
-t+  2.005  +MTEVTMASK:0x0800003F      the default: bits 0 to 5 and 27
+t+  2.004  +MTEVTMASK:0x0800003F      the default: bits 0 to 5 and 27
 t+  3.000  >>> AT+MTEVT=0x1A00003F    adds bits 25 and 28, before pairing
-t+  3.007  OK
+t+  3.006  OK
 t+  4.000  >>> AT+MTCOMMISSION
 t+  4.059  OK                         the window was already open: no second +MTEVT:0
 t+  6.000  >>> AT+MTSTATE?
-t+  6.014  +MTSTATE:1,0
-t+ 16.788  +MTEVT:1                   PASE session established
-t+ 25.056  +MTEVT:25
-t+ 25.056  +MTEVT:28,UNASSIGNED
-t+ 28.112  +MTEVT:25
-t+ 28.112  +MTEVT:28,REED
-t+ 28.162  +MTEVT:25                  role unchanged: no 28 beside this one
-t+ 30.918  +MTEVT:3                   commissioning complete
-t+ 30.918  +MTEVT:4                   the window really closed, after the 3
+t+  6.012  +MTSTATE:1,0
+t+ 14.735  +MTEVT:1                   PASE session established
+t+ 19.848  +MTEVT:25
+t+ 19.848  +MTEVT:28,UNASSIGNED
+t+ 23.256  +MTEVT:25
+t+ 23.306  +MTEVT:28,REED
+t+ 23.356  +MTEVT:25                  role unchanged: no 28 beside this one
+t+ 26.114  +MTEVT:3                   commissioning complete
+t+ 26.114  +MTEVT:4                   the window really closed, after the 3
 ```
 
 Three things in that trace are the design working rather than coincidence.
-The **25 at t+28.162 has no 28 beside it**: `ThreadStateChange.RoleChanged`
+The **25 at t+23.356 has no 28 beside it**: `ThreadStateChange.RoleChanged`
 was set and the decoded token had not changed, which is exactly the C6's bench
 defect A and exactly what the role cache exists to suppress. The **4 follows
 the 3** rather than racing it, for the queue reason above. And there was
-**no second 4 and no second 0 for the next 89 s** (the capture ran to t+120,
+**no second 4 and no second 0 for the next 94 s** (the capture ran to t+120,
 far past the 10 s the round asked for), so the session pause that also fires
 `OnCommissioningWindowClosed()` produced nothing.
 
@@ -1999,13 +2002,13 @@ path rather than only the boot replay, and that the 0/4 pair cycles:
 
 ```
 t+120.000  >>> AT+MTSTATE?
-t+120.020  +MTSTATE:2,1               operational, one fabric
+t+120.018  +MTSTATE:2,1               operational, one fabric
+t+123.079  +MTEVT:25
+t+123.079  +MTEVT:28,ROUTER           the REED to ROUTER promotion, reported
 t+125.000  >>> AT+MTCOMMISSION
-t+125.033  +MTEVT:0                   the URC precedes the terminal response
-t+125.083  OK
-t+135.053  +MTSTATE:1,1
-t+141.515  +MTEVT:25
-t+141.515  +MTEVT:28,ROUTER           the REED to ROUTER promotion, reported
+t+125.035  +MTEVT:0                   the URC precedes the terminal response
+t+125.085  OK
+t+135.013  +MTSTATE:1,1
 ```
 
 **`AT+MTFRESET`**, with the mask widened to `0xFFFFFFFF` first so the fabric
@@ -2013,18 +2016,19 @@ bits are visible:
 
 ```
 t+150.000  >>> AT+MTEVT=0xFFFFFFFF
+t+150.052  OK
 t+152.000  >>> AT+MTFRESET
-t+152.035  OK
-t+152.135  +MTEVT:6                   FabricWillBeRemoved
-t+152.185  +MTEVT:7                   OnFabricRemoved
-t+153.287  +MTREADY                   the reboot
-t+153.287  +MTEVT:0
+t+152.008  OK
+t+152.158  +MTEVT:6                   FabricWillBeRemoved
+t+152.158  +MTEVT:7                   OnFabricRemoved
+t+153.261  +MTREADY                   the reboot
+t+153.261  +MTEVT:0
 ```
 
 So **the reset does remove the fabric through the fabric table**, and both
 delegate callbacks reach the host before the reboot. One honest limit in that
 trace: a commissioning window was open when the reset ran (`+MTSTATE:1,1` at
-t+135) and **no `+MTEVT:4` arrived for it**. The reboot is faster than the
+t+135.013) and **no `+MTEVT:4` arrived for it**. The reboot is faster than the
 deferred re-query, so the outstanding 0 is closed by the reboot rather than by
 a 4. `+MTREADY` is the host's resynchronisation point by contract, and the
 mask resets with it, so this is a session boundary rather than a broken pair;
@@ -2042,19 +2046,21 @@ about; what is lost is only the knowledge that the window blinked.
 
 | | Round 2 task 7 | This round | Delta |
 |---|---|---|---|
-| `.text` | 844 504 B | 845 432 B | **+928 B** |
+| `.text` | 844 504 B | 845 480 B | **+976 B** |
 | `.data` | 3 368 B | 3 376 B | +8 B |
 | `.bss` | 117 720 B | 117 720 B | 0 |
 | `.memory_manager_heap` | 135 992 B | 135 984 B | -8 B |
 | Free heap at `+MTREADY`, uncommissioned | 95 336 B | **95 304 B** | -32 B |
 
-Flash cost **936 B** (`text` plus `data`). The `.bss` row is 0 because the
+Flash cost **984 B** (`text` plus `data`). The `.bss` row is 0 because the
 file's four statics (11 bytes) fit in existing alignment slack; the `.data`
 row is the `AppDelegate` subclass's vtable pointer, constant-initialised, and
 the heap region gives up the same 8 bytes because it is what is left of RAM.
 `arm-none-eabi-size -A`, `~/silabs/work/hearth-matter-t7` against
-`~/silabs/work/hearth-evt`, both read 2026-09-21. The heap figure is the boot
-task's own console line on the uncommissioned boot quoted above
+`~/silabs/work/hearth-evt` at `679e3d8`, both read 2026-09-21. 48 B of the
+`.text` figure is the review fix's console line alone (845 432 at
+`ca62f42`). The heap figure is the boot task's own console line on the
+uncommissioned boot quoted above
 (`I boot: +MTREADY sent, free heap 95304 B`), which is the same measurement
 point and the same state as task 7's 95 336 B row under "Measured".
 
