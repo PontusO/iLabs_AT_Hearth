@@ -1720,6 +1720,11 @@ AT+MTTHREAD?  ->  +MTTHREAD:ROUTER,1,12,0x5CD1,0x[EXTPANID],0x282CCFEA,"[NET]"
 
 ### The URC order observed: there is none, and why
 
+**Closed 2026-09-21**, one round later, by the `+MTEVT` parity round: this port
+emits the whole event surface now and the order is recorded under "Events
+(`+MTEVT`)" below. The round 2 record is kept as written, because the
+measurement below is what the fix was written against.
+
 **No URC of any kind reached the AT link during either commissioning.** The AT
 port was held open in listen mode for the whole of both runs, with no command
 in flight, and the count was zero both times.
@@ -1830,6 +1835,199 @@ before Hearth had a Matter stack at all.
 
 The toggle and the two attribute reads went over the operational Thread
 session, not BLE, so they prove the device joined the mesh.
+
+## Events (`+MTEVT`)
+
+Added 2026-09-21 by the `+MTEVT` parity round, task 1, which closes graph
+**B502** on this port. The contract is `AT_MT_SPEC.md` 3.11 and the bit
+numbers are `core/include/mt_at.h:47-136`; nothing in `core/` changed.
+
+### The shared file, and the three sources behind it
+
+`platform/chip/mt_chip_events.{h,cpp}`, listed in `hearth.slcp` under `source:`
+and `include:`. It is **shared with the nRF arm** (task 2 lists it in that
+port's `CMakeLists.txt`), which is the whole point: it names stock CHIP
+symbols only and no SDK of either vendor, so one mapping serves both Thread
+ports. The C6 keeps its own (`platform/esp32c6/main/main.cpp` `app_event_cb`),
+because esp-matter's fork already posts the extra device events.
+
+Two entry points, both called from `hearth_boot_task()` in `src/main.cpp`:
+
+| Call | Where | Lock |
+|---|---|---|
+| `mt_chip_events_register()` | after `hearth_matter_init()` and the catalogue-endpoint disable, in the same `StackLock` block | the caller's stack lock |
+| `mt_chip_events_after_ready()` | immediately after `mt_at_start()` | none: it reads `mt_matter_state()`, which takes and releases the lock itself |
+
+Stock CHIP has no device event for the commissioning window, the commissioning
+sessions or the fabric table, so the bits come from three places rather than
+one:
+
+| Bits | Source |
+|---|---|
+| 3, 5, 10 to 22, 24, 25, 28 | `PlatformMgr().AddEventHandler()`, a switch on `DeviceEventType` |
+| 0, 1, 2, 4 | `CommissioningWindowManager::SetAppDelegate()`, an `AppDelegate` |
+| 6, 7, 8, 9 | `Server::GetInstance().GetFabricTable().AddFabricDelegate()` |
+| 26 | nothing posts it, on either SDK. The bit stays allocated |
+| 27 | boot-only and single-transport: never raised on this image |
+
+`initParams.appDelegate` is left unset by `port/hearth_matter_init.cpp`, so
+`SetAppDelegate` replaces nothing. Every emission goes through
+`mt_at_event()`, so the RAM mask and the pre-`+MTREADY` `s_at_up` guard apply
+unchanged, and nothing in the file takes the CHIP stack lock: the handler and
+both delegates already run on the CHIP task with it held, `mt_at_event()`
+takes the link mutex only, and the bit-28 role read goes through
+`mt_matter_thread_info()`, which takes the OpenThread lock alone on this port
+(CHIP then OT, the established order).
+
+### The boot replay
+
+The window opens inside `Server::Init`, before `mt_at_start()`, so the
+delegate's `+MTEVT:0` is dropped by the `s_at_up` guard.
+`mt_chip_events_after_ready()` replays it once, which is what makes the boot
+sequence **`+MTREADY` then exactly one `+MTEVT:0`** whenever a window is open,
+instead of a race. It is the C6's block (`main.cpp:6865`) with the same
+double test of the flag around `mt_matter_state()`.
+
+### Bit 4 is decided off the CHIP event queue, and the C6's way does not work here
+
+This is the one place the two SDKs differ in **shape** rather than in name,
+and it cost a bench round to find. `+MTEVT:0` and `+MTEVT:4` are a strict
+pair: exactly one 4 per delivered 0, at the moment the window is really gone.
+CHIP stops advertising for PASE at three different moments (a commissioner
+took a session and the window is only paused, the window genuinely ended, a
+failed open cleaning up), so the 4 has to be gated on which one this is. The
+C6 gates by re-querying `IsCommissioningWindowOpen()` inside the callback.
+
+**On stock CHIP that answer is always "open".** esp-matter POSTS
+`kCommissioningWindowClosed` as a device event, dispatched off the queue once
+the window manager has finished; stock CHIP CALLS
+`AppDelegate::OnCommissioningWindowClosed()` synchronously from
+`StopAdvertisement()`, and the real-close path is `Cleanup()`, which is
+`StopAdvertisement()` **then** `ResetState()`
+(`CommissioningWindowManager.cpp:142-146`), so `mWindowStatus` is still
+`kBasicWindowOpen` when the callback runs. Both moments look identical from
+inside it. Measured, the first cut of this file: a full commissioning produced
+1, 25, 28, 3 and **no 4 at all**, for 148 s after completion.
+
+The fix is to do what esp-matter does and ask again off the queue:
+`PlatformMgr().ScheduleWork()` posts the re-query behind everything already
+queued. That is both what makes `ResetState()` have run by then and what puts
+the `+MTEVT:4` after the `+MTEVT:3` of the same completion, because the window
+manager's own event handler is registered during `Server::Init`, ahead of
+Hearth's, and therefore runs `Cleanup()` before Hearth's handler emits bit 3
+for that same `kCommissioningComplete`.
+
+### What was observed, 2026-09-21
+
+Image `~/silabs/work/hearth-evt`, commit `ca62f42`, flashed with
+`fw/flash.py`. The AT port was opened with DTR and RTS cleared before the open
+(the `--bridge cpico` contract) and held open with no command in flight while
+chip-tool ran. Timestamps are seconds from the port open, which is also the
+module's reset. The dataset came from the D-Bus recipe above into a shell
+variable and was never printed; every hex run of 24 characters or more in
+anything quoted here is replaced.
+
+**The boot sequence**, factory-fresh, 12 s capture, no commands sent:
+
+```
+t+  0.401  +MTREADY
+t+  0.401  +MTEVT:0
+```
+
+Nothing else arrived in the remaining 11.6 s. On the boot of a **commissioned**
+device, with no window open, the same capture gives `+MTREADY` and no
+`+MTEVT:0` at all, which is the negative half of the same check.
+
+**The mask**, then a full commissioning of node `0x4A01` (chip-tool exit 0,
+first attempt, no `fw/srp-aaaa-shim.sh`):
+
+```
+t+  2.000  >>> AT+MTEVT?
+t+  2.005  +MTEVTMASK:0x0800003F      the default: bits 0 to 5 and 27
+t+  3.000  >>> AT+MTEVT=0x1A00003F    adds bits 25 and 28, before pairing
+t+  3.007  OK
+t+  4.000  >>> AT+MTCOMMISSION
+t+  4.059  OK                         the window was already open: no second +MTEVT:0
+t+  6.000  >>> AT+MTSTATE?
+t+  6.014  +MTSTATE:1,0
+t+ 16.788  +MTEVT:1                   PASE session established
+t+ 25.056  +MTEVT:25
+t+ 25.056  +MTEVT:28,UNASSIGNED
+t+ 28.112  +MTEVT:25
+t+ 28.112  +MTEVT:28,REED
+t+ 28.162  +MTEVT:25                  role unchanged: no 28 beside this one
+t+ 30.918  +MTEVT:3                   commissioning complete
+t+ 30.918  +MTEVT:4                   the window really closed, after the 3
+```
+
+Three things in that trace are the design working rather than coincidence.
+The **25 at t+28.162 has no 28 beside it**: `ThreadStateChange.RoleChanged`
+was set and the decoded token had not changed, which is exactly the C6's bench
+defect A and exactly what the role cache exists to suppress. The **4 follows
+the 3** rather than racing it, for the queue reason above. And there was
+**no second 4 and no second 0 for the next 89 s** (the capture ran to t+120,
+far past the 10 s the round asked for), so the session pause that also fires
+`OnCommissioningWindowClosed()` produced nothing.
+
+`+MTEVT:2` is absent and that is correct: stock CHIP calls
+`OnCommissioningSessionStopped()` only when PASE failed or the fail-safe
+expired, never on a successful commissioning.
+
+**The window reopened by hand**, which is what proves the delegate's own bit-0
+path rather than only the boot replay, and that the 0/4 pair cycles:
+
+```
+t+120.000  >>> AT+MTSTATE?
+t+120.020  +MTSTATE:2,1               operational, one fabric
+t+125.000  >>> AT+MTCOMMISSION
+t+125.033  +MTEVT:0                   the URC precedes the terminal response
+t+125.083  OK
+t+135.053  +MTSTATE:1,1
+t+141.515  +MTEVT:25
+t+141.515  +MTEVT:28,ROUTER           the REED to ROUTER promotion, reported
+```
+
+**`AT+MTFRESET`**, with the mask widened to `0xFFFFFFFF` first so the fabric
+bits are visible:
+
+```
+t+150.000  >>> AT+MTEVT=0xFFFFFFFF
+t+152.000  >>> AT+MTFRESET
+t+152.035  OK
+t+152.135  +MTEVT:6                   FabricWillBeRemoved
+t+152.185  +MTEVT:7                   OnFabricRemoved
+t+153.287  +MTREADY                   the reboot
+t+153.287  +MTEVT:0
+```
+
+So **the reset does remove the fabric through the fabric table**, and both
+delegate callbacks reach the host before the reboot. One honest limit in that
+trace: a commissioning window was open when the reset ran (`+MTSTATE:1,1` at
+t+135) and **no `+MTEVT:4` arrived for it**. The reboot is faster than the
+deferred re-query, so the outstanding 0 is closed by the reboot rather than by
+a 4. `+MTREADY` is the host's resynchronisation point by contract, and the
+mask resets with it, so this is a session boundary rather than a broken pair;
+a Phase 2 row must not assert a 4 there.
+
+### The cost
+
+| | Round 2 task 7 | This round | Delta |
+|---|---|---|---|
+| `.text` | 844 504 B | 845 432 B | **+928 B** |
+| `.data` | 3 368 B | 3 376 B | +8 B |
+| `.bss` | 117 720 B | 117 720 B | 0 |
+| `.memory_manager_heap` | 135 992 B | 135 984 B | -8 B |
+| Free heap at `+MTREADY`, uncommissioned | 95 336 B | **95 304 B** | -32 B |
+
+Flash cost **936 B** (`text` plus `data`). The `.bss` row is 0 because the
+file's four statics (11 bytes) fit in existing alignment slack; the `.data`
+row is the `AppDelegate` subclass's vtable pointer, constant-initialised, and
+the heap region gives up the same 8 bytes because it is what is left of RAM.
+`arm-none-eabi-size -A`, `~/silabs/work/hearth-matter-t7` against
+`~/silabs/work/hearth-evt`, both read 2026-09-21. The heap figure is the boot
+task's own console line on the uncommissioned boot quoted above
+(`I boot: +MTREADY sent, free heap 95304 B`), which is the same measurement
+point and the same state as task 7's 95 336 B row under "Measured".
 
 ## Measured
 
@@ -3756,7 +3954,7 @@ not a regression against the nRF arm.
 
 | Open item | Owner |
 |---|---|
-| **No `+MTEVT` is emitted at all** (graph **B502**). The mask, the query and the suppression rules are core's and work here; the platform half that raises the events is unported. Measured on this image with the mask at `0xFFFFFFFF` and a window open: nothing. The nRF arm is expected to be identical, but that half is **inferred** from the call-site grep (`mt_at_event()`'s only caller is the C6's `main.cpp`) and from the committed Thread lifecycle baseline having been recorded on a Challenger port, not measured on an nRF board. It needs a CHIP platform event handler mapping `DeviceEventType` to `AT_MT_SPEC.md` 3.11's bit numbers, written once and used by both arms | the **qualification round**, which owns the wire surface for both arms at once. It is the one spec acceptance clause this round could not answer |
+| **`+MTEVT` is emitted on this port: closed 2026-09-21** (graph **B502**) by the `+MTEVT` parity round's task 1, in `platform/chip/mt_chip_events.cpp`, shared with the nRF arm and bench-proven here: the boot sequence, a full commissioning's order with the 0/4 pair, the role-cache suppression and `AT+MTFRESET`'s fabric bits, all under "Events (`+MTEVT`)" above. The round 2 row below it is what that fix was written against. **The nRF half is task 2's wiring and task 5's bench**, and stays open until a board is on the bench; nothing about it is inferred from this port's result | **closed here**; the nRF arm with the same round's tasks 2 and 5 |
 | **A fixed endpoint's code-driven attributes are unreadable through `AT+MTATTR` except where ruling F500's carve-out serves them.** Four Basic Information integers are carved out and answer; every other code-driven integer on endpoint 0 answers a bare `ERROR` with a console line saying why. Closing it means a read path through the data model provider for endpoints this port did not create, which changes the answer for every fixed-endpoint attribute at once | a **later round by ruling**, not by omission. Whether `AT+MTATTR` should reach fixed endpoints at all is a wire-contract question for both arms and the ruling belongs in `AT_MT_SPEC.md` 3.8 |
 | **`AT+MTNET?`'s enabled flag divides differently here** from the C6's (graph F494): this arm reports `+MTNET:THREAD,0,0,0` uncommissioned and `+MTNET:THREAD,1,0,0` once a fabric exists, and the harness's own baseline header records the change. It is a spec clarification, not a port fix | the **qualification round**, with `AT_MT_SPEC.md` |
 
@@ -3775,7 +3973,7 @@ not a regression against the nRF arm.
 
 | Open item | Owner |
 |---|---|
-| **Harness Phase 2 cannot run on this bench at all** (graph **F503**). `phase2_gate` (`test/mt_regression.py:6198`) calls the absolute `DEFAULT_OTCTL` binary (`:5200`), which exists and runs; it fails on the root-owned control socket with `connect session failed: Permission denied` (graph F474, the underlying cause). The gate needs the same otbr-agent D-Bus route the dataset already takes. Its other precondition, the 2.8 warm reboot over SWD, is the RP2350 carrier's contract and not this module's; and its `+MTEVT` assertions need B502 above | the **qualification round**, which owns the Thread-arm allowances; noted in `TESTING.md` |
+| **Harness Phase 2 cannot run on this bench at all** (graph **F503**). `phase2_gate` (`test/mt_regression.py:6198`) calls the absolute `DEFAULT_OTCTL` binary (`:5200`), which exists and runs; it fails on the root-owned control socket with `connect session failed: Permission denied` (graph F474, the underlying cause). The gate needs the same otbr-agent D-Bus route the dataset already takes. Its other precondition, the 2.8 warm reboot over SWD, is the RP2350 carrier's contract and not this module's; and its `+MTEVT` assertions needed B502, which is closed above since 2026-09-21, so the D-Bus route for the gate is all that is left | the **qualification round**, which owns the Thread-arm allowances; noted in `TESTING.md` |
 | **NVM3's usable figure needs a soak** (graph **F503**). 40 960 B configured, 24 objects and about 3.6 KB consumed by one commissioning, and `availableMemory` observed as low as 480 B during this session's write churn before a repack returned it to 5 392 B. Nothing failed and the repack is the mechanism working, but the trough is unmeasured over a long run, exactly as the nRF arm's 32 KB ZMS row is | the **qualification round**'s soak, with the nRF row |
 | **Phone commissioning over Thread has never been tried on this arm.** Both commissionings here are the CLI chip-tool on the border router's own host | the **qualification round** |
 | **The EUSART's own RX overflow is neither enabled nor counted.** `EUSART0_RX_IRQHandler` drains the FIFO while `STATUS.RXFL` is set and never looks at `EUSART_IF_RXOF`, so a peripheral-level overrun would lose bytes that `s_rx_ring.dropped` cannot see and the console never reports. Not observed: task 7's burst accounting is fully explained by the ring's own counter plus a lossy host-side bridge. It is an accounting hole, not a known defect, and the cheap close is to enable `RXOF` and fold it into the same warning | whoever next touches `port/hearth_port_sl.c`; see "Sustained traffic" |
