@@ -1656,3 +1656,167 @@ app image 753,691 B of the 1,374,208 B slot (54.9%); settings_storage
 raw occupancy 30,476 of 32,768 B non-erased after a day of commissioning
 churn (ZMS is log-structured, stale entries count until collection; the
 32 KB sizing watch item from the design spec stays open).
+
+## Events (`+MTEVT`)
+
+Added 2026-09-21 by the `+MTEVT` parity round, task 2, which puts the event
+surface into this port's image. The contract is `AT_MT_SPEC.md` 3.11 and the
+bit numbers are `core/include/mt_at.h:47-136`; nothing in `core/` changed for
+it. **Bench proof: task 5 of the parity plan, pending the carrier.**
+Everything here is a build result and a source reading: no nRF board has run
+this image, and graph B502's nRF half stays open until task 5 closes it.
+
+### The shared file, and the three sources behind it
+
+`platform/chip/mt_chip_events.{h,cpp}`, joined to the app target in
+`CMakeLists.txt` inside the `CONFIG_CHIP` guard (one `target_sources` entry
+and `../chip` on `target_include_directories`). It is **shared with the
+MGM240P arm**, which is the whole point: it names stock CHIP symbols only and
+no SDK of either vendor, so one mapping serves both Thread ports and they
+cannot drift apart. The C6 keeps its own
+(`platform/esp32c6/main/main.cpp` `app_event_cb`), because esp-matter's fork
+already posts the extra device events. Task 1 of this round wrote the file
+and proved it on the MGM240P; the bench captures live in
+`platform/silabs/README.md`, "Events (`+MTEVT`)".
+
+Two entry points, both called from `main()` in `src/main.cpp`:
+
+| Call | Where | Lock |
+|---|---|---|
+| `mt_chip_events_register()` | after `Nrf::Matter::StartServer()` and the catalogue-endpoint disable, in the same `StackLock` block | the caller's stack lock |
+| `mt_chip_events_after_ready()` | immediately after `mt_at_start()` | none: it reads `mt_matter_state()`, which takes and releases the lock itself |
+
+Stock CHIP posts no device event for the commissioning window, the
+commissioning sessions or the fabric table, so the bits come from three
+places rather than one:
+
+| Bits | Source |
+|---|---|
+| 3, 5, 10 to 22, 24, 25, 28 | `PlatformMgr().AddEventHandler()`, a switch on `DeviceEventType` |
+| 0, 1, 2, 4 | `CommissioningWindowManager::SetAppDelegate()`, an `AppDelegate` |
+| 6, 7, 8, 9 | `Server::GetInstance().GetFabricTable().AddFabricDelegate()` |
+| 26 | nothing posts it, on either SDK. The bit stays allocated |
+| 27 | boot-only and single-transport: never raised on this image |
+
+### What NCS installs, and what it leaves alone
+
+Both facts were read out of the pinned workspace (`~/ncs/v3.3.4`) before the
+wiring went in, because either one would have forced a different shape:
+
+- **`Nrf::Matter::PrepareServer()` installs no `AppDelegate`.** The string
+  `appDelegate` does not occur anywhere in
+  `nrf/samples/matter/common/src/app/matter_init.{cpp,h}`; what that file
+  sets on its `CommonCaseDeviceServerInitParams` is
+  `testEventTriggerDelegate`, `endpointNativeParams`, the operational and
+  session keystores, the group data provider and the data model provider
+  (`matter_init.cpp:303-361`). So `SetAppDelegate()` replaces nothing here,
+  exactly as on the Silabs arm, and the shared delegate does not have to wrap
+  and forward an existing one.
+- **`PlatformMgr().AddEventHandler()` is additive.** Nordic registers its own
+  `DefaultEventHandler` at `matter_init.cpp:351`; it handles
+  `kCHIPoBLEAdvertisingChange` (NFC onboarding), `kServerReady` (the OTA
+  requestor) and `kFactoryReset` (the group data provider), and Hearth's
+  handler is a second entry in the same list. Neither displaces the other.
+  `_AddEventHandler` prepends (`GenericPlatformManagerImpl.ipp:199-203`), so
+  Hearth's, registered later, is dispatched first; nothing in either handler
+  depends on that.
+- **`mt_matter_thread_info()` takes the OpenThread lock and no CHIP lock**
+  (`port/mt_matter_zephyr.cpp:525`), so the bit-28 role read is safe from the
+  CHIP task with the stack lock already held. The Silabs copy has the same
+  property, and it is what lets the shared file read the role through the
+  port instead of carrying the C6's lock-free mirror.
+
+Nothing in the shared file takes the CHIP stack lock: the handler and both
+delegates already run on the CHIP task with it held, and `mt_at_event()`
+takes the link mutex only. Every emission goes through `mt_at_event()`, so
+the RAM mask and the pre-`+MTREADY` `s_at_up` guard apply unchanged.
+
+The file's two delegate objects are constructed at boot by a static
+constructor (`_GLOBAL__sub_I_`, one `.init_array` entry). That entry runs on
+this platform: `CONFIG_STATIC_INIT_GNU=y` in the generated `.config`, and the
+image already carries 51 such entries.
+
+### Bit 4 is deferred, and that is not an accident
+
+`+MTEVT:0` and `+MTEVT:4` are a strict pair, and on stock CHIP the
+`OnCommissioningWindowClosed()` callback cannot tell a paused window from a
+closed one: it is called synchronously from `StopAdvertisement()`, which runs
+before `ResetState()`. The shared file therefore re-queries off the CHIP
+event queue with `PlatformMgr().ScheduleWork()`. That is a bench-measured fix
+from task 1 (its first cut emitted no `+MTEVT:4` at all, for 148 s after a
+completed commissioning), it lives in the shared file, and a review that
+"simplifies" it back into a synchronous re-query breaks both Thread ports.
+The full account, including why handler registration order has nothing to do
+with it, is in `platform/silabs/README.md` under "Bit 4 is decided off the
+CHIP event queue".
+
+### The boot replay
+
+The commissioning window opens inside `Server::Init`, before
+`mt_at_start()`, so the delegate's `+MTEVT:0` is dropped by the `s_at_up`
+guard. `mt_chip_events_after_ready()` replays it once, which is what should
+make the boot sequence **`+MTREADY` then exactly one `+MTEVT:0`** whenever a
+window is open, rather than a race. Observed on the MGM240P; not yet on this
+port.
+
+### The cost
+
+`west build --pristine` on both arms, 2026-09-21, commit `bcffd49` against
+its parent `595d1f0`, same NCS v3.3.4 workspace, same toolchain and the SDK
+patches applied (EEM pool patch revision 2, already in the workspace). Both
+arms link, neither gains a warning: nine Kconfig warnings before and after
+and no compiler warning either side.
+
+| | `ophelia_cpico` (sysbuild) | `nrf54l15dk` (`--no-sysbuild`) |
+|---|---|---|
+| Flash, `595d1f0` | 897,268 B (65.29%) | 905,168 B (61.90%) |
+| Flash, `bcffd49` | **898,252 B (65.37%)** | **906,148 B (61.97%)** |
+| Flash delta | **+984 B** | **+980 B** |
+| RAM, `595d1f0` | 220,548 B (84.13%) | 220,780 B (84.22%) |
+| RAM, `bcffd49` | **220,572 B (84.14%)** | **220,788 B (84.22%)** |
+| RAM delta | +24 B | +8 B |
+
+MCUboot is untouched at 30,276 B of 48 KB, the same image as before the
+round.
+
+The parent-commit column is a build taken here rather than a figure copied
+forward, and it lands within 4 B of flash of "The EVSE round" table above
+(897,272 B and 905,172 B, 2026-08-31) with RAM identical, so everything
+between those two dates cost this platform nothing measurable and the whole
+movement above is this round's.
+
+**The two RAM deltas differ only because the region figure counts the padding
+between sections, which moves.** The sections themselves move by the same
++16 B of RAM on both boards, `arm-none-eabi-size -A`:
+
+| Section | Delta | What it is |
+|---|---|---|
+| `text` | +792 B | the object's own code is 692 B of it; the rest is what the two `Server::GetInstance()` accessors and the delegate registration inline at the call site |
+| `rodata` | +176 B (`ophelia_cpico`), +180 B (DK) | the two vtables (72 B), the two log strings, alignment |
+| `datas` | +4 B | the `AppDelegate` subclass's vtable pointer, constant-initialised |
+| `bss` | +12 B | the fabric delegate object (8 B) and the file's four one-byte statics |
+| `init_array` | +4 B | the static-constructor entry above |
+
+### What task 5 needs from this build
+
+1. **No module was flashed in this task**, so the image on a carrier is
+   whatever was there before. The app image is
+   `build_evt/nrf54l15/zephyr/zephyr.signed.bin` if that build directory is
+   still around; otherwise build as "Building it" says. MCUboot is unchanged,
+   so a module that already carries it needs the app alone.
+2. **Set the mask before pairing.** The default is `0x0800003F`: bits 25 and
+   28 are not deliverable without `AT+MTEVT=0x1A00003F`, and bits 6 to 9 need
+   `0x000000C0` on top. The mask is RAM and resets on every reboot, the one
+   `AT+MTFRESET` causes included.
+3. **`+MTEVT:2` does not arrive on a successful commissioning** on a stock
+   CHIP port. `OnCommissioningSessionStopped()` is reached only when
+   re-advertising fails or the 20-attempt limit has been passed.
+4. **Do not assert a `+MTEVT:4` across `AT+MTFRESET`** while a window is
+   open: the reboot beats the deferred re-query. `+MTREADY` is the
+   resynchronisation point.
+5. **Bit 25 arrives without bit 28 beside it** whenever the Matter role token
+   did not change, which is normal and frequent, and **bit 28 keeps arriving
+   long after commissioning completes** (the REED to ROUTER promotion landed
+   110 s after the `+MTEVT:3` on the MGM240P). A row that pairs them
+   one-to-one, or an `assert_no_urc` window that does not exclude bit 28,
+   will be flaky.
