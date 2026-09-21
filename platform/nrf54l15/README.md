@@ -1634,17 +1634,31 @@ The milestone acceptance (2026-08-28) commissions with the CLI chip-tool
 from the bench host over BLE into the live OTBR fabric:
 
 ```bash
-# open the window over AT (AT+MTCOMMISSION), then, in a clean shell:
-./fw/srp-aaaa-shim.sh &     # see the header comment: OTBR mDNS workaround
+# since 2026-09-21 an uncommissioned device already has its window open
+# (CONFIG_CHIP_ENABLE_PAIRING_AUTOSTART, "The boot replay" below); on a
+# commissioned one, open it over AT with AT+MTCOMMISSION first.
+./fw/srp-aaaa-shim.sh &         # OTBR mDNS workaround, see its header
+./fw/srp-aaaa-shim.sh 1500 &    # or a lifetime in seconds, for a long run
 chip-tool pairing ble-thread <node-id> hex:<dataset> 20202021 3840
 ```
 
 Dev credentials only (test VID 0xFFF1 / PID 0x8000, SPAKE2 passcode
 20202021, discriminator 3840): consumer hubs are expected to refuse
 them. The Thread dataset comes from the border router
-(`ot-ctl dataset active -x`) and is a credential: never commit or log
-it. The `srp-aaaa-shim.sh` workaround is required until the upstream
-ot-br-posix mDNS host-update defect it documents is fixed.
+(`ot-ctl dataset active -x`, or the `ActiveDatasetTlvs` D-Bus property on a
+bench where the control socket is root-owned) and is a credential: never
+commit or log it.
+
+**The `srp-aaaa-shim.sh` workaround is not optional on this bench**, and it
+is required until the upstream ot-br-posix mDNS host-update defect it
+documents is fixed. Without it a pairing reaches PASE and then spins on
+`Re-trying resolve` for the whole chip-tool timeout: measured again
+2026-09-21, where it cost the first attempt at a harness Phase 2 run.
+`+MTEVT:1` arriving is what tells you the device is fine and discovery is
+not. The shim reads the SRP host from `ot-ctl srp server host` and falls
+back to otbr-agent's journal when that socket is root-owned; it takes an
+optional lifetime in seconds, because the default three minutes does not
+cover a suite that commissions several times.
 
 Radio note: the module's 32 MHz HFXO needs the SoC-internal load
 capacitors programmed (board DTS `&hfxo`); without them the radio is
@@ -1662,9 +1676,10 @@ churn (ZMS is log-structured, stale entries count until collection; the
 Added 2026-09-21 by the `+MTEVT` parity round, task 2, which puts the event
 surface into this port's image. The contract is `AT_MT_SPEC.md` 3.11 and the
 bit numbers are `core/include/mt_at.h:47-136`; nothing in `core/` changed for
-it. **Bench proof: task 5 of the parity plan, pending the carrier.**
-Everything here is a build result and a source reading: no nRF board has run
-this image, and graph B502's nRF half stays open until task 5 closes it.
+it. **Bench-proven on an Ophelia-IV carrier 2026-09-21** by task 5 of the same
+round: "What was observed" and "Harness Phase 2" below are that run, and
+graph B502 is closed on both Thread arms. The task-2 subsections between here
+and there are build results and source readings, and are kept as written.
 
 ### The shared file, and the three sources behind it
 
@@ -1750,14 +1765,141 @@ The full account, including why handler registration order has nothing to do
 with it, is in `platform/silabs/README.md` under "Bit 4 is decided off the
 CHIP event queue".
 
-### The boot replay
+### The boot replay, and the window it had nothing to replay
 
 The commissioning window opens inside `Server::Init`, before
 `mt_at_start()`, so the delegate's `+MTEVT:0` is dropped by the `s_at_up`
-guard. `mt_chip_events_after_ready()` replays it once, which is what should
-make the boot sequence **`+MTREADY` then exactly one `+MTEVT:0`** whenever a
-window is open, rather than a race. Observed on the MGM240P; not yet on this
-port.
+guard. `mt_chip_events_after_ready()` replays it once, which makes the boot
+sequence **`+MTREADY` then exactly one `+MTEVT:0`** whenever a window is
+open, rather than a race. Observed on the MGM240P by task 1 and on this port
+by task 5 (below).
+
+**On this port that sentence was false until 2026-09-21, and the replay was
+not why.** `Server::Init` opens no window at all unless
+`CHIP_DEVICE_CONFIG_ENABLE_PAIRING_AUTOSTART` is 1. It is 1 by default on
+CHIP's ESP32 and EFR32 platforms, so the C6 and the MGM240P have always
+opened one; the nrfconnect platform binds it to
+`CONFIG_CHIP_ENABLE_PAIRING_AUTOSTART` and NCS leaves that off
+(`modules/lib/matter/src/platform/nrfconnect/CHIPDevicePlatformConfig.h`
+:200-202), so this port booted uncommissioned with `AT+MTSTATE?` answering
+`0`, no BLE advertising and no `+MTEVT:0`. Measured on the bench:
+
+```
+t+  7.315  +MTREADY                   (no +MTEVT:0)
+t+  8.318  >>> AT+MTCGMR              ... factory-fresh device
+t+ 37.415  >>> AT+MTSTATE?
+t+ 37.465  +MTSTATE:0,0               no window, no fabric
+t+  8.268  >>> AT+MTCOMMISSION        (a later capture)
+t+  8.318  +MTEVT:0                   the delegate's own bit-0 path works
+t+  8.368  OK
+```
+
+So the event code was right and the window was missing. Nothing had noticed
+because this platform's own bench procedure has always opened the window by
+hand ("Matter commissioning on the bench" above says so), and no automated
+lifecycle suite had ever run here. `prj.conf` sets the Kconfig now, with the
+reasoning at the line; it costs **zero bytes** of flash and RAM on both arms,
+because the window-open call it enables was already linked in for
+`AT+MTCOMMISSION`. The harness's 2.1 rows (`+MTEVT:0 after reboot`,
+`state 1 (window open)`) are what the product contract looks like from the
+outside, and they are what found this.
+
+### What was observed, 2026-09-21
+
+Image built `--pristine` from the committed tree at `e8c07da` and flashed
+with `fw/flash.py` over the CPico bridge (`900,452 B`, `upload complete`,
+`+MTREADY` on the exit reset, rc 0). The AT port was opened with DTR and RTS
+cleared before the open (the `--bridge cpico` contract) and held open with
+no command in flight while chip-tool ran. Timestamps are seconds from the
+port open, which is also the module's reset. The dataset came from the
+harness's own D-Bus route into a variable and was never printed; every hex
+run of 24 characters or more in anything quoted here is replaced.
+
+**The boot sequence**, factory-fresh, 20 s capture, no commands sent:
+
+```
+t+  1.354  +MTREADY
+t+  1.354  +MTEVT:0
+```
+
+Nothing else arrived in the remaining 18.6 s. On the boot of a
+**commissioned** device, with no window open, the same capture gives
+`+MTREADY` and no `+MTEVT:0` at all, which is the negative half of the same
+check and what harness row 2.8 asserts.
+
+**The mask, then a full commissioning of node `0x4A01`** (chip-tool exit 0,
+first attempt, with `fw/srp-aaaa-shim.sh` running):
+
+```
+t+ 31.568  >>> AT+MTEVT?
+t+ 31.619  +MTEVTMASK:0x0800003F      the default: bits 0 to 5 and 27
+t+ 33.071  >>> AT+MTEVT=0x1A00003F    adds bits 25 and 28, before pairing
+t+ 33.121  OK
+t+ 34.575  >>> AT+MTSTATE?
+t+ 34.625  +MTSTATE:1,0               the boot window, still open
+t+ 36.082  (chip-tool pairing ble-thread 0x4A01 started)
+t+ 38.687  +MTEVT:1                   PASE session established
+t+ 43.849  +MTEVT:25                  role unchanged: no 28 beside this one
+t+ 43.899  +MTEVT:25
+t+ 43.949  +MTEVT:28,UNASSIGNED
+t+ 44.901  +MTEVT:25
+t+ 44.901  +MTEVT:28,REED
+t+ 49.311  +MTEVT:3                   commissioning complete
+t+ 49.361  +MTEVT:4                   the window really closed, after the 3
+t+117.637  +MTEVT:25
+t+117.637  +MTEVT:28,ROUTER           the REED to ROUTER promotion, 68 s later
+t+186.116  (chip-tool rc=0)
+```
+
+The same three things the MGM240P's trace shows are here. The **25 at
+t+43.849 has no 28 beside it**: `ThreadStateChange.RoleChanged` was set and
+the decoded token had not changed, which is exactly what the role cache
+exists to suppress. The **4 follows the 3** rather than racing it, which is
+the deferred re-query working. And there was **no second 4 and no second 0
+for the 137 s** between t+49.361 and t+186, so the session pause that also
+fires `OnCommissioningWindowClosed()` produced nothing. `+MTEVT:2` is absent
+and that is correct.
+
+**The window reopened by hand**, which proves the delegate's own bit-0 path
+rather than only the boot replay, and that the 0/4 pair cycles:
+
+```
+t+246.138  >>> AT+MTSTATE?
+t+246.188  +MTSTATE:2,1               operational, one fabric
+t+247.643  >>> AT+MTCOMMISSION
+t+247.743  +MTEVT:0                   the URC precedes the terminal response
+t+247.793  OK
+t+250.650  >>> AT+MTSTATE?
+t+250.700  +MTSTATE:1,1
+```
+
+**`AT+MTFRESET`**, with the mask widened to `0xFFFFFFFF` first so the fabric
+bits are visible, and with that window still open:
+
+```
+t+260.168  >>> AT+MTEVT=0xFFFFFFFF
+t+260.218  OK
+t+261.672  >>> AT+MTFRESET
+t+261.972  OK
+t+262.123  +MTEVT:6                   FabricWillBeRemoved
+t+262.574  +MTEVT:7                   OnFabricRemoved
+t+262.975  +MTEVT:4                   the open window's close, before the reboot
+t+265.329  +MTREADY                   the reboot
+t+265.329  +MTEVT:0
+```
+
+So the reset removes the fabric through the fabric table and both delegate
+callbacks reach the host before the reboot, as on the MGM240P. **The
+`+MTEVT:4` at t+262.975 is where the two arms differ**, and it is the race
+fact 5 above describes: here the queued re-query lands 2.4 s ahead of
+`+MTREADY`, where on the MGM240P the reboot wins and the 4 is lost. Nothing
+in the shared file differs; the boot times do.
+
+Two more, from the same day's other captures. With the default mask, a
+factory reset of a **two-fabric** device gives `+MTEVT:6` and `+MTEVT:7`
+once per fabric (`6, 7, 6, 7`) before the reboot. And `AT+MTEPAPPLY`, which
+reboots to rebuild the composition, gives the same `+MTREADY` then exactly
+one `+MTEVT:0` as any other boot with a window open.
 
 ### The cost
 
@@ -1797,26 +1939,237 @@ between sections, which moves.** The sections themselves move by the same
 | `bss` | +12 B | the fabric delegate object (8 B) and the file's four one-byte statics |
 | `init_array` | +4 B | the static-constructor entry above |
 
-### What task 5 needs from this build
+**The boot-window Kconfig costs nothing on top of that.** Task 5 rebuilt
+both arms `--pristine` from `e8c07da`, the commit that adds
+`CONFIG_CHIP_ENABLE_PAIRING_AUTOSTART=y`, and the region figures came back
+**byte-identical** to the `bcffd49` row above: 898,252 B flash and
+220,572 B RAM on `ophelia_cpico`, 906,148 B and 220,788 B on the DK, MCUboot
+still 30,276 B. Eight Kconfig warnings, zero compiler warnings, on both.
+That is the expected answer rather than a surprise: the Kconfig only decides
+whether `Server::Init()` calls a window-open path the image already links in
+for `AT+MTCOMMISSION`.
 
-1. **No module was flashed in this task**, so the image on a carrier is
-   whatever was there before. The app image is
-   `build_evt/nrf54l15/zephyr/zephyr.signed.bin` if that build directory is
-   still around; otherwise build as "Building it" says. MCUboot is unchanged,
-   so a module that already carries it needs the app alone.
-2. **Set the mask before pairing.** The default is `0x0800003F`: bits 25 and
+### The five facts a host or a harness row has to know
+
+Measured on the MGM240P by task 1 and re-measured here by task 5. Four held
+identically on both arms; the fifth is the one place they differ, and it is
+the one a row is most likely to get wrong.
+
+1. **Set the mask before pairing.** The default is `0x0800003F`: bits 25 and
    28 are not deliverable without `AT+MTEVT=0x1A00003F`, and bits 6 to 9 need
    `0x000000C0` on top. The mask is RAM and resets on every reboot, the one
    `AT+MTFRESET` causes included.
-3. **`+MTEVT:2` does not arrive on a successful commissioning** on a stock
+2. **`+MTEVT:2` does not arrive on a successful commissioning** on a stock
    CHIP port. `OnCommissioningSessionStopped()` is reached only when
    re-advertising fails or the 20-attempt limit has been passed.
-4. **Do not assert a `+MTEVT:4` across `AT+MTFRESET`** while a window is
-   open: the reboot beats the deferred re-query. `+MTREADY` is the
-   resynchronisation point.
-5. **Bit 25 arrives without bit 28 beside it** whenever the Matter role token
+3. **Bit 25 arrives without bit 28 beside it** whenever the Matter role token
    did not change, which is normal and frequent, and **bit 28 keeps arriving
    long after commissioning completes** (the REED to ROUTER promotion landed
-   110 s after the `+MTEVT:3` on the MGM240P). A row that pairs them
-   one-to-one, or an `assert_no_urc` window that does not exclude bit 28,
-   will be flaky.
+   110 s after the `+MTEVT:3` on the MGM240P and 68 s after it here). A row
+   that pairs them one-to-one, or an `assert_no_urc` window that does not
+   exclude bit 28, will be flaky.
+4. **A commissioned boot raises no `+MTEVT:0`**, because no window opens.
+   That is the negative half of the boot contract and harness row 2.8
+   asserts it.
+5. **A `+MTEVT:4` across `AT+MTFRESET` is a RACE, and the two arms land on
+   opposite sides of it.** With a window open at the reset, the deferred
+   re-query that decides bit 4 and the reboot are in flight at the same time.
+   On the MGM240P the reboot wins and no `+MTEVT:4` is raised at all (task 1
+   measured that and wrote the warning). **On this port the re-query wins**:
+   the trace below shows `6`, `7`, then `4` at 1.3 s, and `+MTREADY` only
+   2.4 s later, so the 0/4 pair closes properly here. Neither is wrong and
+   neither is a contract: `+MTREADY` is the host's resynchronisation point
+   and the mask resets with it. **A harness row must neither require the 4
+   nor forbid it across `AT+MTFRESET`**, and none does. The difference is
+   boot speed, not event code.
+
+## Harness Phase 2 and Phase 3
+
+Both ran on this carrier for the first time on **2026-09-21**, the parity
+round's task 5. Phase 2 is the Matter lifecycle chain (factory reset,
+commissioning, attribute round trips both ways, a second fabric and its
+removal, a warm reboot over SWD, a cold boot, an unattended window expiring,
+the two resets, the rig restored); Phase 3 is the device-type surface.
+
+### Running them against this carrier
+
+```bash
+export MT_PORT=/dev/serial/by-id/usb-Raspberry_Pi_Pico_2_62C823D8147EAFE7-if00
+cd <firmware repo root>
+
+# the border router's mDNS workaround, for the whole run: see below
+platform/nrf54l15/fw/srp-aaaa-shim.sh 1500 &
+
+python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 2 \
+        --openocd-config platform/nrf54l15/ophelia-swd.cfg \
+        --include-slow --include-manual \
+        --baseline platform/nrf54l15/core-phase2.json
+
+python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 3 \
+        --max-endpoints 16 \
+        --baseline platform/nrf54l15/core-phase3.json
+```
+
+Four carrier facts are in that command line and none of them is optional:
+
+- **`--bridge cpico`** clears DTR and RTS *before* the open. Opening this
+  port pyserial's way holds the module in reset and in recovery at once,
+  which reads as dead hardware ("The host side, which is not devicetree").
+- **`--openocd-config platform/nrf54l15/ophelia-swd.cfg`** because steps
+  2.8, 2.13 and 2.14 reboot the co-processor over SWD, and the harness's
+  built-in argv resets an **RP2350** (the C6 rig's contract). Here the Debug
+  Probe is on the nRF54L15's own SWD. The file names the target
+  (`target/nordic/nrf54l.cfg`, `reset_config none`, so `reset run` goes
+  through the Cortex-M33's `SYSRESETREQ`) and the **adapter serial**,
+  because this bench carries two CMSIS-DAP probes that both answer SWD with
+  a Cortex-M33 and an unnamed adapter resets whichever enumerated first,
+  silently. Measured: `openocd -f platform/nrf54l15/ophelia-swd.cfg -c
+  "init; reset run; shutdown"` returns 0 and the module answers `+MTREADY`
+  1.2 s later on a port held open across the reset, with the fabric, the
+  dataset and the composition intact. pyocd stays this platform's SWD tool
+  everywhere else; openocd is here only because the harness's reset argv is
+  openocd's.
+- **`--max-endpoints 16`**, because `PHASE3_COMPOSITION` declares 28
+  endpoints and `kServiceableEndpoints` on this build is **16** ("Endpoint
+  capacity"). Without it the rebuild would abort at endpoint 17 and every
+  later step would fail against endpoints that are not there; with it the
+  harness declares the 16-endpoint prefix and reports the ten steps above
+  the cap, plus `3.2b`, through `Suite.not_applicable()`.
+- **`fw/srp-aaaa-shim.sh` running alongside**, or `chip-tool pairing
+  ble-thread` reaches PASE (`+MTEVT:1` arrives, so the device is fine) and
+  then spins on `Re-trying resolve` until it times out. This is the border
+  router's own mDNS host-update defect that the shim has documented since
+  2026-08-28, and it bites here and not on the MGM240P. The shim now takes a
+  lifetime in seconds, because a Phase 2 run commissions three times over
+  about six minutes and a shim that expires mid-run takes its avahi record
+  with it. It also falls back to otbr-agent's journal when `ot-ctl` cannot
+  open the root-owned control socket, which is the same wall the harness
+  gate hit (graph F503).
+
+`--baseline` with `--phase 2` requires `--include-slow` and
+`--include-manual` at the harness's own door, so a Phase 2 record here
+always includes the 200 s window-expiry row and the operator-driven cold
+boot. At the cold-boot prompt, this bench's recipe is
+`uhubctl -l 3-1.3 -a cycle -d 5`: **all ports**, because the per-port form
+cuts the carrier without the kernel seeing the disconnect and the step waits
+for the device node to vanish. The all-ports cycle drops both Debug Probes
+too, so a console capture has to be restarted afterwards.
+
+### Phase 2, 2026-09-21: 98 passed, 2 failed, 1 not applicable
+
+101 rows, **the same row set and the same counts the MGM240P recorded the
+same day**, and the same two failures. Result file
+`platform/nrf54l15/core-phase2.json` (`fw_repo_head` `e8c07da`, timestamp
+`2026-09-21T11:53:05+00:00`), beside this README and deliberately not under
+`test/baselines/`, which stays the C6 images' shipping set. Three chip-tool
+commissionings, each exit 0 on the first attempt. `otbr-agent` was `active`
+before and after and was never started, stopped or reconfigured; the dataset
+reached chip-tool through the harness's own D-Bus route and appears nowhere
+in the run log or the result file.
+
+Start state was the documented bench convention, factory-fresh with the
+acceptance composition staged (`AT+MTFRESET`, then `AT+MTEPCLEAR` /
+`AT+MTEP=256` / `AT+MTEP=770` / `AT+MTEPAPPLY`); the run's own cleanup
+returns it there and it was verified there afterwards.
+
+**Every `+MTEVT` row passed**, which is what the round exists for:
+
+| Step | Event rows | Verdict |
+|---|---|---|
+| 2.1 factory fresh | `+MTEVT:0` after the `AT+MTRESET` reboot | PASS |
+| 2.3 commission | `+MTEVT:1`; `+MTEVT:3`; exactly one `+MTEVT:4` after the 3; `+MTEVT:28` with a legal role token during the join; `+MTEVT:25` during the join | PASS (6 rows) |
+| 2.7 second fabric | `+MTEVT:0` on the host-opened window; `+MTEVT:1`; `+MTEVT:3`; exactly one `+MTEVT:4` after the 3 | PASS (4 rows) |
+| 2.8 warm reboot | no `+MTEVT:0` on a commissioned device's boot (a negative) | PASS |
+| 2.10 window expiry | `+MTEVT:0`; `+MTEVT:4` at the end of an unattended 180 s window; no duplicate close | PASS (3 rows) |
+| 2.11 two resets | `+MTEVT:3` on the re-commission | PASS |
+| 2.12 rig restore | `+MTEVT:0` after the factory reset | PASS |
+| 2.14 transport switch | `+MTEVT:27` on a mismatched boot | **not applicable**, self-declared |
+
+2.14 needed no harness change: `AT+MTTRANSPORT?` answers `+MTERR:8` on this
+single-transport image and `main()` reads that from the device, so the step
+reports itself through `Suite.not_applicable()`, exactly as on the MGM240P
+and the C6's Thread image.
+
+**The two failures are the cross-port attribute-persistence gap (B512),
+recorded and not fixed here.**
+
+| Row | Assertion | Classification |
+|---|---|---|
+| `2.8 attribute value survived (B63 guard)` | after a warm SWD reboot, `AT+MTATTR=1,6,0` must read back the `1` written before it | **port defect**, shared with the MGM240P |
+| `2.9 value survived cold boot (B63 guard)` | the same read after a true power cycle | the same defect, the other reboot path |
+
+Task 4 predicted this exactly, from the source rather than from a run:
+`port/mt_devtypes_zephyr.cpp`'s `onOffAttrs` declares every dynamic
+attribute through the same `EXTERNAL_STORAGE` mechanism the Silabs arm uses
+and contains no `NONVOLATILE`, so the value lives in the endpoint arena's
+RAM and nothing restores a persisted one. The full derivation, including why
+the fix is a restore path in the port rather than a flag, is in
+`platform/silabs/README.md` under "Harness Phase 2". It is **one gap for
+both Thread arms**, it is not an event row, no event row depends on it, and
+it needs a ruling on which attributes carry the Matter spec's N quality plus
+a write-churn budget against the ZMS sizing row. Owned by the qualification
+round.
+
+### Phase 3, 2026-09-21: 258 passed, 4 failed, 11 not applicable
+
+273 rows. **The first Phase 3 run this arm has ever had.** Result file
+`platform/nrf54l15/core-phase3.json`, whose header records
+`max_endpoints: 16` so a later diff against a full-table run cannot be
+misread as a regression.
+
+**3.5 is the round's own row and it passed**: `chip-tool pairing exits 0`,
+`+MTEVT:1 session started`, `+MTEVT:3 commissioning complete`, `fabrics 1`.
+That is the last `+MTEVT` assertion in the whole suite, and it is the one
+`TESTING.md` section 7's table lists under Phase 3.
+
+The **11 not-applicable** rows are all the endpoint cap: ten steps target
+endpoints 18 to 28 and `3.2b` targets 28, all above this build's
+`kServiceableEndpoints` of 16. That is the cap working as designed, not a
+gap; the same steps run on the C6, which serves all 28.
+
+The **4 failures are one fact**, and it is a wire divergence this port
+already documents rather than a defect:
+
+| Row | Verdict |
+|---|---|
+| `3.8 allow: +MTCMD forward answered, chimeID 7 in payload` | FAIL |
+| `3.8 allow: chip-tool exits 0` | FAIL (a consequence of the row above) |
+| `3.8 allow: wire status 0x0 (Success)` | FAIL (the same consequence) |
+| `3.8 deny: +MTCMD forward answered, chimeID 7 in payload` | FAIL |
+
+`Chime::PlayChimeSound` **takes no argument in this tree's cluster
+revision** (`chime-cluster.xml:43-45`; user ruling DE396, recorded at the
+chime declaration in `port/mt_devtypes_zephyr.cpp`), where the esp tree's
+revision carries an optional `ChimeID`. To keep the `+MTCMD` payload arity
+byte-identical to the C6, this port forwards the server's
+`GetSelectedChime()` as the single trailing field: the payload means "the
+chime id that will play", not "the chime id the controller asked for".
+
+Step 3.8 sets `InstalledChimeSounds` to ids 1, 2 and 7, sets `Enabled` with
+`AT+MTCHIME=4,1,1` (`<what>` 1 is Enabled, `AT_MT_SPEC.md` 3.24) and then
+invokes `play-chime-sound --ChimeID 7`, expecting `7` in the forwarded
+payload. It never sets `SelectedChime`, so on this arm the payload is
+whatever `SelectedChime` holds and the responder's `expect(payload=7)` does
+not match. With no host answer the command default-denies, which is why the
+allow leg's `chip-tool exits 0` and `wire status 0x0` fail too, and why the
+deny leg's two remaining rows pass for the wrong reason.
+
+So the row is **arm-unaware, not wrong**, and the fix is one AT command in
+the step (`AT+MTCHIME=<ep>,0,7` before the invoke, which would make both
+arms forward `7`), not a port change. It is deliberately not made here: it
+is not an event row, it changes what a shipped C6 Phase 3 baseline row
+exercises, and proving it needs a run on both arms. The three rows that
+follow it (`Enabled = false` short-circuit, no `+MTCMD`, controller still
+sees Success) all passed, so the cluster itself, its persistence and its
+short-circuit are sound on this port.
+
+### What was not measured
+
+- **Free heap at `+MTREADY`.** This port has no boot line for it; the figure
+  in the MGM240P's table is a Silicon Labs `sl_memory_get_free_heap_size()`
+  call with no Zephyr counterpart here.
+- **ZMS occupancy across the two runs.** The 32 KB `settings_storage` sizing
+  watch item is still open and these runs did not read it; the commissioning
+  churn they caused is exactly the kind of load that row wants measured.
+- **Phase 0 and Phase 1** were not re-run: nothing in this round touches the
+  surfaces they cover, and their records stand.
