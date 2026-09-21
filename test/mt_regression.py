@@ -1292,11 +1292,11 @@ def step_2_13_thread_reboot_reattach(ctx):
 
     So this row keeps only what the bench proved DOES hold across a
     non-factory reboot, with no event-mask dependency at all: the SWD
-    reset (`ctx.relink(lambda: swd_reset(ctx.swd_runner,
-    ctx.swd_argv))`, the exact mechanism step 2.8 uses, never touching
-    Matter's factory-reset path,
-    HARDWARE-VERIFIED), the fabric-survived guard (`AT+MTFABRICS?` reads
-    `1` straight after the reboot: F1's self-validating guard,
+    reset (`ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))`,
+    the exact mechanism step 2.8 uses, never touching Matter's
+    factory-reset path, HARDWARE-VERIFIED), the fabric-survived guard
+    (`AT+MTFABRICS?` reads `1` straight after the reboot: F1's
+    self-validating guard,
     HARDWARE-VERIFIED), and the ends-attached assertion (`AT+MTTHREAD?`
     reads back a role in `MT_THREAD_ATTACHED_ROLES` with `<attached>` =
     `1`, HARDWARE-VERIFIED). The ends-attached read is a short bounded
