@@ -1989,7 +1989,10 @@ Both ran on this carrier for the first time on **2026-09-21**, the parity
 round's task 5. Phase 2 is the Matter lifecycle chain (factory reset,
 commissioning, attribute round trips both ways, a second fabric and its
 removal, a warm reboot over SWD, a cold boot, an unattended window expiring,
-the two resets, the rig restored); Phase 3 is the device-type surface.
+the two resets, the rig restored); Phase 3 is the device-type surface. The
+tooling the runs used, `platform/nrf54l15/ophelia-swd.cfg` and
+`fw/srp-aaaa-shim.sh`, was committed after the runs as `37483d3` and
+`5f3d8ea`, unchanged from the working-tree files the runs used.
 
 ### Running them against this carrier
 
@@ -2044,7 +2047,8 @@ Four carrier facts are in that command line and none of them is optional:
   about six minutes and a shim that expires mid-run takes its avahi record
   with it. It also falls back to otbr-agent's journal when `ot-ctl` cannot
   open the root-owned control socket, which is the same wall the harness
-  gate hit (graph F503).
+  gate hit (graph F503). The lifetime argument is unvalidated: a non-numeric
+  value exits at once and publishes nothing.
 
 `--baseline` with `--phase 2` requires `--include-slow` and
 `--include-manual` at the harness's own door, so a Phase 2 record here

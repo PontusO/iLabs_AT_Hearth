@@ -2062,11 +2062,13 @@ t+153.261  +MTEVT:0
 So **the reset does remove the fabric through the fabric table**, and both
 delegate callbacks reach the host before the reboot. One honest limit in that
 trace: a commissioning window was open when the reset ran (`+MTSTATE:1,1` at
-t+135.013) and **no `+MTEVT:4` arrived for it**. The reboot is faster than the
-deferred re-query, so the outstanding 0 is closed by the reboot rather than by
-a 4. `+MTREADY` is the host's resynchronisation point by contract, and the
-mask resets with it, so this is a session boundary rather than a broken pair;
-a Phase 2 row must not assert a 4 there.
+t+135.013) and **no `+MTEVT:4` arrived for it**. A `+MTEVT:4` across
+`AT+MTFRESET` is a race between the deferred re-query and the reboot, and the
+two Thread arms land on opposite sides of it: here the reboot wins and no 4 is
+raised, while on the nRF54L15 the re-query wins, with the 4 arriving 1.3 s
+after the command and `+MTREADY` 2.4 s later (`platform/nrf54l15/README.md`,
+"The five facts a host or a harness row has to know", fact 5). A Phase 2 row
+must neither require nor forbid a 4 there.
 
 The deferred re-query has a second consequence worth stating beside it, and it
 is benign: **a window re-opened between the close callback and the queued
@@ -4195,6 +4197,7 @@ not a regression against the nRF arm.
 | Open item | Owner |
 |---|---|
 | **`+MTEVT` is emitted on this port: closed 2026-09-21** (graph **B502**) by the `+MTEVT` parity round's task 1, in `platform/chip/mt_chip_events.cpp`, shared with the nRF arm and bench-proven here: the boot sequence, a full commissioning's order with the 0/4 pair, the role-cache suppression and `AT+MTFRESET`'s fabric bits, all under "Events (`+MTEVT`)" above. The round 2 row below it is what that fix was written against. **The nRF half closed the same day** (task 5): the Ophelia-IV carrier came back on the bench, ran the same shared file and recorded its own Phase 2 at the same **98 passed, 2 failed, 1 not applicable**, plus Phase 3's 3.5 with `+MTEVT:1` and `+MTEVT:3`. See `platform/nrf54l15/README.md`, "Events (`+MTEVT`)" | **closed on both Thread arms, 2026-09-21** |
+| **Deferred minors from the parity round's final review**: `mt_chip_events_register()`'s idempotence on a partial-failure path (`s_registered` is set only after all three registrations; move `AddEventHandler()` last, or set the flag after it); the `ScheduleWork()` failure path leaving `s_window_evt_sent` set, which suppresses every later window's 0 until a reboot; the harness gate message naming `ot-ctl` for a `busctl` value; `busctl` absent surfacing as "link lost" rather than a gate message; `--openocd-config` with no existence check at the gate; bit 11 as unreachable on Thread as bit 10 | the **first catalogue batch**, which rebuilds both arms |
 | **A fixed endpoint's code-driven attributes are unreadable through `AT+MTATTR` except where ruling F500's carve-out serves them.** Four Basic Information integers are carved out and answer; every other code-driven integer on endpoint 0 answers a bare `ERROR` with a console line saying why. Closing it means a read path through the data model provider for endpoints this port did not create, which changes the answer for every fixed-endpoint attribute at once | a **later round by ruling**, not by omission. Whether `AT+MTATTR` should reach fixed endpoints at all is a wire-contract question for both arms and the ruling belongs in `AT_MT_SPEC.md` 3.8 |
 | **`AT+MTNET?`'s enabled flag divides differently here** from the C6's (graph F494): this arm reports `+MTNET:THREAD,0,0,0` uncommissioned and `+MTNET:THREAD,1,0,0` once a fabric exists, and the harness's own baseline header records the change. It is a spec clarification, not a port fix | the **qualification round**, with `AT_MT_SPEC.md` |
 
