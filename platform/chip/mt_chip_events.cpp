@@ -82,6 +82,23 @@ uint8_t s_last_role_tok;
 bool s_last_role_tok_valid;
 #endif
 
+/*
+ * The deferred half of the window-closed decision. Scheduled onto the CHIP
+ * event queue by OnCommissioningWindowClosed(), which cannot answer the
+ * question itself; the long comment there says why.
+ */
+void window_closed_check(intptr_t)
+{
+    const bool still_open = Server::GetInstance().GetCommissioningWindowManager().IsCommissioningWindowOpen();
+    if (s_window_evt_sent && !still_open)
+    {
+        /* Cleared even if the URC is masked out: the window is gone, and the
+         * next one must be reported as a fresh +MTEVT:0. */
+        s_window_evt_sent = false;
+        mt_at_event(MT_EVT_COMMISSION_WINDOW_CLOSED, nullptr);
+    }
+}
+
 /* Bits 0, 4, 1, 2: stock CHIP signals the window and the sessions through the
  * commissioning window manager's AppDelegate, not device events. AppDelegate
  * is a global-namespace class (app/server/AppDelegate.h), not chip::. */
@@ -99,22 +116,49 @@ public:
 
     void OnCommissioningWindowClosed() override
     {
-        /* CHIP stops advertising for PASE at three different moments: a
+        /*
+         * CHIP stops advertising for PASE at three different moments: a
          * commissioner established a session (the window still open, only
          * paused to new commissioners), the window genuinely ended
          * (completion, timeout, or the 20-attempt limit), and a failed open
          * cleaning up a window that never existed. The host contract is one
          * +MTEVT:4 per reported +MTEVT:0, at the moment the window is really
-         * gone, so gate on both. The window manager is asked directly rather
-         * than via mt_matter_state(): this callback runs on the CHIP task and
-         * must not take the stack lock. */
-        const bool still_open = Server::GetInstance().GetCommissioningWindowManager().IsCommissioningWindowOpen();
-        if (s_window_evt_sent && !still_open)
+         * gone, so the decision has to distinguish them.
+         *
+         * The C6 distinguishes them by asking IsCommissioningWindowOpen()
+         * inside the callback. THAT DOES NOT WORK ON STOCK CHIP, and this is
+         * the one place where the two SDKs' shapes differ rather than their
+         * names (bench-measured 2026-09-21, the first cut of this file: a
+         * full commissioning produced 1, 25, 28, 3 and no 4 at all, for 148 s
+         * after completion). esp-matter POSTS a kCommissioningWindowClosed
+         * DEVICE EVENT, which is dispatched from the queue after the window
+         * manager has finished; stock CHIP CALLS this delegate synchronously
+         * from StopAdvertisement(), and on the real-close path
+         * Cleanup() is StopAdvertisement() followed by ResetState()
+         * (CommissioningWindowManager.cpp:142-146), so mWindowStatus is still
+         * kBasicWindowOpen when this runs. Both moments therefore look
+         * identical from in here, and the gate suppressed the one emission it
+         * exists to make.
+         *
+         * So do what esp-matter does: ask again off the CHIP event queue.
+         * ScheduleWork() posts a kCallWorkFunct behind everything already
+         * queued, which is both what makes ResetState() have run by then and
+         * what puts the +MTEVT:4 after the +MTEVT:3 of the same completion
+         * (the window manager's own handler is registered during
+         * Server::Init, ahead of ours, so it runs Cleanup() before our
+         * handler emits bit 3 for that same kCommissioningComplete).
+         *
+         * No stack lock either way: this callback and the scheduled work both
+         * run on the CHIP task.
+         */
+        if (PlatformMgr().ScheduleWork(window_closed_check, 0) != CHIP_NO_ERROR)
         {
-            /* Cleared even if the URC is masked out: the window is gone, and
-             * the next one must be reported as a fresh +MTEVT:0. */
-            s_window_evt_sent = false;
-            mt_at_event(MT_EVT_COMMISSION_WINDOW_CLOSED, nullptr);
+            /* The event queue is full. Degrade to the immediate re-query
+             * rather than to nothing: it answers "still open" on both paths,
+             * so this window's +MTEVT:4 is lost and the flag stays set, which
+             * is the same outcome as not scheduling and is bounded by the
+             * next reboot. Not reachable in any bench run so far. */
+            window_closed_check(0);
         }
     }
 
