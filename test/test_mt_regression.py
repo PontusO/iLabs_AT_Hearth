@@ -1705,6 +1705,31 @@ class TestOpenocdArgv(unittest.TestCase):
         self.assertEqual(argv[-1], OPENOCD_ARGV[-1])
         self.assertNotIn("target/rp2350.cfg", argv)
 
+    def test_the_shipped_carrier_configs_exist_and_name_their_target(self):
+        """Both Thread carriers ship an openocd config, and a run given a
+        path that is not there fails at the FIRST SWD reset, which is
+        step 2.8, a long way into a destructive phase. This pins the two
+        files against a rename and pins the two facts every carrier
+        config has to carry: an `adapter serial` (this bench has two
+        CMSIS-DAP probes that both answer as a Cortex-M33, so an
+        unnamed adapter resets whichever enumerated first) and the
+        module's own target rather than the C6 rig's RP2350."""
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for rel, target in (
+                ("platform/silabs/mg24-swd.cfg", "target/silabs/xg24.cfg"),
+                ("platform/nrf54l15/ophelia-swd.cfg",
+                 "target/nordic/nrf54l.cfg")):
+            path = os.path.join(repo, rel)
+            self.assertTrue(os.path.exists(path), "missing: %s" % rel)
+            with open(path) as fh:
+                body = fh.read()
+            self.assertIn(target, body, rel)
+            self.assertIn("adapter serial", body, rel)
+            self.assertNotIn("target/rp2350.cfg", body, rel)
+            self.assertEqual(
+                openocd_argv(rel),
+                ["openocd", "-f", rel, "-c", "init; reset run; shutdown"])
+
 
 class TestSwdReset(unittest.TestCase):
     def test_argv_override_is_what_runs(self):
