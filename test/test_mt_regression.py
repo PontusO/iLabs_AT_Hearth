@@ -375,7 +375,8 @@ class TestEchoAndRaw(unittest.TestCase):
 
 
 from mt_regression import (Suite, capture_header, write_baseline, phase0,
-                           otctl_run, parse_dataset)
+                           otctl_run, parse_dataset, otbr_dbus_property,
+                           role_from_dbus_json, dataset_from_dbus_json)
 
 
 class TestSuite(unittest.TestCase):
@@ -1105,6 +1106,42 @@ class TestOtCtl(unittest.TestCase):
         self.assertIn("ot-ctl timed out", out)
 
 
+class TestOtbrDbus(unittest.TestCase):
+    """otbr_dbus_property's parsers, against the shape actually measured
+    on this bench (systemd 255): `busctl get-property ... --json=short`
+    wraps every property the same way, {"type": T, "data": D}, never a
+    bare value. (T3's brief assumed DeviceRole came back as a bare quoted
+    string; the bench proof showed otherwise, so both parsers read the
+    same wrapper ActiveDatasetTlvs was already known to use.)"""
+
+    def test_role_from_dbus_json(self):
+        self.assertEqual(
+            role_from_dbus_json('{"type":"s","data":"leader"}'), "leader")
+
+    def test_role_from_dbus_json_garbage_is_none(self):
+        self.assertIsNone(role_from_dbus_json("Failed to get property"))
+
+    def test_dataset_from_dbus_json(self):
+        self.assertEqual(
+            dataset_from_dbus_json('{"type":"ay","data":[1,2,3]}'),
+            "010203")
+
+    def test_dataset_from_dbus_json_garbage_is_none(self):
+        self.assertIsNone(dataset_from_dbus_json("Failed to get property"))
+
+    def test_otbr_dbus_property_argv(self):
+        calls = []
+
+        def runner(argv, timeout):
+            calls.append(argv)
+            return 0, '{"type":"s","data":"leader"}'
+
+        rc, out = otbr_dbus_property("DeviceRole", runner=runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0][-2:], ["DeviceRole", "--json=short"])
+        self.assertEqual(calls[0][0], "busctl")
+
+
 class TestUrcHistory(unittest.TestCase):
     def test_history_survives_drain(self):
         link, _ = link_with_reply(b"+MTEVT:0\r\n+MTATTR:0,40,2,1\r\nOK\r\n")
@@ -1328,17 +1365,24 @@ class TestPhase2GateTransport(unittest.TestCase):
         self.assertEqual(dataset, parse_dataset(ds_text))
 
     def test_thread_dead_otbr_aborts(self):
+        """Both routes down: ot-ctl and the D-Bus fallback. A fake dbus is
+        required here (not just a fake otctl) so this stays a self-test
+        rather than spawning a real busctl when ot-ctl fails."""
         link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
 
         def fake_otctl(cmd_args, binary):
             return 1, "Error: no such device\n"
+
+        def fake_dbus(prop, runner=None):
+            return 1, "Failed to get property"
 
         with tempfile.TemporaryDirectory() as d:
             chip = self._healthy_chip(d)
             with mock.patch("mt_regression.shutil.which",
                             return_value="/usr/local/bin/openocd"):
                 problem, transport, dataset = phase2_gate(
-                    chip, self._args(), link, otctl=fake_otctl)
+                    chip, self._args(), link, otctl=fake_otctl,
+                    dbus=fake_dbus)
         self.assertIsNotNone(problem)
         self.assertIn("otbr-agent", problem)
         self.assertEqual(transport, "THREAD")
@@ -1427,6 +1471,92 @@ class TestPhase2GateTransport(unittest.TestCase):
         self.assertEqual(transport, "THREAD")
         self.assertEqual(dataset, parse_dataset(ds_text))
         self.assertNotIn("AT+MTNET?", link.sent)
+
+    def test_gate_falls_back_to_dbus_when_otctl_cannot_connect(self):
+        """otbr-agent's D-Bus property answers the role and the dataset
+        when ot-ctl's socket is root-owned (graph F503; the Silabs
+        README's Commissioning section is the bench recipe this mirrors).
+        Only 'state' reaches otctl; the dataset fetch is never attempted
+        against a binary already known to be unreachable."""
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+        calls = []
+
+        def fake_otctl(cmd_args, binary):
+            calls.append(tuple(cmd_args))
+            return 1, "connect session failed: Permission denied"
+
+        def fake_dbus(prop, runner=None):
+            if prop == "DeviceRole":
+                return 0, '{"type":"s","data":"leader"}'
+            return 0, '{"type":"ay","data":[1,2,3]}'
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), link, otctl=fake_otctl,
+                    dbus=fake_dbus)
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertEqual(dataset, "010203")
+        self.assertIn(("state",), calls)
+
+    def test_gate_reports_both_paths_when_dbus_fails_too(self):
+        """Neither route works: the message names both, so the operator
+        does not have to guess which one to chase."""
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+
+        def fake_otctl(cmd_args, binary):
+            return 1, "connect session failed: Permission denied"
+
+        def fake_dbus(prop, runner=None):
+            return 1, "Failed to get property"
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), link, otctl=fake_otctl,
+                    dbus=fake_dbus)
+        self.assertIsNotNone(problem)
+        self.assertIn("ot-ctl", problem)
+        self.assertIn("D-Bus", problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertIsNone(dataset)
+
+    def test_gate_prefers_otctl_when_it_works(self):
+        """A healthy ot-ctl is the whole path: D-Bus is never touched, so
+        this gate behaves exactly as it did before the fallback existed
+        whenever the bench's own ot-ctl actually connects."""
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+        ds_text = fixture("otctl_dataset_active.txt")
+
+        def fake_otctl(cmd_args, binary):
+            if cmd_args == ["state"]:
+                return 0, "leader\r\nDone\r\n"
+            if cmd_args == ["dataset", "active", "-x"]:
+                return 0, ds_text
+            raise AssertionError("unexpected ot-ctl call: %r" % (cmd_args,))
+
+        seen = []
+
+        def fake_dbus(prop, runner=None):
+            seen.append(prop)
+            return 0, '{"type":"s","data":"leader"}'
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), link, otctl=fake_otctl,
+                    dbus=fake_dbus)
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertEqual(dataset, parse_dataset(ds_text))
+        self.assertEqual(seen, [])
 
 
 from mt_regression import phase3_gate, _transport_gate

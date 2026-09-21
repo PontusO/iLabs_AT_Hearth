@@ -5807,6 +5807,57 @@ def parse_dataset(text):
     return None
 
 
+OTBR_DBUS = ["busctl", "--system", "get-property",
+             "io.openthread.BorderRouter.wpan0",
+             "/io/openthread/BorderRouter/wpan0",
+             "io.openthread.BorderRouter"]
+
+
+def otbr_dbus_property(prop, runner=None, timeout=10):
+    """One otbr-agent D-Bus property, the sudo-free route on a bench
+    where ot-ctl cannot connect: its socket is root-owned (graph F503;
+    TESTING.md section 7, the Silabs README's Commissioning section).
+    Every `busctl get-property ... --json=short` result, on this bench's
+    systemd 255, comes back wrapped the same way regardless of the D-Bus
+    type: {"type": T, "data": D}. DeviceRole's D is a JSON string
+    ("leader"), ActiveDatasetTlvs's is a JSON byte array ([...]); see
+    _dbus_json_data, role_from_dbus_json and dataset_from_dbus_json,
+    which all read that wrapper rather than assuming a bare value."""
+    argv = OTBR_DBUS + [prop, "--json=short"]
+    if runner is None:
+        runner = lambda argv, timeout: _subprocess_runner(argv, timeout,
+                                                           label="busctl")
+    return runner(argv, timeout)
+
+
+def _dbus_json_data(text):
+    """The 'data' field of one busctl --json=short get-property result,
+    or None on any parse failure (measured on this bench: both DeviceRole
+    and ActiveDatasetTlvs come back as {"type": T, "data": D}, never a
+    bare value)."""
+    try:
+        return json.loads(text)["data"]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def role_from_dbus_json(text):
+    """The lowercased Thread role from otbr-agent's DeviceRole D-Bus
+    property ({"type":"s","data":"leader"} with --json=short), or None."""
+    data = _dbus_json_data(text)
+    return data.strip().lower() if isinstance(data, str) else None
+
+
+def dataset_from_dbus_json(text):
+    """Dataset hex from otbr-agent's ActiveDatasetTlvs D-Bus property
+    ({"type":"ay","data":[...]} with --json=short), or None. The dataset
+    itself is never printed by any caller of this function."""
+    data = _dbus_json_data(text)
+    if not isinstance(data, list):
+        return None
+    return "".join("%02x" % b for b in data) or None
+
+
 TESTS = []
 
 
@@ -6169,7 +6220,7 @@ KNOWN_MODELS = (
 GATE_REFERENCE_QR = "MT:Y.K9042C00KA0648G00"
 
 
-def _transport_gate(chip, args, link, otctl):
+def _transport_gate(chip, args, link, otctl, dbus=otbr_dbus_property):
     """Shared preflight body for Phase 2 and Phase 3: detects the
     transport from the device and branches, WiFi needs credentials,
     Thread needs a live border router and its active dataset (design
@@ -6180,7 +6231,13 @@ def _transport_gate(chip, args, link, otctl):
 
     Factored out of phase2_gate (T5 task 4) so Phase 3's gate reuses this
     exact logic instead of copy-pasting it: phase2_gate's own self-tests
-    are the guard that the extraction changed nothing observable."""
+    are the guard that the extraction changed nothing observable.
+
+    On a bench where ot-ctl's socket is root-owned (graph F503), the
+    Thread branch falls back to otbr-agent's own D-Bus property for the
+    role and, if needed, the dataset: `dbus` is the same kind of test
+    seam `otctl` is, and a caller that never passes it gets the real
+    otbr_dbus_property. When ot-ctl answers, dbus is never called."""
     if shutil.which("openocd") is None:
         return ("openocd not on PATH: the 2.8 warm reboot resets the "
                 "RP2350 over SWD (see graph N22)", None, None)
@@ -6197,12 +6254,17 @@ def _transport_gate(chip, args, link, otctl):
     if transport == "THREAD":
         rc, out = otctl(["state"], args.ot_ctl)
         if rc != 0:
-            return ("otbr-agent is not answering (ot-ctl state failed): "
-                    "start it per the T4 runbook (graph F36: run "
-                    "otbr-agent directly, D-Bus policy required)",
-                    transport, None)
-        lines = (out or "").strip().splitlines()
-        role = (lines[0] if lines else "<empty>").strip().lstrip("> ")
+            drc, dout = dbus("DeviceRole")
+            if drc != 0:
+                return ("otbr-agent is not answering (ot-ctl state "
+                        "failed): start it per the T4 runbook (graph "
+                        "F36: run otbr-agent directly, D-Bus policy "
+                        "required); D-Bus DeviceRole also failed: %s"
+                        % dout, transport, None)
+            role = role_from_dbus_json(dout) or "<empty>"
+        else:
+            lines = (out or "").strip().splitlines()
+            role = (lines[0] if lines else "<empty>").strip().lstrip("> ")
         if role not in ("leader", "router", "child"):
             return ("the Thread network is down (ot-ctl state: %s); "
                     "bring it up before a Thread phase 2 run" % role,
@@ -6211,6 +6273,9 @@ def _transport_gate(chip, args, link, otctl):
         if not dataset:
             rc, out = otctl(["dataset", "active", "-x"], args.ot_ctl)
             dataset = parse_dataset(out) if rc == 0 else None
+        if not dataset:
+            drc, dout = dbus("ActiveDatasetTlvs")
+            dataset = dataset_from_dbus_json(dout) if drc == 0 else None
         if not dataset:
             return ("no usable Thread dataset (ot-ctl dataset active -x "
                     "gave nothing; set MT_DATASET to override)",
@@ -6236,7 +6301,7 @@ def _transport_gate(chip, args, link, otctl):
     return None, transport, dataset
 
 
-def phase2_gate(chip, args, link, otctl=otctl_run):
+def phase2_gate(chip, args, link, otctl=otctl_run, dbus=otbr_dbus_property):
     """Phase-2-only preflight, before anything destructive: the shared
     transport/chip-tool checks (_transport_gate) plus nothing else, since
     Phase 2's own destructive precondition (a factory-fresh-or-restorable
@@ -6245,11 +6310,13 @@ def phase2_gate(chip, args, link, otctl=otctl_run):
     otctl is a test seam, in the same style as ChipTool's injectable
     runner: production call sites never pass it, so the real otctl_run
     runs against the real binary; self-tests substitute a callable with
-    the same (args, binary) -> (rc, out) signature."""
-    return _transport_gate(chip, args, link, otctl)
+    the same (args, binary) -> (rc, out) signature. dbus is the same kind
+    of seam for the otbr-agent D-Bus fallback _transport_gate uses when
+    ot-ctl cannot connect."""
+    return _transport_gate(chip, args, link, otctl, dbus=dbus)
 
 
-def phase3_gate(chip, args, link, otctl=otctl_run):
+def phase3_gate(chip, args, link, otctl=otctl_run, dbus=otbr_dbus_property):
     """Phase-3-only preflight: the same shared transport/chip-tool checks
     as Phase 2 (design spec T5 section 4.1: "same code path as Phase 2's
     gate"), so the two transports (and Thread's border-router liveness
@@ -6261,8 +6328,8 @@ def phase3_gate(chip, args, link, otctl=otctl_run):
     gate's job stays "is this bench usable at all", not "is state already
     clean".
 
-    otctl is the same test seam phase2_gate takes."""
-    return _transport_gate(chip, args, link, otctl)
+    otctl and dbus are the same test seams phase2_gate takes."""
+    return _transport_gate(chip, args, link, otctl, dbus=dbus)
 
 
 def phase0(link, header):
