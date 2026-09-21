@@ -460,6 +460,10 @@ class Phase2Context:
         self.subscriber_factory = None  # test seam; None means real Subscriber
         self.relink = None        # installed by main(); steps 2.8/2.9 need it
         self.swd_runner = None    # test seam for swd_reset
+        self.swd_argv = None      # the openocd argv swd_reset runs; None
+                                   # means the C6 carrier's built-in
+                                   # OPENOCD_ARGV. main() fills it from
+                                   # --openocd-config (see openocd_argv)
         self.power_cycler = None  # test seam for operator_power_cycle
         self.composition = None   # +MTEP: lines captured by run_phase2
         self.transport = "WIFI"   # set from phase2_gate's detection
@@ -1050,7 +1054,7 @@ def step_2_8_warm_reboot(ctx):
                    res == 0 and lines == ["+MTATTR:1,6,0,1"], tag="P2"):
         raise StepAbort("could not establish the pre-reboot state")
     link.drain(0.3)
-    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))
     if not s.check("2.8 SWD reset, port back", ok, tag="P2"):
         raise StepAbort("bridge did not come back after SWD reset: %s"
                         % detail)
@@ -1288,8 +1292,9 @@ def step_2_13_thread_reboot_reattach(ctx):
 
     So this row keeps only what the bench proved DOES hold across a
     non-factory reboot, with no event-mask dependency at all: the SWD
-    reset (`ctx.relink(lambda: swd_reset(ctx.swd_runner))`, the exact
-    mechanism step 2.8 uses, never touching Matter's factory-reset path,
+    reset (`ctx.relink(lambda: swd_reset(ctx.swd_runner,
+    ctx.swd_argv))`, the exact mechanism step 2.8 uses, never touching
+    Matter's factory-reset path,
     HARDWARE-VERIFIED), the fabric-survived guard (`AT+MTFABRICS?` reads
     `1` straight after the reboot: F1's self-validating guard,
     HARDWARE-VERIFIED), and the ends-attached assertion (`AT+MTTHREAD?`
@@ -1316,7 +1321,7 @@ def step_2_13_thread_reboot_reattach(ctx):
         s.not_applicable(name, "WIFI transport: no Thread mesh to "
                          "reattach to")
         return
-    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))
     if not s.check("2.13 SWD reset, port back", ok, tag="P2"):
         raise StepAbort("bridge did not come back after SWD reset: %s"
                         % detail)
@@ -1368,8 +1373,8 @@ def step_2_14_transport_switch(ctx):
     row would test nothing while still reporting PASS on every other
     line -- the exact "check whose input can never arrive" shape B267
     already cost this harness once. The reboot instead uses
-    ctx.relink(lambda: swd_reset(ctx.swd_runner)), the identical
-    non-factory mechanism steps 2.8 and 2.13 use.
+    ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv)), the
+    identical non-factory mechanism steps 2.8 and 2.13 use.
 
     Placement: runs before 2.11, not after, for the same reason 2.13
     does (its own docstring, and TESTING.md's "Runs before 2.11, not
@@ -1412,7 +1417,7 @@ def step_2_14_transport_switch(ctx):
             res == 0 and lines
             and lines[0].split(":", 1)[1].split(",")[1] == other, tag="P2")
     link.drain(0.3)
-    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))
     if not s.check("2.14 SWD reset, port back", ok, tag="P2"):
         raise StepAbort("bridge did not come back after the switch: %s"
                         % detail)
@@ -1445,7 +1450,7 @@ def step_2_14_transport_switch(ctx):
             link.command("AT+MTTRANSPORT=%s" % ctx.transport)[0] == 0,
             tag="P2")
     link.drain(0.3)
-    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))
     if not s.check("2.14 restore: SWD reset, port back", ok, tag="P2"):
         raise StepAbort("bridge did not come back after the restore: %s"
                         % detail)
@@ -6038,14 +6043,38 @@ OPENOCD_ARGV = ["openocd", "-f", "interface/cmsis-dap.cfg",
                 "-c", "init; reset run; shutdown"]
 
 
-def swd_reset(runner=None):
-    """Reset the RP2350 over SWD (graph N22). The bridge sketch's setup()
-    then pulses PIN_ESP_RST, so this is the RP2350-driven warm C6 reboot
-    TESTING.md 2.8 names. The 1200-baud touch reset is NOT equivalent:
-    it drops the bridge into BOOTSEL."""
+def openocd_argv(config=None):
+    """The argv swd_reset runs, built once in main() and carried on the
+    context.
+
+    With no --openocd-config this is OPENOCD_ARGV unchanged, the C6
+    carrier's contract: the probe is on the Challenger's RP2350 and the
+    bridge sketch's setup() pulses the C6's reset line.
+
+    A carrier whose probe sits on the co-processor's OWN SWD takes its own
+    openocd config file instead, which is where the adapter selection, the
+    transport and the target belong: on the iLabs CPico carrier there are
+    TWO CMSIS-DAP probes on this bench, so `interface/cmsis-dap.cfg` alone
+    picks one at random (`platform/silabs/mg24-swd.cfg` names the right one
+    by serial). Only the two `-f` arguments move; the reset command itself
+    is the same one for every carrier, so a config that resets something
+    other than the co-processor is a config bug, not a harness fork."""
+    if config is None:
+        return list(OPENOCD_ARGV)
+    return ["openocd", "-f", config, "-c", "init; reset run; shutdown"]
+
+
+def swd_reset(runner=None, argv=None):
+    """Reset the co-processor over SWD (graph N22). On the C6 carrier the
+    argv resets the RP2350 and the bridge sketch's setup() then pulses
+    PIN_ESP_RST, so this is the RP2350-driven warm C6 reboot TESTING.md 2.8
+    names. The 1200-baud touch reset is NOT equivalent: it drops the bridge
+    into BOOTSEL. `argv` (from openocd_argv) lets a carrier whose probe is
+    on the module's own SWD reset the module directly; None keeps the C6
+    argv."""
     runner = runner or subprocess.run
     try:
-        proc = runner(OPENOCD_ARGV, capture_output=True, text=True,
+        proc = runner(argv or OPENOCD_ARGV, capture_output=True, text=True,
                       timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
@@ -8236,6 +8265,16 @@ def main(argv=None):
                          "both (the default, every C6 phase), cpico clears "
                          "both (asserting DTR there holds the nRF54L15 or "
                          "the MGM240P in reset)")
+    ap.add_argument("--openocd-config", dest="openocd_config",
+                    default=os.environ.get("MT_OPENOCD_CONFIG"),
+                    help="openocd config file for the SWD reset steps 2.8, "
+                         "2.13 and 2.14 use. The default resets an RP2350 "
+                         "through interface/cmsis-dap.cfg, which is the C6 "
+                         "carrier's contract (the bridge's setup() pulses "
+                         "the C6 reset). A carrier whose probe is on the "
+                         "co-processor's own SWD passes its own config: "
+                         "platform/silabs/mg24-swd.cfg for the iLabs CPico "
+                         "carrier with an MGM240P")
     ap.add_argument("--node-id", type=lambda x: int(x, 0), default=0x4845,
                     help="node id chip-tool assigns at pairing")
     ap.add_argument("--max-endpoints", type=int, default=None,
@@ -8326,6 +8365,7 @@ def main(argv=None):
             res, _ = link.command("AT+MTTRANSPORT?")
             ctx.image = "combined" if res == 0 else transport.lower()
             ctx.dataset = dataset
+            ctx.swd_argv = openocd_argv(args.openocd_config)
             ctx.relink = make_relink(link, args.port, bridge=args.bridge)
             ctx.chip2 = ChipTool(args.chip_tool, args.storage + "-f2")
             ctx.chip2.wipe_storage()

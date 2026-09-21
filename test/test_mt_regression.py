@@ -1670,10 +1670,64 @@ class TestPhase3Gate(unittest.TestCase):
         self.assertEqual(r2, r3)
 
 
-from mt_regression import swd_reset, operator_power_cycle
+from mt_regression import (swd_reset, openocd_argv, OPENOCD_ARGV,
+                           operator_power_cycle)
+
+
+class TestOpenocdArgv(unittest.TestCase):
+    """The 2.8/2.13/2.14 SWD reset is carrier-specific: on the C6 rig the
+    probe is on the RP2350 bridge, on the iLabs CPico carrier it is on the
+    MGM240P's own SWD, and this bench carries two CMSIS-DAP probes that
+    both answer as a Cortex-M33, so the adapter has to be named. The
+    config file carries all of that; the harness only chooses which -f to
+    pass."""
+
+    def test_no_config_is_the_c6_argv_unchanged(self):
+        self.assertEqual(openocd_argv(), list(OPENOCD_ARGV))
+        self.assertEqual(openocd_argv(None), list(OPENOCD_ARGV))
+        self.assertIn("target/rp2350.cfg", OPENOCD_ARGV)
+
+    def test_no_config_returns_a_copy(self):
+        """A step that mutated the returned list must not rewrite the
+        module constant for the rest of the run."""
+        got = openocd_argv()
+        got.append("scribble")
+        self.assertNotIn("scribble", OPENOCD_ARGV)
+
+    def test_config_replaces_only_the_f_arguments(self):
+        argv = openocd_argv("platform/silabs/mg24-swd.cfg")
+        self.assertEqual(argv, ["openocd", "-f",
+                                "platform/silabs/mg24-swd.cfg",
+                                "-c", "init; reset run; shutdown"])
+        # The reset command itself is the same for every carrier: a
+        # config that resets the wrong board is a config bug, not a
+        # second reset mechanism.
+        self.assertEqual(argv[-1], OPENOCD_ARGV[-1])
+        self.assertNotIn("target/rp2350.cfg", argv)
 
 
 class TestSwdReset(unittest.TestCase):
+    def test_argv_override_is_what_runs(self):
+        calls = []
+        def runner(argv, capture_output, text, timeout):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        ok, _ = swd_reset(runner=runner,
+                          argv=openocd_argv("platform/silabs/mg24-swd.cfg"))
+        self.assertTrue(ok)
+        self.assertEqual(calls[0][2], "platform/silabs/mg24-swd.cfg")
+
+    def test_argv_none_keeps_the_c6_argv(self):
+        """The C6 rig passes no --openocd-config and must be byte-for-byte
+        unaffected by the carrier hook."""
+        calls = []
+        def runner(argv, **kw):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        swd_reset(runner=runner, argv=None)
+        self.assertEqual(calls[0], OPENOCD_ARGV)
+
+
     def test_argv_and_success(self):
         calls = []
         def runner(argv, capture_output, text, timeout):
@@ -2858,6 +2912,33 @@ class TestStep28(unittest.TestCase):
         self.assertTrue(relink_called[0][0])
         self.assertTrue(swd_calls,
                         "step must reach swd_reset via ctx.swd_runner")
+
+    def test_context_argv_reaches_openocd(self):
+        """The carrier's openocd config is only useful if the step hands
+        ctx.swd_argv to swd_reset: a step that kept calling
+        swd_reset(ctx.swd_runner) alone would silently reset the C6 rig's
+        RP2350 target on every carrier."""
+        link = FakeLink(self._commands())
+        swd_calls = []
+
+        def fake_swd_runner(argv, **kw):
+            swd_calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def relink(action):
+            ok, detail = action()
+            if ok:
+                link.push_urcs(["+MTREADY"])
+            return ok, detail
+
+        ctx = fresh_ctx(link)
+        ctx.relink = relink
+        ctx.swd_runner = fake_swd_runner
+        ctx.swd_argv = openocd_argv("platform/silabs/mg24-swd.cfg")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_8_warm_reboot(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual(swd_calls[0], ctx.swd_argv)
 
     def test_relink_failure_aborts(self):
         link = FakeLink(self._commands())
