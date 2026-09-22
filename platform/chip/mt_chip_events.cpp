@@ -171,7 +171,20 @@ public:
              * later one until a reboot). The trade: if this close was the paused-session
              * variety and the manager re-advertises the same window, that re-open emits a
              * second 0 for one window. A logged, bounded duplicate beats an unbounded
-             * silence. Not reached in any bench run so far. */
+             * silence. Not reached in any bench run so far.
+             *
+             * One corner this trade does not cover: if an earlier
+             * OnCommissioningWindowClosed() already queued window_closed_check
+             * successfully and that item is still pending when a second call's
+             * ScheduleWork fails here, this synchronous clear makes the pending
+             * check's own s_window_evt_sent && !still_open guard read false when it
+             * finally runs, so that earlier, real close loses its +MTEVT:4 too, and
+             * silently, since window_closed_check's own no-op path logs nothing. That
+             * needs two ScheduleWork failures in a row, one queued and one refused,
+             * which is accepted here: two consecutive queue-full events on the CHIP
+             * task have never been observed, and the fix, a per-window token so the
+             * pending check could tell this failure is not about its own window, is
+             * machinery for a path no bench has reached. */
             s_window_evt_sent = false;
             ChipLogError(AppServer, "Hearth: +MTEVT:4 lost, ScheduleWork failed: %" CHIP_ERROR_FORMAT,
                          err.Format());
