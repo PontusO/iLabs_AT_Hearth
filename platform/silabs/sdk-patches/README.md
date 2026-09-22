@@ -22,6 +22,13 @@ under `sdk-patches/matter/` is silently skipped by `git add`. `matter_sdk/` is
 not ignored. Run `git check-ignore -v` on the file before adding a patch under
 any new directory name.
 
+**Since catalogue batch 1's task 2 (2026-09-22) there is a second tree:
+`extension/`, patches against the extension's own files, not its bundled
+`third_party/matter_sdk` checkout.** Same shape (`sdk-patches/extension/<name>.patch`
+plus its `.sha256`), applied the same way, one directory later in
+`sdk-prepare.sh`. "Why the extension tree and not `matter_sdk`" explains the
+split below.
+
 ## Why a script and not `west patch`
 
 There is no west workspace here. The Simplicity SDK and the Matter extension
@@ -93,13 +100,22 @@ passes a presence check: it configures, builds and measures cleanly while
 running code nobody reviewed, which is a worse failure than an unpatched tree
 because nothing looks wrong. The `.sha256` beside each patch protects the patch
 FILE in this repository; nothing else looks at the state of the tree it was
-applied to. So each patch carries a `HEARTH_<name>_PATCH_REV <n>` define next to
-its configuration macro, marked in place as downstream-only and to be dropped
-when upstreaming, and `HEARTH_EEM_PATCH_REV` in `toolchain.env` is the number
-this tree expects. Bump the two together when a patch is re-cut.
+applied to. So a patch that edits a file behind a guarded macro (`matter_sdk/`'s
+patches so far) carries a `HEARTH_<name>_PATCH_REV <n>` define next to that
+macro, marked in place as downstream-only and to be dropped when upstreaming;
+a patch that only adds a file with nothing to guard (see `extension/` below)
+is checked for presence instead, since there is no "older cut" of a file that
+either exists or does not. `HEARTH_SDK_PATCH_REV` in `toolchain.env` is the
+one number that stamps the WHOLE prepared tree, both directories together
+(named `HEARTH_EEM_PATCH_REV` before the `extension/` tree joined it on
+2026-09-22; renamed because it gates every patch, not the one it used to be
+named for). Bump it whenever any patch in either directory is added or
+re-cut, and keep a per-patch macro define in step with its own patch.
 
 Both branches were verified on 2026-09-18 by running them, not by reading the
-code. Three cases, against the real files:
+code (the transcript predates the rename; read `HEARTH_EEM_PATCH_REV` as
+`HEARTH_SDK_PATCH_REV` and "patch revision 2" as the revision this tree
+carried that day). Three cases, against the real files:
 
 ```
 $ bash -c 'source platform/silabs/toolchain.env; echo "source returned $?"'
@@ -127,10 +143,15 @@ The prepare itself also has a positive control, a `grep` for the marker in the
 tree it has just patched, so a patch that applied to the wrong place cannot
 write a stamp.
 
-Adding a patch means one more `.patch` and `.sha256` pair in
-`matter_sdk/`; `sdk-prepare.sh` loops over the directory. A patch with its own
-revision marker means one more variable in `toolchain.env` and one more clause
-in the gate.
+Adding a patch means one more `.patch` and `.sha256` pair in `matter_sdk/` or
+`extension/`; `sdk-prepare.sh` loops over each directory in turn (`matter_sdk/`
+first, `extension/` after, since the extension's own files can reference paths
+under `third_party/matter_sdk` that need to exist first, though neither
+current patch actually depends on the other). A patch with its own macro-guarded
+revision marker means one more `grep` clause in the gate; a presence-only patch
+means one more existence check. Either way, bump `HEARTH_SDK_PATCH_REV` in
+`toolchain.env`: it is the one number that has to change for a stale prepared
+tree to be refused, regardless of which directory changed.
 
 ## Regenerating a patch
 
@@ -147,8 +168,8 @@ diff -u "$MATTER_EXT_INSTALL/third_party/matter_sdk/$F" \
 and rewrite the `--- a/$F` / `+++ b/$F` header lines, which is what makes the
 result apply with `patch -p1 -d third_party/matter_sdk`. Keep the existing patch
 file's header above the `---` separator: it is the upstream commit message and
-is meant to be usable verbatim as a pull request description. **Bump
-`HEARTH_<name>_PATCH_REV` in the patch and `HEARTH_EEM_PATCH_REV` in
+is meant to be usable verbatim as a pull request description. **Bump this
+patch's own `HEARTH_<name>_PATCH_REV` define and `HEARTH_SDK_PATCH_REV` in
 `toolchain.env` together**, then refresh the hash from inside this directory, so
 the name in the checksum file stays a bare basename:
 
@@ -156,6 +177,35 @@ the name in the checksum file stays a bare basename:
 cd platform/silabs/sdk-patches/matter_sdk
 sha256sum <the patch file> > <the patch file>.sha256
 ```
+
+An `extension/` patch is regenerated the same way, against
+`$MATTER_EXT_ROOT` itself rather than `$MATTER_EXT_ROOT/third_party/matter_sdk`
+(so the diff and the rewritten header paths are relative to the extension
+root, e.g. `src/app/zap-templates/...`, and it applies with
+`patch -p1 -d "$MATTER_EXT_ROOT"`), and its hash lives beside it in
+`sdk-patches/extension/`. If the patch only adds a file (nothing to guard with
+a macro), there is no per-patch revision define to bump; bumping
+`HEARTH_SDK_PATCH_REV` is what makes a stale prepared tree get refused either
+way.
+
+## Why the extension tree and not `matter_sdk`
+
+Every patch here so far edits an existing file behind a macro that defaults to
+stock behaviour when unset, which is what makes `matter_sdk/`'s patches
+upstreamable and safe to leave applied indefinitely. The `extension/` tree
+holds a different shape of change: one that ADDS a file the extension itself
+is missing an equivalent of, in the extension's own ZAP template set
+(`src/app/zap-templates/`), which is Silicon Labs' own addition on top of the
+bundled `third_party/matter_sdk` checkout and is never touched for anything
+else this project patches. There is no meaningful "stock behaviour" for an
+added template to default to: either the header it produces exists, or the
+build that needs it does not link. So this tree gets its own directory rather
+than folding into `matter_sdk/`, for the same reason the two per-arm SDK
+patch directories stay separate from each other (moved independently, patched
+independently): `third_party/matter_sdk` and the extension's own tree are
+different trees with different provenance inside the same Conan package, and
+a future patch against one should never have to reason about the other's
+layout.
 
 ## The patches
 
@@ -200,3 +250,53 @@ shared patch would make one arm's SDK bump the other arm's problem.
 
 Not yet submitted upstream. The patch file's header is written as the pull
 request description it should become.
+
+### `extension/boolean-state-static-cluster-config.patch`
+
+`matter_boolean_state`'s `CodegenIntegration.cpp` unconditionally includes
+`app/static-cluster-config/BooleanState.h`, which has to declare
+`chip::app::Clusters::BooleanState::StaticApplicationConfig::kFixedClusterConfig`,
+an array whose length is read at compile time to size the cluster's
+per-endpoint server-instance pool. Nothing in this build's generation
+pipeline produced that header: the extension's own `app-templates.json` has
+exactly one entry that emits an `app/static-cluster-config/*.h` file
+(`static-cluster-config-Descriptor.zapt`, for `Descriptor` alone), and the
+small set of prebuilt headers the `matter_zap_include` component ships
+(`BasicInformation.h`, `GeneralCommissioning.h`, and a dozen more) covers only
+singleton root-node clusters that are always on endpoint 0 with a universal
+attribute set; `BooleanState` is neither. No `.slcp` in the whole extension
+tree references `matter_boolean_state`, so no Silicon Labs sample has ever
+exercised this path.
+
+The patch adds `static-cluster-config-BooleanState.zapt`, a close-to-verbatim
+copy of the Descriptor template (the cluster name swapped from `"Descriptor"`
+to `"Boolean State"`, the exact string ZAP uses internally for this cluster's
+`name` field, with the space; the `EndpointUniqueID` exclusion dropped, since
+BooleanState has no equivalent; the includes pointed at
+`clusters/BooleanState/...`; `FeatureBitmapType` set to
+`Clusters::StaticApplicationConfig::NoFeatureFlagsDefined`, because
+`clusters/BooleanState/Enums.h`'s `BooleanState` namespace is empty, no
+`Feature` enum), plus the matching `app-templates.json` entry (`"BooleanState
+static cluster configuration"`, output `app/static-cluster-config/BooleanState.h`).
+Verified against Hearth's nRF54L15 port, which generates this same header
+through NCS's own, different pipeline: for endpoint 240, both arms produce
+one fixed entry with the same six enabled attributes (the five globals plus
+`StateValue`), no commands, no features.
+
+The header is then generated by both of this repository's producers, exactly
+as `Descriptor.h` already is: slc's own `autogen/zap-generated/` at build
+time, and `fw/zap-regen.sh` into the committed
+`data_model/zap-generated/app/static-cluster-config/BooleanState.h`. No
+include path anywhere else changes, and `zap-regen.sh --check` remains the
+gate for the committed copy.
+
+This patch has no per-patch `HEARTH_<name>_PATCH_REV` define: it adds a file
+rather than editing one behind a guarded macro, so `sdk-prepare.sh` checks its
+evidence by presence (the template file exists, `app-templates.json` carries
+its entry) rather than by revision. `HEARTH_SDK_PATCH_REV` is what a stale
+prepared tree is refused against.
+
+Cut against the extension on 2026-09-22 (catalogue batch 1, task 2). Not yet
+submitted upstream (Silicon Labs does not publish this extension on GitHub
+for a pull request to target). The patch file's header is written as the
+upstream issue/PR description it should become if that changes.

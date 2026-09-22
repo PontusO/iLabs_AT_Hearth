@@ -1,0 +1,158 @@
+app: add the BooleanState static cluster configuration ZAP template
+
+Every "code-driven" application cluster's CodegenIntegration.cpp
+unconditionally includes <app/static-cluster-config/<Cluster>.h>, which must
+declare that cluster's StaticApplicationConfig::kFixedClusterConfig (the
+compile-time count and per-endpoint attribute/command list of every FIXED
+occurrence of the cluster). app-templates.json generates this header for
+exactly one cluster, Descriptor, via a dedicated
+templates/app/slc_compatibility/static-cluster-config-Descriptor.zapt; no
+other code-driven cluster has an equivalent template, and BooleanState is
+not in the small set of singleton root-node clusters
+(BasicInformation, GeneralCommissioning, etc.) the SDK ships a prebuilt
+header for in slc/component/sdk-content/zap/app/static-cluster-config/
+either, because those headers hard-code endpoint 0 and a universal
+attribute/command list that only holds for mandatory root clusters.
+
+A project enabling matter_boolean_state's server on any fixed endpoint
+therefore fails to link: boolean-state-server/CodegenIntegration.cpp:21
+"app/static-cluster-config/BooleanState.h: No such file or directory". No
+.slcp in this extension has ever enabled matter_boolean_state's server on a
+fixed endpoint, so nothing has hit this before.
+
+This patch adds static-cluster-config-BooleanState.zapt, a close-to-verbatim
+copy of the Descriptor template with the cluster name swapped, the
+Descriptor-specific EndpointUniqueID attribute exclusion dropped (BooleanState
+has no equivalent), the includes pointed at clusters/BooleanState/..., and
+FeatureBitmapType set to Clusters::StaticApplicationConfig::NoFeatureFlagsDefined
+(BooleanState declares no Feature enum: clusters/BooleanState/Enums.h's
+BooleanState namespace is empty), plus the matching app-templates.json entry.
+The generated header then has one entry per fixed endpoint that enables the
+cluster's server, exactly as Descriptor.h already does, produced by both
+generators (slc's own autogen at build time, and this repository's
+zap-regen.sh into its committed record), so zap-regen.sh --check remains the
+gate and no include path changes anywhere else.
+
+Verified against Hearth's nRF54L15 port, which builds against NCS's own
+Matter module and therefore generates this header through a different
+pipeline: the two arms' generated BooleanState.h for the same endpoint (240,
+in Hearth's data model) agree entry for entry (one fixed cluster, six
+enabled attributes: the five globals plus StateValue, no commands, no
+features).
+
+Not yet submitted upstream (Silicon Labs does not publish this extension on
+GitHub for a pull request to target). This patch file's header is written as
+the upstream issue/PR description it should become if that changes.
+
+--- a/src/app/zap-templates/app-templates.json
++++ b/src/app/zap-templates/app-templates.json
+@@ -301,6 +301,11 @@
+             "path": "templates/app/slc_compatibility/static-cluster-config-Descriptor.zapt",
+             "name": "Descriptor static cluster configuration",
+             "output": "app/static-cluster-config/Descriptor.h"
++        },
++        {
++            "path": "templates/app/slc_compatibility/static-cluster-config-BooleanState.zapt",
++            "name": "BooleanState static cluster configuration",
++            "output": "app/static-cluster-config/BooleanState.h"
+         }
+ 
+     ],
+--- /dev/null
++++ b/src/app/zap-templates/templates/app/slc_compatibility/static-cluster-config-BooleanState.zapt
+@@ -0,0 +1,95 @@
++// DO NOT EDIT - Generated file
++//
++// Application configuration for BooleanState based on EMBER configuration
++#pragma once
++
++#include <app/util/cluster-config.h>
++#include <clusters/BooleanState/AttributeIds.h>
++#include <clusters/BooleanState/CommandIds.h>
++#include <clusters/BooleanState/Enums.h>
++
++#include <array>
++
++namespace chip {
++namespace app {
++namespace Clusters {
++namespace BooleanState {
++namespace StaticApplicationConfig {
++namespace detail {
++{{#user_endpoints}}
++{{#user_clusters}}
++{{#if (is_str_equal name "Boolean State")}}
++{{#if (isServer side)}}
++{{#if enabled}}
++inline constexpr AttributeId kEndpoint{{../endpointId}}EnabledAttributes[] = {
++{{#user_cluster_attributes}}
++{{#if included}}
++    Attributes::{{asUpperCamelCase name}}::Id{{#unless @last}},{{/unless}}
++{{/if}}
++{{/user_cluster_attributes}}
++};
++{{/if}}
++{{/if}}
++{{/if}}
++{{/user_clusters}}
++{{/user_endpoints}}
++} // namespace detail
++
++using FeatureBitmapType = Clusters::StaticApplicationConfig::NoFeatureFlagsDefined;
++
++{{#zcl_clusters}}
++{{#if (is_str_equal name "Boolean State")}}
++inline constexpr std::array<Clusters::StaticApplicationConfig::ClusterConfiguration<FeatureBitmapType>, {{user_endpoint_count_by_cluster id "server"}}> kFixedClusterConfig = { {
++{{#user_endpoints}}
++{{#user_clusters}}
++{{#if (is_str_equal name "Boolean State")}}
++{{#if (isServer side)}}
++{{#if enabled}}
++    {
++        .endpointNumber    = {{../endpointId}},
++        .featureMap        = BitFlags<FeatureBitmapType>{},
++        .enabledAttributes = Span<const AttributeId>(detail::kEndpoint{{../endpointId}}EnabledAttributes),
++        .enabledCommands   = Span<const CommandId>(),
++    },
++{{/if}}
++{{/if}}
++{{/if}}
++{{/user_clusters}}
++{{/user_endpoints}}
++} };
++{{/if}}
++{{/zcl_clusters}}
++
++// If a specific attribute is supported at all across all endpoint static instantiations
++inline constexpr bool IsAttributeEnabledOnSomeEndpoint(AttributeId attributeId)
++{
++    switch (attributeId)
++    {
++{{#zcl_clusters}}
++{{#if (is_str_equal name "Boolean State")}}
++{{#zcl_attributes_server}}
++    case Attributes::{{asUpperCamelCase name}}::Id:
++{{/zcl_attributes_server}}
++{{/if}}
++{{/zcl_clusters}}
++        return true;
++    default:
++        return false;
++    }
++}
++
++// If a specific command is supported at all across all endpoint static instantiations
++inline constexpr bool IsCommandEnabledOnSomeEndpoint(CommandId commandId)
++{
++    switch (commandId)
++    {
++    default:
++        return false;
++    }
++}
++
++} // namespace StaticApplicationConfig
++} // namespace BooleanState
++} // namespace Clusters
++} // namespace app
++} // namespace chip
