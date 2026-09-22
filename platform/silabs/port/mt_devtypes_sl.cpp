@@ -1207,10 +1207,10 @@ attr_slot *block_slots(const dyn_endpoint &d)
 
 constexpr size_t kMax2(size_t a, size_t b) { return a > b ? a : b; }
 
-/* Identify rides on both device types; Descriptor contributes nothing.
+/* Identify rides on all fourteen device types; Descriptor contributes nothing.
  * MT_COUNT over an attr list counts DECLARED entries plus the LIST_END
  * ClusterRevision, which over-counts a list whose metadata-only members get
- * no slot; neither list here has one, so these counts are exact, and an
+ * no slot; no list here has one, so these counts are exact, and an
  * over-count would only ever make the asserted floor MORE conservative. */
 constexpr size_t kIdentifySlots = MT_COUNT(identifyAttrs);
 /* The widest endpoint is the one with the most slots: the dimmable light and

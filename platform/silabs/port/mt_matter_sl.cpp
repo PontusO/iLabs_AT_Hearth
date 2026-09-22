@@ -372,9 +372,14 @@ extern "C" void mt_matter_record_endpoint(uint32_t devtype, uint16_t ep_id, uint
  * Nasty because +MTERR:5 is ALSO the honest answer for a null nullable value
  * (mt_matter.h:178-181), so a tester cannot tell the two apart.
  *
- * NOT ONE alias type is declared by this image's two device types: the light's
- * and the sensor's attribute lists are BOOLEAN, ENUM8, INT16U, INT16S and
- * BITMAP32 throughout (port/mt_devtypes_sl.cpp). The normalisation is carried
+ * NOT ONE alias type is declared by this image's fourteen device types: every
+ * attribute list in port/mt_devtypes_sl.cpp is BOOLEAN, ENUM8, BITMAP8,
+ * BITMAP32, INT8U, INT16U or INT16S, and so is the ClusterRevision row that
+ * ..._LIST_END() appends (INT16U). BITMAP8 arrives with catalogue batch 1
+ * (LevelControl Options, OccupancySensing Occupancy and
+ * OccupancySensorTypeBitmap) and INT8U with the same batch (LevelControl
+ * CurrentLevel, MinLevel, MaxLevel, OnLevel and StartUpCurrentLevel); both are
+ * base types, so neither changes the claim. The normalisation is carried
  * anyway, ahead of need, because it is one line and because the batch that
  * adds the first thermostat setpoint or fan percentage would otherwise
  * reproduce the nRF's bug here from scratch. Do not "simplify" it away.
