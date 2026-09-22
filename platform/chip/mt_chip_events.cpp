@@ -165,11 +165,14 @@ public:
             /* The event queue is full, and there is no fallback to degrade
              * to: every path into this callback runs before ResetState(), so
              * an immediate re-query here would answer "still open" and emit
-             * nothing at all. This window's +MTEVT:4 is therefore lost, and
-             * s_window_evt_sent stays set, which also suppresses the next
-             * window's +MTEVT:0 until a reboot. Say that on the console
-             * rather than dropping it silently. Not reached in any bench run
-             * so far. */
+             * nothing at all. This window's +MTEVT:4 is therefore lost. s_window_evt_sent
+             * is cleared so the NEXT window's +MTEVT:0 is not lost with it (the pair rule
+             * is already broken for this window; leaving the flag set would break every
+             * later one until a reboot). The trade: if this close was the paused-session
+             * variety and the manager re-advertises the same window, that re-open emits a
+             * second 0 for one window. A logged, bounded duplicate beats an unbounded
+             * silence. Not reached in any bench run so far. */
+            s_window_evt_sent = false;
             ChipLogError(AppServer, "Hearth: +MTEVT:4 lost, ScheduleWork failed: %" CHIP_ERROR_FORMAT,
                          err.Format());
         }
@@ -272,6 +275,10 @@ void on_device_event(const ChipDeviceEvent * event, intptr_t)
         mt_at_event(MT_EVT_WIFI_CONNECTIVITY,
                     event->WiFiConnectivityChange.Result == kConnectivity_Established ? "1" : "0");
         break;
+    /* Bit 11 is as unreachable on a Thread image as bit 10: in this CHIP tree
+     * kInternetConnectivityChange is posted only by the WiFi and Ethernet
+     * platforms (grep InternetConnectivityChange src/platform/), never by the
+     * OpenThread one. Kept so the mapping stays one-to-one with the C6's. */
     case DeviceEventType::kInternetConnectivityChange:
         mt_at_event(MT_EVT_INTERNET_CONNECTIVITY,
                     event->InternetConnectivityChange.IPv4 == kConnectivity_Established ? "1" : "0");
@@ -380,9 +387,16 @@ CHIP_ERROR mt_chip_events_register(void)
     {
         return CHIP_NO_ERROR;
     }
-    ReturnErrorOnFailure(PlatformMgr().AddEventHandler(on_device_event, 0));
+    /* Order matters on a partial failure. SetAppDelegate() is a plain
+     * assignment and AddFabricDelegate() walks its own linked list first and
+     * answers CHIP_NO_ERROR without re-adding a delegate already on it, so a
+     * retry after either fails is harmless; AddEventHandler() PREPENDS
+     * unconditionally, so a second call after a failure below it would
+     * dispatch every device event twice. It therefore goes last, and the
+     * flag is set the moment it succeeds. */
     Server::GetInstance().GetCommissioningWindowManager().SetAppDelegate(&s_window_delegate);
     ReturnErrorOnFailure(Server::GetInstance().GetFabricTable().AddFabricDelegate(&s_fabric_delegate));
+    ReturnErrorOnFailure(PlatformMgr().AddEventHandler(on_device_event, 0));
     s_registered = true;
     return CHIP_NO_ERROR;
 }

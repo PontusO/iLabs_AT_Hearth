@@ -52,6 +52,11 @@
 OTCTL=/mnt/f86c891c-33c6-4bb7-afe1-2c8846257177/src/git/ot-br-posix/build/otbr/third_party/openthread/repo/src/posix/ot-ctl
 JOURNAL_UNIT=otbr-agent
 LIFETIME=${1:-180}
+case "$LIFETIME" in
+  ''|*[!0-9]*)
+    echo "usage: $0 [lifetime-seconds]  (got '$LIFETIME'; a non-number would make the shim exit at once, publishing nothing, which reads exactly like a fixed defect)" >&2
+    exit 2 ;;
+esac
 PUBPID=""
 LAST=""
 

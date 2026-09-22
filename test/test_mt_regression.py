@@ -1670,6 +1670,80 @@ class TestPhase3Gate(unittest.TestCase):
         self.assertEqual(r2, r3)
 
 
+class TestTransportGateDoorChecks(unittest.TestCase):
+    """Task 1 (catalogue batch 1, 2026-09-22): the deferred minors from the
+    parity round's final review. A typo in --openocd-config used to surface
+    deep inside a destructive phase instead of at the door, and the Thread
+    branch's D-Bus fallback message did not say which source (ot-ctl or
+    busctl) answered the role it is complaining about."""
+
+    def _args(self, **kw):
+        base = {"ssid": None, "psk": None, "transport": "THREAD",
+                "dataset": "deadbeef", "ot_ctl": "/fake/ot-ctl",
+                "openocd_config": None}
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    @staticmethod
+    def _chip(d):
+        runner = FakeChipRunner(
+            [(0, fixture("chiptool_parse_setup_payload.txt"))])
+        binary = os.path.join(d, "chip-tool")
+        open(binary, "w").close()
+        os.chmod(binary, 0o755)
+        return ChipTool(binary, d, runner=runner)
+
+    @staticmethod
+    def _link_thread():
+        return FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+
+    @staticmethod
+    def _otctl_ok(cmd_args, binary):
+        if cmd_args == ["state"]:
+            return 0, "leader\r\nDone\r\n"
+        if cmd_args == ["dataset", "active", "-x"]:
+            return 0, fixture("otctl_dataset_active.txt")
+        raise AssertionError("unexpected ot-ctl call: %r" % (cmd_args,))
+
+    def test_missing_openocd_config_is_a_door_message(self):
+        """A typo in --openocd-config used to surface at step 2.8."""
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args(openocd_config="/nonexistent/carrier.cfg")
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/bin/openocd"):
+                problem, _, _ = _transport_gate(
+                    self._chip(d), args, self._link_thread(), self._otctl_ok)
+        self.assertIn("--openocd-config /nonexistent/carrier.cfg does not exist",
+                      problem)
+
+    def test_role_message_names_busctl_when_dbus_answered(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args()
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/bin/x"):
+                problem, _, _ = _transport_gate(
+                    self._chip(d), args, self._link_thread(),
+                    otctl=lambda a, b: (1, "connect session failed"),
+                    dbus=lambda prop: (0, '{"type":"s","data":"detached"}'))
+        self.assertIn("busctl DeviceRole: detached", problem)
+        self.assertNotIn("ot-ctl state:", problem)
+
+    def test_busctl_absent_is_a_gate_message_not_link_lost(self):
+        """Only when the REAL D-Bus route is in use: a fake dbus seam must
+        not be gated on the host's PATH."""
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args()
+
+            def which(name):
+                return None if name == "busctl" else "/usr/bin/" + name
+
+            with mock.patch("mt_regression.shutil.which", side_effect=which):
+                problem, _, _ = _transport_gate(
+                    self._chip(d), args, self._link_thread(),
+                    otctl=lambda a, b: (1, "connect session failed"))
+        self.assertIn("busctl is not on PATH", problem)
+
+
 from mt_regression import (swd_reset, openocd_argv, OPENOCD_ARGV,
                            operator_power_cycle)
 
@@ -1751,7 +1825,6 @@ class TestSwdReset(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         swd_reset(runner=runner, argv=None)
         self.assertEqual(calls[0], OPENOCD_ARGV)
-
 
     def test_argv_and_success(self):
         calls = []

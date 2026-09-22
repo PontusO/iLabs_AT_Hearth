@@ -6270,6 +6270,11 @@ def _transport_gate(chip, args, link, otctl, dbus=otbr_dbus_property):
     if shutil.which("openocd") is None:
         return ("openocd not on PATH: the 2.8 warm reboot resets the "
                 "RP2350 over SWD (see graph N22)", None, None)
+    cfg = getattr(args, "openocd_config", None)
+    if cfg and not os.path.isfile(cfg):
+        return ("--openocd-config %s does not exist; the first SWD reset "
+                "is step 2.8, deep in a destructive phase, so this is "
+                "checked at the door" % cfg, None, None)
     transport = getattr(args, "transport", None)
     if transport is None:
         res, lines = cmd_retry(link, "AT+MTNET?")
@@ -6283,6 +6288,10 @@ def _transport_gate(chip, args, link, otctl, dbus=otbr_dbus_property):
     if transport == "THREAD":
         rc, out = otctl(["state"], args.ot_ctl)
         if rc != 0:
+            if dbus is otbr_dbus_property and shutil.which("busctl") is None:
+                return ("otbr-agent's control socket is closed to this user "
+                        "(ot-ctl state failed) and busctl is not on PATH, so "
+                        "the D-Bus fallback cannot run either", transport, None)
             drc, dout = dbus("DeviceRole")
             if drc != 0:
                 return ("otbr-agent is not answering (ot-ctl state "
@@ -6291,13 +6300,15 @@ def _transport_gate(chip, args, link, otctl, dbus=otbr_dbus_property):
                         "required); D-Bus DeviceRole also failed: %s"
                         % dout, transport, None)
             role = role_from_dbus_json(dout) or "<empty>"
+            role_source = "busctl DeviceRole"
         else:
             lines = (out or "").strip().splitlines()
             role = (lines[0] if lines else "<empty>").strip().lstrip("> ")
+            role_source = "ot-ctl state"
         if role not in ("leader", "router", "child"):
-            return ("the Thread network is down (ot-ctl state: %s); "
-                    "bring it up before a Thread phase 2 run" % role,
-                    transport, None)
+            return ("the Thread network is down (%s: %s); "
+                    "bring it up before a Thread phase 2 run"
+                    % (role_source, role), transport, None)
         dataset = getattr(args, "dataset", None)
         if not dataset:
             rc, out = otctl(["dataset", "active", "-x"], args.ot_ctl)
