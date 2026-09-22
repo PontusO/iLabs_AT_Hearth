@@ -36,6 +36,8 @@
  *   the compiler-checked floor         nRF 5273-5978  recast, this catalogue
  *   the seed table                     nRF 5979-6889  whole, verbatim
  *   seed_slots()                       nRF 6894-7005  whole but the quiet table
+ *   the ember cluster init hook        nRF 7006-7051  the pattern, for
+ *                                                     LevelControl not DoorLock
  *   mt_dyn_attr_slot()                 nRF 7052-7069  whole
  *   the mt_devtypes.h quartet          nRF 7189-8413  the fourteen ported types
  *   the ember external-attribute hooks nRF 8415-8451  whole
@@ -86,6 +88,7 @@
  */
 
 #include <app/util/attribute-storage.h>
+#include <app-common/zap-generated/callback.h>
 #include <app-common/zap-generated/ids/Attributes.h>
 #include <app-common/zap-generated/ids/Clusters.h>
 #include <app-common/zap-generated/ids/Commands.h>
@@ -2383,6 +2386,103 @@ void seed_slots(dyn_endpoint *d)
 }
 
 } /* namespace */
+
+/* ---- the ember cluster init hook (nRF 7006-7051) ---------------------- */
+
+/*
+ * Strong override of the generated weak stub in
+ * zap-generated/app/callback-stub.cpp:65. THE ONE INITIALISATION A DYNAMIC
+ * ENDPOINT DOES NOT GET FOR FREE, and catalogue batch 1's bench proof is what
+ * found it: every MoveToLevel on a dimmable light or plug was clamped to 0.
+ *
+ * THE MECHANISM, because it is the same trap the occupancy sensor comment
+ * above describes and the two must be read together. level-control.cpp keeps a
+ * private EmberAfLevelControlState per endpoint in stateTable, sized
+ * MATTER_DM_LEVEL_CONTROL_CLUSTER_SERVER_ENDPOINT_COUNT +
+ * CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT, so a dynamic endpoint does get a
+ * slot and getState() answers non-null. The ONLY writer of that struct's
+ * minLevel and maxLevel is emberAfLevelControlClusterServerInitCallback()
+ * (level-control.cpp:1465), and that is a per-cluster INIT FUNCTION, reached
+ * through the "functions" array on EmberAfCluster that DECLARE_DYNAMIC_CLUSTER
+ * hardcodes to NULL. So the struct kept its static zero fill, and
+ * moveToLevelHandler()'s `if (state->maxLevel <= level)` made every target 0,
+ * with the endpoint's own MinLevel and MaxLevel attributes reading 1 and 254
+ * correctly over the wire the whole time: those are ember attributes in this
+ * file's arena, the state struct is a second, private copy.
+ *
+ * OccupancySensing survives the identical gap because its seed row writes
+ * ATTRIBUTES and ember serves them. LevelControl cannot, because the value
+ * that decides the move is not an attribute.
+ *
+ * THE HOOK. attribute-storage.cpp:486 calls emberAfClusterInitCallback() for
+ * every cluster of every endpoint, dynamic ones included, one line before it
+ * looks for the functions array it will not find. The generated
+ * zap-generated/app/cluster-init-callback.cpp:49-50 dispatches LevelControl's
+ * to the weak emberAfLevelControlClusterInitCallback(EndpointId) below. That
+ * is the hook an application is expected to define, and it is exactly the one
+ * the nRF arm uses for its DoorLock init (mt_devtypes_zephyr.cpp 7006-7051),
+ * so this is the arms' shared pattern rather than a Silabs workaround.
+ *
+ * ENDPOINT 240 RETURNS AT ONCE. The catalogue endpoint is ZAP-declared, so
+ * endpoint_config.h wires it a real functions array and
+ * attribute-storage.cpp:487-491 runs the server init for it on the next line.
+ * Calling it here as well would run it twice for no gain, and the second run
+ * would re-apply the StartUp behaviour to an endpoint that has already applied
+ * it.
+ *
+ * THE GENERIC ALTERNATIVE IS NOT TAKEN. mt_devtype_create() could walk every
+ * created endpoint's cluster list and call each cluster's server init after
+ * emberAfSetDynamicEndpoint() returns, which would cover every future
+ * cluster at once. It is not done, for the reason this file gives for every
+ * other "carried ahead of need" decision in reverse: a server init is not a
+ * uniform thing. Some read a Delegate this port never sets (calling those is
+ * a null dereference, which is the chime's disease on the C6), some register
+ * scene handlers, some are already run by a code-driven path, and there is no
+ * table that says which. One override per cluster that provably needs one,
+ * each with the evidence beside it, is the form that cannot go wrong quietly.
+ * The batch that ports a second such cluster adds a second function here.
+ *
+ * WHAT IT READS, and why the seeds are already there. The server init reads
+ * MinLevel (seed 0x01), MaxLevel (seed 0xFE), the FeatureMap's Lighting bit
+ * (seed 0x03, so the lighting clamps to 0x01 and 0xFE apply and change
+ * nothing), CurrentLevel (seed 0xFE) and StartUpCurrentLevel (seed 0xFF, the
+ * null sentinel). Every one of those is in place before this runs:
+ * mt_devtype_create() calls seed_slots() and sets d.used BEFORE
+ * emberAfSetDynamicEndpoint(), precisely so the cluster inits can read
+ * attributes straight back through the external-storage callbacks. The
+ * comment at that call site says so; this function is the first caller that
+ * depends on it.
+ *
+ * WHAT IT WRITES, and why no +MTATTR fires. Our attribute rows are all
+ * EXTERNAL_STORAGE, so emberAfIsKnownVolatileAttribute() is false for both
+ * CurrentLevel and StartUpCurrentLevel (util.cpp:153-162 returns
+ * !IsAutomaticallyPersisted() && !IsExternal()) and the StartUp block DOES
+ * run. StartUpCurrentLevel is null, which the spec reads as "keep the previous
+ * value", so the block writes CurrentLevel back as the 0xFE it just read; the
+ * final min/max clamp then finds 254 inside [1, 254] and writes nothing more.
+ * The seeds were chosen to agree with the init for exactly this reason. And
+ * even that one same-value write cannot raise a URC: it happens inside
+ * emberAfSetDynamicEndpoint() during the boot rebuild, before mt_at_start()
+ * sets s_at_up, and mt_at_urc() drops anything raised before then.
+ *
+ * ON/OFF NEEDS NO EQUIVALENT, and that is a finding, not an omission.
+ * emberAfOnOffClusterServerInitCallback() is one line,
+ * OnOffServer::initOnOffServer(), whose whole body is the StartUpOnOff
+ * power-up behaviour (on-off-server.cpp:492-537). It caches nothing: OnOff,
+ * OnTime, OffWaitTime and GlobalSceneControl are all ember attributes this
+ * file declares, so every command handler reads the same bytes the AT surface
+ * does. Our StartUpOnOff seed is 0xFF, the null that means "previous value",
+ * so the init would be a no-op even if it ran. The on/off light has passed
+ * the harness Phase 2 control rows since round 2 task 5 without it, which is
+ * the empirical half of the same statement.
+ */
+void emberAfLevelControlClusterInitCallback(EndpointId endpoint)
+{
+    if (endpoint == kCatalogueEndpointId) {
+        return;
+    }
+    emberAfLevelControlClusterServerInitCallback(endpoint);
+}
 
 /* nRF 7052-7069. Contract, including the locking rules, in mt_dyn_store.h. */
 bool mt_dyn_attr_slot(EndpointId ep, ClusterId cluster, AttributeId attr, uint8_t **data,
