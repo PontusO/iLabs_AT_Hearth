@@ -1026,6 +1026,7 @@ index, and a round that changes one arm finds the other through it.
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the endpoint block arena and its sizing | `mt_devtypes_zephyr.cpp` 4659-5978 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the seed table and `seed_slots()` | `mt_devtypes_zephyr.cpp` 5979-7005 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| the ember cluster init hook | `mt_devtypes_zephyr.cpp` 7006-7051 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 (fix round 2, B525) |
 | `mt_dyn_attr_slot()` | `mt_devtypes_zephyr.cpp` 7052-7069 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the `mt_devtypes.h` quartet | `mt_devtypes_zephyr.cpp` 7189-8413 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the ember external-attribute hooks | `mt_devtypes_zephyr.cpp` 8415-8451 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
@@ -1386,12 +1387,14 @@ Three consequences of that policy are worth stating out loud:
 - **The floor under the arena sizing is STRONGER here than on the nRF**, and
   deliberately so. The nRF demands room for eight of its widest uncapped
   device type, because sizing for sixteen of its heaviest is a trade it
-  declined. This catalogue's widest block is the on/off light's 192 B, so the
-  arena holds `kServiceableEndpoints` of it in 3,072 B and the promise is
-  "every composition this build accepts, it can build". The first batch that
-  adds a wider type fails that assertion and has to choose, in the open,
-  between raising `HEARTH_EP_ARENA_BYTES` and dropping to the nRF's floor of
-  eight.
+  declined. This catalogue's widest block was the on/off light's 192 B at
+  round 2, when the arena held `kServiceableEndpoints` of it in 3,072 B and
+  the promise was "every composition this build accepts, it can build".
+  Catalogue batch 1 was the first batch to add a wider type (the dimmable
+  light and plug, 336 B): rather than dropping to the nRF's floor of eight,
+  it kept the strong promise by raising `HEARTH_EP_ARENA_BYTES` to 5,376 B
+  (the ruling of 2026-09-22). See "Catalogue batch 1" under "Measured" for
+  the sizing table.
 
 Four parts of the nRF's device-type side are **absent rather than reduced**,
 each because every consumer it has belongs to an unported device type: the
@@ -4664,7 +4667,7 @@ not a regression against the nRF arm.
 
 | Open item | Owner |
 |---|---|
-| **This branch has not been rebased onto `dev/fota-firmware`**, which is where the user ruled it lands (graph **DE484**). Against the merge base `1842af3` that branch adds four declarations to `core/include/mt_matter.h` (`mt_matter_ota_set_mode`, `mt_matter_ota_block_acked`, `mt_matter_ota_staged`, `mt_matter_swver_set`), which `port/mt_matter_stub.c` has to answer or `check_decls.py` reads 61/65 and the image does not link; it adds `core/mt/mt_ota.c` to `core/sources.cmake`, which `hearth.slcp` has to list or `check_slcp_sources.py` fails; and it edits `test/host/Makefile`'s `TESTS` and its `run:` recipe, both of which this branch also edits (`run: all boundary silabs-stubs`), so that one is a textual conflict whose resolution is to keep both sides | **the rebase, before the first batch plan**. None of the three is discovered at merge time: each has a check on this branch that names it |
+| **This branch has not been rebased onto `dev/fota-firmware`**, which is where the user ruled it lands (graph **DE484**). Against the merge base `1842af3` that branch adds four declarations to `core/include/mt_matter.h` (`mt_matter_ota_set_mode`, `mt_matter_ota_block_acked`, `mt_matter_ota_staged`, `mt_matter_swver_set`), which `port/mt_matter_stub.c` has to answer or `check_decls.py` reads 61/65 and the image does not link; it adds `core/mt/mt_ota.c` to `core/sources.cmake`, which `hearth.slcp` has to list or `check_slcp_sources.py` fails; and it edits `test/host/Makefile`'s `TESTS` and its `run:` recipe, both of which this branch also edits (`run: all boundary silabs-stubs`), so that one is a textual conflict whose resolution is to keep both sides | **the user's call; the batch rounds continue on this branch by the 2026-09-18 ruling (DE484)**. None of the three is discovered at merge time: each has a check on this branch that names it. This round's own forecast: the branch carries seventeen pre-existing conflict hunks against `dev/fota-firmware` in four files (`platform/nrf54l15/CMakeLists.txt`, `test/host/Makefile`, `test/mt_regression.py`, `test/test_mt_regression.py`), none of them in this round's own hunks; once the rebase lands, `_transport_gate`'s two new door checks also gate `phase4_gate` (safe, both default through `getattr`); the twenty harness names `test/mt_catalogue_proof.py` imports all exist on that branch; and the ARCHITECTURE.md 8.x decision log still owes an entry for four MG24 rounds |
 
 ### Still owned elsewhere
 
