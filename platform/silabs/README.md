@@ -1012,6 +1012,15 @@ index, and a round that changes one arm finds the other through it.
 | shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| dimmable light (0x0101) | `mt_devtypes_zephyr.cpp` 349-387 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
+| boolean-state sensors (0x0015, 0x0044, 0x0041, 0x0043) | `mt_devtypes_zephyr.cpp` 417-479 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
+| occupancy sensor (0x0107) | `mt_devtypes_zephyr.cpp` 480-538 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
+| humidity sensor (0x0307) | `mt_devtypes_zephyr.cpp` 539-563 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
+| pressure sensor (0x0305) | `mt_devtypes_zephyr.cpp` 564-588 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
+| light (illuminance) sensor (0x0106) | `mt_devtypes_zephyr.cpp` 589-620 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
+| flow sensor (0x0306) | `mt_devtypes_zephyr.cpp` 621-644 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
+| on/off plug-in unit (0x010A) | `mt_devtypes_zephyr.cpp` 645-670 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
+| dimmable plug-in unit (0x010B) | `mt_devtypes_zephyr.cpp` 700-721 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
 | the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |

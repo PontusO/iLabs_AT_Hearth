@@ -15,16 +15,29 @@
  *   shared cluster building blocks     nRF  276-320   whole
  *   on/off light (0x0100)              nRF  321-348   whole
  *   temperature sensor (0x0302)        nRF  388-416   whole
+ *   dimmable light (0x0101)            nRF  349-387   whole
+ *   boolean-state sensors: contact
+ *     (0x0015), rain (0x0044), water
+ *     freeze (0x0041), water leak
+ *     (0x0043)                         nRF  417-479   whole
+ *   occupancy sensor (0x0107)          nRF  480-538   whole
+ *   humidity sensor (0x0307)           nRF  539-563   whole
+ *   pressure sensor (0x0305)           nRF  564-588   whole
+ *   light (illuminance) sensor
+ *     (0x0106)                         nRF  589-620   whole
+ *   flow sensor (0x0306)               nRF  621-644   whole
+ *   on/off plug-in unit (0x010A)       nRF  645-670   whole
+ *   dimmable plug-in unit (0x010B)     nRF  700-721   whole
  *   the parenting policy               nRF 3325-3428  whole (predicate + shape struct)
- *   the registry                       nRF 4402-4641  all 52 rows' identity, two
- *                                                     rows' cluster sets
+ *   the registry                       nRF 4402-4641  all 52 rows' identity,
+ *                                                     fourteen rows' cluster sets
  *   the external attribute store       nRF 4642-4658  whole
  *   the endpoint block arena           nRF 4659-5272  on a bump arena
  *   the compiler-checked floor         nRF 5273-5978  recast, this catalogue
  *   the seed table                     nRF 5979-6889  whole, verbatim
  *   seed_slots()                       nRF 6894-7005  whole but the quiet table
  *   mt_dyn_attr_slot()                 nRF 7052-7069  whole
- *   the mt_devtypes.h quartet          nRF 7189-8413  the two ported types
+ *   the mt_devtypes.h quartet          nRF 7189-8413  the fourteen ported types
  *   the ember external-attribute hooks nRF 8415-8451  whole
  *
  * THE REGISTRY POLICY OF THIS ROUND, stated once here because it is what
@@ -151,9 +164,9 @@ static_assert(kServiceableEndpoints <= MT_COMP_MAX_ENDPOINTS,
  * all times whatever the host composed, and paid for twice, since .data also
  * carries an initialiser image in flash. The nRF arm measured 8,740 B of RAM
  * across 120 symbols for its 41 device types (2026-08-30, at 6c31f09) before
- * making the change; this file starts with two device types and therefore
- * saves very little today, and carries the macros anyway so the batches that
- * grow the catalogue do not have to rediscover the problem. The ZAP-generated
+ * making the change; this file's catalogue is fourteen device types deep and
+ * therefore saves little today, and carries the macros anyway so the batches
+ * that grow the catalogue do not have to rediscover the problem. The ZAP-generated
  * equivalents for the two fixed endpoints are already const and sit in
  * .rodata, so this is a declaration accident, not a requirement.
  *
@@ -313,6 +326,311 @@ HEARTH_DECLARE_CONST_ENDPOINT(temperatureSensorEndpoint, temperatureSensorCluste
  * (nRF fix round 2, M1). */
 constexpr EmberAfDeviceType kTemperatureSensorTypes[] = { { 0x0302, 3 } };
 
+/* ---- dimmable light (0x0101) (nRF 349-387) ---------------------------- */
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(levelAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::CurrentLevel::Id, INT8U, 1,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::RemainingTime::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::MinLevel::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::MaxLevel::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::Options::Id, BITMAP8, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::OnLevel::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::StartUpCurrentLevel::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE) | ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(LevelControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kLevelIncoming[] = {
+    LevelControl::Commands::MoveToLevel::Id,          LevelControl::Commands::Move::Id,
+    LevelControl::Commands::Step::Id,                 LevelControl::Commands::Stop::Id,
+    LevelControl::Commands::MoveToLevelWithOnOff::Id, LevelControl::Commands::MoveWithOnOff::Id,
+    LevelControl::Commands::StepWithOnOff::Id,        LevelControl::Commands::StopWithOnOff::Id,
+    kInvalidCommandId
+};
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(dimmableLightClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(dimmableLightEndpoint, dimmableLightClusters);
+
+constexpr EmberAfDeviceType kDimmableLightTypes[] = { { 0x0101, 3 } };
+
+/* ---- boolean-state sensors: contact (0x0015), rain (0x0044), water
+ * freeze (0x0041), water leak (0x0043) (nRF 417-479) -------------------- */
+
+/*
+ * BooleanState (0x0045) is one of the clusters CHIP has migrated to the
+ * newer code-driven ServerClusterInterface path
+ * (src/app/clusters/boolean-state-server/CodegenIntegration.cpp):
+ * MatterBooleanStateClusterInitCallback fires for every endpoint carrying
+ * the cluster, dynamic ones included (its instance pool is explicitly sized
+ * kFixedClusterCount + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT), and
+ * constructs a BooleanStateCluster object whose ReadAttribute() answers
+ * StateValue from its own mStateValue member, never consulting this arena:
+ * the Descriptor situation above, but for a value the host is meant to
+ * update live rather than a static list. The nRF arm confirmed the split
+ * both on the bench (an AT+MTATTR write of StateValue=1 fired its URC, but
+ * chip-tool still read FALSE) and mechanically (CodegenDataModelProvider_
+ * Read.cpp:116 checks that registry before ember's external-storage
+ * fallback is ever consulted).
+ *
+ * The split is BRIDGED on this arm too, not left as a gap.
+ * mt_matter_attr_read/write (port/mt_matter_sl.cpp) call the classic
+ * emberAfReadAttribute/WriteAttribute path and always reach this arena, so
+ * AT+MTATTR against StateValue reads and writes correctly here;
+ * MatterPostAttributeChangeCallback additionally looks up the registered
+ * BooleanStateCluster object via BooleanState::FindClusterOnEndpoint() and
+ * calls SetStateValue() on it, so a host write also reaches a real Matter
+ * controller's read AND emits the cluster's StateChange event. See the
+ * comment at that call site for the full mechanism and why it cannot
+ * recurse. Declared here regardless: the AT+MTATTR contract must still
+ * resolve the attribute against this arena, and every other cluster in this
+ * file besides Descriptor is a plain ember external-storage cluster with no
+ * such split.
+ */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(booleanStateAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(BooleanState::Attributes::StateValue::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(BooleanState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+/* Contact/Rain/Water Freeze/Water Leak all compose to the exact same cluster
+ * set (BooleanState + Identify + Descriptor, mandatory clusters only), so one
+ * cluster list and one EmberAfEndpointType serve all four: the same "one
+ * metadata array per cluster, shared by every endpoint type that carries that
+ * cluster" principle stated above for onOffAttrs, extended here to the whole
+ * cluster list since the whole composition, not just one cluster, is identical
+ * across these four. Only the EmberAfDeviceType (id, revision) differs per
+ * device type, and that is what s_registry keys off. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(booleanStateSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(BooleanState::Id, booleanStateAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(booleanStateSensorEndpoint, booleanStateSensorClusters);
+
+constexpr EmberAfDeviceType kContactSensorTypes[] = { { 0x0015, 2 } };
+constexpr EmberAfDeviceType kRainSensorTypes[] = { { 0x0044, 1 } };
+constexpr EmberAfDeviceType kWaterFreezeDetectorTypes[] = { { 0x0041, 1 } };
+constexpr EmberAfDeviceType kWaterLeakDetectorTypes[] = { { 0x0043, 1 } };
+
+/* ---- occupancy sensor (0x0107) (nRF 480-538) -------------------------- */
+
+/*
+ * Occupancy, OccupancySensorType and OccupancySensorTypeBitmap are none of
+ * them nullable (controller-clusters.matter: plain, non-nullable
+ * attributes).
+ *
+ * THE INIT CALLBACK DOES NOT RUN FOR A DYNAMIC ENDPOINT, which is why the
+ * seed row is the only writer of OccupancySensorType and
+ * OccupancySensorTypeBitmap. emberAfOccupancySensingClusterServerInitCallback
+ * (occupancy-sensor-server.cpp) is reached only through the per-cluster
+ * "functions" array on EmberAfCluster (MATTER_CLUSTER_FLAG_INIT_FUNCTION,
+ * checked by emberAfFindClusterFunction() in attribute-storage.cpp's
+ * initializeEndpoint()). endpoint_config.h wires that array
+ * (chipFuncArrayOccupancySensingServer) for the STATIC, ZAP-declared cluster
+ * on endpoint 240 only; DECLARE_DYNAMIC_CLUSTER below hardcodes
+ * `.functions = NULL` for every dynamic cluster it builds, with no way to
+ * attach one. (There is no per-build cluster-callbacks.cpp in the checked-in
+ * tree that would dispatch it either; the file with that name lives only under
+ * a build directory's generated tree and dispatches a DIFFERENT, unrelated
+ * function, emberAfOccupancySensingClusterInitCallback, no "Server" in the
+ * name: a weak no-op stub, unused.)
+ *
+ * occupancy-sensor-server.cpp does define an AttributeAccessInterface Instance
+ * class and its object file is linked into this build, but nothing in this
+ * firmware instantiates one. With no Instance registered, reads and writes for
+ * this cluster are plain ember external storage, exactly like every other
+ * sensor in this file.
+ */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(occupancyAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::Occupancy::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::OccupancySensorType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::OccupancySensorTypeBitmap::Id, BITMAP8, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OccupancySensing::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(occupancySensorClusters)
+DECLARE_DYNAMIC_CLUSTER(OccupancySensing::Id, occupancyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(occupancySensorEndpoint, occupancySensorClusters);
+
+constexpr EmberAfDeviceType kOccupancySensorTypes[] = { { 0x0107, 4 } };
+
+/* ---- humidity sensor (0x0307) (nRF 539-563) --------------------------- */
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(humidityAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, INT16U, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MinMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::MaxMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(RelativeHumidityMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(humiditySensorClusters)
+DECLARE_DYNAMIC_CLUSTER(RelativeHumidityMeasurement::Id, humidityAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(humiditySensorEndpoint, humiditySensorClusters);
+
+constexpr EmberAfDeviceType kHumiditySensorTypes[] = { { 0x0307, 2 } };
+
+/* ---- pressure sensor (0x0305) (nRF 564-588) --------------------------- */
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(pressureAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MeasuredValue::Id, INT16S, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MinMeasuredValue::Id, INT16S, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::MaxMeasuredValue::Id, INT16S, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(PressureMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(pressureSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(PressureMeasurement::Id, pressureAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(pressureSensorEndpoint, pressureSensorClusters);
+
+constexpr EmberAfDeviceType kPressureSensorTypes[] = { { 0x0305, 2 } };
+
+/* ---- light (illuminance) sensor (0x0106) (nRF 589-620) ----------------
+ *
+ * IlluminanceMeasurement's MeasuredValue is uint16 (INT16U), unlike
+ * TemperatureMeasurement/PressureMeasurement's signed int16s: the null
+ * sentinel is therefore the type MAXIMUM (0xFFFF, NumericAttributeTraits::
+ * GetNullValue() for an unsigned type), not the signed-type minimum 0x8000
+ * the temperature/pressure seeds use. Same attr_null_sentinel() convention
+ * (port/mt_matter_sl.cpp), different type -> different sentinel bytes. */
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(illuminanceAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MeasuredValue::Id, INT16U, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MinMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::MaxMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(IlluminanceMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(lightSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(IlluminanceMeasurement::Id, illuminanceAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(lightSensorEndpoint, lightSensorClusters);
+
+constexpr EmberAfDeviceType kLightSensorTypes[] = { { 0x0106, 3 } };
+
+/* ---- flow sensor (0x0306) (nRF 621-644) ------------------------------- */
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(flowAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MeasuredValue::Id, INT16U, 2,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MinMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::MaxMeasuredValue::Id, INT16U, 2,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(FlowMeasurement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(flowSensorClusters)
+DECLARE_DYNAMIC_CLUSTER(FlowMeasurement::Id, flowAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(flowSensorEndpoint, flowSensorClusters);
+
+constexpr EmberAfDeviceType kFlowSensorTypes[] = { { 0x0306, 2 } };
+
+/* ---- on/off plug-in unit (0x010A) (nRF 645-670) -----------------------
+ *
+ * Reuses onOffAttrs/kOnOffIncoming verbatim: OnOffPlug-inUnit.xml mandates
+ * the SAME OnOff feature (LT, "Lighting") as OnOffLight.xml, surprising for
+ * a plug, but confirmed against both the device-type XML (mandatoryConform
+ * on feature LT for the On/Off cluster) and the C6's own esp_matter build
+ * (esp_matter_endpoint.cpp on_off_plug_in_unit::add() calls
+ * on_off::feature::lighting::add() for this same device type), so the plug's
+ * OnOff FeatureMap seed is 0x01, identical to the light's, not 0. Groups and
+ * Scenes Management are also mandatoryConform in the XML for this device
+ * type, matching OnOffLight.xml exactly, and are left out here for the same
+ * reason the on/off light above leaves them out: this catalogue serves
+ * attribute-only clusters this build declares, and Groups/Scenes were never
+ * added for the lights either. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(onOffPlugInUnitClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(onOffPlugInUnitEndpoint, onOffPlugInUnitClusters);
+
+constexpr EmberAfDeviceType kOnOffPlugInUnitTypes[] = { { 0x010A, 4 } };
+
+/* ---- dimmable plug-in unit (0x010B) (nRF 700-721) ---------------------
+ *
+ * Reuses onOffAttrs/levelAttrs/kOnOffIncoming/kLevelIncoming verbatim:
+ * DimmablePlug-InUnit.xml mandates OnOff feature LT and LevelControl
+ * features OO+LT, the identical set DimmableLight.xml mandates, so this
+ * cluster list and its seeds (FeatureMap 0x01 for OnOff, 0x03 for
+ * LevelControl) are the same as the dimmable light above; see that device
+ * type's seed rows in s_seeds, none of which are duplicated here. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(dimmablePlugInUnitClusters)
+DECLARE_DYNAMIC_CLUSTER(OnOff::Id, onOffAttrs, ZAP_CLUSTER_MASK(SERVER), kOnOffIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(LevelControl::Id, levelAttrs, ZAP_CLUSTER_MASK(SERVER), kLevelIncoming,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(dimmablePlugInUnitEndpoint, dimmablePlugInUnitClusters);
+
+constexpr EmberAfDeviceType kDimmablePlugInUnitTypes[] = { { 0x010B, 5 } };
+
 /* ---- the parenting policy (nRF 3325-3391) ----------------------------- */
 
 /*
@@ -407,7 +725,8 @@ struct hearth_shape {
  * span REPLACES the ep_type/ep_type_v1 selection entirely.
  *
  * In THIS build every one of those four members is null or empty on every
- * row but the two ported ones, which carry ep_type and device_types alone.
+ * row but the fourteen ported ones, which carry ep_type and device_types
+ * alone.
  */
 struct hearth_devtype {
     uint32_t id;
@@ -440,19 +759,21 @@ struct hearth_devtype {
  */
 constexpr hearth_devtype s_registry[] = {
     { 0x0100, 0, &onOffLightEndpoint, Span<const EmberAfDeviceType>(kOnOffLightTypes) },
-    { 0x0101, 0 },                                                      /* batch 1: dimmable light */
+    { 0x0101, 0, &dimmableLightEndpoint, Span<const EmberAfDeviceType>(kDimmableLightTypes) },
     { 0x0302, 0, &temperatureSensorEndpoint, Span<const EmberAfDeviceType>(kTemperatureSensorTypes) },
-    { 0x0015, 0 },                                                      /* batch 1: contact sensor */
-    { 0x0107, 0 },                                                      /* batch 1: occupancy sensor */
-    { 0x0307, 0 },                                                      /* batch 1: humidity sensor */
-    { 0x0305, 0 },                                                      /* batch 1: pressure sensor */
-    { 0x0044, 0 },                                                      /* batch 1: rain sensor */
-    { 0x0041, 0 },                                                      /* batch 1: water freeze detector */
-    { 0x0043, 0 },                                                      /* batch 1: water leak detector */
-    { 0x0106, 0 },                                                      /* batch 1: light sensor */
-    { 0x0306, 0 },                                                      /* batch 1: flow sensor */
-    { 0x010A, 0 },                                                      /* batch 1: on/off plug-in unit */
-    { 0x010B, 0 },                                                      /* batch 1: dimmable plug-in unit */
+    { 0x0015, 0, &booleanStateSensorEndpoint, Span<const EmberAfDeviceType>(kContactSensorTypes) },
+    { 0x0107, 0, &occupancySensorEndpoint, Span<const EmberAfDeviceType>(kOccupancySensorTypes) },
+    { 0x0307, 0, &humiditySensorEndpoint, Span<const EmberAfDeviceType>(kHumiditySensorTypes) },
+    { 0x0305, 0, &pressureSensorEndpoint, Span<const EmberAfDeviceType>(kPressureSensorTypes) },
+    { 0x0044, 0, &booleanStateSensorEndpoint, Span<const EmberAfDeviceType>(kRainSensorTypes) },
+    { 0x0041, 0, &booleanStateSensorEndpoint,
+      Span<const EmberAfDeviceType>(kWaterFreezeDetectorTypes) },
+    { 0x0043, 0, &booleanStateSensorEndpoint,
+      Span<const EmberAfDeviceType>(kWaterLeakDetectorTypes) },
+    { 0x0106, 0, &lightSensorEndpoint, Span<const EmberAfDeviceType>(kLightSensorTypes) },
+    { 0x0306, 0, &flowSensorEndpoint, Span<const EmberAfDeviceType>(kFlowSensorTypes) },
+    { 0x010A, 0, &onOffPlugInUnitEndpoint, Span<const EmberAfDeviceType>(kOnOffPlugInUnitTypes) },
+    { 0x010B, 0, &dimmablePlugInUnitEndpoint, Span<const EmberAfDeviceType>(kDimmablePlugInUnitTypes) },
     /* Catalogue batch 2: the server-interaction types. */
     { 0x010C, 0 },                                                      /* batch 2: colour temperature light */
     { 0x010D, 0 },                                                      /* batch 2: extended colour light */
@@ -536,7 +857,7 @@ static_assert(sizeof(s_registry) / sizeof(s_registry[0]) == 52,
  * unserved, and mt_devtype_create() refuses it before the parent is even
  * looked at. So the per-row body is skipped for those, and what the
  * assertion now proves is the same property over the rows that can be
- * created. It does NOT weaken into vacuity: the two ported rows are checked
+ * created. It does NOT weaken into vacuity: the fourteen ported rows are checked
  * in full, the parent universe is still the whole 52-row registry (so a
  * future restricted row is enumerated against every catalogue id from the
  * moment it gains a cluster set), and the day a batch gives the cabinet or
@@ -642,8 +963,8 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * cost it 18,144 bytes of .bss whether or not a single endpoint was ever
  * created and made an on/off light pay the extended colour light's bill.
  * The per-endpoint block is that defect's fix and it is transferred whole,
- * even though a two-device-type catalogue would barely notice the flat form
- * today: the shape is what the later batches need.
+ * even though a fourteen-device-type catalogue would barely notice the flat
+ * form today: the shape is what the later batches need.
  *
  * dv first is what keeps the layout alignment-free. Arena blocks are
  * 8-aligned (hearth_arena_alloc), which is MORE than every region needs:
@@ -695,18 +1016,28 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * catalogue this build declares:
  *
  *   device type                        clusters  slots  payload  arena cost
- *   on/off light           0x0100             3     11      188         192
- *   temperature sensor     0x0302             3      9      156         160
+ *   dimmable light / plug  0x0101 0x010B       4     20      336         344
+ *   on/off light / plug    0x0100 0x010A       3     11      188         192
+ *   temp/humidity/pressure/light/flow
+ *     0x0302 0x0307 0x0305 0x0106 0x0306       3      9      156         160
+ *   occupancy sensor       0x0107             3      9      156         160
+ *   boolean-state sensors
+ *     0x0015 0x0044 0x0041 0x0043             3      7      124         128
  *
- * HEARTH_EP_ARENA_BYTES is 3,072, which is 16 x 192: this arena holds
- * kServiceableEndpoints of the WIDEST type it can build, with nothing left
- * over and nothing wasted. That is a stronger promise than the nRF's, whose
- * 8,112 usable bytes hold only 8 of its widest (an all-robotic-vacuum
- * composition serves a 9-endpoint prefix there), and it is affordable only
- * because this catalogue is two device types deep. The floor below asserts
- * the strong form deliberately: the batch that adds a wider type will fail
- * this build and have to make the same trade the nRF made, in the open,
- * rather than inherit a weaker floor by accident.
+ * Slots are the declared attributes plus the LIST_END ClusterRevision each
+ * cluster carries, Identify's four included and Descriptor's none.
+ *
+ * HEARTH_EP_ARENA_BYTES is 5,504, which is 16 x 344: this arena holds
+ * kServiceableEndpoints of the WIDEST type it can build, the dimmable light
+ * and plug, with nothing left over and nothing wasted. Keeping that strong
+ * promise rather than dropping to a floor of eight is the ruling of
+ * 2026-09-22 for catalogue batch 1; batch 2, whose types are wider again,
+ * revisits it. It is still a stronger promise than the nRF's, whose 8,112
+ * usable bytes hold only 8 of its widest (an all-robotic-vacuum composition
+ * serves a 9-endpoint prefix there). The floor below asserts the strong form
+ * deliberately: the batch that adds a wider type will fail this build and
+ * have to make the same trade the nRF made, in the open, rather than inherit
+ * a weaker floor by accident.
  */
 constexpr size_t kEpArenaBytes = HEARTH_EP_ARENA_BYTES;
 
@@ -882,10 +1213,19 @@ constexpr size_t kMax2(size_t a, size_t b) { return a > b ? a : b; }
  * no slot; neither list here has one, so these counts are exact, and an
  * over-count would only ever make the asserted floor MORE conservative. */
 constexpr size_t kIdentifySlots = MT_COUNT(identifyAttrs);
+/* The widest endpoint is the one with the most slots: the dimmable light and
+ * plug carry OnOff AND LevelControl. Each MT_COUNT counts declared entries
+ * plus the LIST_END ClusterRevision; no list here has a metadata-only member,
+ * so the counts are exact. */
 constexpr size_t kWidestEndpointSlots =
-    kIdentifySlots + kMax2(MT_COUNT(onOffAttrs), MT_COUNT(tempAttrs));
-constexpr size_t kWidestClusterList =
-    kMax2(MT_COUNT(onOffLightClusters), MT_COUNT(temperatureSensorClusters));
+    kIdentifySlots + kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs),
+                           kMax2(kMax2(MT_COUNT(tempAttrs), MT_COUNT(booleanStateAttrs)),
+                                 kMax2(MT_COUNT(occupancyAttrs),
+                                       kMax2(MT_COUNT(humidityAttrs),
+                                             kMax2(MT_COUNT(pressureAttrs),
+                                                   kMax2(MT_COUNT(illuminanceAttrs),
+                                                         MT_COUNT(flowAttrs)))))));
+constexpr size_t kWidestClusterList = MT_COUNT(dimmableLightClusters);
 
 constexpr size_t kWidestBlockBytes =
     block_bytes(kWidestClusterList, kWidestEndpointSlots) +
@@ -894,13 +1234,13 @@ constexpr size_t kWidestBlockBytes =
     0;
 
 /* Pinned, so the sizing table above cannot go stale without the build
- * noticing: the on/off light is the widest type this build declares, at 188
- * payload bytes and 192 of arena. */
-static_assert(kWidestBlockBytes == 188,
+ * noticing: the dimmable light and plug are the widest types this build
+ * declares, at 336 payload bytes and 344 of arena. */
+static_assert(kWidestBlockBytes == 336,
               "the widest declared block changed size; redo the sizing table above and the "
               "README's capacity rows");
-static_assert(hearth_arena_cost(kWidestBlockBytes) == 192,
-              "the widest declared block's arena cost moved off the tables' 192");
+static_assert(hearth_arena_cost(kWidestBlockBytes) == 344,
+              "the widest declared block's arena cost moved off the tables' 344");
 
 /*
  * Usable bytes ARE gross bytes on a bump arena: nothing is spent on an
@@ -914,16 +1254,19 @@ constexpr size_t kArenaUsableBytes = kEpArenaBytes;
  * The floor. The nRF demands room for kMinWidestEndpoints = 8 of its widest
  * uncapped type, eight being "the point below which the capacity table would
  * be describing a different device"; sizing for sixteen of its heaviest is
- * precisely the trade that round declined. This catalogue is small enough
- * that the trade does not arise: sixteen on/off lights are 3,072 bytes, so
- * the floor is the full kServiceableEndpoints and the capacity claim is
- * "every composition this build accepts, it can build".
+ * precisely the trade that round declined. This catalogue is still small
+ * enough that the trade does not arise: sixteen dimmable lights are 5,504
+ * bytes, so the floor stays the full kServiceableEndpoints and the capacity
+ * claim is "every composition this build accepts, it can build". Catalogue
+ * batch 1 kept that strong promise by raising HEARTH_EP_ARENA_BYTES from
+ * 3,072 to 5,504 rather than lowering the floor (the ruling of 2026-09-22);
+ * batch 2's wider types revisit the choice.
  *
- * That is deliberate rather than incidental. The first batch that adds a
+ * That is deliberate rather than incidental. The next batch that adds a
  * wider device type fails THIS assertion and has to choose, with the numbers
- * in front of it, between raising HEARTH_EP_ARENA_BYTES and dropping to a
- * floor of eight the way the nRF did. Asserting eight today would let that
- * batch inherit the weaker promise without anyone deciding to.
+ * in front of it, between raising HEARTH_EP_ARENA_BYTES again and dropping
+ * to a floor of eight the way the nRF did. Asserting eight today would let
+ * that batch inherit the weaker promise without anyone deciding to.
  */
 constexpr size_t kMinWidestEndpoints = kServiceableEndpoints;
 
@@ -976,8 +1319,8 @@ uint16_t s_next_ep_id = 1;
  * and the type minimum for signed ones (0x8000 for INT16S, stored
  * little-endian as 00 80).
  *
- * THE WHOLE TABLE IS TRANSFERRED, not just the rows the two ported device
- * types consult, and that is a deliberate departure from this file's own
+ * THE WHOLE TABLE IS TRANSFERRED, not just the rows the fourteen ported
+ * device types consult, and that is a deliberate departure from this file's own
  * "only what is ported" rule. Three reasons. It is const data keyed by
  * (cluster, attribute), so a row for a cluster no list declares is never
  * looked up and costs flash only. It compiles against the app-common id

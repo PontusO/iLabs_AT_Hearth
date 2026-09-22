@@ -78,15 +78,22 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * were deliberately not copied: they price Zephyr's sys_heap chunk header
  * and bucket table.
  *
- * 3,072 is 16 x 192, i.e. kServiceableEndpoints blocks of the widest device
- * type this build declares (the on/off light: 3 clusters and 11 attribute
- * slots, 188 payload bytes, 192 after rounding). The temperature sensor, the
- * only other type built this round, is 160. So every composition this image
+ * 5,504 is 16 x 344, i.e. kServiceableEndpoints blocks of the widest device
+ * type this build declares (the dimmable light and the dimmable plug-in
+ * unit, which share a cluster list: 4 clusters and 20 attribute slots, 336
+ * payload bytes, 344 after rounding). The rest of catalogue batch 1 is
+ * cheaper: 192 for the on/off light and the on/off plug-in unit, 160 for the
+ * temperature, humidity, pressure, light, flow and occupancy sensors, 128
+ * for the four boolean-state sensors. So every composition this image
  * accepts, it can build, which is a stronger promise than the nRF arm makes
- * (its 8,112 usable bytes hold eight of its widest type, not sixteen) and is
- * affordable only while the catalogue is two device types deep. The floor
- * assertion in mt_devtypes_sl.cpp is written to FAIL when a wider device
- * type is added, so the batch that adds one has to choose between raising
- * this number and lowering the promise, in the open.
+ * (its 8,112 usable bytes hold eight of its widest type, not sixteen).
+ *
+ * Catalogue batch 1 kept that promise by raising this number from 3,072
+ * rather than lowering the floor to the nRF's eight: the ruling of
+ * 2026-09-22, made with the arithmetic in front of it, +2,432 B of .bss for
+ * a capacity claim that needs no footnote. Batch 2's wider device types
+ * revisit it. The floor assertion in mt_devtypes_sl.cpp is written to FAIL
+ * when a wider device type is added, so the batch that adds one has to
+ * choose between raising this number and lowering the promise, in the open.
  */
-#define HEARTH_EP_ARENA_BYTES 3072
+#define HEARTH_EP_ARENA_BYTES 5504

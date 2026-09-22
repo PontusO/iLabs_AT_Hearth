@@ -31,6 +31,7 @@
 #include <app-common/zap-generated/ids/Attributes.h>
 #include <app-common/zap-generated/ids/Clusters.h>
 #include <app/ConcreteAttributePath.h>
+#include <app/clusters/boolean-state-server/CodegenIntegration.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>
 #include <app/util/attribute-storage.h>
@@ -501,11 +502,12 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * the port never DECLARES stays out too, because attr_locate()'s metadata miss
  * answers MT_ATTR_ERR_ATTRIBUTE long before any table is consulted.
  *
- * Also absent with it: the nRF's BooleanState bridge inside
- * MatterPostAttributeChangeCallback (its fix round 2, C1), for the same
- * reason. BooleanState reaches the contact/rain/leak sensors of a later batch;
- * this image declares no such endpoint, and FindClusterOnEndpoint() would
- * answer nullptr on every call.
+ * The nRF's BooleanState bridge (its fix round 2, C1) is present in
+ * MatterPostAttributeChangeCallback below since catalogue batch 1, which is
+ * the batch that brought the contact, rain, water freeze and water leak
+ * sensors here. It is not a row in the table above and never was: it is a
+ * write-side push into a registered cluster object, not a read-side
+ * interception.
  */
 struct instance_served_attr {
     uint32_t cluster;
@@ -978,6 +980,44 @@ void MatterPostAttributeChangeCallback(const chip::app::ConcreteAttributePath &p
         emberAfLocateAttributeMetadata(path.mEndpointId, path.mClusterId, path.mAttributeId);
     if (md != nullptr && md->IsNullable() && raw == attr_null_sentinel(is_unsigned, bytes)) {
         return;
+    }
+
+    /*
+     * The BooleanState bridge (contact, rain, water freeze, water leak).
+     * BooleanState is one of the clusters CHIP serves through the newer
+     * registered ServerClusterInterface path
+     * (src/app/clusters/boolean-state-server/): CodegenDataModelProvider_
+     * Read.cpp:116 checks that registry before ember's external-storage
+     * fallback is ever consulted, so a real controller's read of StateValue
+     * is answered from the registered BooleanStateCluster object's own
+     * mStateValue, not from this bridge's arena. The nRF arm found that on
+     * the bench (an AT write of StateValue=1 fired the URC below, but
+     * chip-tool still read FALSE) and confirmed it against the tree cited
+     * above. This block bridges the two: BooleanState::
+     * FindClusterOnEndpoint() (CodegenIntegration.h) returns the very object
+     * emberAfSetDynamicEndpoint()'s init dispatch already constructed for
+     * this endpoint (see the comment on booleanStateAttrs in
+     * port/mt_devtypes_sl.cpp for why that construction happens at all), and
+     * SetStateValue() pushes this write into it AND emits the StateChange
+     * event (boolean-state-cluster.cpp:57-64), which is strictly better than
+     * an ember-only fix: a bare ember write never emits that event.
+     *
+     * No recursion risk. SetStateValue() only touches the object's own
+     * mStateValue plus the event/reporting path; it never calls back into
+     * emberAfWriteAttribute, so it cannot re-enter this callback. And a
+     * controller's own IM write to StateValue never reaches this function in
+     * the first place: StateValue is read-only in the Matter sense and
+     * BooleanStateCluster does not override WriteAttribute, so the registry
+     * rejects the write before ember's external-storage path (and this
+     * callback) is ever reached. The only writer that reaches here for this
+     * attribute is this bridge's own AT+MTATTR path.
+     */
+    if (path.mClusterId == chip::app::Clusters::BooleanState::Id &&
+        path.mAttributeId == chip::app::Clusters::BooleanState::Attributes::StateValue::Id) {
+        auto *booleanState = chip::app::Clusters::BooleanState::FindClusterOnEndpoint(path.mEndpointId);
+        if (booleanState != nullptr) {
+            booleanState->SetStateValue(raw != 0);
+        }
     }
 
     char line[64];
