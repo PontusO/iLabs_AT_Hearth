@@ -2345,50 +2345,41 @@ claims to be.
 
 ### Catalogue batch 1: the fabric proof, Phase 2 and the batch's memory record
 
-The current image, 2026-09-22, built from the committed tree at `d263b6b` in
+The current image, 2026-09-22, built from the committed tree at `ca05afa` in
 `~/silabs/work/hearth-matter-b1`, which is task 2's directory. Nothing in
-`hearth.slcp` or `data_model/hearth.zap` changed after task 2, so no fresh
-`slc generate` was needed and this is an incremental `make` inside that one
-generated tree. `otbr-agent` was `active` before and after every step here and
-was never started, stopped or reconfigured.
+`hearth.slcp` or `data_model/hearth.zap` has changed since task 2, so no fresh
+`slc generate` has been needed since: every build in this batch is an
+incremental `make` inside that one generated tree. `otbr-agent` was `active`
+before and after every step here and was never started, stopped or
+reconfigured.
 
 ```
-$ git status --porcelain                                (clean, at d263b6b)
+$ git status --porcelain                                (clean, at ca05afa)
 $ source platform/silabs/toolchain.env
 $ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-b1 \
-      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-b1/build-t5.log
-  Building .../platform/silabs/port/mt_devtypes_sl.cpp
-  Building .../platform/silabs/port/mt_matter_sl.cpp
-  Linking build/debug/hearth.out
-$ grep -ci warning    ~/silabs/work/hearth-matter-b1/build-t5.log     0
-$ grep -c  deprecated ~/silabs/work/hearth-matter-b1/build-t5.log     0
+      -f hearth.Makefile -j8            # warning-free, deprecation-free
 $ cd build/debug && commander gbl create hearth.gbl --app hearth.s37
 $ python3 platform/silabs/fw/flash.py --port "$MT_PORT" --image .../hearth.gbl
-  6730 blocks, 6730 frame(s) sent (0 retransmit(s)), 95.5 s
+  6730 blocks, 6730 frame(s) sent (0 retransmit(s)), 95.6 s
   +MTREADY seen: the module is running the new image
 ```
 
-The only two files it recompiled are the two `9af506c` touched, and it touched
-comments alone. `hearth.bin` 861 328 B, md5
-`fb3a1efc34659fb30603ff64ca8ff124`; `hearth.gbl` 861 400 B, md5
-`f2e6776a79cb6effab82f02bbb56ac9b`. **Both md5s are task 3's `f4ddd4f` build's
-to the byte**, which is what proves the comment commit changed no code: per
-F497 an md5 identifies one `slc generate`, and a relink inside one generated
-tree is reproducible ("Round 2 task 7").
+`hearth.bin` 861 328 B, md5 `276968b351871f828cd5c523f9cd555a`; `hearth.gbl`
+861 400 B, md5 `fa2837e6f13c9df532ad9b8012991931`. Every figure and every run
+below is this image. The build directory was already at `ca05afa` when this
+record was taken, and a repeated incremental `make` compiled nothing, which is
+what says the tree and the directory agree; the module was reflashed from it
+anyway, so what is on the bench is beyond doubt. Both result files'
+`fw_repo_head` reads `ca05afa`, the built commit exactly.
 
-Both result files' `fw_repo_head` reads `b1eb3ad`, one commit past the build,
-because the proof script was fixed between the first bench run and the
-recorded one. `git diff --stat d263b6b b1eb3ad` is two files under `test/`,
-neither of them compiled into the image.
-
-#### The proof: 69 passed, 6 failed, 9 not applicable
+#### The proof: 75 passed, 0 failed, 9 not applicable
 
 ```
 $ export MT_PORT=/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00
 $ python3 test/mt_catalogue_proof.py --port "$MT_PORT" --bridge cpico \
       --batch mg24-batch1 --openocd-config platform/silabs/mg24-swd.cfg \
       --baseline platform/silabs/core-batch1.json
-  mg24-batch1: 69 passed, 6 failed, 9 not applicable
+  mg24-batch1: 75 passed, 0 failed, 9 not applicable
   baseline written: platform/silabs/core-batch1.json
 ```
 
@@ -2398,8 +2389,12 @@ chip-tool pairing. Every one of the twelve types answers its
 an `AT+MTATTR` write of its primary attribute and is read back at that value
 by the controller, and agrees with a second AT read afterwards. The nine N/A
 rows are the nine read-only clusters' controller-write rows, recorded by name
-rather than silently skipped. What the script proves and how to run it for a
-later batch is in the docs repository, `TESTING.md` section 8.
+rather than silently skipped. The three types with a controller-side path
+(0x0101, 0x010A and 0x010B) carry the whole quadruple as well: the chip-tool
+command exits 0, the `+MTATTR` URC arrives on the AT link with the new value,
+the controller reads that value back, and the second AT read agrees. What the
+script proves and how to run it for a later batch is in the docs repository,
+`TESTING.md` section 8.
 
 **Both rows the design spec named as risks passed.** The four BooleanState
 sensors' `controller reads state-value = True after the AT write` rows pass, so
@@ -2410,25 +2405,27 @@ the cluster's event too. The occupancy sensor's `feature-map = 2` row passes,
 so `matter_occupancy_sensor` constructs no `Instance` here and the seed row is
 still the only writer of that cluster's metadata.
 
-#### The six failures: LevelControl's server state is never initialised on a dynamic endpoint
+#### The six rows that failed first, and the defect behind them (B525)
 
-One fact on two device types, three rows each: 0x0101 dimmable light on
-endpoint 2 and 0x010B dimmable plug-in unit on endpoint 13.
+**The first run of this proof, on the `d263b6b` image one code commit earlier,
+was 69 passed, 6 failed, 9 not applicable.** The six were one fact on two device
+types, three rows each: 0x0101 dimmable light on endpoint 2 and 0x010B
+dimmable plug-in unit on endpoint 13.
 
-| Row, on both endpoints | Verdict |
-|---|---|
-| `+MTATTR:<ep>,8,0,200 on the AT link` | FAIL |
-| `controller reads back 200` | FAIL |
-| `second AT read agrees (200)` | FAIL |
+| Row, on both endpoints | Then | Now |
+|---|---|---|
+| `+MTATTR:<ep>,8,0,200 on the AT link` | FAIL | PASS |
+| `controller reads back 200` | FAIL | PASS |
+| `second AT read agrees (200)` | FAIL | PASS |
 
-The three rows before them pass on both endpoints: the device-type list
-carries `(257, 3)` and `(267, 5)`, an `AT+MTATTR` write of `CurrentLevel` 100
-is read back as 100 by the controller, and `move-to-level-with-on-off 200`
-exits 0. So the attributes are served, the endpoint is real, the command
-reaches the cluster server and the server accepts it. What does not happen is
-the move.
+The three rows before them passed even then, which is what bounded the defect:
+the device-type list carried `(257, 3)` and `(267, 5)`, an `AT+MTATTR` write of
+`CurrentLevel` 100 was read back as 100 by the controller, and
+`move-to-level-with-on-off 200` exited 0. The attributes were served, the
+endpoint was real, the command reached the cluster server and the server
+accepted it. What did not happen was the move.
 
-Reproduced by hand on endpoint 2, 2026-09-22, commissioned:
+Reproduced by hand on endpoint 2, 2026-09-22, commissioned, before the fix:
 
 ```
 chip-tool levelcontrol read min-level      ep2 -> 1
@@ -2479,23 +2476,66 @@ survives the same gap because its seed row writes the attributes and ember
 serves them; LevelControl cannot, because the value that decides the move is
 not an attribute.
 
-**Classification: a port defect, and one both Thread arms have by
+**Classification: a port defect, graph B525, and one both Thread arms have by
 construction.** The nRF arm declares the same LevelControl tables through the
 same `DECLARE_DYNAMIC_CLUSTER` macro with the same null functions array, so
 its dimmable light behaves identically; its own batch 1 proved the types in a
-prose bench session and never sent a level command. It is not the script's:
-the script sends the only command that can work from a cold composition (the
-"without On/Off" variants are refused with SUCCESS while `OnOff` is FALSE),
-and these rows will pass unchanged once the state is initialised. It is not
-the SDK's: a cluster with an init function is entitled to have it called, and
-this port creates endpoints by a route that calls none.
+prose bench session and never sent a level command. **The nRF half of B525 is
+open.** It was not the script's: the script sends the only command that can
+act on a cold composition (the "without On/Off" variants are refused with
+SUCCESS while `OnOff` is FALSE), and these rows passed unchanged once the
+state was initialised. It was not the SDK's either: a cluster with an init
+function is entitled to have it called, and this port was creating endpoints
+by a route that called none.
 
-The fix has the same shape as the occupancy seed's, one level deeper: call
-`emberAfLevelControlClusterServerInitCallback(id)` for each dynamic endpoint
-carrying LevelControl, after `emberAfSetDynamicEndpoint()` and before
-`+MTREADY`. It is deliberately not made here, because a change to `platform/`
-in this task would leave every figure in this section describing an image
-nobody ran. Listed under "What round 2 leaves open".
+**Fixed in `ca05afa`**, which is the image everything above and below is
+measured on. The hook is one level up from the occupancy seed's:
+`emberAfClusterInitCallback()` runs for every cluster of every endpoint,
+dynamic ones included, one line before ember looks for the functions array it
+will not find, and the generated dispatch sends LevelControl's to a weak
+`emberAfLevelControlClusterInitCallback()`. `port/mt_devtypes_sl.cpp` now
+defines that strongly, which is the same hook the nRF arm already uses for its
+DoorLock init:
+
+```cpp
+void emberAfLevelControlClusterInitCallback(EndpointId endpoint)
+{
+    if (endpoint == kCatalogueEndpointId) {
+        return;
+    }
+    emberAfLevelControlClusterServerInitCallback(endpoint);
+}
+```
+
+Endpoint 240 returns at once, because it is ZAP-declared and ember runs its
+server init on the next line anyway. The seeds already agree with what the
+init reads and writes, so nothing moves at boot and no `+MTATTR` fires. OnOff
+needs no equivalent and the file's comment says why: its init body is the
+`StartUpOnOff` power-up behaviour, it caches nothing, and every one of its
+attributes is an ember attribute this port declares.
+
+The same probe on the fixed image, endpoint 2, commissioned:
+
+```
+> AT+MTATTR=2,8,0,100
+  +MTATTR:2,8,0,100
+chip-tool levelcontrol move-to-level-with-on-off 200 0 0 0 ep2      (exit 0)
+  URCs raised: '+MTATTR:2,6,0,1', '+MTATTR:2,8,0,200'
+> AT+MTATTR=2,8,0
+  +MTATTR:2,8,0,200
+chip-tool levelcontrol read current-level  ep2 -> 200
+chip-tool onoff        read on-off         ep2 -> TRUE
+```
+
+```
+I chip: [ZCL] RX level-control: MOVE_TO_LEVEL_WITH_ON_OFF c8  0 0 0
+I chip: [ZCL] Setting on/off to ON due to level change
+```
+
+ON where it said OFF, the target reached instead of clamped, and the command's
+own `WithOnOff` half visible as the second URC. The cost is **+10 B of `.text`
+for the new function against the 2 B weak stub it replaces**, absorbed by
+inter-object alignment: the section totals below are unchanged to the byte.
 
 #### Harness Phase 2, re-run on the batch image: 98 passed, 2 failed, 1 n/a
 
@@ -2522,9 +2562,9 @@ the run log or the result file. 2.9's cold boot used this bench's hub recipe,
 #### Flash and RAM
 
 `arm-none-eabi-size` on `~/silabs/work/hearth-matter-b1/build/debug/hearth.out`,
-2026-09-22, at `d263b6b`, against round 2 task 7's row:
+2026-09-22, at `ca05afa`, against round 2 task 7's row:
 
-| | Catalogue batch 1 (`d263b6b`) | Round 2 task 7 (`a9d6ae6`) | Delta |
+| | Catalogue batch 1 (`ca05afa`) | Round 2 task 7 (`a9d6ae6`) | Delta |
 |---|---|---|---|
 | `text` (`size`) | 857 928 | 845 340 | +12 588 |
 | `data` (`size`) | 3 384 | 3 368 | +16 |
@@ -2547,6 +2587,14 @@ macros exist for. `.text` splits the same way, +10 592 for task 2's components
 and clusters and +1 996 for task 3's tables and the BooleanState bridge. Every
 byte of the `.bss` rise comes straight out of `.memory_manager_heap`, which is
 the linker handing the heap section whatever RAM is left over.
+
+**Every figure in that table is the same at `ca05afa` as it was at
+`d263b6b`**, the commit before the LevelControl fix, and both were measured
+rather than assumed: the new function is 10 B and the weak stub it replaces
+is 2 B, and the +8 B disappears into the 4-byte alignment padding between
+objects. The two `hearth.bin` files differ (md5 `276968b3...` against
+`fb3a1efc...`), so this is a measured coincidence of the section totals and
+not a stale reading.
 
 `hearth.bin` is **861 328 B**, **55.93 %** of the 1 540 096 B application
 region, and still **163 812 B below** the stock Silicon Labs `lighting-app` on
@@ -2590,10 +2638,10 @@ From the boot task's own line, this session, all four on this image:
 
 | Boot | Composition | Free heap at `+MTREADY` | NVM3 |
 |---|---|---|---|
-| factory-fresh | 0 endpoints | **90 976 B** | 11 objects, 1 936 B free of 40 960 |
-| uncommissioned | the batch's 13 | **90 976 B** | 12 objects, 1 808 B free |
-| **commissioned, one fabric** | the batch's 13 | **90 928 B** | 37 objects, 2 592 B free |
-| uncommissioned | the standard 2 | **90 976 B** | 12 objects, 2 048 B free |
+| factory-fresh | 0 endpoints | **90 976 B** | 11 objects, 304 B free of 40 960 |
+| uncommissioned | the batch's 13 | **90 976 B** | 12 objects, 176 B free |
+| **commissioned, one fabric** | the batch's 13 | **90 928 B** | 37 objects, 908 B free |
+| uncommissioned | the standard 2 | **90 976 B** | 12 objects, 316 B free |
 
 Two things worth keeping. **The fabric costs 48 B of heap held at `+MTREADY`**,
 90 976 against 90 928, which is the same 48 B round 2 task 7 measured with two
@@ -2609,7 +2657,12 @@ boot, with `hearth_boot_task`'s own 5 120-byte stack and CHIP's init transients
 outstanding; round 2 task 7's note on the steady-state figure applies
 unchanged. `availableMemory` remains the log-structured figure NVM3 reports
 rather than `size - used`, with the same repack caveat the soak row carries;
-the erase count moved 5 to 7 across this session's resets.
+the erase count moved 5 to 8 across this day's resets, which is the repack
+running three times. **The four figures above are a pre-repack trough and the
+lowest this bench has recorded, 176 B at the bottom**, against 480 B on the
+round 2 task 7 session. Nothing failed and no write was refused, so this is
+the mechanism working rather than an exhaustion, but it is the same fact the
+NVM3 soak row owns and it now has a smaller number in it.
 
 #### Bench state found and left
 
@@ -2617,7 +2670,7 @@ the erase count moved 5 to 7 across this session's resets.
 `open_at_port(..., bridge="cpico")`: `+MTREADY`, `+MTVER:1.2.0`,
 `+MTEP:0,1,0x0100` and `+MTEP:1,2,0x0302`, `+MTFABRICS:0`, `+MTSTATE:1,0`,
 `+MTNET:THREAD,0,0,0`. Factory-fresh with the standard composition staged,
-exactly as task 3 left it.
+which is the state every run in this batch both expects and restores.
 
 **Left** the same way, asserted three times independently: by the proof
 script's own restore rows, by Phase 2's 2.12, and by the measurement cycle at
@@ -4538,7 +4591,7 @@ not a regression against the nRF arm.
 
 | Open item | Owner |
 |---|---|
-| **A dynamic endpoint's LevelControl server state is never initialised, so every `MoveToLevel` target is clamped to 0.** Found 2026-09-22 by catalogue batch 1's proof, six rows on 0x0101 and 0x010B; `MinLevel` and `MaxLevel` read 1 and 254 over the wire while the server's private `EmberAfLevelControlState` holds 0 and 0, because `emberAfLevelControlClusterServerInitCallback()` is a per-cluster init function and `DECLARE_DYNAMIC_CLUSTER` hardcodes `.functions = NULL`. Full account and the bench transcript under "Catalogue batch 1". The fix is one call per dynamic endpoint carrying the cluster, after `emberAfSetDynamicEndpoint()` and before `+MTREADY`. **The nRF arm declares the same tables through the same macro**, so this is one gap for both Thread arms | **a fix round of catalogue batch 1**, called by the controller; it should close both arms at once |
+| **A dynamic endpoint's LevelControl server state was never initialised, so every `MoveToLevel` target clamped to 0: closed on this arm 2026-09-22** (graph **B525**) by catalogue batch 1's fix round, `ca05afa`. Found by the batch's own proof, six rows on 0x0101 and 0x010B; `MinLevel` and `MaxLevel` read 1 and 254 over the wire while the server's private `EmberAfLevelControlState` held 0 and 0, because `emberAfLevelControlClusterServerInitCallback()` is a per-cluster init function and `DECLARE_DYNAMIC_CLUSTER` hardcodes `.functions = NULL`. The port now defines the weak `emberAfLevelControlClusterInitCallback()` strongly and calls the server init from it, which is the hook the nRF arm already uses for DoorLock. Full account, the pre-fix transcript and the override under "Catalogue batch 1" | **closed here. The nRF half is open**: that arm declares the same tables through the same macro and has the same gap by construction, and nothing there has ever sent a level command |
 | **`+MTEVT` is emitted on this port: closed 2026-09-21** (graph **B502**) by the `+MTEVT` parity round's task 1, in `platform/chip/mt_chip_events.cpp`, shared with the nRF arm and bench-proven here: the boot sequence, a full commissioning's order with the 0/4 pair, the role-cache suppression and `AT+MTFRESET`'s fabric bits, all under "Events (`+MTEVT`)" above. The round 2 row below it is what that fix was written against. **The nRF half closed the same day** (task 5): the Ophelia-IV carrier came back on the bench, ran the same shared file and recorded its own Phase 2 at the same **98 passed, 2 failed, 1 not applicable**, plus Phase 3's 3.5 with `+MTEVT:1` and `+MTEVT:3`. See `platform/nrf54l15/README.md`, "Events (`+MTEVT`)" | **closed on both Thread arms, 2026-09-21** |
 | **Deferred minors from the parity round's final review: closed 2026-09-22 by catalogue batch 1's task 1**: `mt_chip_events_register()`'s registration order now puts `AddEventHandler()` last and sets `s_registered` right after it succeeds, so a retry after either idempotent call above it registers nothing twice; the `ScheduleWork()` failure path now clears `s_window_evt_sent`, so a lost `+MTEVT:4` no longer suppresses every later window's 0; the harness gate's role message now names its source, `ot-ctl state` or `busctl DeviceRole`; `busctl` absent from PATH is now a gate message rather than surfacing as "link lost", gated only on the real D-Bus route being in use; `--openocd-config` is checked for existence at the gate, before the destructive phase it guards; bit 11 carries the same unreachable-on-Thread annotation as bit 10 | **closed** |
 | **A fixed endpoint's code-driven attributes are unreadable through `AT+MTATTR` except where ruling F500's carve-out serves them.** Four Basic Information integers are carved out and answer; every other code-driven integer on endpoint 0 answers a bare `ERROR` with a console line saying why. Closing it means a read path through the data model provider for endpoints this port did not create, which changes the answer for every fixed-endpoint attribute at once | a **later round by ruling**, not by omission. Whether `AT+MTATTR` should reach fixed endpoints at all is a wire-contract question for both arms and the ruling belongs in `AT_MT_SPEC.md` 3.8 |
