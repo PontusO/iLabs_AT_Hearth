@@ -662,20 +662,34 @@ that regenerates identically on any machine.
 
 ### SDK patches
 
-`sdk-patches/README.md` is the mechanism, the patch, and how a reader tells
+`sdk-patches/README.md` is the mechanism, the patches, and how a reader tells
 whether a tree is patched. The short version: the extension is copied out of the
 Conan cache by `fw/sdk-prepare.sh`, which applies
-`sdk-patches/matter_sdk/*.patch` after checking each against its `.sha256`, and
-stamps the copy with `HEARTH_EEM_PATCH_REV`; `toolchain.env` returns 1 naming
-the prepare script if that stamp is missing or at the wrong revision. It is a
-revision check and not a presence check because the patch defaults to stock
-behaviour when its macro is unset, so a stale cut of it looks exactly like a
-current one.
+`sdk-patches/matter_sdk/*.patch` (against `third_party/matter_sdk`) and then
+`sdk-patches/extension/*.patch` (against the extension root itself) after
+checking each against its own `.sha256`, and stamps the copy with
+`HEARTH_SDK_PATCH_REV`; `toolchain.env` returns 1 naming the prepare script if
+that stamp is missing or at the wrong revision. It is a revision check and not
+a presence check for the same reason the matter_sdk patch needs one: that
+patch defaults to stock behaviour when its macro is unset, so a stale cut of
+it looks exactly like a current one; the stamp's revision covers the whole
+tree, both patch directories, so an addition to either bumps it.
 
-The one patch caps `ElectricalEnergyMeasurement`'s `gMeasurements` table at
-`CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES` (8, in
+The matter_sdk patch caps `ElectricalEnergyMeasurement`'s `gMeasurements` table
+at `CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES` (8, in
 `src/CHIPProjectConfig.h`) instead of the whole dynamic endpoint space. The
 cluster is not in this round's build, so the reclaim is not measured here.
+
+The extension patch adds the `BooleanState` static cluster configuration
+template that catalogue batch 1's task 2 needed (`sdk-patches/README.md`
+explains why the extension tree and not `matter_sdk`): `matter_boolean_state`
+is a code-driven cluster whose `CodegenIntegration.cpp` unconditionally
+includes `app/static-cluster-config/BooleanState.h`, and the extension's own
+`app-templates.json` only ever generates that header for `Descriptor`. The
+patch adds a matching template for `BooleanState`, so `zap-regen.sh`'s
+committed `data_model/zap-generated/app/static-cluster-config/BooleanState.h`
+and slc's own `autogen/` copy are both produced the same way `Descriptor.h`
+already is, and no include path anywhere else changes.
 
 ### The OpenThread override
 
