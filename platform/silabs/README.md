@@ -2357,7 +2357,7 @@ reconfigured.
 $ git status --porcelain                                (clean, at ca05afa)
 $ source platform/silabs/toolchain.env
 $ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-b1 \
-      -f hearth.Makefile -j8            # warning-free, deprecation-free
+      -f hearth.Makefile -j8
 $ cd build/debug && commander gbl create hearth.gbl --app hearth.s37
 $ python3 platform/silabs/fw/flash.py --port "$MT_PORT" --image .../hearth.gbl
   6730 blocks, 6730 frame(s) sent (0 retransmit(s)), 95.6 s
@@ -2366,11 +2366,32 @@ $ python3 platform/silabs/fw/flash.py --port "$MT_PORT" --image .../hearth.gbl
 
 `hearth.bin` 861 328 B, md5 `276968b351871f828cd5c523f9cd555a`; `hearth.gbl`
 861 400 B, md5 `fa2837e6f13c9df532ad9b8012991931`. Every figure and every run
-below is this image. The build directory was already at `ca05afa` when this
-record was taken, and a repeated incremental `make` compiled nothing, which is
-what says the tree and the directory agree; the module was reflashed from it
-anyway, so what is on the bench is beyond doubt. Both result files'
-`fw_repo_head` reads `ca05afa`, the built commit exactly.
+below is this image. Both result files' `fw_repo_head` reads `ca05afa`, the
+built commit exactly.
+
+Two things about that transcript, because the `make` in it compiled nothing.
+The build directory was already at `ca05afa` when this record was taken, so
+the repeated incremental `make` had nothing to do, which is exactly what says
+the tree and the directory agree; the module was reflashed from it anyway, so
+what is on the bench is beyond doubt. And because a `make` that compiles
+nothing proves nothing about warnings, the one file `ca05afa` changed was
+recompiled deliberately afterwards and the image relinked:
+
+```
+$ touch platform/silabs/port/mt_devtypes_sl.cpp
+$ POST_BUILD_EXE=$(which commander) make all -C ~/silabs/work/hearth-matter-b1 \
+      -f hearth.Makefile -j8 | tee ~/silabs/work/hearth-matter-b1/build-ca05afa.log
+  Building .../platform/silabs/port/mt_devtypes_sl.cpp
+  Linking build/debug/hearth.out
+$ grep -ci warning    ~/silabs/work/hearth-matter-b1/build-ca05afa.log     0
+$ grep -c  deprecated ~/silabs/work/hearth-matter-b1/build-ca05afa.log     0
+$ md5sum build/debug/hearth.bin   276968b351871f828cd5c523f9cd555a
+$ md5sum build/debug/hearth.gbl   fa2837e6f13c9df532ad9b8012991931
+```
+
+**Warning-free and deprecation-free, and byte-identical to the image on the
+bench**, which re-proves F497's relink rule on this build as well as the
+warning count.
 
 #### The proof: 75 passed, 0 failed, 9 not applicable
 
@@ -2407,10 +2428,19 @@ still the only writer of that cluster's metadata.
 
 #### The six rows that failed first, and the defect behind them (B525)
 
-**The first run of this proof, on the `d263b6b` image one code commit earlier,
-was 69 passed, 6 failed, 9 not applicable.** The six were one fact on two device
-types, three rows each: 0x0101 dimmable light on endpoint 2 and 0x010B
-dimmable plug-in unit on endpoint 13.
+**The first recorded run of this proof, on the `d263b6b` image one code commit
+earlier, was 69 passed, 6 failed, 9 not applicable.** The six were one fact on
+two device types, three rows each: 0x0101 dimmable light on endpoint 2 and
+0x010B dimmable plug-in unit on endpoint 13.
+
+(It was the second run on the bench. The first, on the same image, was 66
+passed, 9 failed, 9 not applicable, and three of those nine were the script's
+own row table rather than the port: an `on-off` read parsed as an integer, an
+`on` command that asked for the value the AT write had already set, and a
+`move-to-level` that Options processing refuses with SUCCESS while `OnOff` is
+FALSE. `b1eb3ad` corrected all three, with self-tests, and that run's result
+file was overwritten by the next one before anything was committed. The rules
+it produced are in the docs repository, `TESTING.md` section 8.)
 
 | Row, on both endpoints | Then | Now |
 |---|---|---|
@@ -2558,6 +2588,16 @@ chip-tool commissionings, each exit 0 on the first attempt; the dataset
 reached chip-tool through the harness's own D-Bus route and appears nowhere in
 the run log or the result file. 2.9's cold boot used this bench's hub recipe,
 `uhubctl -l 3-1.3 -a cycle -d 5` ("The bench limit this run found").
+
+**Phase 1 was not re-run on this image, and its 292 of 296 is task 3's
+measurement**, taken on the earlier `f4ddd4f` build (`hearth.bin` md5
+`fb3a1efc...`, the same bytes as `d263b6b`), with the same four unported-type
+rows failing as `core-phase1.json` records. It is not expected to move on
+`ca05afa`: the only change is a strong
+`emberAfLevelControlClusterInitCallback()` that runs for dynamic endpoints
+carrying LevelControl and returns at once for endpoint 240, and Phase 1 stages
+none of the batch-1 device types at all. Stated rather than assumed, so a
+reader of this section does not take the figure for a `ca05afa` run.
 
 #### Flash and RAM
 
@@ -4615,7 +4655,7 @@ not a regression against the nRF arm.
 | **Harness Phase 2 ran on this bench: closed 2026-09-21** (graph **F503**). All three obstacles are gone: the gate falls back to otbr-agent's D-Bus property when `ot-ctl` cannot open the root-owned socket (the `+MTEVT` round's task 3), the SWD reset takes this carrier's own openocd config (`--openocd-config platform/silabs/mg24-swd.cfg`, task 4), and the `+MTEVT` assertions have events (task 1). **98 passed, 2 failed, 1 not applicable**, every event row passing, result file `platform/silabs/core-phase2.json`; see "Harness Phase 2" | **closed here**. What is left of the row is the two failures, which are the attribute-persistence gap below, and Phase 3, which has never run on this arm |
 | **A dynamic endpoint's attribute value does not survive a reboot**, warm or cold. Measured 2026-09-21 by harness rows 2.8 and 2.9 (`attribute value survived (B63 guard)`) and reproduced by hand: write `AT+MTATTR=1,6,0,1`, reset over SWD, read back `0`. Every attribute on every dynamic endpoint is `EXTERNAL_STORAGE`, so the value lives in the endpoint arena's RAM; CHIP's write path would persist a `NONVOLATILE` row, but nothing restores one, because `emAfLoadAttributeDefaults()` never runs for a dynamic endpoint and discards `EXTERNAL` rows where it does. The fix is a restore path in the port beside `rebuild_composition()`, before `+MTREADY`, and it needs a ruling on which attributes carry the spec's N quality plus a write-churn budget against the NVM3 row below. **The nRF arm declares the same tables through the same mechanism and carries no `NONVOLATILE` either**, so this is one gap for both Thread arms; **confirmed on the nRF 2026-09-21**, where the same two rows failed with the same reads (`platform/nrf54l15/core-phase2.json`) | the **qualification round**, with the nRF arm; the full account is under "Harness Phase 2" |
 | **Harness Phase 2's cold boot needs this bench's hub recipe.** `uhubctl -l 3-1.3 -p 3 -a off` cuts the carrier's power without the kernel ever seeing the disconnect, so the device node goes stale rather than vanishing and step 2.9 times out; the matching `-a on` does not restore the port either. `uhubctl -l 3-1.3 -a cycle -d 5`, all ports, is what produces a real disconnect and what recovers a carrier left dark. A bench fact, recorded under "Harness Phase 2" | the bench; nothing in the harness or the port is wrong here |
-| **NVM3's usable figure needs a soak** (graph **F503**). 40 960 B configured, 24 objects and about 3.6 KB consumed by one commissioning, and `availableMemory` observed as low as 480 B during this session's write churn before a repack returned it to 5 392 B. Nothing failed and the repack is the mechanism working, but the trough is unmeasured over a long run, exactly as the nRF arm's 32 KB ZMS row is | the **qualification round**'s soak, with the nRF row |
+| **NVM3's usable figure needs a soak** (graph **F503**). 40 960 B configured, 24 objects and about 3.6 KB consumed by one commissioning. `availableMemory` was observed as low as 480 B during round 2 task 7's write churn, before a repack returned it to 5 392 B, and **as low as 176 B on 2026-09-22, during catalogue batch 1's bench session** (a proof run, two Phase 2 runs and a measurement cycle in one day; erase count 5 to 8, so three repacks; the four boot figures are under "Catalogue batch 1"). **176 B is the number the soak has to size against**, not 480. Nothing failed and no write was refused, so the repack is the mechanism working, but the trough is unmeasured over a long run, exactly as the nRF arm's 32 KB ZMS row is | the **qualification round**'s soak, with the nRF row |
 | **Phone commissioning over Thread has never been tried on this arm.** Both commissionings here are the CLI chip-tool on the border router's own host | the **qualification round** |
 | **The EUSART's own RX overflow is neither enabled nor counted.** `EUSART0_RX_IRQHandler` drains the FIFO while `STATUS.RXFL` is set and never looks at `EUSART_IF_RXOF`, so a peripheral-level overrun would lose bytes that `s_rx_ring.dropped` cannot see and the console never reports. Not observed: task 7's burst accounting is fully explained by the ring's own counter plus a lossy host-side bridge. It is an accounting hole, not a known defect, and the cheap close is to enable `RXOF` and fold it into the same warning | whoever next touches `port/hearth_port_sl.c`; see "Sustained traffic" |
 | **`fw/flash.py`'s `read_until()` and the harness's own stream loops do the same job in two places.** A round 1 review minor, still true, still costing nothing | whoever next touches either; it is a tidy-up, not a defect |
