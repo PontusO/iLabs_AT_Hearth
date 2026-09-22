@@ -447,11 +447,17 @@ constexpr EmberAfDeviceType kWaterLeakDetectorTypes[] = { { 0x0043, 1 } };
  * (chipFuncArrayOccupancySensingServer) for the STATIC, ZAP-declared cluster
  * on endpoint 240 only; DECLARE_DYNAMIC_CLUSTER below hardcodes
  * `.functions = NULL` for every dynamic cluster it builds, with no way to
- * attach one. (There is no per-build cluster-callbacks.cpp in the checked-in
- * tree that would dispatch it either; the file with that name lives only under
- * a build directory's generated tree and dispatches a DIFFERENT, unrelated
- * function, emberAfOccupancySensingClusterInitCallback, no "Server" in the
- * name: a weak no-op stub, unused.)
+ * attach one. (This is a DIFFERENT, unrelated function from
+ * emberAfOccupancySensingClusterInitCallback, no "Server" in the name: since
+ * ca05afa the committed zap-generated/app/cluster-init-callback.cpp:49-50 is
+ * the live route for it, the same generic per-endpoint dispatch the
+ * LevelControl hook below uses (see "the ember cluster init hook" section),
+ * so it IS called, on endpoint 240 and on any dynamic endpoint that carries
+ * OccupancySensing. It stays the weak no-op stub because OccupancySensing
+ * does not need a strong override the way LevelControl does: its server
+ * init, occupancy-sensor-server.cpp:216-246, only writes
+ * OccupancySensorType and OccupancySensorTypeBitmap, and the seed row above
+ * already writes both.)
  *
  * occupancy-sensor-server.cpp does define an AttributeAccessInterface Instance
  * class and its object file is linked into this build, but nothing in this
@@ -1228,7 +1234,23 @@ constexpr size_t kWidestEndpointSlots =
                                              kMax2(MT_COUNT(pressureAttrs),
                                                    kMax2(MT_COUNT(illuminanceAttrs),
                                                          MT_COUNT(flowAttrs)))))));
-constexpr size_t kWidestClusterList = MT_COUNT(dimmableLightClusters);
+/* The widest cluster list is a max over every declared cluster list, not
+ * just the dimmable light's: a future device type with a wider list (for
+ * example a five-cluster type) must fail the floor's static_assert below at
+ * build time, not surface later as a runtime allocation refusal when its
+ * endpoint overruns block_bytes()'s sizing. */
+constexpr size_t kWidestClusterList = kMax2(
+    MT_COUNT(onOffLightClusters),
+    kMax2(MT_COUNT(temperatureSensorClusters),
+          kMax2(MT_COUNT(dimmableLightClusters),
+                kMax2(MT_COUNT(booleanStateSensorClusters),
+                      kMax2(MT_COUNT(occupancySensorClusters),
+                            kMax2(MT_COUNT(humiditySensorClusters),
+                                  kMax2(MT_COUNT(pressureSensorClusters),
+                                        kMax2(MT_COUNT(lightSensorClusters),
+                                              kMax2(MT_COUNT(flowSensorClusters),
+                                                    kMax2(MT_COUNT(onOffPlugInUnitClusters),
+                                                          MT_COUNT(dimmablePlugInUnitClusters)))))))))));
 
 constexpr size_t kWidestBlockBytes =
     block_bytes(kWidestClusterList, kWidestEndpointSlots) +
@@ -2421,7 +2443,12 @@ void seed_slots(dyn_endpoint *d)
  * to the weak emberAfLevelControlClusterInitCallback(EndpointId) below. That
  * is the hook an application is expected to define, and it is exactly the one
  * the nRF arm uses for its DoorLock init (mt_devtypes_zephyr.cpp 7006-7051),
- * so this is the arms' shared pattern rather than a Silabs workaround.
+ * so this is the arms' shared pattern rather than a Silabs workaround. That
+ * dispatch is generated from the ZAP's enabled cluster set on endpoint 240:
+ * Task 2 enabling LevelControl there is what created the `case
+ * LevelControl::Id` in cluster-init-callback.cpp, so a cluster that needs an
+ * init override must stay enabled on the catalogue endpoint, or the override
+ * is never called and B525 returns silently.
  *
  * ENDPOINT 240 RETURNS AT ONCE. The catalogue endpoint is ZAP-declared, so
  * endpoint_config.h wires it a real functions array and
