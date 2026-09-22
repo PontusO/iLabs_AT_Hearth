@@ -65,9 +65,21 @@ class TestBatchTable(unittest.TestCase):
 
 class TestParsers(unittest.TestCase):
     def test_parse_bool_attr(self):
-        self.assertIs(P.parse_bool_attr("CHIP:TOO:   StateValue: TRUE\n"), True)
-        self.assertIs(P.parse_bool_attr("CHIP:TOO:   StateValue: FALSE\n"), False)
+        # Real chip-tool line shape (mirrors modes-current-mode.txt):
+        # "[ts] [pid:tid] [TOO]   Label: VALUE", anchored on `]` + 2+ spaces.
+        self.assertIs(P.parse_bool_attr(
+            "[1740000000.123] [1234:1234] [TOO]   StateValue: TRUE\n"), True)
+        self.assertIs(P.parse_bool_attr(
+            "[1740000000.123] [1234:1234] [TOO]   StateValue: FALSE\n"), False)
         self.assertIsNone(P.parse_bool_attr("nothing here"))
+
+    def test_parse_bool_attr_last_match_wins_over_an_earlier_true(self):
+        # An earlier TRUE on a different label (e.g. a preceding attribute
+        # in the same read) must not win: only the last labelled value
+        # counts, the same discipline parse_int_attr enforces.
+        out = ("[1740000000.100] [1234:1234] [TOO]   SomeOtherFlag: TRUE\n"
+               "[1740000000.123] [1234:1234] [TOO]   StateValue: FALSE\n")
+        self.assertIs(P.parse_bool_attr(out), False)
 
     def test_parse_device_types(self):
         # Real chip-tool shape (DataModelLogger): the id is followed by

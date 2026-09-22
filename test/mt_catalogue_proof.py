@@ -98,8 +98,15 @@ def rows_for(batch):
     return BATCHES[batch]
 
 def parse_bool_attr(out):
-    m = re.search(r":\s+(TRUE|FALSE)\s*$", out or "", re.M)
-    return None if m is None else m.group(1) == "TRUE"
+    """The last plain `<Label>: TRUE`/`FALSE` value chip-tool prints,
+    mirroring parse_int_attr's discipline (mt_regression.py:5294):
+    anchored on chip-tool's `]  Label: VALUE` line shape (the `]` closes
+    the `[TOO]` tag, then 2-or-more spaces) so a single-space summary
+    line cannot supply a false hit, and taking the LAST match so an
+    earlier TRUE/FALSE on a different label cannot win. None on no
+    match, never raises."""
+    vals = re.findall(r"\]\s{2,}[A-Za-z_]\w*:\s*(TRUE|FALSE)\s*$", out or "", re.M)
+    return None if not vals else vals[-1] == "TRUE"
 
 def parse_device_types(out):
     """Every (device type id, revision) pair from a Descriptor
@@ -283,33 +290,39 @@ def main(argv=None):
         print("ABORT: cannot capture onboarding codes, skipping commissioning")
 
     node = "0x%X" % args.node_id
-    if paired:
-        for (ep, _), t in zip(comp[1:], rows_for(args.batch)):
-            prove_endpoint(link, chip, s, node, ep, t)
-    else:
-        print("ABORT: pairing failed, skipping the endpoint proofs")
-
-    # restore: factory-reset back to the bench's documented start state
-    res, _ = link.command("AT+MTFRESET", timeout=5.0)
-    s.check("restore: MTFRESET -> OK", res == 0)
-    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
-    s.check("restore: +MTREADY after MTFRESET", ready is not None)
-    restore_devtypes = args.restore.split(",")
-    ok = H.stage_composition(link, restore_devtypes)
-    s.check("restore: composition staged", ok)
-    link.drain(0.3)
-    res, _ = link.command("AT+MTEPAPPLY", timeout=5.0)
-    s.check("restore: MTEPAPPLY -> OK", res == 0)
-    ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
-    s.check("restore: +MTREADY after MTEPAPPLY", ready is not None)
-    expected_restore = ["+MTEP:%d,%d,%s" % (i, i + 1, dt)
-                        for i, dt in enumerate(restore_devtypes)]
-    res, lines = H.cmd_retry(link, "AT+MTEP?")
-    s.check("restore: composition %s staged" % args.restore,
-            res == 0 and lines == expected_restore)
-    res, lines = H.cmd_retry(link, "AT+MTFABRICS?")
-    s.check("restore: fabrics 0", res == 0 and lines == ["+MTFABRICS:0"])
-    chip.wipe_storage()
+    try:
+        if paired:
+            for (ep, _), t in zip(comp[1:], rows_for(args.batch)):
+                prove_endpoint(link, chip, s, node, ep, t)
+        else:
+            print("ABORT: pairing failed, skipping the endpoint proofs")
+    finally:
+        # restore: factory-reset back to the bench's documented start
+        # state, in a finally so a serial drop (or any other exception)
+        # mid-proof still runs it: without this, an exception out of the
+        # loop above would skip straight to the interpreter and leave the
+        # bench commissioned with all thirteen catalogue endpoints instead
+        # of the documented 0x0100,0x0302.
+        res, _ = link.command("AT+MTFRESET", timeout=5.0)
+        s.check("restore: MTFRESET -> OK", res == 0)
+        ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+        s.check("restore: +MTREADY after MTFRESET", ready is not None)
+        restore_devtypes = args.restore.split(",")
+        ok = H.stage_composition(link, restore_devtypes)
+        s.check("restore: composition staged", ok)
+        link.drain(0.3)
+        res, _ = link.command("AT+MTEPAPPLY", timeout=5.0)
+        s.check("restore: MTEPAPPLY -> OK", res == 0)
+        ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
+        s.check("restore: +MTREADY after MTEPAPPLY", ready is not None)
+        expected_restore = ["+MTEP:%d,%d,%s" % (i, i + 1, dt)
+                            for i, dt in enumerate(restore_devtypes)]
+        res, lines = H.cmd_retry(link, "AT+MTEP?")
+        s.check("restore: composition %s staged" % args.restore,
+                res == 0 and lines == expected_restore)
+        res, lines = H.cmd_retry(link, "AT+MTFABRICS?")
+        s.check("restore: fabrics 0", res == 0 and lines == ["+MTFABRICS:0"])
+        chip.wipe_storage()
 
     passed = sum(1 for _, ok, _ in s.results if ok); failed = len(s.results) - passed
     print("%s: %d passed, %d failed, %d not applicable" % (args.batch, passed, failed, len(s.na)))
