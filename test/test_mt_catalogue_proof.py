@@ -29,6 +29,40 @@ class TestBatchTable(unittest.TestCase):
         got = {t["devtype"]: t["revision"] for t in P.BATCHES["mg24-batch1"]}
         self.assertEqual(got, want)
 
+    def test_a_controller_command_moves_the_value_away_from_the_at_write(self):
+        """A command asking for the value the AT write of the previous
+        step already put there is a no-op: the cluster server changes
+        nothing, MatterPostAttributeChangeCallback never runs, no
+        +MTATTR URC is raised, and the row waits for something that can
+        never arrive. Found on the bench 2026-09-22 on 0x010A, whose
+        controller command was `on` after an AT write of 1."""
+        for t in P.BATCHES["mg24-batch1"]:
+            if t["controller"] is None:
+                continue
+            self.assertNotEqual(t["controller"][2], t["primary"]["at_value"],
+                                "%s: the controller value equals the AT write"
+                                % t["devtype"])
+
+    def test_boolean_attributes_are_read_with_the_boolean_parser(self):
+        """chip-tool prints a BOOLEAN attribute as `OnOff: TRUE`, which
+        carries no integer for parse_int_attr to find. Found on the
+        bench 2026-09-22 on 0x010A's on-off row."""
+        for t in P.BATCHES["mg24-batch1"]:
+            if t["chip_cluster"] in ("booleanstate", "onoff"):
+                self.assertEqual(t["primary"]["parse"], "bool", t["devtype"])
+
+    def test_levelcontrol_commands_are_the_with_on_off_variants(self):
+        """LevelControl's Move, MoveToLevel, Stop and Step are refused
+        with SUCCESS on an endpoint whose OnOff attribute is FALSE and
+        whose Options ExecuteIfOff bit is clear (level-control.cpp's
+        shouldExecuteIfOff), so they change nothing, raise no URC and
+        still exit 0. A freshly composed dimmable light is off."""
+        for t in P.BATCHES["mg24-batch1"]:
+            if t["chip_cluster"] == "levelcontrol" and t["controller"] is not None:
+                self.assertTrue(t["controller"][1][0].endswith("-with-on-off"),
+                                "%s: %s is gated by Options processing"
+                                % (t["devtype"], t["controller"][1][0]))
+
 class TestParsers(unittest.TestCase):
     def test_parse_bool_attr(self):
         self.assertIs(P.parse_bool_attr("CHIP:TOO:   StateValue: TRUE\n"), True)

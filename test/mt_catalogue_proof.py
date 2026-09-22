@@ -46,10 +46,29 @@ ANCHOR_NAME = "on/off light (anchor)"
 
 # controller = ("command", [chip-tool args after the cluster name, before node/ep],
 #               expected +MTATTR value) or None for a read-only cluster.
+#
+# Two rules the bench taught this table on 2026-09-22, both of them Matter
+# facts rather than port behaviour, and both of them things the design spec
+# (section 4 step 3) got wrong when it named `move-to-level` and `on`:
+#
+#  * The controller command must move the attribute AWAY from the value the
+#    AT write of step 2 put there. A command that asks for the value already
+#    held is a no-op, raises no MatterPostAttributeChangeCallback and so no
+#    +MTATTR URC, and the row waits for something that can never arrive.
+#    Observed on the console as "Endpoint c On/off already set to new value".
+#  * LevelControl's four "without On/Off" commands (Move, MoveToLevel, Stop,
+#    Step) are gated by the Options processing: with the endpoint's OnOff
+#    cluster present, its OnOff attribute FALSE and the Options ExecuteIfOff
+#    bit clear, the command returns SUCCESS and changes nothing
+#    (level-control.cpp's shouldExecuteIfOff(), quoting ZCL7 3.10.2.2.8.1;
+#    the caller at :889 returns Status::Success on the refusal, so chip-tool
+#    exits 0 and the row sees a silent no-op). A freshly composed dimmable
+#    light is off, so the "with On/Off" variant is the command a real dimmer
+#    sends and the only one that can prove the URC path here.
 BATCHES = {
     "mg24-batch1": [
         _type("0x0101", "dimmable light", 3, "levelcontrol", 8, 0, "current-level", 100,
-              controller=("command", ["move-to-level", "200", "0", "0", "0"], 200)),
+              controller=("command", ["move-to-level-with-on-off", "200", "0", "0", "0"], 200)),
         _type("0x0015", "contact sensor", 2, "booleanstate", 69, 0, "state-value", 1, parse="bool",
               extra_reads=[("read-event", "state-change")]),
         _type("0x0044", "rain sensor", 1, "booleanstate", 69, 0, "state-value", 1, parse="bool"),
@@ -61,10 +80,13 @@ BATCHES = {
         _type("0x0305", "pressure sensor", 2, "pressuremeasurement", 1027, 0, "measured-value", 1013),
         _type("0x0106", "light sensor", 3, "illuminancemeasurement", 1024, 0, "measured-value", 12345),
         _type("0x0306", "flow sensor", 2, "flowmeasurement", 1028, 0, "measured-value", 250),
-        _type("0x010A", "on/off plug-in unit", 4, "onoff", 6, 0, "on-off", 1,
-              controller=("command", ["on"], 1)),
+        # OnOff is a BOOLEAN attribute, so chip-tool prints "OnOff: TRUE"
+        # and parse="bool" is what reads it; parse_int_attr finds no
+        # integer on that line and answers None.
+        _type("0x010A", "on/off plug-in unit", 4, "onoff", 6, 0, "on-off", 1, parse="bool",
+              controller=("command", ["off"], 0)),
         _type("0x010B", "dimmable plug-in unit", 5, "levelcontrol", 8, 0, "current-level", 100,
-              controller=("command", ["move-to-level", "200", "0", "0", "0"], 200)),
+              controller=("command", ["move-to-level-with-on-off", "200", "0", "0", "0"], 200)),
     ],
 }
 
