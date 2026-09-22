@@ -567,16 +567,28 @@ why the two arms' models are comparable. What task 2 changed:
   cluster 0x002A is absent, which a certification tool reads as a broken
   declaration and a controller can see the moment the stack runs. Endpoint 0 is
   never disabled, so this one was not cosmetic.
-- **Endpoint 240's device type 0x0101 (dimmable light) is left as it is**, with
-  Level Control disabled under it. It is the same shape of inconsistency and it
-  is deliberately not the same problem: this endpoint is the CATALOGUE, the port
-  disables it at runtime before any fabric can read it (which is what "disabled
-  catalogue endpoint" means and is task 3's `emberAfEndpointEnableDisable`
-  call), and its device type list is never served. Removing it would diverge
-  this arm's model from the nRF arm's, which carries the same entry, for no wire
-  effect. A known artefact, recorded here so nobody has to rediscover it; the
-  round that gives endpoint 240 a device type it means is the one that should
-  change it, for both arms.
+- **Endpoint 240's device type 0x0101 (dimmable light) is left as it is**,
+  originally with Level Control disabled under it. It was the same shape of
+  inconsistency and deliberately not the same problem: this endpoint is the
+  CATALOGUE, the port disables it at runtime before any fabric can read it
+  (which is what "disabled catalogue endpoint" means and is task 3's
+  `emberAfEndpointEnableDisable` call), and its device type list is never
+  served. Removing it would diverge this arm's model from the nRF arm's, which
+  carries the same entry, for no wire effect. A known artefact, recorded here
+  so nobody has to rediscover it; the round that gives endpoint 240 a device
+  type it means is the one that should change it, for both arms.
+- **Catalogue batch 1's task 2 (2026-09-22) enables the server side of seven
+  clusters bound to endpoint 240's `MA-dimmablelight` endpoint type**: Level
+  Control (8), Boolean State (69), Relative Humidity Measurement (1029),
+  Pressure Measurement (1027), Illuminance Measurement (1024), Flow
+  Measurement (1028) and Occupancy Sensing (1030), with `hearth.slcp` gaining
+  the three components that have a cluster-server directory
+  (`matter_level_control`, `matter_boolean_state`, `matter_occupancy_sensor`);
+  the other four have no component to add, served out of ember attribute
+  storage the same way Temperature Measurement already was. This is a data
+  model and image-link change only, before the catalogue registry gives any of
+  the seven clusters a table: the seven enabled clusters carry no attribute
+  data until the next task builds the registry rows that create them.
 - The two `"package"` paths point at the extension's `zcl.json` and
   `app-templates.json` as **absolute paths on this machine**, exactly as the nRF
   file points at its NCS workspace. They are overridden at every generation, by

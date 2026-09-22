@@ -351,18 +351,27 @@ component:
   - id: matter_identify
   - id: matter_network_commissioning
   - id: matter_on_off
+  # Catalogue batch 1 (2026-09-22): the three clusters of the batch that have a
+  # server. LevelControl for the dimmable light and plug (commands MoveToLevel
+  # and friends), BooleanState for the four sensors (a code-driven cluster; the
+  # port bridges the arena into it, see MatterPostAttributeChangeCallback), and
+  # OccupancySensing (its Instance class links and is never constructed here,
+  # so the ember path serves it, as on the nRF).
+  - id: matter_boolean_state
+  - id: matter_level_control
+  - id: matter_occupancy_sensor
   - id: matter_operational_credentials
   - id: matter_software_diagnostics
   - id: matter_thread_network_diagnostics
   # There is deliberately no matter_temperature_measurement: no such component
-  # exists, and none is needed. Temperature Measurement has no cluster server in
-  # connectedhomeip at all (src/app/clusters/ has no temperature-measurement
-  # directory) and no row in the extension's own
-  # cluster-to-component-dependencies.json. It is served entirely out of ember
-  # attribute storage, which for this port means the external-attribute
-  # callbacks the upward port provides. Asking slc for it fails the generate
-  # outright: "Referenced project component matter_temperature_measurement not
-  # in framework".
+  # exists, and none is needed. The same holds for Relative Humidity, Pressure,
+  # Illuminance and Flow Measurement (catalogue batch 1): no component, no
+  # cluster server directory, served out of ember attribute storage. None of
+  # these have a cluster server in connectedhomeip at all (src/app/clusters/
+  # has no directory for any of them) and no row in the extension's own
+  # cluster-to-component-dependencies.json. Asking slc for any of them fails
+  # the generate outright: "Referenced project component
+  # matter_temperature_measurement not in framework".
   #
   # Two clusters this data model enables on endpoint 0 have a component that is
   # NOT listed here: Diagnostic Logs (matter_diagnostic_logs) and Wi-Fi Network

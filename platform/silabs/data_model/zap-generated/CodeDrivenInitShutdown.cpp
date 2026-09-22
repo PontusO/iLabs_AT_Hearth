@@ -56,6 +56,9 @@ void MatterClusterServerInitCallback(EndpointId endpoint, ClusterId  clusterId) 
     case app::Clusters::GroupKeyManagement::Id:
         MatterGroupKeyManagementClusterInitCallback(endpoint);
         break;
+    case app::Clusters::BooleanState::Id:
+        MatterBooleanStateClusterInitCallback(endpoint);
+        break;
     }
 }
 
@@ -91,6 +94,9 @@ void MatterClusterServerShutdownCallback(EndpointId endpoint, ClusterId clusterI
         break;
     case app::Clusters::GroupKeyManagement::Id:
         MatterGroupKeyManagementClusterShutdownCallback(endpoint);
+        break;
+    case app::Clusters::BooleanState::Id:
+        MatterBooleanStateClusterShutdownCallback(endpoint);
         break;
     }
 }
