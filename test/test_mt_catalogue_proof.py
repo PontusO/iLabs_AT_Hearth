@@ -36,12 +36,19 @@ class TestParsers(unittest.TestCase):
         self.assertIsNone(P.parse_bool_attr("nothing here"))
 
     def test_parse_device_types(self):
-        out = ("CHIP:TOO:   DeviceTypeList: 1 entries\n"
+        # Real chip-tool shape (DataModelLogger): the id is followed by
+        # a parenthesised name on the same line, and the revision is a
+        # separate line with no id on it.
+        out = ("CHIP:TOO:   DeviceTypeList: 2 entries\n"
                "CHIP:TOO:     [1]: {\n"
-               "CHIP:TOO:       DeviceType: 257\n"
+               "CHIP:TOO:       DeviceType: 257 (On/Off Light)\n"
                "CHIP:TOO:       Revision: 3\n"
+               "CHIP:TOO:     }\n"
+               "CHIP:TOO:     [2]: {\n"
+               "CHIP:TOO:       DeviceType: 17 (Power Source)\n"
+               "CHIP:TOO:       Revision: 1\n"
                "CHIP:TOO:     }\n")
-        self.assertEqual(P.parse_device_types(out), [(257, 3)])
+        self.assertEqual(P.parse_device_types(out), [(257, 3), (17, 1)])
 
 class TestArgs(unittest.TestCase):
     def test_batch_is_required_and_known(self):

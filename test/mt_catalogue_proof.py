@@ -80,8 +80,17 @@ def parse_bool_attr(out):
     return None if m is None else m.group(1) == "TRUE"
 
 def parse_device_types(out):
-    return [(int(a), int(b)) for a, b in
-            re.findall(r"DeviceType: (\d+)\s*\n.*?Revision: (\d+)", out or "", re.S)]
+    """Every (device type id, revision) pair from a Descriptor
+    DeviceTypeList chip-tool read, in order. The two values never share
+    a line in chip-tool's real output: DataModelLogger prints
+    "DeviceType: 777 (Heat Pump)", the id followed by a parenthesised
+    name, then a separate "Revision: N" line with no id on it. Reuses
+    the harness's own id parser (H.parse_device_types, already tolerant
+    of the parenthesised name) and pairs it positionally with each
+    entry's Revision line."""
+    ids = H.parse_device_types(out)
+    revs = [int(m) for m in re.findall(r"Revision:\s*(\d+)\s*$", out or "", re.M)]
+    return list(zip(ids, revs))
 
 def _onboarding_codes(link):
     """The AT+MTCODES? extraction step_3_5_commission uses
@@ -114,7 +123,9 @@ def build_parser():
     ap.add_argument("--node-id", type=lambda x: int(x, 0), default=0x4845)
     ap.add_argument("--baseline", default=None)
     ap.add_argument("--restore", default="0x0100,0x0302",
-                    help="composition to stage after the proof (the bench's documented start state)")
+                    help="composition to stage after the proof (the bench's "
+                         "documented start state); bare device types only, "
+                         "no <devtype>,<variant> suffix support yet")
     ap.add_argument("--dry-run", action="store_true")
     return ap
 
@@ -219,7 +230,9 @@ def main(argv=None):
     s.check("compose: MTEPAPPLY -> OK", res == 0)
     ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
     s.check("compose: +MTREADY after MTEPAPPLY", ready is not None)
-    res, lines = link.command("AT+MTEP?")
+    # the first command after a reboot can time out once (graph N22);
+    # every analogous readback in the harness retries through this
+    res, lines = H.cmd_retry(link, "AT+MTEP?")
     expected = ["+MTEP:%d,%d,%s" % (i, ep, dt) for i, (ep, dt) in enumerate(comp)]
     s.check("compose: composition readback exact", res == 0 and lines == expected)
 
@@ -259,13 +272,21 @@ def main(argv=None):
     s.check("restore: MTFRESET -> OK", res == 0)
     ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
     s.check("restore: +MTREADY after MTFRESET", ready is not None)
-    ok = H.stage_composition(link, args.restore.split(","))
+    restore_devtypes = args.restore.split(",")
+    ok = H.stage_composition(link, restore_devtypes)
     s.check("restore: composition staged", ok)
     link.drain(0.3)
     res, _ = link.command("AT+MTEPAPPLY", timeout=5.0)
     s.check("restore: MTEPAPPLY -> OK", res == 0)
     ready = link.await_urc(r"\+MTREADY$", timeout=15.0)
     s.check("restore: +MTREADY after MTEPAPPLY", ready is not None)
+    expected_restore = ["+MTEP:%d,%d,%s" % (i, i + 1, dt)
+                        for i, dt in enumerate(restore_devtypes)]
+    res, lines = H.cmd_retry(link, "AT+MTEP?")
+    s.check("restore: composition %s staged" % args.restore,
+            res == 0 and lines == expected_restore)
+    res, lines = H.cmd_retry(link, "AT+MTFABRICS?")
+    s.check("restore: fabrics 0", res == 0 and lines == ["+MTFABRICS:0"])
     chip.wipe_storage()
 
     passed = sum(1 for _, ok, _ in s.results if ok); failed = len(s.results) - passed
