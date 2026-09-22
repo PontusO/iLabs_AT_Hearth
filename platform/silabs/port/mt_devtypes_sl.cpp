@@ -1016,7 +1016,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * catalogue this build declares:
  *
  *   device type                        clusters  slots  payload  arena cost
- *   dimmable light / plug  0x0101 0x010B       4     20      336         344
+ *   dimmable light / plug  0x0101 0x010B       4     20      336         336
  *   on/off light / plug    0x0100 0x010A       3     11      188         192
  *   temp/humidity/pressure/light/flow
  *     0x0302 0x0307 0x0305 0x0106 0x0306       3      9      156         160
@@ -1027,7 +1027,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * Slots are the declared attributes plus the LIST_END ClusterRevision each
  * cluster carries, Identify's four included and Descriptor's none.
  *
- * HEARTH_EP_ARENA_BYTES is 5,504, which is 16 x 344: this arena holds
+ * HEARTH_EP_ARENA_BYTES is 5,376, which is 16 x 336: this arena holds
  * kServiceableEndpoints of the WIDEST type it can build, the dimmable light
  * and plug, with nothing left over and nothing wasted. Keeping that strong
  * promise rather than dropping to a floor of eight is the ruling of
@@ -1235,12 +1235,13 @@ constexpr size_t kWidestBlockBytes =
 
 /* Pinned, so the sizing table above cannot go stale without the build
  * noticing: the dimmable light and plug are the widest types this build
- * declares, at 336 payload bytes and 344 of arena. */
+ * declares, at 336 payload bytes and 336 of arena. 336 is already a multiple
+ * of 8, so this is the one row in the table whose cost model adds nothing. */
 static_assert(kWidestBlockBytes == 336,
               "the widest declared block changed size; redo the sizing table above and the "
               "README's capacity rows");
-static_assert(hearth_arena_cost(kWidestBlockBytes) == 344,
-              "the widest declared block's arena cost moved off the tables' 344");
+static_assert(hearth_arena_cost(kWidestBlockBytes) == 336,
+              "the widest declared block's arena cost moved off the tables' 336");
 
 /*
  * Usable bytes ARE gross bytes on a bump arena: nothing is spent on an
@@ -1255,11 +1256,11 @@ constexpr size_t kArenaUsableBytes = kEpArenaBytes;
  * uncapped type, eight being "the point below which the capacity table would
  * be describing a different device"; sizing for sixteen of its heaviest is
  * precisely the trade that round declined. This catalogue is still small
- * enough that the trade does not arise: sixteen dimmable lights are 5,504
+ * enough that the trade does not arise: sixteen dimmable lights are 5,376
  * bytes, so the floor stays the full kServiceableEndpoints and the capacity
  * claim is "every composition this build accepts, it can build". Catalogue
  * batch 1 kept that strong promise by raising HEARTH_EP_ARENA_BYTES from
- * 3,072 to 5,504 rather than lowering the floor (the ruling of 2026-09-22);
+ * 3,072 to 5,376 rather than lowering the floor (the ruling of 2026-09-22);
  * batch 2's wider types revisit the choice.
  *
  * That is deliberate rather than incidental. The next batch that adds a

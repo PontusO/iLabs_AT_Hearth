@@ -78,10 +78,11 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * were deliberately not copied: they price Zephyr's sys_heap chunk header
  * and bucket table.
  *
- * 5,504 is 16 x 344, i.e. kServiceableEndpoints blocks of the widest device
+ * 5,376 is 16 x 336, i.e. kServiceableEndpoints blocks of the widest device
  * type this build declares (the dimmable light and the dimmable plug-in
  * unit, which share a cluster list: 4 clusters and 20 attribute slots, 336
- * payload bytes, 344 after rounding). The rest of catalogue batch 1 is
+ * payload bytes, and 336 after rounding too, because 336 is already a
+ * multiple of 8). The rest of catalogue batch 1 is
  * cheaper: 192 for the on/off light and the on/off plug-in unit, 160 for the
  * temperature, humidity, pressure, light, flow and occupancy sensors, 128
  * for the four boolean-state sensors. So every composition this image
@@ -90,10 +91,10 @@ constexpr uint16_t kServiceableEndpoints = 16;
  *
  * Catalogue batch 1 kept that promise by raising this number from 3,072
  * rather than lowering the floor to the nRF's eight: the ruling of
- * 2026-09-22, made with the arithmetic in front of it, +2,432 B of .bss for
+ * 2026-09-22, made with the arithmetic in front of it, +2,304 B of .bss for
  * a capacity claim that needs no footnote. Batch 2's wider device types
  * revisit it. The floor assertion in mt_devtypes_sl.cpp is written to FAIL
  * when a wider device type is added, so the batch that adds one has to
  * choose between raising this number and lowering the promise, in the open.
  */
-#define HEARTH_EP_ARENA_BYTES 5504
+#define HEARTH_EP_ARENA_BYTES 5376
