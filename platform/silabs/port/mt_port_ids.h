@@ -78,23 +78,28 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * were deliberately not copied: they price Zephyr's sys_heap chunk header
  * and bucket table.
  *
- * 5,376 is 16 x 336, i.e. kServiceableEndpoints blocks of the widest device
- * type this build declares (the dimmable light and the dimmable plug-in
- * unit, which share a cluster list: 4 clusters and 20 attribute slots, 336
- * payload bytes, and 336 after rounding too, because 336 is already a
- * multiple of 8). The rest of catalogue batch 1 is
- * cheaper: 192 for the on/off light and the on/off plug-in unit, 160 for the
- * temperature, humidity, pressure, light, flow and occupancy sensors, 128
- * for the four boolean-state sensors. So every composition this image
- * accepts, it can build, which is a stronger promise than the nRF arm makes
- * (its 8,112 usable bytes hold eight of its widest type, not sixteen).
+ * 9,600 is 16 x 600, i.e. kServiceableEndpoints blocks of the widest device
+ * type this build declares (the extended colour light: 5 clusters and 36
+ * attribute slots, 596 payload bytes, 600 after rounding to 8). Catalogue
+ * batch 2 moved the widest from batch 1's dimmable light and dimmable
+ * plug-in unit (which share a cluster list: 4 clusters, 20 slots, 336
+ * payload, 336 rounded - 336 is already a multiple of 8): 536 for the colour
+ * temperature light, 256 for the thermostat, 224 for the window covering,
+ * 192 for the on/off light and the on/off plug-in unit, 176 for the fan,
+ * 160 for the temperature, humidity, pressure, light, flow and occupancy
+ * sensors, 128 for the air quality sensor and the four boolean-state
+ * sensors. So every composition this image accepts, it can build, which is
+ * a stronger promise than the nRF arm makes (its 8,112 usable bytes hold
+ * thirteen of the same extended colour light, not sixteen).
  *
  * Catalogue batch 1 kept that promise by raising this number from 3,072
  * rather than lowering the floor to the nRF's eight: the ruling of
  * 2026-09-22, made with the arithmetic in front of it, +2,304 B of .bss for
- * a capacity claim that needs no footnote. Batch 2's wider device types
- * revisit it. The floor assertion in mt_devtypes_sl.cpp is written to FAIL
- * when a wider device type is added, so the batch that adds one has to
- * choose between raising this number and lowering the promise, in the open.
+ * a capacity claim that needs no footnote. Catalogue batch 2 kept it on the
+ * same terms: +4,224 B of .bss, raised to 9,600 rather than lowered to the
+ * nRF's floor, the ruling of 2026-09-24. The floor assertion in
+ * mt_devtypes_sl.cpp is written to FAIL when a wider device type is added,
+ * so the batch that adds one has to choose between raising this number and
+ * lowering the promise, in the open.
  */
-#define HEARTH_EP_ARENA_BYTES 5376
+#define HEARTH_EP_ARENA_BYTES 9600
