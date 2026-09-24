@@ -16,14 +16,23 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::AdministratorCommissioning::Id:
         emberAfAdministratorCommissioningClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::AirQuality::Id:
+        emberAfAirQualityClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::BasicInformation::Id:
         emberAfBasicInformationClusterInitCallback(endpoint);
         break;
      case  app::Clusters::BooleanState::Id:
         emberAfBooleanStateClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::ColorControl::Id:
+        emberAfColorControlClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::Descriptor::Id:
         emberAfDescriptorClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::FanControl::Id:
+        emberAfFanControlClusterInitCallback(endpoint);
         break;
      case  app::Clusters::FlowMeasurement::Id:
         emberAfFlowMeasurementClusterInitCallback(endpoint);
@@ -73,8 +82,14 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::TemperatureMeasurement::Id:
         emberAfTemperatureMeasurementClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::Thermostat::Id:
+        emberAfThermostatClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::ThreadNetworkDiagnostics::Id:
         emberAfThreadNetworkDiagnosticsClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::WindowCovering::Id:
+        emberAfWindowCoveringClusterInitCallback(endpoint);
         break;
     default:
         // Unrecognized cluster ID

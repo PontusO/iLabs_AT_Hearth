@@ -357,12 +357,27 @@ component:
   # port bridges the arena into it, see MatterPostAttributeChangeCallback), and
   # OccupancySensing (its Instance class links and is never constructed here,
   # so the ember path serves it, as on the nRF).
+  - id: matter_air_quality
   - id: matter_boolean_state
+  # Catalogue batch 2 (2026-09-24): the five server-interaction clusters. All
+  # five are ember-served on dynamic endpoints (no CodegenIntegration, no
+  # static-cluster-config include, so no SDK patch): ColorControl for the two
+  # colour lights (its server init is run by the port's
+  # emberAfColorControlClusterInitCallback override), Thermostat and
+  # WindowCovering (each registers an attribute access interface that answers
+  # ClusterRevision only), FanControl (nothing: its FanMode/PercentSetting
+  # coupling is functions-array-bound and the host owns it), AirQuality (its
+  # Instance class links and is never constructed here; the FeatureMap comes
+  # from mt_air_quality_feature_mask()).
+  - id: matter_color_control
+  - id: matter_fan_control
   - id: matter_level_control
   - id: matter_occupancy_sensor
   - id: matter_operational_credentials
   - id: matter_software_diagnostics
   - id: matter_thread_network_diagnostics
+  - id: matter_thermostat
+  - id: matter_window_covering
   # There is deliberately no matter_temperature_measurement: no such component
   # exists, and none is needed. The same holds for Relative Humidity, Pressure,
   # Illuminance and Flow Measurement (catalogue batch 1): no component, no

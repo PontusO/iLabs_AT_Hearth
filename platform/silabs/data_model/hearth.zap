@@ -6050,7 +6050,7 @@
           "mfgCode": null,
           "define": "COLOR_CONTROL_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "commands": [
             {
               "name": "MoveToHue",
@@ -6478,7 +6478,7 @@
           "mfgCode": null,
           "define": "THERMOSTAT_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "commands": [
             {
               "name": "SetpointRaiseLower",
@@ -6722,7 +6722,7 @@
           "mfgCode": null,
           "define": "FAN_CONTROL_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "FanMode",
@@ -6876,7 +6876,7 @@
           "mfgCode": null,
           "define": "WINDOW_COVERING_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "commands": [
             {
               "name": "UpOrOpen",
@@ -7112,7 +7112,7 @@
           "mfgCode": null,
           "define": "AIR_QUALITY_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "AirQuality",
