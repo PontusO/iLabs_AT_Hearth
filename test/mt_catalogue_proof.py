@@ -25,15 +25,39 @@ import mt_regression as H  # noqa: E402
 
 CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "relativehumiditymeasurement", "pressuremeasurement",
-                 "illuminancemeasurement", "flowmeasurement"}
+                 "illuminancemeasurement", "flowmeasurement",
+                 "colorcontrol", "thermostat", "fancontrol",
+                 "windowcovering", "airquality"}
+
+def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
+           echo=False, null_read=False, chip_cluster=None, urc_chip_attr=None):
+    """One proven attribute. controller = (kind, chip-tool args after the
+    cluster name, (urc_cluster, urc_attr, urc_value)), kind "command" or
+    "write"; the URC may land on a different attribute from the AT write's
+    (the window covering's command writes Target, not Current). echo asserts
+    the AT write's own +MTATTR echo instead of draining it (DE531); null_read
+    asserts +MTERR:5 on an AT read before the write (AT_MT_SPEC 3.8's null
+    rule). chip_cluster overrides the type's for a check on another cluster."""
+    return {"cluster": cluster, "attr": attr, "chip_attr": chip_attr,
+            "at_value": at_value, "parse": parse, "controller": controller,
+            "echo": echo, "null_read": null_read, "chip_cluster": chip_cluster,
+            "urc_chip_attr": urc_chip_attr}
+
+def _multi(devtype, name, revision, chip_cluster, checks, extra_reads=()):
+    return {"devtype": devtype, "name": name, "revision": revision,
+            "chip_cluster": chip_cluster, "checks": list(checks),
+            "extra_reads": list(extra_reads)}
 
 def _type(devtype, name, revision, chip_cluster, cluster, attr, chip_attr,
           at_value, parse="int", controller=None, extra_reads=()):
-    return {"devtype": devtype, "name": name, "revision": revision,
-            "chip_cluster": chip_cluster,
-            "primary": {"cluster": cluster, "attr": attr, "chip_attr": chip_attr,
-                        "at_value": at_value, "parse": parse},
-            "controller": controller, "extra_reads": list(extra_reads)}
+    """Batch 1's one-attribute shape; its controller tuple's URC is the
+    same attribute, (kind, args, value)."""
+    if controller is not None:
+        kind, args, value = controller
+        controller = (kind, args, (cluster, attr, value))
+    return _multi(devtype, name, revision, chip_cluster,
+                  [_check(cluster, attr, chip_attr, at_value, parse, controller)],
+                  extra_reads)
 
 # Endpoint 1 is always the on/off light (the regression harness's own
 # anchor, PHASE3_COMPOSITION's convention too): staged ahead of every
@@ -87,6 +111,41 @@ BATCHES = {
               controller=("command", ["off"], 0)),
         _type("0x010B", "dimmable plug-in unit", 5, "levelcontrol", 8, 0, "current-level", 100,
               controller=("command", ["move-to-level-with-on-off", "200", "0", "0", "0"], 200)),
+    ],
+    "mg24-batch2": [
+        _multi("0x010C", "colour temperature light", 4, "colorcontrol", [
+            _check(0x0300, 0x0007, "color-temperature-mireds", 300,
+                   controller=("command", ["move-to-color-temperature", "400", "0", "1", "1"],
+                               (0x0300, 0x0007, 400))),
+        ], extra_reads=[("read", "feature-map", 16), ("read", "color-capabilities", 16)]),
+        _multi("0x010D", "extended colour light", 4, "colorcontrol", [
+            _check(0x0300, 0x0007, "color-temperature-mireds", 300,
+                   controller=("command", ["move-to-color-temperature", "400", "0", "1", "1"],
+                               (0x0300, 0x0007, 400))),
+            _check(0x0300, 0x0000, "current-hue", 60,
+                   controller=("command", ["move-to-hue", "120", "0", "0", "1", "1"],
+                               (0x0300, 0x0000, 120))),
+        ], extra_reads=[("read", "feature-map", 25), ("read", "color-capabilities", 25)]),
+        _multi("0x0301", "thermostat", 4, "thermostat", [
+            _check(0x0201, 0x0000, "local-temperature", -500, null_read=True),
+            _check(0x0201, 0x0012, "occupied-heating-setpoint", 2000,
+                   controller=("command", ["setpoint-raise-lower", "0", "10"],
+                               (0x0201, 0x0012, 2100))),
+        ]),
+        _multi("0x002B", "fan", 4, "fancontrol", [
+            _check(0x0202, 0x0002, "percent-setting", 30,
+                   controller=("write", ["write", "percent-setting", "70"],
+                               (0x0202, 0x0002, 70))),
+        ]),
+        _multi("0x0202", "window covering", 5, "windowcovering", [
+            _check(0x0102, 0x000E, "current-position-lift-percent100ths", 2500,
+                   controller=("command", ["go-to-lift-percentage", "7500"],
+                               (0x0102, 0x000B, 7500)),
+                   urc_chip_attr="target-position-lift-percent100ths"),
+        ]),
+        _multi("0x002C", "air quality sensor", 1, "airquality", [
+            _check(0x005B, 0x0000, "air-quality", 3, echo=True),
+        ], extra_reads=[("read", "feature-map", 15)]),
     ],
 }
 
@@ -164,33 +223,33 @@ def print_plan(batch):
     print("  ep  1 %s %s: staged only (the regression harness's own "
           "anchor, not re-proven here)" % (ANCHOR_DEVTYPE, ANCHOR_NAME))
     for (ep, dt), t in zip(comp[1:], rows_for(batch)):
-        print("  ep %2d %s %s rev %d: AT write %s -> chip-tool %s read %s; controller %s"
-              % (ep, dt, t["name"], t["revision"], t["primary"]["at_value"],
-                 t["chip_cluster"], t["primary"]["chip_attr"],
-                 "n/a (read-only cluster)" if t["controller"] is None else t["controller"][1]))
+        for i, c in enumerate(t["checks"]):
+            urc = "n/a (read-only cluster)"
+            if c["controller"] is not None:
+                kind, args, (u_cluster, u_attr, u_val) = c["controller"]
+                urc = (f"{kind} {' '.join(str(a) for a in args)}"
+                       f" -> +MTATTR:{u_cluster},{u_attr},{u_val}")
+            print("  ep %2d %s %s rev %d: AT write %s -> chip-tool %s read %s; controller %s"
+                  % (ep, dt, t["name"], t["revision"], c["at_value"],
+                     c["chip_cluster"] or t["chip_cluster"], c["chip_attr"], urc))
 
 class Ctx:  # the fields pairing_argv() reads
     pass
 
 def prove_endpoint(link, chip, s, node, ep, t):
-    p = t["primary"]
     tag = "%s %s" % (t["devtype"], t["name"])
     rc, out = chip.run(["descriptor", "read", "device-type-list", node, str(ep)], timeout=30)
     s.check("%s ep%d device-type-list carries (%d, %d)"
             % (tag, ep, int(t["devtype"], 16), t["revision"]),
             rc == 0 and (int(t["devtype"], 16), t["revision"]) in parse_device_types(out))
-    res, _ = link.command("AT+MTATTR=%d,%d,%d,%s" % (ep, p["cluster"], p["attr"], p["at_value"]))
-    s.check("%s ep%d AT write %s -> OK" % (tag, ep, p["at_value"]), res == 0)
-    link.drain(0.3)   # the local write raises its own +MTATTR; not this row's
-    rc, out = chip.run([t["chip_cluster"], "read", p["chip_attr"], node, str(ep)], timeout=30)
-    if p["parse"] == "bool":
-        got = parse_bool_attr(out)
-        want = bool(p["at_value"])
-    else:
-        got = H.parse_int_attr(out)
-        want = p["at_value"]
-    s.check("%s ep%d controller reads %s = %s after the AT write" % (tag, ep, p["chip_attr"], want),
-            rc == 0 and got == want)
+    # The per-attribute row name gains " <chip_attr>" only when a type has
+    # more than one check: batch 1's single-check rows keep their existing
+    # names byte-for-byte (including the N/A row's literal "controller write"),
+    # so a batch 1 re-run's result file stays comparable.
+    multi = len(t["checks"]) > 1
+    for c in t["checks"]:
+        prove_check(link, chip, s, node, ep, t, c,
+                    "%s ep%d" % (tag, ep) + (" %s" % c["chip_attr"] if multi else ""))
     for extra in t["extra_reads"]:
         if extra[0] == "read-event":
             rc, out = chip.run([t["chip_cluster"], "read-event", extra[1], node, str(ep)], timeout=30)
@@ -199,24 +258,57 @@ def prove_endpoint(link, chip, s, node, ep, t):
         else:
             rc, out = chip.run([t["chip_cluster"], "read", extra[1], node, str(ep)], timeout=30)
             s.check("%s ep%d %s = %s" % (tag, ep, extra[1], extra[2]), rc == 0 and H.parse_int_attr(out) == extra[2])
-    if t["controller"] is None:
-        s.not_applicable("%s ep%d controller write" % (tag, ep), "read-only cluster")
-        last = p["at_value"]
+
+def prove_check(link, chip, s, node, ep, t, c, prefix):
+    cc = c["chip_cluster"] or t["chip_cluster"]
+    at = "%d,%d,%d" % (ep, c["cluster"], c["attr"])
+    if c["null_read"]:
+        # AT_MT_SPEC 3.8's null rule: reading an attribute that has never
+        # been set answers +MTERR:5. ATLink._collect() consumes the
+        # +MTERR:<n> line and returns n as the result code, so the error
+        # line is NOT in `lines` and the check is res == 5.
+        res, lines = link.command("AT+MTATTR=" + at)
+        s.check("%s AT read of the null seed -> +MTERR:5" % prefix, res == 5)
+    link.drain(0.2)
+    res, _ = link.command("AT+MTATTR=%s,%s" % (at, c["at_value"]))
+    s.check("%s AT write %s -> OK" % (prefix, c["at_value"]), res == 0)
+    if c["echo"]:
+        # DE531: a local write must raise its own +MTATTR echo.
+        got = link.await_urc(r"\+MTATTR:%s,%s$" % (at, c["at_value"]), 3.0)
+        s.check("%s AT write echoes +MTATTR:%s,%s" % (prefix, at, c["at_value"]), got is not None)
+    link.drain(0.3)   # without echo=True the write's own +MTATTR is not this row's
+    rc, out = chip.run([cc, "read", c["chip_attr"], node, str(ep)], timeout=30)
+    if c["parse"] == "bool":
+        got, want = parse_bool_attr(out), bool(c["at_value"])
     else:
-        kind, args, want_urc = t["controller"]
+        got, want = H.parse_int_attr(out), c["at_value"]
+    s.check("%s controller reads %s = %s after the AT write" % (prefix, c["chip_attr"], want),
+            rc == 0 and got == want)
+    own = c["at_value"]
+    if c["controller"] is None:
+        s.not_applicable("%s controller write" % prefix, "read-only cluster")
+    else:
+        kind, args, (ucl, uat, uval) = c["controller"]
         link.drain(0.2)
-        rc, out = chip.run([t["chip_cluster"]] + args + [node, str(ep)], timeout=30)
-        s.check("%s ep%d controller %s exits 0" % (tag, ep, " ".join(args)), rc == 0)
-        got = link.await_urc(r"\+MTATTR:%d,%d,%d,%d$" % (ep, p["cluster"], p["attr"], want_urc), 10.0)
-        s.check("%s ep%d +MTATTR:%d,%d,%d,%d on the AT link" % (tag, ep, ep, p["cluster"], p["attr"], want_urc),
-                got is not None)
-        rc, out = chip.run([t["chip_cluster"], "read", p["chip_attr"], node, str(ep)], timeout=30)
-        s.check("%s ep%d controller reads back %d" % (tag, ep, want_urc),
-                rc == 0 and (H.parse_int_attr(out) == want_urc if p["parse"] != "bool" else parse_bool_attr(out) == bool(want_urc)))
-        last = want_urc
-    res, lines = link.command("AT+MTATTR=%d,%d,%d" % (ep, p["cluster"], p["attr"]))
-    s.check("%s ep%d second AT read agrees (%s)" % (tag, ep, last),
-            res == 0 and lines == ["+MTATTR:%d,%d,%d,%s" % (ep, p["cluster"], p["attr"], last)])
+        rc, out = chip.run([cc] + args + [node, str(ep)], timeout=30)
+        s.check("%s controller %s exits 0" % (prefix, " ".join(args)), rc == 0)
+        got = link.await_urc(r"\+MTATTR:%d,%d,%d,%d$" % (ep, ucl, uat, uval), 10.0)
+        s.check("%s +MTATTR:%d,%d,%d,%d on the AT link" % (prefix, ep, ucl, uat, uval), got is not None)
+        rc, out = chip.run([cc, "read", c["urc_chip_attr"] or c["chip_attr"], node, str(ep)], timeout=30)
+        if c["parse"] == "bool":
+            ok = parse_bool_attr(out) == bool(uval)
+        else:
+            ok = H.parse_int_attr(out) == uval
+        s.check("%s controller reads back %d" % (prefix, uval), rc == 0 and ok)
+        if (ucl, uat) == (c["cluster"], c["attr"]):
+            own = uval
+        else:
+            res, lines = link.command("AT+MTATTR=%d,%d,%d" % (ep, ucl, uat))
+            s.check("%s AT read of %d/%d agrees (%s)" % (prefix, ucl, uat, uval),
+                    res == 0 and lines == ["+MTATTR:%d,%d,%d,%s" % (ep, ucl, uat, uval)])
+    res, lines = link.command("AT+MTATTR=" + at)
+    s.check("%s second AT read agrees (%s)" % (prefix, own),
+            res == 0 and lines == ["+MTATTR:%s,%s" % (at, own)])
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
