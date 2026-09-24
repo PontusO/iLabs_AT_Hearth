@@ -1038,12 +1038,18 @@ index, and a round that changes one arm finds the other through it.
 | flow sensor (0x0306) | `mt_devtypes_zephyr.cpp` 621-644 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
 | on/off plug-in unit (0x010A) | `mt_devtypes_zephyr.cpp` 645-670 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
 | dimmable plug-in unit (0x010B) | `mt_devtypes_zephyr.cpp` 700-721 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
+| color temperature light (0x010C) and extended color light (0x010D) | `mt_devtypes_zephyr.cpp` 745-946 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
+| thermostat (0x0301) | `mt_devtypes_zephyr.cpp` 947-1040 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
+| fan (0x002B) | `mt_devtypes_zephyr.cpp` 1041-1100 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
+| window covering (0x0202) | `mt_devtypes_zephyr.cpp` 1125-1199 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
+| air quality sensor (0x002C) | `mt_devtypes_zephyr.cpp` 1200-1247 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
 | the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the endpoint block arena and its sizing | `mt_devtypes_zephyr.cpp` 4659-5978 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the seed table and `seed_slots()` | `mt_devtypes_zephyr.cpp` 5979-7005 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the ember cluster init hook | `mt_devtypes_zephyr.cpp` 7006-7051 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 (fix round 2, B525) |
+| the ColorControl cluster init hook | the second override beside the first, this port's own | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
 | `mt_dyn_attr_slot()` | `mt_devtypes_zephyr.cpp` 7052-7069 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the `mt_devtypes.h` quartet | `mt_devtypes_zephyr.cpp` 7189-8413 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the ember external-attribute hooks | `mt_devtypes_zephyr.cpp` 8415-8451 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |

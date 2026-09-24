@@ -3256,10 +3256,16 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * cluster server needs one object per endpoint: the valve, the
      * OperationalState trio, chime, mode select, the ModeBase families, the
      * measurement clusters, DEM, WHM, MeterIdentification, the microwave's
-     * three-way construction order and the EVSE. Neither device type built
-     * here carries any of those clusters. OnOff, TemperatureMeasurement,
-     * Identify and Descriptor are served from ember storage and from CHIP's
-     * own registered cluster objects, with no per-endpoint delegate at all.
+     * three-way construction order and the EVSE. None of the twenty device
+     * types this build constructs carries a delegate family (graph F528), and
+     * the first type that does is the water valve, catalogue batch 3, whose
+     * nRF create is at mt_matter_zephyr.cpp:1818. The types this build does
+     * construct serve OnOff, LevelControl, ColorControl, Thermostat,
+     * FanControl, WindowCovering, AirQuality, TemperatureMeasurement,
+     * OccupancySensing, RelativeHumidityMeasurement, PressureMeasurement,
+     * IlluminanceMeasurement, FlowMeasurement and BooleanState from ember
+     * storage and from CHIP's own registered cluster objects, with no
+     * per-endpoint delegate at all.
      *
      * The batch that ports the first delegate-bearing type brings the claim
      * block, the second halves AND the cluster-object arena the pools live
@@ -3267,8 +3273,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * is here in a reduced form: a claim block with nothing to claim from
      * would be the wrong half to land first.
      *
-     * The B388 cluster-init call site is absent for the same reason. The nRF
-     * calls emberAfLevelControlClusterServerInitCallback(),
+     * The B388 cluster-init call site is absent because this port does not
+     * need one. The nRF calls
+     * emberAfLevelControlClusterServerInitCallback(),
      * emberAfColorControlClusterServerInitCallback() and
      * emberAfModeSelectClusterServerInitCallback() by hand after a successful
      * create, because DECLARE_DYNAMIC_CLUSTER hardcodes functions=NULL and
@@ -3277,9 +3284,16 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * for a cluster whose ServerInit caches per-endpoint state (LevelControl
      * caches Min/MaxLevel, and without the call every transition clamps to
      * 0); it is a no-op for OnOff and TemperatureMeasurement, neither of
-     * which has a ServerInit worth running, and neither cluster server is
-     * even in this image for two of the three names. The call site comes
-     * back with the dimmable light.
+     * which has a ServerInit worth running. This port runs the LevelControl
+     * and ColorControl server inits it needs from the strong
+     * emberAfLevelControlClusterInitCallback() and
+     * emberAfColorControlClusterInitCallback() overrides in this file (the
+     * hook section above), which the generated dispatch in
+     * zap-generated/app/cluster-init-callback.cpp reaches for dynamic
+     * endpoints the same way it reaches them for fixed ones, so there is no
+     * call site to carry. ModeSelect's init, the third one the nRF calls by
+     * hand, arrives with batch 4's mode select, the same shape the
+     * ColorControl override already sets.
      */
 
     /*

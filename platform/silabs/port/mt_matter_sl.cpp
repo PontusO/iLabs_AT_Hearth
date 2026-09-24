@@ -1096,4 +1096,9 @@ extern "C" uint32_t mt_air_quality_feature_mask(void)
  * hearth_arena in port/mt_dyn_store.h is the allocator both arenas use, and
  * that batch adds an instance and a budget in port/mt_port_ids.h beside
  * HEARTH_EP_ARENA_BYTES, not a new mechanism.
+ *
+ * Catalogue batch 2 (2026-09-24): the build now constructs twenty device
+ * types, and none of them carries a delegate family either (graph F528), so
+ * the arena is still absent. It arrives with the first type that draws on
+ * it, the water valve (catalogue batch 3).
  */
