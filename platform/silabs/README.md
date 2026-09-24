@@ -2175,7 +2175,9 @@ this is the run they were for.
 
 **Re-run on the catalogue batch 1 image on 2026-09-22 at the same 98 / 2 / 1
 and the same row set**, the result file differing only in its header's commit
-and timestamp; see "Catalogue batch 1" under "Measured". The record below is
+and timestamp; see "Catalogue batch 1" under "Measured". **Re-run on the
+catalogue batch 2 image on 2026-09-24 at the same 98 / 2 / 1 and the same row
+set** as well; see "Catalogue batch 2" under "Measured". The record below is
 the first run, and it is where the two failing rows are explained.
 
 ### 2026-09-21: 98 passed, 2 failed, 1 not applicable
@@ -2332,10 +2334,13 @@ that lies.
 
 ## Measured
 
-Nine sets of figures live here. **"Catalogue batch 1" immediately below is the
-current image**, the batch's bench proof and its memory record: it is round 2
-task 7's image plus twelve device types, three cluster servers and a wider
-endpoint arena. "Round 2 task 7" after it is the round's own bench acceptance,
+Ten sets of figures live here. **"Catalogue batch 2" immediately below is the
+current image**, the batch's bench proof, its two phase re-runs and its memory
+record: it is catalogue batch 1's image plus six device types, five cluster
+servers and a wider endpoint arena. "Catalogue batch 1" after it was the
+current image until this batch: round 2 task 7's image plus twelve device
+types, three cluster servers and a wider endpoint arena. "Round 2 task 7"
+after that is the round's own bench acceptance,
 task 6's image plus one NVM3 boot line, commissioned onto the bench fabric
 twice, and it is what the batch's figures are measured against.
 "Round 2 task 6" after that is the first image whose attributes are readable and
@@ -2369,9 +2374,228 @@ differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
 
+### Catalogue batch 2: the fabric proof, Phase 1 and 2 and the batch's memory record
+
+The current image, 2026-09-24, built from the committed tree at `a271a3f` in
+`~/silabs/work/hearth-matter-b2`, a fresh `slc generate` with a `make clean`
+inside it, **0 warnings**, which is task 2's directory. Batch 1's record noted
+that `hearth.slcp` and `hearth.zap` had not changed since its task 2; this
+batch's task 1 changed both (five cluster servers, five components, the
+regenerated `zap-generated/`), so a fresh generate was needed, and it was run.
+`otbr-agent` was `active` before and after every step here and was never
+started, stopped or reconfigured.
+
+All three result files' `fw_repo_head` reads `c6bd3a0`, the committed tip
+after task 3, not the built commit. That is not a mismatch: task 3 committed
+two test-only changes (`ad4bb57`, `c6bd3a0`) after the image was built, so the
+image on the module is `a271a3f`'s bytes and the tree at run time was two
+commits past it, both under `test/`. `git status --porcelain` was empty at the
+build, and nothing under `platform/` has changed since, so the batch image is
+the batch image.
+
+#### The proof: 72 passed, 0 failed, 2 not applicable
+
+```
+$ export MT_PORT=/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00
+$ python3 test/mt_catalogue_proof.py --port "$MT_PORT" --bridge cpico \
+      --batch mg24-batch2 --openocd-config platform/silabs/mg24-swd.cfg \
+      --baseline platform/silabs/core-batch2.json
+  mg24-batch2: 72 passed, 0 failed, 2 not applicable
+  baseline written: platform/silabs/core-batch2.json
+```
+
+First run, 2026-09-24 23:03 UTC, on the `a271a3f` image. Seven endpoints
+staged, applied, read back exactly, and commissioned in one chip-tool
+pairing: the standard on/off light, a colour temperature light, an extended
+colour light, a thermostat, a fan, a window covering and an air quality
+sensor, the batch's seven-endpoint proof composition. Every one of the six
+types answers its `descriptor read device-type-list` with its own id and its
+own revision, and the controller-write types carry the whole round trip as
+well: the `AT+MTATTR` write is echoed, the controller read answers at that
+value, the chip-tool command exits 0, and the second AT read agrees.
+
+The two N/A rows are the two read-only rows: the thermostat's
+`LocalTemperature` and the air quality sensor's controller write, recorded by
+name rather than silently skipped.
+
+**The air quality echo row passed, and its verdict is the measurement DE531
+waits for: the MG24 echoes.** The AT write of the air quality sensor's
+measured value returned `+MTATTR:7,91,0,3` on the AT link. That is the
+behaviour the design spec's echo ruling (DE531) was written to resolve, and
+the MG24 behaves unlike the C6 here: the C6's Thread arm does not echo an AT
+attribute write, the MG24 does, and task 5's amendment of `AT_MT_SPEC.md`
+section 3.25 takes this line as its evidence.
+
+Two more measurements the proof made on the way past. The thermostat's null
+read answered `+MTERR:5`, and a `-500` write round-tripped: the signed path
+works on this port, as the unsigned rejection row in Phase 1 already said.
+And the window covering's `go-to-lift-percentage` raised `+MTATTR` on
+`Target` (0x000B), not `Current`: the command writes the target, and `Current`
+moves only as the (absent) mechanism reports it, which is what the row's
+expectation encodes.
+
+#### Harness Phase 1, re-run on the batch image: 292 passed, 4 failed
+
+```
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 1 \
+      --baseline platform/silabs/core-phase1.json
+  ===== RESULT: 292 passed, 4 failed =====
+```
+
+**The same four rows.** `git diff` on the result file is the header's
+`fw_repo_head` and timestamp only; all 296 verdicts are unchanged, and the
+four failing rows are task 6's four parked rows, the two unported-type
+compositions (catalogue batches 7a and 7b, the EVSE round). Batch 1's record
+stated that Phase 1 was not re-run on `ca05afa` and was not expected to move;
+this run is that statement measured rather than assumed, on the batch image,
+and nothing moved.
+
+#### Harness Phase 2, re-run on the batch image: 98 passed, 2 failed, 1 n/a
+
+```
+$ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 2 \
+      --openocd-config platform/silabs/mg24-swd.cfg \
+      --include-slow --include-manual \
+      --baseline platform/silabs/core-phase2.json
+  [GATE] preflight ok: MGM240P Hearth, firmware 1.2.0
+  ===== RESULT: 98 passed, 2 failed, 1 n/a =====
+  baseline written: platform/silabs/core-phase2.json
+```
+
+**Row-identical to the committed file**, the `git diff` being the header's
+`fw_repo_head` and timestamp again: all 101 verdicts are unchanged, including
+the two B512 rows (2.8 and 2.9's `attribute value survived (B63 guard)`) and
+2.14's self-declared N/A. Three chip-tool commissionings, each exit 0 on the
+first attempt; the dataset reached chip-tool through the harness's own D-Bus
+route and appears nowhere in the run log or the result file. 2.9's cold boot
+used the hub recipe, `uhubctl -l 3-1.3 -a cycle -d 5` ("The bench limit this
+run found").
+
+One bench fact from the run itself: the CPico's carrier was found **unenumerated
+before task 1**, and a port-3 cycle did not bring it back; a whole-hub cycle,
+`uhubctl -l 3-1.3 -a cycle -d 5`, did. The hub-lies fact of the section named
+above, confirmed once more, from the bench rather than from the recipe.
+
+#### Flash and RAM
+
+`arm-none-eabi-size` on `~/silabs/work/hearth-matter-b2/build/debug/hearth.out`,
+2026-09-24, at `a271a3f`, against catalogue batch 1's row:
+
+| | Catalogue batch 2 (`a271a3f`) | Catalogue batch 1 (`ca05afa`) | Delta |
+|---|---|---|---|
+| `text` (`size`) | 889 656 | 857 928 | **+31 728** |
+| `.bss` (`-A`) | 131 704 | 122 040 | **+9 664** |
+| `.memory_manager_heap` | 121 976 | 131 656 | -9 680 |
+
+The `.bss` rise splits exactly in two, and both halves were measured inside
+this round rather than apportioned afterwards:
+
+| Half | `.bss` | Where it was measured |
+|---|---|---|
+| the five cluster servers (`matter_color_control`, `matter_thermostat`, `matter_fan_control`, `matter_window_covering`, `matter_air_quality`) | **+5 440** | task 1's build, commit `d10d307`: 127 480 against batch 1's 122 040 |
+| the endpoint arena, 5 376 to 9 600 | **+4 224** | task 2's build, commit `a271a3f`: 131 704 against task 1's 127 480, and 9 600 - 5 376 = 4 224 exactly |
+
+So the six device types' own metadata again costs **no `.bss` at all**: every
+new table is `const` and lands in flash, the same as batch 1's. And again every
+byte of the `.bss` rise comes straight out of `.memory_manager_heap`: the
+linker hands the heap section whatever RAM is left over, and it gives back
+9 680 B here against 9 664 B of `.bss`, the 16 B difference being this bench's
+boot-to-boot spread, the same spread batch 1's record named against its own
+standings.
+
+#### The arena
+
+`HEARTH_EP_ARENA_BYTES` is **9 600** = 16 x 600, sixteen blocks of the widest
+declared type (the extended colour light, 600 B of arena cost after
+`hearth_arena_cost()`'s rounding). Batch 1's ruling had been 16 x 336 = 5 376;
+this batch's six types made the block wider and the batch kept the strong
+promise by raising the arena to sixteen of the new widest block, ruling DE530,
+rather than lowering the floor. The strong promise is the same: every
+composition the image accepts, it builds, with nothing left over and nothing
+wasted, and it is proven below rather than assumed.
+
+Read off this image's console, all three lines from this session:
+
+```
+I devtypes: endpoint arena: 2112 of 9600 B handed out, 7488 B free, 7 of 16 serviceable endpoints live
+I devtypes: endpoint arena: 9600 of 9600 B handed out, 0 B free, 16 of 16 serviceable endpoints live
+I devtypes: endpoint arena: 352 of 9600 B handed out, 9248 B free, 2 of 16 serviceable endpoints live
+```
+
+In order: the batch's seven-endpoint proof composition (the on/off light, the
+colour temperature light, the extended colour light, the thermostat, the fan,
+the window covering, the air quality sensor), task 2's sixteen-`0x010D` smoke,
+and the bench's standard two restored at the end.
+
+**2 112 of 9 600** matches the per-type arithmetic term for term, the figure
+task 2's smoke measured before this run: 192 + 536 + 600 + 256 + 176 + 224 +
+128. At seven endpoints, the widest composition this batch's proof stages, the
+arena is 22 % used.
+
+**The strong promise, DE530, is proven, not assumed.** Task 2's smoke staged
+sixteen extended colour lights, the sixteen widest blocks the arena holds, and
+the console read **9 600 of 9 600 B handed out, 16 of 16 serviceable endpoints
+live**: every endpoint the arena can hold is built and serviceable, with
+nothing left over and nothing wasted. That is the promise the design spec
+ruling names, measured on this image.
+
+**The second arena still does not exist.** The cluster-object arena arrives
+with the first delegate-bearing device type; nothing in this batch needs one,
+and `hearth_arena` in `port/mt_dyn_store.h` is still the allocator both will
+use.
+
+#### Free heap at `+MTREADY`, and NVM3
+
+From the boot task's own line, this session:
+
+| Boot | Composition | Free heap at `+MTREADY` | NVM3 |
+|---|---|---|---|
+| factory-fresh | 0 endpoints | **81 296 B** | not read this session |
+| commissioned, one fabric | the standard 2 | **81 248 B** | not read this session |
+
+The factory-fresh figure is the same on every boot of the proof and of Phase 1,
+any composition; the commissioned figure is Phase 2's, the standard
+`0x0100,0x0302` composition with one fabric. `availableMemory` was not read
+this session, and the NVM3 soak row's standing caveat applies unchanged; this
+table records the heap only.
+
+Two things to say beside the figures. **The fabric costs 48 B of heap held at
+`+MTREADY`** here too, 81 296 against 81 248: the same 48 B round 2 task 7 and
+batch 1 measured, the figure a property of the fabric, not of the composition.
+And **the commissioned figure is not the same measurement as batch 1's**:
+batch 1's 90 928 B was taken with its thirteen-endpoint composition, this one
+with the standard two, so the two are not comparable beyond the fabric cost
+itself, which is the only thing the comparison is used for here. Against
+batch 1's 90 976 B the standing factory-fresh figure is 9 680 B lower, of which
+9 664 B is `.memory_manager_heap` shrinking to pay for this batch's `.bss`;
+the remaining 16 B is this bench's boot-to-boot spread, the same spread batch
+1's record named.
+
+The `+MTREADY` figure is still a floor measured at the worst moment of the
+boot, with `hearth_boot_task`'s own 5 120-byte stack and CHIP's init transients
+outstanding; round 2 task 7's note on the steady-state figure applies
+unchanged.
+
+#### Bench state found and left
+
+**Found**, before anything was run, factory-fresh with the standard
+composition staged, `0x0100,0x0302`, which is the state every run in this
+batch both expects and restores. The carrier itself had to be brought back
+first (the paragraph above).
+
+**Left** the same way, asserted three times independently: by the proof
+script's own restore rows, by Phase 2's 2.12, and by the measurement cycle at
+the end. The arena line for the restored composition is the third one above,
+352 of 9 600.
+
+No Thread operational dataset was printed, logged or written at any point: the
+harness's D-Bus route hands it to chip-tool's argv and nowhere else, and the
+result files and this section name only commit ids and the CPico's serial.
+
 ### Catalogue batch 1: the fabric proof, Phase 2 and the batch's memory record
 
-The current image, 2026-09-22, built from the committed tree at `ca05afa` in
+The current image until this batch, 2026-09-22, built from the committed tree
+at `ca05afa` in
 `~/silabs/work/hearth-matter-b1`, which is task 2's directory. Nothing in
 `hearth.slcp` or `data_model/hearth.zap` has changed since task 2, so no fresh
 `slc generate` has been needed since: every build in this batch is an
@@ -2624,6 +2848,11 @@ rows failing as `core-phase1.json` records. It is not expected to move on
 carrying LevelControl and returns at once for endpoint 240, and Phase 1 stages
 none of the batch-1 device types at all. Stated rather than assumed, so a
 reader of this section does not take the figure for a `ca05afa` run.
+
+*Superseded for Phase 1, by the "Catalogue batch 2" section above: that
+image's run re-ran Phase 1 on the batch image and took the header-only diff,
+the same 292 of 296 with the same four rows. This section's statement stands
+for `ca05afa` itself, which was never Phase-1-ran.*
 
 #### Flash and RAM
 
