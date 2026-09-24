@@ -270,13 +270,23 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         res, lines = link.command("AT+MTATTR=" + at)
         s.check("%s AT read of the null seed -> +MTERR:5" % prefix, res == 5)
     link.drain(0.2)
-    res, _ = link.command("AT+MTATTR=%s,%s" % (at, c["at_value"]))
+    res, wlines = link.command("AT+MTATTR=%s,%s" % (at, c["at_value"]))
     s.check("%s AT write %s -> OK" % (prefix, c["at_value"]), res == 0)
     if c["echo"]:
         # DE531: a local write must raise its own +MTATTR echo.
-        got = link.await_urc(r"\+MTATTR:%s,%s$" % (at, c["at_value"]), 3.0)
+        # AT_MT_SPEC 3.8: the echo arrives BEFORE the write's OK.
+        # ATLink._derive_expect gives an AT+MTATTR write the +MTATTR:
+        # expect prefix, and _collect appends any line starting with
+        # the expect prefix to the command's lines, so the echo
+        # normally lands in the write's own returned lines and never
+        # in the URC queue; the await_urc below is the wait for the
+        # late case.
+        echo_line = "+MTATTR:%s,%s" % (at, c["at_value"])
+        got = (echo_line in wlines) or \
+              link.await_urc(r"\+MTATTR:%s,%s$" % (at, c["at_value"]), 3.0)
         s.check("%s AT write echoes +MTATTR:%s,%s" % (prefix, at, c["at_value"]), got is not None)
-    link.drain(0.3)   # without echo=True the write's own +MTATTR is not this row's
+    else:
+        link.drain(0.3)   # without echo=True the write's own +MTATTR is not this row's
     rc, out = chip.run([cc, "read", c["chip_attr"], node, str(ep)], timeout=30)
     if c["parse"] == "bool":
         got, want = parse_bool_attr(out), bool(c["at_value"])

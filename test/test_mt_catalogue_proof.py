@@ -117,6 +117,18 @@ class TestArgs(unittest.TestCase):
 
 BATCH2 = ["0x010C", "0x010D", "0x0301", "0x002B", "0x0202", "0x002C"]
 
+# chip-tool cluster name -> the table's checks that carry a controller
+# action on that cluster. _FakeChip uses it to queue the URC a
+# controller run would raise, mirroring the table rather than the
+# command text (the fake chip-tool cannot parse the table's arguments).
+_CONTROLLER_BY_CLUSTER_ARG = {}
+for _t in P.BATCHES["mg24-batch1"] + P.BATCHES["mg24-batch2"]:
+    _cc = _t["chip_cluster"]
+    for _c in _t["checks"]:
+        if _c["controller"] is not None:
+            _CONTROLLER_BY_CLUSTER_ARG.setdefault(
+                _cc or _t["chip_cluster"], []).append(_c)
+
 class TestBatch2Table(unittest.TestCase):
     def test_batch2_lists_every_type_once_after_the_anchor(self):
         comp = P.composition_for("mg24-batch2")
@@ -201,6 +213,7 @@ class _FakeLink:
     def __init__(self, state=None, null_read=None):
         self.state = dict(state or {})
         self.null_read = null_read
+        self.urc_queue = []
 
     def command(self, cmd, *a, **k):
         m = re.fullmatch(r"AT\+MTATTR=(\d+),(\d+),(\d+)(?:,(\S+))?", cmd)
@@ -218,11 +231,52 @@ class _FakeLink:
         pass
 
     def await_urc(self, pattern, *a, **k):
+        """Like ATLink.await_urc, this serves only lines that actually
+        landed in the URC queue. The queue is filled by the fake's
+        controller action: a chip-tool command or write runs as the
+        table's controller tuple and queues the +MTATTR line the row
+        waits for. An AT write's own echo is NOT queued (it belongs in
+        the write's returned lines), so await_urc after an AT write
+        finds nothing unless the table also names a controller."""
         m = re.search(r"MTATTR:(\d+),(\d+),(\d+),(-?\d+)", pattern)
-        if m:
-            v = self.state.get((int(m.group(1)), int(m.group(2)), int(m.group(3))), "0")
-            return "+MTATTR:%s,%s,%s,%s" % (m.group(1), m.group(2), m.group(3), v)
+        if not m:
+            return None
+        for (ucl, uat, uval) in self.urc_queue:
+            if (int(m.group(2)), int(m.group(3)),
+                    int(m.group(4))) == (ucl, uat, uval):
+                return "+MTATTR:%d,%d,%d,%d" % (int(m.group(1)), ucl, uat, uval)
         return None
+
+class _EchoLink(_FakeLink):
+    """_FakeLink plus echo control. A write with echo_in_lines=true
+    returns (0, ["+MTATTR:ep,cl,at,val"]), the shape ATLink._collect
+    yields when the +MTATTR echo arrives before the write's OK (AT_MT_SPEC
+    3.8: _derive_expect gives an AT+MTATTR write the +MTATTR: expect
+    prefix, so the line lands in the command's own lines). With
+    echo_late=false the write raises no echo at all, and await_urc stays
+    empty too, so the late branch has nothing to find. The default
+    mirrors _FakeLink: no echo in the write's lines, await_urc answers
+    from the state dict."""
+
+    def __init__(self, echo_in_lines=False, echo_late=True):
+        super().__init__()
+        self.echo_in_lines = echo_in_lines
+        self.echo_late = echo_late
+
+    def command(self, cmd, *a, **k):
+        m = re.fullmatch(r"AT\+MTATTR=(\d+),(\d+),(\d+)(?:,(\S+))?", cmd)
+        if m and m.group(4) is not None:
+            self.state[(int(m.group(1)), int(m.group(2)), int(m.group(3)))] = m.group(4)
+            if self.echo_in_lines:
+                return (0, ["+MTATTR:%s,%s,%s,%s" % (m.group(1), m.group(2),
+                                                      m.group(3), m.group(4))])
+            return (0, [])
+        return super().command(cmd, *a, **k)
+
+    def await_urc(self, pattern, *a, **k):
+        if not self.echo_late:
+            return None
+        return super().await_urc(pattern, *a, **k)
 
 class _FakeChip:
     """Every run exits 0 and prints the attribute under the chip-tool
@@ -232,11 +286,24 @@ class _FakeChip:
     plain shape has no `]`, so parse_int_attr answers None on it and
     every read row would fail. The bracket shape is the one the
     harness's own tests and fixtures use (test_parse_bool_attr,
-    fixtures/t5/modes-current-mode.txt)."""
+    fixtures/t5/modes-current-mode.txt).
+
+    A non-read run is a controller command or write; it queues on its
+    link the +MTATTR line the table's controller tuple says will come,
+    so the link's URC queue mirrors ATLink's: a controller action
+    queues its URC, an AT write's own echo does not (it belongs in the
+    write's returned lines)."""
+
+    def __init__(self, link=None):
+        self.link = link
 
     def run(self, args, *a, **k):
         if len(args) >= 4 and args[1] in ("read", "read-event"):
             return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: 0\n" % args[2])
+        if self.link is not None:
+            for c in _CONTROLLER_BY_CLUSTER_ARG.get(args[0], ()):
+                ucl, uat, uval = c["controller"][2]
+                self.link.urc_queue.append((ucl, uat, uval))
         return (0, "CHIP:TOO:   Accepted: 0\n")
 
 class _FakeSuite:
@@ -255,7 +322,7 @@ def _names_for(batch, null_read=None):
     """Every row name prove_endpoint records (checks plus N/A) over the
     batch's types, with the bench's endpoints, against the fakes."""
     link = _FakeLink(null_read=null_read)
-    chip = _FakeChip()
+    chip = _FakeChip(link)
     comp = P.composition_for(batch)
     names = []
     for (ep, _), t in zip(comp[1:], P.rows_for(batch)):
@@ -293,7 +360,7 @@ class TestNullRead(unittest.TestCase):
 
     def test_null_read_returns_five_and_the_row_passes(self):
         link = _FakeLink(null_read=(0x0201, 0x0000))
-        chip = _FakeChip()
+        chip = _FakeChip(link)
         th = [t for t in P.BATCHES["mg24-batch2"] if t["devtype"] == "0x0301"][0]
         s = _FakeSuite()
         P.prove_endpoint(link, chip, s, "0x4845", 2, th)
@@ -304,7 +371,7 @@ class TestNullRead(unittest.TestCase):
 
     def test_null_read_answering_a_value_fails_the_row(self):
         link = _FakeLink(null_read=(0, ["+MTATTR:2,513,0,-500"]))
-        chip = _FakeChip()
+        chip = _FakeChip(link)
         th = [t for t in P.BATCHES["mg24-batch2"] if t["devtype"] == "0x0301"][0]
         s = _FakeSuite()
         P.prove_endpoint(link, chip, s, "0x4845", 2, th)
@@ -312,6 +379,36 @@ class TestNullRead(unittest.TestCase):
         null_rows = [n for n in got if "null" in n.lower()]
         self.assertEqual(len(null_rows), 1)
         self.assertFalse(got[null_rows[0]])
+
+class TestEchoRow(unittest.TestCase):
+    """AT_MT_SPEC 3.8: a write that changes the value echoes the +MTATTR
+    URC BEFORE the OK. _derive_expect maps an AT+MTATTR write to the
+    +MTATTR: prefix, so _collect puts that line in the write's own
+    returned lines and the URC queue never sees it; the echo row must
+    accept it there (keeping the await_urc wait for the late case) or it
+    fails a firmware that echoes correctly."""
+
+    def test_echo_in_the_write_lines_passes(self):
+        link = _EchoLink(echo_in_lines=True)
+        chip = _FakeChip(link)
+        s = _FakeSuite()
+        aq = [t for t in P.BATCHES["mg24-batch2"] if t["devtype"] == "0x002C"][0]
+        P.prove_endpoint(link, chip=chip, s=s, node="0x4845", ep=2, t=aq)
+        got = {n: ok for n, ok in s.results}
+        echo_rows = [n for n in got if "echoes" in n]
+        self.assertEqual(len(echo_rows), 1)
+        self.assertTrue(got[echo_rows[0]])
+
+    def test_echo_nowhere_fails(self):
+        link = _EchoLink(echo_in_lines=False, echo_late=False)
+        chip = _FakeChip(link)
+        s = _FakeSuite()
+        aq = [t for t in P.BATCHES["mg24-batch2"] if t["devtype"] == "0x002C"][0]
+        P.prove_endpoint(link, chip=chip, s=s, node="0x4845", ep=2, t=aq)
+        got = {n: ok for n, ok in s.results}
+        echo_rows = [n for n in got if "echoes" in n]
+        self.assertEqual(len(echo_rows), 1)
+        self.assertFalse(got[echo_rows[0]])
 
 if __name__ == "__main__":
     unittest.main()
