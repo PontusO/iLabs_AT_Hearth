@@ -1032,6 +1032,24 @@ the hook, and `sl_main_start_task_should_continue()` returns false by default
 so the start task ends there. Hearth's work therefore goes on its own task,
 which is what `app_init()` creates.
 
+### Source layout: mt_devtypes_sl.cpp and its fragments
+
+Its static data lives in six `port/` fragments, `#include`d in this order:
+`mt_devtypes_sl_tables_core.inc` (device tables: milestone types and catalogue
+batch 1), `mt_devtypes_sl_tables_b2.inc` (batch 2),
+`mt_devtypes_sl_tables_b3.inc` (batch 3),
+`mt_devtypes_sl_registry.inc` (the parenting policy and the registry),
+`mt_devtypes_sl_arena.inc` (the external attribute store, the endpoint arena,
+its sizing and floor) and `mt_devtypes_sl_seeds.inc` (the seed table and
+`seed_slots`). Reason: the 65,536-token window; the file was 3,790 lines,
+about 55,000 tokens, and no fragment exceeds about 1,100 lines (the largest,
+the seeds, is 1,097). The anonymous-namespace includes keep one translation
+unit and the same image, proven 2026-09-25 by identical section sizes and
+disassembly; the fragments are not in `hearth.slcp`. Convention: each
+catalogue batch's device tables go in a new `mt_devtypes_sl_tables_bN.inc`
+included after the last, and its new bridge code goes in its own file beside
+`mt_matter_sl.cpp` (batch 4 decides its linkage).
+
 ### Port sections: what has transferred from the nRF arm
 
 The upward port is a section-by-section transfer of the nRF54L15 port's two
@@ -1044,30 +1062,30 @@ index, and a round that changes one arm finds the other through it.
 | commissioning state, network, Thread | `platform/nrf54l15/port/mt_matter_zephyr.cpp` 388-602 | `port/mt_matter_sl.cpp` | round 2 task 4 |
 | the live endpoint table | `mt_matter_zephyr.cpp` 604-663 | `port/mt_matter_sl.cpp` | round 2 task 5 |
 | the attribute bridge and the `+MTATTR` URC | `mt_matter_zephyr.cpp` 665-1505 | `port/mt_matter_sl.cpp` | round 2 task 6 |
-| shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
-| on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
-| temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
-| dimmable light (0x0101) | `mt_devtypes_zephyr.cpp` 349-387 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
-| boolean-state sensors (0x0015, 0x0044, 0x0041, 0x0043) | `mt_devtypes_zephyr.cpp` 417-479 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
-| occupancy sensor (0x0107) | `mt_devtypes_zephyr.cpp` 480-538 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
-| humidity sensor (0x0307) | `mt_devtypes_zephyr.cpp` 539-563 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
-| pressure sensor (0x0305) | `mt_devtypes_zephyr.cpp` 564-588 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
-| light (illuminance) sensor (0x0106) | `mt_devtypes_zephyr.cpp` 589-620 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
-| flow sensor (0x0306) | `mt_devtypes_zephyr.cpp` 621-644 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
-| on/off plug-in unit (0x010A) | `mt_devtypes_zephyr.cpp` 645-670 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
-| dimmable plug-in unit (0x010B) | `mt_devtypes_zephyr.cpp` 700-721 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 |
-| color temperature light (0x010C) and extended color light (0x010D) | `mt_devtypes_zephyr.cpp` 745-946 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
-| thermostat (0x0301) | `mt_devtypes_zephyr.cpp` 947-1040 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
-| fan (0x002B) | `mt_devtypes_zephyr.cpp` 1041-1100 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
-| window covering (0x0202) | `mt_devtypes_zephyr.cpp` 1125-1199 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
-| air quality sensor (0x002C) | `mt_devtypes_zephyr.cpp` 1200-1247 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
-| door lock (0x000A) | `mt_devtypes_zephyr.cpp` 1248-1357 | `port/mt_devtypes_sl.cpp` | catalogue batch 3 |
-| water valve (0x0042) | `mt_devtypes_zephyr.cpp` 1358-1484 | `port/mt_devtypes_sl.cpp` | catalogue batch 3 |
-| the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
-| the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
-| the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
-| the endpoint block arena and its sizing | `mt_devtypes_zephyr.cpp` 4659-5978 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
-| the seed table and `seed_slots()` | `mt_devtypes_zephyr.cpp` 5979-7005 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
+| shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
+| on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
+| temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
+| dimmable light (0x0101) | `mt_devtypes_zephyr.cpp` 349-387 | `port/mt_devtypes_sl_tables_core.inc` | catalogue batch 1 |
+| boolean-state sensors (0x0015, 0x0044, 0x0041, 0x0043) | `mt_devtypes_zephyr.cpp` 417-479 | `port/mt_devtypes_sl_tables_core.inc` | catalogue batch 1 |
+| occupancy sensor (0x0107) | `mt_devtypes_zephyr.cpp` 480-538 | `port/mt_devtypes_sl_tables_core.inc` | catalogue batch 1 |
+| humidity sensor (0x0307) | `mt_devtypes_zephyr.cpp` 539-563 | `port/mt_devtypes_sl_tables_core.inc` | catalogue batch 1 |
+| pressure sensor (0x0305) | `mt_devtypes_zephyr.cpp` 564-588 | `port/mt_devtypes_sl_tables_core.inc` | catalogue batch 1 |
+| light (illuminance) sensor (0x0106) | `mt_devtypes_zephyr.cpp` 589-620 | `port/mt_devtypes_sl_tables_core.inc` | catalogue batch 1 |
+| flow sensor (0x0306) | `mt_devtypes_zephyr.cpp` 621-644 | `port/mt_devtypes_sl_tables_core.inc` | catalogue batch 1 |
+| on/off plug-in unit (0x010A) | `mt_devtypes_zephyr.cpp` 645-670 | `port/mt_devtypes_sl_tables_core.inc` | catalogue batch 1 |
+| dimmable plug-in unit (0x010B) | `mt_devtypes_zephyr.cpp` 700-721 | `port/mt_devtypes_sl_tables_core.inc` | catalogue batch 1 |
+| color temperature light (0x010C) and extended color light (0x010D) | `mt_devtypes_zephyr.cpp` 745-946 | `port/mt_devtypes_sl_tables_b2.inc` | catalogue batch 2 |
+| thermostat (0x0301) | `mt_devtypes_zephyr.cpp` 947-1040 | `port/mt_devtypes_sl_tables_b2.inc` | catalogue batch 2 |
+| fan (0x002B) | `mt_devtypes_zephyr.cpp` 1041-1100 | `port/mt_devtypes_sl_tables_b2.inc` | catalogue batch 2 |
+| window covering (0x0202) | `mt_devtypes_zephyr.cpp` 1125-1199 | `port/mt_devtypes_sl_tables_b2.inc` | catalogue batch 2 |
+| air quality sensor (0x002C) | `mt_devtypes_zephyr.cpp` 1200-1247 | `port/mt_devtypes_sl_tables_b2.inc` | catalogue batch 2 |
+| door lock (0x000A) | `mt_devtypes_zephyr.cpp` 1248-1357 | `port/mt_devtypes_sl_tables_b3.inc` | catalogue batch 3 |
+| water valve (0x0042) | `mt_devtypes_zephyr.cpp` 1358-1484 | `port/mt_devtypes_sl_tables_b3.inc` | catalogue batch 3 |
+| the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
+| the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
+| the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl_arena.inc` | round 2 task 5 |
+| the endpoint block arena and its sizing | `mt_devtypes_zephyr.cpp` 4659-5978 | `port/mt_devtypes_sl_arena.inc` | round 2 task 5 |
+| the seed table and `seed_slots()` | `mt_devtypes_zephyr.cpp` 5979-7005 | `port/mt_devtypes_sl_seeds.inc` | round 2 task 5 |
 | the ember cluster init hook | `mt_devtypes_zephyr.cpp` 7006-7051 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 (fix round 2, B525) |
 | the ColorControl cluster init hook | the second override beside the first, this port's own | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
 | `mt_dyn_attr_slot()` | `mt_devtypes_zephyr.cpp` 7052-7069 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
