@@ -97,6 +97,7 @@
  */
 
 #include <app/util/attribute-storage.h>
+#include <app/clusters/door-lock-server/door-lock-server.h>
 #include <app-common/zap-generated/callback.h>
 #include <app-common/zap-generated/ids/Attributes.h>
 #include <app-common/zap-generated/ids/Clusters.h>
@@ -3333,6 +3334,36 @@ void emberAfColorControlClusterInitCallback(EndpointId endpoint)
     emberAfColorControlClusterServerInitCallback(endpoint);
 }
 
+/*
+ * DoorLock's per-endpoint state is the SDK's own mEndpointCtx array,
+ * filled only by DoorLockServer::InitEndpoint(), which
+ * DECLARE_DYNAMIC_CLUSTER's null functions array never reaches for a
+ * dynamic endpoint; the generated dispatch
+ * (zap-generated/app/cluster-init-callback.cpp) sends DoorLock's init
+ * here. The result is parked in the two statics below because this
+ * callback returns void and mt_devtype_create() reads it back after
+ * emberAfSetDynamicEndpoint(). The statics sit in this file's
+ * anonymous namespace, the shape the functions around the
+ * ColorControl hook take. Endpoint 240's own functions array runs its
+ * init, so it returns at once (nRF mt_devtypes_zephyr.cpp 7025-7049 is
+ * the model).
+ */
+static EndpointId s_lock_init_ep = kInvalidEndpointId;
+static CHIP_ERROR s_lock_init_err = CHIP_NO_ERROR;
+
+void emberAfDoorLockClusterInitCallback(EndpointId endpoint)
+{
+    if (endpoint == kCatalogueEndpointId) {
+        return;
+    }
+    s_lock_init_ep = endpoint;
+    s_lock_init_err = DoorLockServer::Instance().InitEndpoint(endpoint);
+    if (s_lock_init_err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("devtypes", "DoorLock InitEndpoint(%u) failed: %" CHIP_ERROR_FORMAT,
+                    (unsigned)endpoint, s_lock_init_err.Format());
+    }
+}
+
 /* nRF 7052-7069. Contract, including the locking rules, in mt_dyn_store.h. */
 bool mt_dyn_attr_slot(EndpointId ep, ClusterId cluster, AttributeId attr, uint8_t **data,
                       uint8_t *size)
@@ -3405,6 +3436,17 @@ extern "C" bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant)
 extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
 {
     return parent_policy_ok(devtype_id, variant, parent_devtype);
+}
+
+/* Does this endpoint type carry cluster id as a server? nRF type_has_cluster. */
+static bool type_has_cluster(const EmberAfEndpointType *ep_type, ClusterId id)
+{
+    for (uint8_t i = 0; i < ep_type->clusterCount; i++) {
+        if (ep_type->cluster[i].clusterId == id) {
+            return true;
+        }
+    }
+    return false;
 }
 
 extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype,
@@ -3524,34 +3566,26 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
 
     /*
-     * THE PER-ENDPOINT DELEGATE HANDOUT IS NOT HERE, and its absence is a
-     * fact about this round's catalogue rather than a simplification. The
-     * nRF's create (7405-7900) claims a slot from one of fourteen pools
-     * before anything is spent, and registers the Delegate or Instance after
-     * a successful emberAfSetDynamicEndpoint(), for every device type whose
-     * cluster server needs one object per endpoint: the valve, the
-     * OperationalState trio, chime, mode select, the ModeBase families, the
-     * measurement clusters, DEM, WHM, MeterIdentification, the microwave's
-     * three-way construction order and the EVSE. Before catalogue batch 3,
-     * none of the twenty device types this build constructs carried a
-     * delegate family (graph F528); the first type that does is the water
-     * valve, batch 3, whose nRF create is at mt_matter_zephyr.cpp:1818. The
+     * THE PER-ENDPOINT DELEGATE HANDOUT, for the one family batch 3 brings,
+     * is in this function below. The nRF's create (7405-7900) claims a slot
+     * from one of fourteen pools before anything is spent, and registers the
+     * Delegate or Instance after a successful emberAfSetDynamicEndpoint(),
+     * for every device type whose cluster server needs one object per
+     * endpoint: the valve, the OperationalState trio, chime, mode select,
+     * the ModeBase families, the measurement clusters, DEM, WHM,
+     * MeterIdentification, the microwave's three-way construction order and
+     * the EVSE. Since catalogue batch 3 the water valve draws a delegate from
+     * the cluster-object arena through the claim below and the second half
+     * below; the other delegate families (the OperationalState trio, chime,
+     * mode select and the rest of the nRF list) arrive with batch 4. The
      * types this build does construct, door lock and water valve included,
      * serve OnOff, LevelControl, ColorControl, Thermostat, FanControl,
      * WindowCovering, AirQuality, TemperatureMeasurement,
      * OccupancySensing, RelativeHumidityMeasurement, PressureMeasurement,
-     * IlluminanceMeasurement, FlowMeasurement and BooleanState from ember
-     * storage and from CHIP's own registered cluster objects, with no
-     * per-endpoint delegate at all.
-     *
-     * The batch that ports a delegate-bearing type brings the claim block,
-     * the second halves AND the cluster-object arena the pools live in
-     * (nRF mt_matter_zephyr.cpp 133-386). Catalogue batch 3 is the first
-     * such batch, and its claim block is Task 3's, which lands with the
-     * smoke: until it does, a created valve endpoint answers its commands
-     * through the delegate the SDK registers by default (the water valve
-     * section's audit comment records the ordering rule and the
-     * consequence).
+     * IlluminanceMeasurement, FlowMeasurement, BooleanState and
+     * ValveConfigurationAndControl from ember storage and from CHIP's own
+     * registered cluster objects, the valve's per-endpoint delegate being
+     * the one exception.
      *
      * The B388 cluster-init call site is absent because this port does not
      * need one. The nRF calls
@@ -3602,6 +3636,24 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     const size_t base = block_bytes(n_clusters, n_slots);
     const size_t store = store_bytes(ep_type);
     const size_t want = base + store;
+
+    /* The valve's delegate is claimed before any endpoint memory is spent,
+     * so an exhausted cluster-object arena refuses the create cleanly (nRF
+     * mt_devtypes_zephyr.cpp 7862-7883). A claim stranded by a later failure
+     * in this function is bounded at one per boot: the rebuild stops at the
+     * first failure and the bump arena cannot free. */
+    void *valve_delegate = nullptr;
+    if (type_has_cluster(ep_type, ValveConfigurationAndControl::Id)) {
+        valve_delegate = mt_matter_valve_delegate_alloc();
+        if (valve_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: valve delegate unavailable: the "
+                                    "cluster-object arena or the valve cap (kServiceableEndpoints) is "
+                                    "exhausted; %u of %u serviceable endpoints in use",
+                        (unsigned)devtype_id, (unsigned)live_endpoints(),
+                        (unsigned)kServiceableEndpoints);
+            return -1;
+        }
+    }
 
     void *block = hearth_arena_alloc(s_ep_arena, want, "endpoint block arena");
     if (block == nullptr) {
@@ -3664,6 +3716,28 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         HEARTH_LOGE("devtypes", "emberAfSetDynamicEndpoint(0x%04X) failed: %" CHIP_ERROR_FORMAT,
                     (unsigned)devtype_id, err.Format());
         return -1;
+    }
+
+    /* DoorLock: the init hook above ran inside emberAfSetDynamicEndpoint();
+     * an endpoint whose lock context is missing would answer invokes it
+     * cannot perform, so the create aborts (nRF mt_devtypes_zephyr.cpp
+     * 8093-8125). */
+    if (type_has_cluster(ep_type, DoorLock::Id) &&
+        (s_lock_init_ep != d.ep_id || s_lock_init_err != CHIP_NO_ERROR)) {
+        HEARTH_LOGE("devtypes", "devtype 0x%04X: DoorLock init did not succeed for endpoint %u "
+                                "(init ran for endpoint %u, result %" CHIP_ERROR_FORMAT ")",
+                    (unsigned)devtype_id, (unsigned)d.ep_id, (unsigned)s_lock_init_ep,
+                    s_lock_init_err.Format());
+        emberAfClearDynamicEndpoint(index);
+        d.used = false;
+        d.block = nullptr;
+        return -1;
+    }
+    /* The valve delegate's second half: SetDefaultDelegate resolves through
+     * emberAfGetClusterServerEndpointIndex, so it must run after the
+     * endpoint is configured and enabled (nRF 8205-8221). */
+    if (valve_delegate != nullptr) {
+        mt_matter_valve_delegate_set_endpoint(valve_delegate, d.ep_id);
     }
 
     s_next_ep_id++;
