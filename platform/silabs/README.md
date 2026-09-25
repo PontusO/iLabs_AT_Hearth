@@ -2400,6 +2400,20 @@ differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
 
+### The cluster-object arena
+
+Since catalogue batch 3 (2026-09-25), minimal (graph DE541): one `hearth_arena` over
+`HEARTH_OBJ_ARENA_BYTES` = 128 (`port/mt_port_ids.h`), with `obj_new` as its only
+helper (`port/mt_matter_sl.cpp`). Its only customer is the water valve's
+`HearthValveDelegate`, 8 B (a 4-byte vptr plus a 2-byte `EndpointId` plus 2 B of
+padding), sixteen of them exactly, pinned by the two static_asserts. The create
+path claims a valve's delegate before any endpoint memory is spent and registers
+it with `SetDefaultDelegate` after `emberAfSetDynamicEndpoint`; its boot line,
+"cluster-object arena: N of 128 B handed out", follows the endpoint arena's.
+Measured on the bench (build 7a28411, 2026-09-25): 8 of 128 B with one valve,
+128 of 128 B with sixteen, nothing refused; `.bss` +128 B exactly. Batch 4 adds
+`obj_pair_new` and `obj_inst_new` and raises the budget.
+
 ### Catalogue batch 2: the fabric proof, Phase 1 and 2 and the batch's memory record
 
 The current image, 2026-09-24, built from the committed tree at `a271a3f` in

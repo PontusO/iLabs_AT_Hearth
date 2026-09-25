@@ -1113,7 +1113,42 @@ void mt_obj_arena_report(void)
                 (unsigned)(s_obj_arena.cap - s_obj_arena.used));
 }
 
-/* ---- catalogue batch 3: door lock and water valve (nRF mt_matter_zephyr.cpp 1565-1892, verbatim) ---- */
+/* ---- catalogue batch 3: door lock and water valve (nRF mt_matter_zephyr.cpp 1536-1892, verbatim) ---- */
+/*
+ * ============ catalogue batch 3: the command verdict frame ==============
+ *
+ * The door lock (0x000A) and the water valve (0x0042) are the first device
+ * types on this platform whose commands need an APPLICATION verdict, and
+ * this section is where that verdict is fetched. Everything about the
+ * verdict protocol itself, the sequence numbers, the 1000 ms window, the
+ * default-deny, the +MTCMDTO URC, belongs to core (mt_at.h, mt_cmdbox.h)
+ * and is identical on both platforms; nothing here reimplements any of it.
+ * All this code does is call mt_cmd_forward() from the right SDK hook and
+ * translate the boolean it returns into whatever that hook's caller expects.
+ *
+ * Both types forward the PAYLOAD-LESS form. AT_MT_SPEC.md 3.17 registers
+ * the door lock as cluster 257 commands 0/1 and the valve as cluster 129
+ * commands 0/1, with no trailing fields on either, so mt_cmd_forward() is
+ * the right entry point and neither mt_cmd_forward_payload() nor
+ * mt_cmd_forward_fields() is involved.
+ *
+ * NO StackLock in the command hooks, unlike every mt_matter_* bridge
+ * function in this file. They already run ON the CHIP event-loop task: the
+ * lock's two are ember command callbacks and the valve's two are Delegate
+ * methods the SDK calls synchronously from that same task.
+ * mt_cmd_forward() takes no lock of its own either, for the same reason,
+ * and mt_at.c's AT+MTCMDRESP handler must never take the stack lock on the
+ * reply path (see its comment) or the two would deadlock. The AT+MTLOCK
+ * and AT+MTVALVE bridges below DO take it, because those are called from
+ * the AT parser thread like every other bridge function here.
+ *
+ * On the MGM240P: mt_cmd_forward() blocks this CHIP task on the verdict
+ * semaphore through hearth_sem_take() (port/hearth_port_sl.c, sliced
+ * FreeRTOS waits), and the AT parser task, which outranks it (graph F491,
+ * N479), answers AT+MTCMDRESP without the stack lock: core/mt/mt_at.c
+ * 2285 onward says why it never takes it. First run on this port in
+ * catalogue batch 3 (2026-09-25).
+ */
 /* ---- door lock (0x000A) ----------------------------------------------- */
 
 /*

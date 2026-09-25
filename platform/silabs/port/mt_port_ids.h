@@ -111,9 +111,10 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * form (port/mt_dyn_store.h owns the cost story for both halves). It holds
  * the cluster objects that outlive no Instance beside them: today only the
  * valve delegate, one per water valve (mt_matter_sl.cpp's
- * HearthValveDelegate, 4 bytes, 8 after hearth_arena_cost's rounding to
- * 8). The budget is exactly sixteen of those, one per serviceable endpoint
- * (kServiceableEndpoints), pinned by the static_asserts in
+ * HearthValveDelegate, 8 bytes: a 4-byte vptr, a 2-byte EndpointId, 2 bytes of
+ * padding; 8 after hearth_arena_cost's rounding). The budget is exactly
+ * sixteen of those, one per serviceable endpoint (kServiceableEndpoints),
+ * pinned by the static_asserts in
  * mt_matter_sl.cpp.
  *
  * DE541: minimal, grows per batch. The valve delegate is the only customer
