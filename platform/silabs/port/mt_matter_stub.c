@@ -117,33 +117,8 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
     return STUB_ATTR_MISS(ep);
 }
 
-/* ---- door lock (C2) -------------------------------------------------------- */
-
-int mt_matter_lock_state_set(uint16_t ep, uint8_t state, uint8_t source)
-{
-    (void)state;
-    (void)source;
-    /* no DoorLock cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:276) */
-    return STUB_ATTR_MISS(ep);
-}
-
-uint8_t mt_matter_lock_source_manual(void) { return 0; }
-
-uint8_t mt_matter_lock_source_max(void) { return 0; }
-
-/* ---- water valve ----------------------------------------------------------- */
-
-void *mt_matter_valve_delegate_alloc(void) { return NULL; }
-void mt_matter_valve_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)delegate; (void)ep; }
-
-int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
-{
-    (void)state;
-    (void)level;
-    /* no ValveConfigurationAndControl cluster: MT_ATTR_ERR_CLUSTER
-     * (mt_matter.h:347) */
-    return STUB_ATTR_MISS(ep);
-}
+/* The door lock and water valve bridge functions left this file in
+ * catalogue batch 3 (2026-09-25); they live in mt_matter_sl.cpp. */
 
 /* ---- mode select ------------------------------------------------------------ */
 
