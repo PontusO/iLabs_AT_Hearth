@@ -1113,7 +1113,7 @@ void mt_obj_arena_report(void)
                 (unsigned)(s_obj_arena.cap - s_obj_arena.used));
 }
 
-/* ---- catalogue batch 3: door lock and water valve (nRF mt_matter_zephyr.cpp 1536-1892, verbatim) ---- */
+/* ---- catalogue batch 3: door lock and water valve (nRF mt_matter_zephyr.cpp 1536-1892, verbatim but for the MGM240P no-lock paragraph and file references) ---- */
 /*
  * ============ catalogue batch 3: the command verdict frame ==============
  *
@@ -1222,7 +1222,7 @@ bool emberAfPluginDoorLockOnDoorUnlockCommand(chip::EndpointId endpointId,
 
 /*
  * The lock's per-endpoint init hook, emberAfDoorLockClusterInitCallback(),
- * is deliberately NOT here. It lives in mt_devtypes_zephyr.cpp, next to the
+ * is deliberately NOT here. It lives in mt_devtypes_sl.cpp, next to the
  * door lock's device type declaration, because its failure has to abort
  * mt_devtype_create() and that file owns the create. See the comment on the
  * override there for the InitEndpoint-versus-InitServer reasoning.
@@ -1306,7 +1306,7 @@ extern "C" uint8_t mt_matter_lock_source_max(void)
  * own auto-close timer re-enters it when a timed open expires, so the host
  * sees an unsolicited 129/1 forward. Fix round I1; the full mechanism and
  * why it is documented rather than fixed are on the water valve's audit
- * note in mt_devtypes_zephyr.cpp, and the host-facing consequence is in the
+ * note in mt_devtypes_sl.cpp, and the host-facing consequence is in the
  * platform README.
  */
 class HearthValveDelegate : public chip::app::Clusters::ValveConfigurationAndControl::Delegate
@@ -1350,7 +1350,7 @@ public:
      * Nothing in this firmware's AT surface exposes that countdown as an
      * event to forward, so there is nothing to do; RemainingDuration itself
      * still ticks in the server's shadow store and is what a subscribed
-     * controller reads (see the seed note in mt_devtypes_zephyr.cpp).
+     * controller reads (see the seed note in mt_devtypes_sl.cpp).
      *
      * THIS FUNCTION must stay non-blocking: it runs on the event loop once
      * per second, and a mt_cmd_forward() from here would stall the stack
@@ -1365,7 +1365,7 @@ public:
      * blocking forward per timed open rather than one per second, and it is
      * the SDK's structure rather than something this class chooses.
      * Documented, not fixed; fix round I1, full mechanism on the water
-     * valve's audit note in mt_devtypes_zephyr.cpp.
+     * valve's audit note in mt_devtypes_sl.cpp.
      */
     void HandleRemainingDurationTick(uint32_t duration) override { (void)duration; }
 
@@ -1380,12 +1380,12 @@ static_assert(hearth_arena_cost(sizeof(HearthValveDelegate)) * kServiceableEndpo
 
 
 /*
- * Pool of delegate objects, handed out in composition order by
- * mt_devtype_create() (mt_devtypes_zephyr.cpp). Memory reclaim round A:
- * the pool is a table of POINTERS and the objects themselves come from the
- * cluster-object heap, so a composition with no water valve pays four
- * bytes per unused slot instead of a whole delegate. The heap block is
- * never freed; see the heap's own comment for the standing policy.
+ * Delegate objects, handed out in composition order by
+ * mt_devtype_create() (mt_devtypes_sl.cpp). Memory reclaim round A: the
+ * pool is a size_t count over the cluster-object bump arena, so a
+ * composition with no water valve pays nothing for the unused delegates
+ * and no slot table exists at all. The arena block is never freed; see its
+ * own comment in this file for the standing policy.
  *
  * Sized kServiceableEndpoints, not MT_COMP_MAX_ENDPOINTS. mt_matter.h's
  * contract names the latter because it was written for the C6, which

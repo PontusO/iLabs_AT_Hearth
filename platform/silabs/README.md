@@ -644,7 +644,7 @@ They are disabled rather than deleted, so re-enabling either is one flag and one
 two arms' root-node surface is still the qualification round's.
 
 Generated figures, read out of `data_model/zap-generated/endpoint_config.h`
-(2026-09-18, zap 2026.6.18):
+(2026-09-18; refreshed 2026-09-25 for catalogue batch 3, zap 2026.6.18):
 
 | | |
 |---|---|

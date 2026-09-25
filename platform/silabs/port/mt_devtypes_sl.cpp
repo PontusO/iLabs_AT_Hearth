@@ -88,12 +88,9 @@
  *     as the one place the block layout asks the question, so the batch that
  *     ports the first store-bearing type adds a TABLE and not a layout.
  *
- * The cluster-object heap (nRF mt_matter_zephyr.cpp 133-386 and 9137-9472)
- * is absent from this port for the same reason one level up: every one of
- * its fourteen pools serves a per-endpoint Delegate or Instance belonging to
- * a device type this round does not build, so carrying it would be a static
- * arena with no allocation site. The note in port/mt_matter_sl.cpp beside
- * the live endpoint table says what the batch that needs it has to bring.
+ * The cluster-object arena lives in port/mt_matter_sl.cpp (the
+ * hearth_arena block at the top of the file), and its budget is pinned by
+ * DE541 to sixteen valve delegates.
  */
 
 #include <app/util/attribute-storage.h>
@@ -1182,7 +1179,7 @@ constexpr EmberAfDeviceType kAirQualitySensorTypes[] = { { 0x002C, 1 } };
  *   a lock with FeatureMap 0 never reaches the user/credential/schedule
  *   hooks at all. This firmware therefore overrides exactly two of them,
  *   emberAfPluginDoorLockOnDoorLockCommand and ...OnDoorUnlockCommand
- *   (mt_matter_zephyr.cpp), and leaves the other twenty-eight to their weak
+ *   (mt_matter_sl.cpp), and leaves the other twenty-eight to their weak
  *   stubs. Same two the C6 defines.
  *
  * FeatureMap 0 is conformant. Every feature in DoorLock's feature list is
@@ -1278,8 +1275,8 @@ constexpr EmberAfDeviceType kDoorLockTypes[] = { { 0x000A, 3 } };
  *   The delegate: chip::app::Clusters::ValveConfigurationAndControl::
  *   Delegate (delegate.h:34), three pure virtuals (:40-42), registered per
  *   endpoint with the free function SetDefaultDelegate(EndpointId,
- *   Delegate*) (cluster.h:40, impl cluster.cpp:262). Task 3 adds this
- *   port's mt_devtype_create() claim and SetDefaultDelegate() call, and
+ *   Delegate*) (cluster.h:40, impl cluster.cpp:262). Catalogue batch 3 adds
+ *   this port's mt_devtype_create() claim and SetDefaultDelegate() call, and
  *   with them the ordering rule this forces and why it differs from the
  *   C6's.
  *
@@ -3345,9 +3342,13 @@ void emberAfColorControlClusterInitCallback(EndpointId endpoint)
  * callback returns void and mt_devtype_create() reads it back after
  * emberAfSetDynamicEndpoint(). The statics sit in this file's
  * anonymous namespace, the shape the functions around the
- * ColorControl hook take. Endpoint 240's own functions array runs its
- * init, so it returns at once (nRF mt_devtypes_zephyr.cpp 7025-7049 is
- * the model).
+ * ColorControl hook take. Endpoint 240's functions array runs no init at
+ * all: door-lock-cluster.xml declares the server with init="false"
+ * (door-lock-cluster.xml:44), so ZAP puts no init function in the array and
+ * the array never calls InitEndpoint for it, the fact the audit note above
+ * records. The early return keeps because endpoint 240 is disabled at boot
+ * (src/main.cpp:133) and a disabled endpoint needs no lock context; the nRF
+ * hook has no early return.
  */
 static EndpointId s_lock_init_ep = kInvalidEndpointId;
 static CHIP_ERROR s_lock_init_err = CHIP_NO_ERROR;
