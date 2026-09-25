@@ -272,8 +272,11 @@ def print_plan(batch):
             flags = "".join(
                 f" {name}" for name, on in (("echo", c["echo"]),
                                             ("null-read", c["null_read"])) if on)
-            print("  ep %2d %s %s rev %d: AT write %s%s -> chip-tool %s read %s; controller %s"
-                  % (ep, dt, t["name"], t["revision"], c["at_value"], flags,
+            # at_cmd sends the type's own AT command (AT+MTLOCK/AT+MTVALVE),
+            # not the AT+MTATTR write, so the plan shows that line.
+            atline = c["at_cmd"] % {"ep": ep} if c.get("at_cmd") else "AT write %s" % c["at_value"]
+            print("  ep %2d %s %s rev %d: %s%s -> chip-tool %s read %s; controller %s"
+                  % (ep, dt, t["name"], t["revision"], atline, flags,
                      c["chip_cluster"] or t["chip_cluster"], c["chip_attr"], urc))
 
 class Ctx:  # the fields pairing_argv() reads
@@ -335,6 +338,13 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
     # The write step: at_cmd, when set, sends the type's own AT command
     # (AT+MTLOCK/AT+MTVALVE) instead of the AT+MTATTR write; the row name
     # says the command.
+    #
+    # Drain before the write, in both forms: the AT layer may have queued a
+    # stale +MTATTR for the same endpoint, cluster and attribute (a URC from
+    # an earlier check), and the echo row below must prove that THIS write
+    # produced its own +MTATTR. A stale URC would let a silent write pass,
+    # so the queue has to be empty when the write goes out.
+    link.drain(0.2)
     if c.get("at_cmd"):
         wcmd = c["at_cmd"] % {"ep": ep}
         res, wlines = link.command(wcmd)
@@ -373,9 +383,9 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         # attribute (an opened valve's CurrentState to Transitioning or Open,
         # a locked door's LockState to Locked), and the host, not the
         # controller, reports actuation. The "second AT read agrees" row
-        # runs BEFORE the controller action, and after the action nothing
-        # about the attribute is asserted; the log records what it became,
-        # for the as-built.
+        # runs BEFORE the controller action, and the attribute after the
+        # action is deliberately not asserted: nothing here reads it back,
+        # and the host, not this proof, owns what the actuation became.
         _second_at_read(link, s, prefix, at, own)
         kind, args, (fcl, fcmd), answer, want = c["controller"]
         ctx = types.SimpleNamespace(chip=chip, chip_call=None)

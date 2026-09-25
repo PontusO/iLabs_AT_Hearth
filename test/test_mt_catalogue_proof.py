@@ -333,14 +333,15 @@ def _names_for(batch, null_read=None):
         names += [n for n, _ in s.na]
     return names
 
-def _baseline_endpoint_names():
-    """core-batch1.json's endpoint row names: the results keys minus
+def _baseline_endpoint_names(path=None):
+    """A proven result file's endpoint row names: the results keys minus
     the compose:, commission: and restore: rows main() owns. The N/A
     names are among the keys (write_baseline merges suite.na into the
-    same dict)."""
+    same dict), so they count as names in the pin. Without a path,
+    core-batch1.json, as in the original batch 1 pin."""
     import json
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "platform", "silabs", "core-batch1.json")
+    path = path or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "platform", "silabs", "core-batch1.json")
     keys = json.load(open(path))["results"]
     return {k for k in keys
             if not k.startswith(("compose:", "commission:", "restore:"))}
@@ -353,6 +354,14 @@ class TestBatch2RowNames(unittest.TestCase):
     def test_fake_run_yields_no_duplicate_name(self):
         names = _names_for("mg24-batch2")
         self.assertEqual(len(names), len(set(names)))
+
+    def test_fake_run_yields_exactly_the_baseline_row_names(self):
+        # Batch 2's proven result file is the pin, as batch 1's is: the
+        # fake run must yield exactly the recorded endpoint row names,
+        # N/A names among them.
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "platform", "silabs", "core-batch2.json")
+        self.assertEqual(set(_names_for("mg24-batch2")), _baseline_endpoint_names(path))
 
 class TestNullRead(unittest.TestCase):
     """ATLink._collect consumes the +MTERR:<n> line and returns n as the
@@ -481,6 +490,9 @@ class _VerdictLink(_FakeLink):
         # _FakeLink's instance attribute name for the URC queue; here it is
         # self.urcs, the same list (so an assignment in _FakeLink.__init__
         # or an append by the base await_urc reaches the same queue).
+        # Not dead: _FakeLink.__init__ assigns self.urc_queue = [], which
+        # goes through the setter below, aliasing the tuple queue onto the
+        # string queue, so every fake's queue IS this list.
         return self.urcs
 
     @urc_queue.setter
@@ -521,6 +533,8 @@ class _VerdictChip:
         self.timeout = timeout
         self.rc = rc
         self.status = status
+        self.devtype = devtype
+        self.revision = revision
 
     def run(self, args, timeout=None):
         if args and args[0] == "descriptor":
@@ -695,7 +709,8 @@ class TestVerdictKind(unittest.TestCase):
         t = [x for x in P.BATCHES["mg24-batch3"] if x["devtype"] == "0x000A"][0]
         c = [c for c in t["checks"] if c["controller"] and c["controller"][0] == "verdict"
              and c["controller"][1][0] == "unlock-door"][0]
-        # status 0x01 (UNSUPPORTED_COMMAND) with a non-zero rc: the row passes.
+        # status 0x01 (FAILURE; UNSUPPORTED_COMMAND is 0x81) with a
+        # non-zero rc: the row passes.
         link = _VerdictLink(null_read=(0x0101, 0x0000))
         chip = _VerdictChip(link=link, ep=2, cluster=257, command=1, seq=7, rc=1, status="0x01")
         s = _FakeSuite()
@@ -813,12 +828,143 @@ class TestVerdictKind(unittest.TestCase):
         self.assertTrue(got["door lock ep2 lock-state lock-door allow second AT read agrees (1)"])
 
 
+class _DrainingVerdictLink(_VerdictLink):
+    """_VerdictLink whose drain behaves like ATLink.drain: it discards
+    every queued URC and returns them, so one check's stray URC cannot
+    satisfy the next check's expectation. The base _FakeLink.drain is a
+    no-op, so only this fake can model the drain prove_check does before
+    the write (AT_MT_SPEC 3.8: the echo row must prove THIS write raised
+    its own +MTATTR, and a stale +MTATTR for the same endpoint, cluster
+    and attribute would otherwise let a silent write pass)."""
+
+    def drain(self, quiet=0.2):
+        drained = list(self.urcs)
+        del self.urcs[:]
+        return drained
+
+
+class _AtCmdEchoLink(_DrainingVerdictLink):
+    """_DrainingVerdictLink plus the AT layer's echo of the at_cmd write.
+    AT+MTVALVE (and AT+MTLOCK) make the AT layer raise a +MTATTR URC for
+    the attribute the command drives, and the echo row's late branch
+    (link.await_urc) finds it there. at_cmd_echo=false models a firmware
+    that answers the command but raises no echo: the echo row must then
+    fail, the way it would on the wire for a silent write."""
+
+    def __init__(self, at_cmd_echo=True, **kw):
+        super().__init__(**kw)
+        self.at_cmd_echo = at_cmd_echo
+
+    def command(self, cmd, *a, **k):
+        res, lines = super().command(cmd, *a, **k)
+        if self.at_cmd_echo:
+            m = re.fullmatch(r"AT\+MTVALVE=(\d+),(\S+)", cmd)
+            if m:
+                self.urcs.append("+MTATTR:%s,129,4,%s" % (m.group(1), m.group(2)))
+        return res, lines
+
+
+def _valve_open_check():
+    # The water valve's open check: the at_cmd form of the write step
+    # (AT+MTVALVE=<ep>,1) with the echo row on.
+    t = [x for x in P.BATCHES["mg24-batch3"] if x["devtype"] == "0x0042"][0]
+    c = [c for c in t["checks"] if c["controller"] and c["controller"][0] == "verdict"
+         and c["controller"][1][0] == "open"][0]
+    return t, c
+
+
+class TestVerdictKindStaleUrc(unittest.TestCase):
+    """I2: the drain before the write step in prove_check. A stale
+    +MTATTR URC for the check's own endpoint, cluster and attribute must
+    be discarded before the write goes out, or the echo row would be
+    satisfied by the stale line and a silent write would pass."""
+
+    def _run_open_check(self, link, stale=()):
+        t, c = _valve_open_check()
+        chip = _VerdictChip(link=link, ep=3, cluster=129, command=0, seq=9,
+                            rc=0, status="0x00")
+        for u in stale:
+            link.urcs.append(u)
+        s = _FakeSuite()
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            P.prove_check(link, chip, s, "0x4845", 3, t, c,
+                          "water valve ep3 current-state open allow")
+        finally:
+            H._threaded_chip_call = saved
+        return s
+
+    def test_stale_mtattr_urc_is_drained_and_the_echo_row_fails(self):
+        # The stale URC is the echo line itself, so without the pre-write
+        # drain the await_urc late branch would find it and the row would
+        # pass a write that raised no echo of its own.
+        link = _DrainingVerdictLink()
+        s = self._run_open_check(link, stale=["+MTATTR:3,129,4,1"])
+        got = {n: ok for n, ok in s.results}
+        self.assertFalse(got["water valve ep3 current-state open allow AT write echoes +MTATTR:3,129,4,1"])
+        # The drain ran: the stale URC is gone, not left in the queue to
+        # satisfy a later row.
+        self.assertNotIn("+MTATTR:3,129,4,1", link.urcs)
+
+    def test_write_with_no_stale_and_no_echo_fails(self):
+        # The control case: no stale URC queued, the write raises no echo
+        # of its own, so the echo row fails exactly as it should. The
+        # drain is a no-op on the empty queue and changes nothing.
+        link = _DrainingVerdictLink()
+        s = self._run_open_check(link)
+        got = {n: ok for n, ok in s.results}
+        self.assertFalse(got["water valve ep3 current-state open allow AT write echoes +MTATTR:3,129,4,1"])
+        self.assertEqual(link.urcs, [])
+
+
+class TestVerdictKindAtCmdEcho(unittest.TestCase):
+    """M9: the at_cmd echo path. AT+MTVALVE makes the AT layer raise a
+    +MTATTR URC for the attribute it drives, and the echo row's late
+    branch (link.await_urc) finds it: one test where the fake queues the
+    echo (the row passes) and one where it does not (the row fails)."""
+
+    def _run_open_check(self, at_cmd_echo):
+        link = _AtCmdEchoLink(at_cmd_echo=at_cmd_echo)
+        t, c = _valve_open_check()
+        chip = _VerdictChip(link=link, ep=3, cluster=129, command=0, seq=9,
+                            rc=0, status="0x00")
+        s = _FakeSuite()
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            P.prove_check(link, chip, s, "0x4845", 3, t, c,
+                          "water valve ep3 current-state open allow")
+        finally:
+            H._threaded_chip_call = saved
+        return link, s
+
+    def test_at_cmd_write_with_echo_passes(self):
+        link, s = self._run_open_check(at_cmd_echo=True)
+        got = {n: ok for n, ok in s.results}
+        # The null-read row fails against a bare fake (no null_read set on
+        # the link), as in the other verdict-kind tests; every other row,
+        # and the echo row, passes: the AT+MTVALVE write queued its own
+        # +MTATTR echo, and the late branch found it.
+        self.assertFalse(got["water valve ep3 current-state open allow AT read of the null seed -> +MTERR:5"])
+        for name, ok in got.items():
+            if "null seed" not in name:
+                self.assertTrue(ok, "row fails: %s" % name)
+        self.assertTrue(got["water valve ep3 current-state open allow AT write echoes +MTATTR:3,129,4,1"])
+
+    def test_at_cmd_write_without_echo_fails(self):
+        link, s = self._run_open_check(at_cmd_echo=False)
+        got = {n: ok for n, ok in s.results}
+        self.assertFalse(got["water valve ep3 current-state open allow AT write echoes +MTATTR:3,129,4,1"])
+
+
 class TestBatch3RowNames(unittest.TestCase):
-    def test_fake_run_yields_no_duplicate_name(self):
-        # Running prove_endpoint over both batch 3 types with the fakes yields
-        # no duplicate row name: the door lock's four checks all prove
-        # LockState, and the " <command> <answer>" suffix the verdict kind
-        # adds disambiguates them.
+    def _fake_run_names(self):
+        # Running prove_endpoint over both batch 3 types with the fakes:
+        # the AT rows are plain, the descriptor read reads the devtype and
+        # revision out of the chip tool, the controller rows enqueue their
+        # +MTCMD URC. Returns the row names, results first, N/A after, as
+        # the batch 1 and 2 helpers do.
         link = _VerdictLink()
         chip = _VerdictChip(link=link, ep=2, cluster=257, command=0, seq=7)
         saved = H._threaded_chip_call
@@ -836,7 +982,22 @@ class TestBatch3RowNames(unittest.TestCase):
                 names += [n for n, _ in s.na]
         finally:
             H._threaded_chip_call = saved
+        return names
+
+    def test_fake_run_yields_no_duplicate_name(self):
+        # The door lock's four checks all prove LockState, and the
+        # " <command> <answer>" suffix the verdict kind adds disambiguates
+        # them, so the names must not collide.
+        names = self._fake_run_names()
         self.assertEqual(len(names), len(set(names)))
+
+    def test_fake_run_yields_exactly_the_baseline_row_names(self):
+        # Batch 3's proven result file is the pin, as batch 1's and 2's
+        # are: the fake run must yield exactly the recorded endpoint row
+        # names, N/A names among them.
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "platform", "silabs", "core-batch3.json")
+        self.assertEqual(set(self._fake_run_names()), _baseline_endpoint_names(path))
 
 
 if __name__ == "__main__":
