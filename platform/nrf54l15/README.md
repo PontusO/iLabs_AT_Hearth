@@ -2180,32 +2180,14 @@ short-circuit are sound on this port.
 
 ## Open: LevelControl on a dynamic endpoint (B525)
 
-Placed here, as a new top-level section at the end of the file, rather than
-folded into "Endpoint capacity" or "Harness Phase 2 and Phase 3": this is a
-functional gap in the dynamic endpoint machinery those sections describe,
-not a capacity figure or a harness-run record, and it has no closer home.
-
-A dynamic endpoint's LevelControl cluster keeps a private
-`EmberAfLevelControlState` (its `minLevel` and `maxLevel` among the fields),
-filled only by `emberAfLevelControlClusterServerInitCallback()`. That
-function is a per-cluster init function, reached only through the
-"functions" array on `EmberAfCluster` that `DECLARE_DYNAMIC_CLUSTER` leaves
-`NULL` for every dynamic cluster it builds. With no way to attach one, the
-state struct keeps its static zero fill, and a controller's `MoveToLevel`
-clamps every target to 0, while the endpoint's own `MinLevel` and `MaxLevel`
-attributes keep reading correctly over the wire the whole time: those are
-ember attributes, the state struct is a second, private copy.
-
-The MG24 arm found this with `test/mt_catalogue_proof.py` on 2026-09-22 and
-fixed it there with a strong `emberAfLevelControlClusterInitCallback()`
-(`platform/silabs/port/mt_devtypes_sl.cpp`, "the ember cluster init hook"
-section). That hook is the same route this port's own DoorLock init already
-uses (`mt_devtypes_zephyr.cpp` 7006-7051), so the fix is not a new
-mechanism on this arm, only a second cluster wired through the one already
-here.
-
-This arm has the defect by construction, not by a difference in behaviour:
-it has never proved `MoveToLevel`, no harness row exercises it, and nothing
-here has ever sent a level command that would have caught it. The fix is
-the same override, plus a run of `test/mt_catalogue_proof.py` on this
-carrier to prove it closed.
+Withdrawn 2026-09-25 (catalogue batch 2, graph F529): this arm never had the
+gap. It has run `emberAfLevelControlClusterServerInitCallback()` (and
+`emberAfColorControlClusterServerInitCallback()`) on dynamic endpoints since
+`06c9bd4` (2026-08-28, "fix: dynamic endpoints run the level-control server
+init so the state caches the seeded bounds"), which 1.2.0 (`1842af3`)
+contains, at `port/mt_devtypes_zephyr.cpp:8189-8193`. The claim added by
+`c9c95a8` was wrong: the MG24's `MoveToLevel` clamp was the MG24's own missing
+init, and it is fixed on that arm (`ca05afa`), so B525 is closed on both arms.
+The B388 record in "Batch 2: the attribute-only types" above already stated
+this arm invokes the LevelControl init by hand at endpoint create time, which
+is this line of evidence.

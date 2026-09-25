@@ -1429,6 +1429,12 @@ cluster-init call site (`LevelControl`, `ColorControl` and `ModeSelect`
 `ServerInit`, two of whose cluster servers are not even in this image). The
 sources say what the batch that needs each one has to bring back.
 
+Corrected 2026-09-25 (catalogue batch 2, graph F528): the per-endpoint
+delegate handout and the cluster-object arena arrive together with the first
+type that draws on them, batch 3's valve. Catalogue batch 2 built and proved
+its six types without either, which is what moved the arena's owner from
+batch 2 to batch 3 in the catalogue table.
+
 `port/mt_devtypes_stub.c` is now an empty file, kept rather than deleted so
 that `hearth.slcp`, `test/host/Makefile`'s `silabs-stubs` target and
 `check_decls.py`'s pair list keep naming the same pair; `check_decls.py` proves
@@ -2434,6 +2440,18 @@ And the window covering's `go-to-lift-percentage` raised `+MTATTR` on
 moves only as the (absent) mechanism reports it, which is what the row's
 expectation encodes.
 
+Two host-facing facts the proof rows encode, worth knowing before driving
+either cluster from a host:
+
+- **A colour command on a light that is off answers Success and changes
+  nothing, without ExecuteIfOff.** Matter's Options processing drops the
+  colour state of a light whose OnOff is FALSE, so a host must send
+  ExecuteIfOff (OptionsMask and OptionsOverride 1,1) for a command to move a
+  freshly composed colour light at all; the batch 2 rows send it.
+- **FanMode and PercentSetting are not coupled on a dynamic endpoint.** The
+  cluster server keeps them apart, as on the nRF; writing one leaves the
+  other where it was, and the host owns the coupling if it wants it.
+
 #### Harness Phase 1, re-run on the batch image: 292 passed, 4 failed
 
 ```
@@ -2540,9 +2558,9 @@ nothing left over and nothing wasted. That is the promise the design spec
 ruling names, measured on this image.
 
 **The second arena still does not exist.** The cluster-object arena arrives
-with the first delegate-bearing device type; nothing in this batch needs one,
-and `hearth_arena` in `port/mt_dyn_store.h` is still the allocator both will
-use.
+with the first delegate-bearing device type, batch 3's valve (F528); nothing in
+this batch needs one, and `hearth_arena` in `port/mt_dyn_store.h` remains the
+allocator both will use.
 
 #### Free heap at `+MTREADY`, and NVM3
 
@@ -2927,6 +2945,10 @@ with batch 2's first delegate-bearing device type; nothing in this batch needs
 one, and `hearth_arena` in `port/mt_dyn_store.h` is still the allocator both
 will use.
 
+Corrected 2026-09-25 (catalogue batch 2, graph F528): the arena arrives with
+the first type that draws on it, batch 3's valve. Batch 2 built and proved all
+six of its types on this image without a delegate and without the arena.
+
 #### Free heap at `+MTREADY`, and NVM3
 
 From the boot task's own line, this session, all four on this image:
@@ -3163,6 +3185,11 @@ deliberately absent until the first delegate-bearing device type arrives
 `hearth_arena` in `port/mt_dyn_store.h` is already the allocator both will
 use). The design spec asks for "the two arenas' occupancy"; there is one, and
 this is why.
+
+Corrected 2026-09-25 (catalogue batch 2, graph F528): the arena does not
+arrive with batch 2. None of batch 2's six types uses a delegate or the
+cluster-object arena, so the first type to draw on it is batch 3's valve, and
+the arena and the first delegate pool belong to batch 3.
 
 #### NVM3
 
@@ -4860,8 +4887,8 @@ the heap and the arenas.
 | Batch | Contents | Brings with it |
 |---|---|---|
 | 1 | attribute-only, 14 types | nothing structural. **Built 2026-09-22**, twelve types: the registry's fourteen batch-1 ids include the two milestone types round 2 already built (0x0100, 0x0302). Proof file `core-batch1.json`; see "Catalogue batch 1" under "Measured" |
-| 2 | server-interaction, 6 types | **the cluster-object arena** and the first delegate pool |
-| 3 | command-verdict, 2 types | the `+MTCMD` verdict path |
+| 2 | server-interaction, 6 types | nothing structural: **built 2026-09-24**, six types, no delegate and no object arena (F528). Proof file `core-batch2.json`; see "Catalogue batch 2" under "Measured" |
+| 3 | command-verdict, 2 types | the `+MTCMD` verdict path, and **the cluster-object arena** and the first delegate pool (the valve) |
 | 4 | appliance, 7 types | OperationalState and Chime carve-out rows |
 | 5 | standalone, 7 types | the Rvc mode rows |
 | 7a | energy foundation, 6 types | the meter Instance pool, ElectricalPowerMeasurement, DEM |
@@ -4897,7 +4924,7 @@ not a regression against the nRF arm.
 | Open item | Owner |
 |---|---|
 | **The tiny printf faults on a NULL `%s`** rather than printing `(null)`, image-wide, for the SDK's, CHIP's and OpenThread's log call sites as much as Hearth's. `core/`, `port/` and `src/` were audited call site by call site and are clean, and the one place it could have happened is guarded deliberately (`core/mt/mt_at.c:1715-1719`); the SDK's, CHIP's and OpenThread's were not audited. The cheaper of the two fixes is to patch the component under `sdk-patches/` so `case 's'` prints `(null)` | the **qualification round**; both options and the line numbers are in the `.slcp` comment and "Where the tiny printf disagrees with newlib-nano" |
-| **The cluster-object arena does not exist yet.** The mechanism does (`hearth_arena`, `port/mt_dyn_store.h`); the instance, its budget beside `HEARTH_EP_ARENA_BYTES` and the family pool arrive together or not at all | **catalogue batch 2** |
+| **The cluster-object arena does not exist yet.** The mechanism does (`hearth_arena`, `port/mt_dyn_store.h`); the instance, its budget beside `HEARTH_EP_ARENA_BYTES` and the family pool arrive together or not at all, with the first type that draws on them, the valve | **catalogue batch 3** (F528) |
 | **A fault before `hearth_console_init()` returns produces no output on any UART.** The console is the first thing `app_init_early()` does, so the window is small, but it covers `sl_clock_manager_init()` and the `device_init` steps | unowned by design: closing it means a pre-console sink (RTT is there, and is what the SDK's own early code uses). Listed so it is a known limit rather than a surprise |
 | **A fault report is proven only as far as its log line.** The HardFault probe proved the report itself ("A log line from a fault handler does not wait for the mutex"), and `debugHardfault()` ends there. Three other hooks in `src/sdk/SoftwareFaultReports.cpp` do not end there: `vApplicationMallocFailedHook` (`:226`), `vApplicationStackOverflowHook` (`:246`, called from `vTaskSwitchContext()` inside PendSV) and `RAILCb_AssertFailed` (`:329`, the radio interrupt) all continue into `Silabs::OnSoftwareFaultEventHandler()` (`:75-99`), which is live because the generated `gen_config.h` defines `MATTER_DM_PLUGIN_SOFTWARE_DIAGNOSTICS_SERVER`, and which calls `vTaskGetInfo()`, `SystemLayer().ScheduleLambda()` and `osDelay(1000)` from handler mode. (`halInternalAssertFailed`, `:107-116`, does not: it logs and asserts.) The file is a verbatim SDK copy and is not edited here, so what follows the log line is the SDK's own contract, shared with every Silicon Labs sample, and nothing on this bench has exercised it | the **qualification round**, with two options: an `sdk-patches/` entry that makes the handler safe in handler mode, or dropping `matter_software_diagnostics` so the handler compiles to nothing |
 | **`b9fea7f` is a commit that was made and then reverted** in task 6 (`fix: the image links the full newlib ...`, undone by `8879199` with the fault registers). It is left in history deliberately, because the reversal is evidence; a reader diffing the branch meets a change that is not in the result | the branch's final review, if it wants it squashed |
