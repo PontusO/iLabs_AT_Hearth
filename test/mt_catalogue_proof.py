@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import types
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -27,21 +28,28 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "relativehumiditymeasurement", "pressuremeasurement",
                  "illuminancemeasurement", "flowmeasurement",
                  "colorcontrol", "thermostat", "fancontrol",
-                 "windowcovering", "airquality"}
+                 "windowcovering", "airquality",
+                 "doorlock", "valveconfigurationandcontrol"}
 
 def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
-           echo=False, null_read=False, chip_cluster=None, urc_chip_attr=None):
+           echo=False, null_read=False, chip_cluster=None, urc_chip_attr=None,
+           at_cmd=None):
     """One proven attribute. controller = (kind, chip-tool args after the
     cluster name, (urc_cluster, urc_attr, urc_value)), kind "command" or
     "write"; the URC may land on a different attribute from the AT write's
-    (the window covering's command writes Target, not Current). echo asserts
+    (the window covering's command writes Target, not Current); kind
+    "verdict" instead of the URC triple is (fwd_cluster, fwd_command),
+    the answer 1 (allow) / 0 (deny) / None (unanswered, +MTCMDTO) and
+    the want dict {"rc0": bool, "status": int (optional)}. echo asserts
     the AT write's own +MTATTR echo instead of draining it (DE531); null_read
     asserts +MTERR:5 on an AT read before the write (AT_MT_SPEC 3.8's null
-    rule). chip_cluster overrides the type's for a check on another cluster."""
+    rule). chip_cluster overrides the type's for a check on another cluster.
+    at_cmd, when set, is the format string (with %(ep)d) of the AT line the
+    write step sends instead of the AT+MTATTR write, e.g. "AT+MTLOCK=%(ep)d,1"."""
     return {"cluster": cluster, "attr": attr, "chip_attr": chip_attr,
             "at_value": at_value, "parse": parse, "controller": controller,
             "echo": echo, "null_read": null_read, "chip_cluster": chip_cluster,
-            "urc_chip_attr": urc_chip_attr}
+            "urc_chip_attr": urc_chip_attr, "at_cmd": at_cmd}
 
 def _multi(devtype, name, revision, chip_cluster, checks, extra_reads=()):
     return {"devtype": devtype, "name": name, "revision": revision,
@@ -147,6 +155,28 @@ BATCHES = {
             _check(0x005B, 0x0000, "air-quality", 3, echo=True),
         ], extra_reads=[("read", "feature-map", 15)]),
     ],
+    "mg24-batch3": [
+        _multi("0x000A", "door lock", 3, "doorlock", [
+            _check(0x0101, 0x0000, "lock-state", 1, null_read=True,
+                   at_cmd="AT+MTLOCK=%(ep)d,1"),
+            _check(0x0101, 0x0000, "lock-state", 1, at_cmd="AT+MTLOCK=%(ep)d,1",
+                   controller=("verdict", ["lock-door", "--timedInteractionTimeoutMs", "5000"],
+                               (257, 0), 1, {"rc0": True, "status": 0x0})),
+            _check(0x0101, 0x0000, "lock-state", 1, at_cmd="AT+MTLOCK=%(ep)d,1",
+                   controller=("verdict", ["unlock-door", "--timedInteractionTimeoutMs", "5000"],
+                               (257, 1), 0, {"rc0": False, "status": 0x1})),
+            _check(0x0101, 0x0000, "lock-state", 1, at_cmd="AT+MTLOCK=%(ep)d,1",
+                   controller=("verdict", ["lock-door", "--timedInteractionTimeoutMs", "5000"],
+                               (257, 0), None, {"rc0": False, "status": 0x1})),
+        ]),
+        _multi("0x0042", "water valve", 1, "valveconfigurationandcontrol", [
+            _check(0x0081, 0x0004, "current-state", 1, null_read=True, echo=True,
+                   at_cmd="AT+MTVALVE=%(ep)d,1",
+                   controller=("verdict", ["open"], (129, 0), 1, {"rc0": True})),
+            _check(0x0081, 0x0004, "current-state", 1, at_cmd="AT+MTVALVE=%(ep)d,1",
+                   controller=("verdict", ["close"], (129, 1), 0, {"rc0": True})),
+        ], extra_reads=[("read-event", "valve-state-changed")]),
+    ],
 }
 
 def composition_for(batch):
@@ -226,12 +256,19 @@ def print_plan(batch):
         for i, c in enumerate(t["checks"]):
             urc = "n/a (no controller action, read-only attribute)"
             if c["controller"] is not None:
-                kind, args, (u_cluster, u_attr, u_val) = c["controller"]
-                # The write's args already carry the "write" kind word
-                # ("write percent-setting 70"); printing the kind in front
-                # of them doubles it, so the command text stands alone.
-                cmd = " ".join(str(a) for a in args)
-                urc = f"{cmd} -> +MTATTR:{u_cluster},{u_attr},{u_val}"
+                if c["controller"][0] == "verdict":
+                    kind, args, (fcl, fcmd), answer, want = c["controller"]
+                    # The verdict's forward and answer stand in for the
+                    # URC triple: command, forward, answer or "unanswered".
+                    cmd = " ".join(str(a) for a in args)
+                    urc = f"{cmd} -> +MTCMD:{fcl},{fcmd} answer {answer if answer is not None else 'unanswered'}"
+                else:
+                    kind, args, (u_cluster, u_attr, u_val) = c["controller"]
+                    # The write's args already carry the "write" kind word
+                    # ("write percent-setting 70"); printing the kind in front
+                    # of them doubles it, so the command text stands alone.
+                    cmd = " ".join(str(a) for a in args)
+                    urc = f"{cmd} -> +MTATTR:{u_cluster},{u_attr},{u_val}"
             flags = "".join(
                 f" {name}" for name, on in (("echo", c["echo"]),
                                             ("null-read", c["null_read"])) if on)
@@ -251,19 +288,39 @@ def prove_endpoint(link, chip, s, node, ep, t):
     # The per-attribute row name gains " <chip_attr>" only when a type has
     # more than one check: batch 1's single-check rows keep their existing
     # names byte-for-byte (including the N/A row's literal "controller write"),
-    # so a batch 1 re-run's result file stays comparable.
+    # so a batch 1 re-run's result file stays comparable. A check whose
+    # controller is a verdict gains a further " <command> <answer>" suffix
+    # (e.g. "lock-state lock-door allow"): several checks can share one
+    # attribute (the door lock's four checks all prove LockState) and every
+    # row must name the command and the adjudication it proves, while batch
+    # 1's and batch 2's row names stay byte-for-byte (neither carries a
+    # verdict kind).
     multi = len(t["checks"]) > 1
     for c in t["checks"]:
-        prove_check(link, chip, s, node, ep, t, c,
-                    "%s ep%d" % (tag, ep) + (" %s" % c["chip_attr"] if multi else ""))
+        prefix = "%s ep%d" % (tag, ep) + (" %s" % c["chip_attr"] if multi else "")
+        if c["controller"] is not None and c["controller"][0] == "verdict":
+            kind, args, (fcl, fcmd), answer, want = c["controller"]
+            prefix += " %s %s" % (args[0],
+                                  "allow" if answer == 1 else
+                                  "deny" if answer == 0 else "unanswered")
+        prove_check(link, chip, s, node, ep, t, c, prefix)
     for extra in t["extra_reads"]:
         if extra[0] == "read-event":
             rc, out = chip.run([t["chip_cluster"], "read-event", extra[1], node, str(ep)], timeout=30)
+            # chip-tool prints the event under its Matter name
+            # (BooleanState's StateChange, the valve's ValveStateChanged);
+            # the pass test is that printed name, not a cluster-specific
+            # constant.
             s.check("%s ep%d %s event present" % (tag, ep, extra[1]),
-                    rc == 0 and "StateChange" in out)
+                    rc == 0 and extra[1].replace("-", " ").title().replace(" ", "") in out)
         else:
             rc, out = chip.run([t["chip_cluster"], "read", extra[1], node, str(ep)], timeout=30)
             s.check("%s ep%d %s = %s" % (tag, ep, extra[1], extra[2]), rc == 0 and H.parse_int_attr(out) == extra[2])
+
+def _second_at_read(link, s, prefix, at, own):
+    res, lines = link.command("AT+MTATTR=" + at)
+    s.check("%s second AT read agrees (%s)" % (prefix, own),
+            res == 0 and lines == ["+MTATTR:%s,%s" % (at, own)])
 
 def prove_check(link, chip, s, node, ep, t, c, prefix):
     cc = c["chip_cluster"] or t["chip_cluster"]
@@ -275,9 +332,16 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         # line is NOT in `lines` and the check is res == 5.
         res, lines = link.command("AT+MTATTR=" + at)
         s.check("%s AT read of the null seed -> +MTERR:5" % prefix, res == 5)
-    link.drain(0.2)
-    res, wlines = link.command("AT+MTATTR=%s,%s" % (at, c["at_value"]))
-    s.check("%s AT write %s -> OK" % (prefix, c["at_value"]), res == 0)
+    # The write step: at_cmd, when set, sends the type's own AT command
+    # (AT+MTLOCK/AT+MTVALVE) instead of the AT+MTATTR write; the row name
+    # says the command.
+    if c.get("at_cmd"):
+        wcmd = c["at_cmd"] % {"ep": ep}
+        res, wlines = link.command(wcmd)
+        s.check("%s %s -> OK" % (prefix, wcmd), res == 0)
+    else:
+        res, wlines = link.command("AT+MTATTR=%s,%s" % (at, c["at_value"]))
+        s.check("%s AT write %s -> OK" % (prefix, c["at_value"]), res == 0)
     if c["echo"]:
         # DE531: a local write must raise its own +MTATTR echo.
         # AT_MT_SPEC 3.8: the echo arrives BEFORE the write's OK.
@@ -303,6 +367,41 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
     own = c["at_value"]
     if c["controller"] is None:
         s.not_applicable("%s controller write" % prefix, "no controller action (read-only attribute)")
+        _second_at_read(link, s, prefix, at, own)
+    elif c["controller"][0] == "verdict":
+        # Ordering rule for verdict checks: an allowed command may move the
+        # attribute (an opened valve's CurrentState to Transitioning or Open,
+        # a locked door's LockState to Locked), and the host, not the
+        # controller, reports actuation. The "second AT read agrees" row
+        # runs BEFORE the controller action, and after the action nothing
+        # about the attribute is asserted; the log records what it became,
+        # for the as-built.
+        _second_at_read(link, s, prefix, at, own)
+        kind, args, (fcl, fcmd), answer, want = c["controller"]
+        ctx = types.SimpleNamespace(chip=chip, chip_call=None)
+        # The argv shape puts the command name first, then node and
+        # endpoint, then the flags: chip-tool's --help usage lines read
+        # "<cluster> <command> destination-id endpoint-id ... [flags]".
+        handle = H.invoke_chip(ctx, [cc] + args[:1] + [node, str(ep)] + args[1:], timeout=30)
+        responder = H.CmdResponder(link)
+        if answer is None:
+            # Seen, deliberately not answered: the firmware must time out
+            # the interaction and raise +MTCMDTO on its own seq.
+            fwd = responder._match(fcl, fcmd, None, 5.0)
+            s.check("%s forward %d/%d seen" % (prefix, fcl, fcmd), fwd is not None)
+            to = fwd and link.await_urc(r"\+MTCMDTO:%d$" % fwd["seq"], 3.0)
+            s.check("%s unanswered -> +MTCMDTO" % prefix, bool(to))
+        else:
+            fwd = responder.expect(cluster=fcl, command=fcmd, verdict=answer, timeout=5.0)
+            s.check("%s forward %d/%d answered %s" % (prefix, fcl, fcmd,
+                                                     "allow" if answer else "deny"),
+                    fwd is not None)
+        rc, out = handle.join(30)
+        s.check("%s chip-tool %s" % (prefix, "exits 0" if want["rc0"] else "fails"),
+                (rc == 0) == want["rc0"])
+        if "status" in want:
+            s.check("%s wire status 0x%X" % (prefix, want["status"]),
+                    H.parse_status(out) == want["status"])
     else:
         kind, args, (ucl, uat, uval) = c["controller"]
         link.drain(0.2)
@@ -322,9 +421,7 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
             res, lines = link.command("AT+MTATTR=%d,%d,%d" % (ep, ucl, uat))
             s.check("%s AT read of %d/%d agrees (%s)" % (prefix, ucl, uat, uval),
                     res == 0 and lines == ["+MTATTR:%d,%d,%d,%s" % (ep, ucl, uat, uval)])
-    res, lines = link.command("AT+MTATTR=" + at)
-    s.check("%s second AT read agrees (%s)" % (prefix, own),
-            res == 0 and lines == ["+MTATTR:%s,%s" % (at, own)])
+        _second_at_read(link, s, prefix, at, own)
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
