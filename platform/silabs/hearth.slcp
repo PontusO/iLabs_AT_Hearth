@@ -344,6 +344,14 @@ component:
   - id: matter_administrator_commissioning
   - id: matter_basic_information
   - id: matter_descriptor
+  # Catalogue batch 3 (2026-09-25): the command-verdict clusters. Neither is
+  # code-driven (no CodegenIntegration, no static-cluster-config include), so
+  # no SDK patch. DoorLock's per-endpoint state lives in the SDK's own
+  # mEndpointCtx array; the port runs its InitEndpoint from a strong
+  # emberAfDoorLockClusterInitCallback. The valve's delegate comes from the
+  # port's cluster-object arena. matter_lock (the example lock app and its
+  # NVM3 credential keys) is deliberately NOT included.
+  - id: matter_door_lock
   - id: matter_general_commissioning
   - id: matter_general_diagnostics
   - id: matter_group_key_mgmt
@@ -377,6 +385,7 @@ component:
   - id: matter_software_diagnostics
   - id: matter_thread_network_diagnostics
   - id: matter_thermostat
+  - id: matter_valve_configuration_and_control
   - id: matter_window_covering
   # There is deliberately no matter_temperature_measurement: no such component
   # exists, and none is needed. The same holds for Relative Humidity, Pressure,

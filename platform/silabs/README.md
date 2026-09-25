@@ -606,6 +606,24 @@ why the two arms' models are comparable. What task 2 changed:
   in batch 2's task 2. As with batch 1 this is a data model and image-link
   change only: the five enabled clusters carry no attribute data until the
   registry rows that create them arrive.
+- **Catalogue batch 3's task 1 (2026-09-25) enables the server side of two
+  more clusters bound to endpoint 240's `MA-dimmablelight` endpoint type**:
+  Door Lock (257) and Valve Configuration and Control (129), with
+  `hearth.slcp` gaining both components, since both have a cluster-server
+  directory (`matter_door_lock`,
+  `matter_valve_configuration_and_control`), as in batch 2. Neither is
+  code-driven: no `CodegenIntegration` and no `static-cluster-config` include
+  in either, so no SDK patch and no new `static-cluster-config/` file (the
+  directory is still only `BooleanState.h` and `Descriptor.h`). Both are
+  ember-served on dynamic endpoints, and the regenerated dispatch in
+  `cluster-init-callback.cpp` routes their server init to weak
+  `emberAfDoorLockClusterInitCallback(EndpointId)` and
+  `emberAfValveConfigurationAndControlClusterInitCallback(EndpointId)`; the
+  port overrides the Door Lock's from a strong callback in batch 3's task 3.
+  `matter_lock` (the example lock app and its NVM3 credential keys) is
+  deliberately NOT included. As with batches 1 and 2 this is a data model and
+  image-link change only: the two enabled clusters carry no attribute data
+  until the registry rows that create them arrive.
 - The two `"package"` paths point at the extension's `zcl.json` and
   `app-templates.json` as **absolute paths on this machine**, exactly as the nRF
   file points at its NCS workspace. They are overridden at every generation, by
@@ -633,9 +651,9 @@ Generated figures, read out of `data_model/zap-generated/endpoint_config.h`
 | `FIXED_ENDPOINT_COUNT` | `(2)` |
 | `FIXED_ENDPOINT_ARRAY` | `{ 0x0000, 0x00F0 }` |
 | `FIXED_DEVICE_TYPES` | `{{0x00000016,4},{0x00000101,3}}` |
-| `GENERATED_CLUSTER_COUNT` | 28 (23 before catalogue batch 2 enabled the five above) |
+| `GENERATED_CLUSTER_COUNT` | 30 (28 before catalogue batch 3 enabled the two above; 23 before catalogue batch 2) |
 | `ATTRIBUTE_LARGEST` | `(66)` |
-| `ATTRIBUTE_MAX_SIZE` | `(185)` (112 before catalogue batch 2 enabled the five above; 46 before task 3) |
+| `ATTRIBUTE_MAX_SIZE` | `(217)` (185 before catalogue batch 3 enabled the two above; 112 before catalogue batch 2; 46 before task 3) |
 | `ATTRIBUTE_SINGLETONS_SIZE` | `(0)` |
 
 `ATTRIBUTE_LARGEST` is the size of the generated ember IO buffer, and it is the

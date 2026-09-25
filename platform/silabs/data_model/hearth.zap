@@ -7218,7 +7218,7 @@
           "mfgCode": null,
           "define": "DOOR_LOCK_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "LockState",
@@ -7445,7 +7445,7 @@
           "mfgCode": null,
           "define": "VALVE_CONFIGURATION_AND_CONTROL_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "OpenDuration",

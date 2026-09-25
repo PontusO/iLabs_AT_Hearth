@@ -31,6 +31,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::Descriptor::Id:
         emberAfDescriptorClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::DoorLock::Id:
+        emberAfDoorLockClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::FanControl::Id:
         emberAfFanControlClusterInitCallback(endpoint);
         break;
@@ -87,6 +90,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
         break;
      case  app::Clusters::ThreadNetworkDiagnostics::Id:
         emberAfThreadNetworkDiagnosticsClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::ValveConfigurationAndControl::Id:
+        emberAfValveConfigurationAndControlClusterInitCallback(endpoint);
         break;
      case  app::Clusters::WindowCovering::Id:
         emberAfWindowCoveringClusterInitCallback(endpoint);

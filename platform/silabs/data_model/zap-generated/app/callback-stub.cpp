@@ -37,6 +37,11 @@ void __attribute__((weak)) emberAfDescriptorClusterInitCallback(EndpointId endpo
     // To prevent warning
     (void) endpoint;
 }
+void __attribute__((weak)) emberAfDoorLockClusterInitCallback(EndpointId endpoint)
+{
+    // To prevent warning
+    (void) endpoint;
+}
 void __attribute__((weak)) emberAfFanControlClusterInitCallback(EndpointId endpoint)
 {
     // To prevent warning
@@ -128,6 +133,11 @@ void __attribute__((weak)) emberAfThermostatClusterInitCallback(EndpointId endpo
     (void) endpoint;
 }
 void __attribute__((weak)) emberAfThreadNetworkDiagnosticsClusterInitCallback(EndpointId endpoint)
+{
+    // To prevent warning
+    (void) endpoint;
+}
+void __attribute__((weak)) emberAfValveConfigurationAndControlClusterInitCallback(EndpointId endpoint)
 {
     // To prevent warning
     (void) endpoint;
