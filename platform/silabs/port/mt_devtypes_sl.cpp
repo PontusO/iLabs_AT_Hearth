@@ -35,6 +35,8 @@
  *   fan (0x002B)                       nRF 1041-1100  whole
  *   window covering (0x0202)           nRF 1125-1199  whole
  *   air quality sensor (0x002C)        nRF 1200-1246  whole
+ *   door lock (0x000A)                 nRF 1248-1357  whole
+ *   water valve (0x0042)               nRF 1358-1484  whole
  *   the parenting policy               nRF 3325-3428  whole (predicate + shape struct)
  *   the registry                       nRF 4402-4641  all 52 rows' identity,
  *                                                     twenty rows' cluster sets
@@ -1127,6 +1129,244 @@ HEARTH_DECLARE_CONST_ENDPOINT(airQualitySensorEndpoint, airQualitySensorClusters
 
 constexpr EmberAfDeviceType kAirQualitySensorTypes[] = { { 0x002C, 1 } };
 
+/* ---- door lock (0x000A) (nRF 1248-1357) ------------------------
+ *
+ * Catalogue batch 3 audit, DoorLock (0x0101). The first cluster on this
+ * platform whose commands need an application VERDICT, so the audit asked a
+ * fourth question beyond the usual three: where does the app's answer
+ * attach, and what does the SDK do with it.
+ *
+ *   Code-driven? No. door-lock-server is the only door-lock directory in
+ *   the tree, and DoorLock is absent from the CodeDrivenClusters list
+ *   (src/app/common/templates/config-data.yaml:144-168). Confirmed
+ *   empirically: regenerating hearth.zap with the cluster on ep240 left
+ *   zap-generated/CodeDrivenInitShutdown.cpp byte-identical.
+ *
+ *   AAI? Yes, wildcard-endpoint (DoorLockServer itself derives from
+ *   AttributeAccessInterface, door-lock-server.h:99, constructed with
+ *   Optional<EndpointId>::Missing() at :102 and registered from
+ *   MatterDoorLockPluginServerInitCallback, door-lock-server.cpp:4312).
+ *   Harmless for this attribute set: Read() (:4421) has a case for
+ *   nothing but the nine Aliro attributes and then `default: break;
+ *   return CHIP_NO_ERROR`, i.e. falls through to the attribute store. None
+ *   of the Aliro attributes is declared below, so every read of this
+ *   endpoint reaches the arena. There is no Write() override.
+ *
+ *   ServerInit? YES, and this one is REQUIRED, not merely worth running.
+ *   The catch is the name. door-lock-cluster.xml:44 declares
+ *   <server tick="false" init="false">, so ZAP puts NO init function in the
+ *   cluster's function array and emberAfDoorLockClusterServerInitCallback
+ *   (with "Server") is declared but never called. The hook that IS called
+ *   is emberAfDoorLockClusterInitCallback (no "Server"), dispatched from
+ *   emberAfClusterInitCallback() inside initializeEndpoint()
+ *   (attribute-storage.cpp:480). Unlike the LevelControl/ColorControl
+ *   inits below, that path DOES run for a dynamic endpoint: it is reached
+ *   through emberAfEndpointEnableDisable(), which emberAfSetDynamicEndpoint
+ *   calls itself (:393), and the isEnabled bit is set BEFORE
+ *   initializeEndpoint runs (:991-996), so the endpoint index resolves.
+ *   So this cluster does NOT join the B388 call site: the strong override
+ *   of emberAfDoorLockClusterInitCallback below is what calls
+ *   DoorLockServer::InitEndpoint(), and ember drives it. That is also what
+ *   the nRF lock sample does (nrf/samples/matter/lock/src/
+ *   zcl_callbacks.cpp:97-99), though it uses the deprecated InitServer
+ *   alias and discards the error; see the override for why this port does
+ *   neither.
+ *
+ *   The delegate surface: NOTHING is link-mandatory. All thirty
+ *   emberAfPluginDoorLock* application hooks carry weak defaults in
+ *   door-lock-server-callback.cpp (the first at :46), which
+ *   app_config_dependent_sources.cmake:19 compiles unconditionally
+ *   alongside the server. Feature gating is at RUNTIME, off the FeatureMap
+ *   attribute (GetFeatures(), door-lock-server.cpp:1471), not by #ifdef, so
+ *   a lock with FeatureMap 0 never reaches the user/credential/schedule
+ *   hooks at all. This firmware therefore overrides exactly two of them,
+ *   emberAfPluginDoorLockOnDoorLockCommand and ...OnDoorUnlockCommand
+ *   (mt_matter_zephyr.cpp), and leaves the other twenty-eight to their weak
+ *   stubs. Same two the C6 defines.
+ *
+ * FeatureMap 0 is conformant. Every feature in DoorLock's feature list is
+ * optionalConform, and USR is mandatory only under (PIN|RID|FPG|FACE),
+ * which none of them is here; the device type agrees
+ * (matter-devices.xml:2003-2025). ZAP's own default FeatureMap of 0x0001
+ * (door-lock-cluster.xml:49) is a seed value in that file, not a
+ * requirement.
+ *
+ * AutoRelockTime is OPTIONAL and is declared anyway, deliberately. This is
+ * bug B129 from the C6, and it reproduces verbatim in this tree: the 7-arg
+ * SetLockState() ends an UNLOCK with
+ * VerifyOrReturnError(GetAutoRelockTime(endpointId, autoRelockTime), false)
+ * (door-lock-server.cpp:206). With the attribute absent that read fails and
+ * the function returns false for an unlock that actually happened and
+ * actually emitted its LockOperation event, which turns every host
+ * AT+MTLOCK unlock into a bare ERROR with the state changed underneath.
+ * Seeded 0, which disables auto-relock. If a controller writes it non-zero
+ * the server relocks at expiry through its own timer
+ * (DoorLockOnAutoRelockCallback, :4342) and the host observes the LockState
+ * change as a +MTATTR URC, the same path as any controller write.
+ *
+ * LockDoor and UnlockDoor are the two mandatory commands and the only two
+ * declared. Both are mustUseTimedInvoke in door-lock-cluster.xml's command
+ * list. UnlockWithTimeout and UnboltDoor are not declared, so their
+ * handlers are unreachable and the extra hooks they would need stay
+ * unwritten. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(doorLockAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::LockState::Id, ENUM8, 1,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::LockType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::ActuatorEnabled::Id, BOOLEAN, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::AutoRelockTime::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::OperatingMode::Id, ENUM8, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::SupportedOperatingModes::Id, BITMAP16, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DoorLock::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kDoorLockIncoming[] = { DoorLock::Commands::LockDoor::Id,
+                                            DoorLock::Commands::UnlockDoor::Id,
+                                            kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(doorLockClusters)
+DECLARE_DYNAMIC_CLUSTER(DoorLock::Id, doorLockAttrs, ZAP_CLUSTER_MASK(SERVER), kDoorLockIncoming,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(doorLockEndpoint, doorLockClusters);
+
+constexpr EmberAfDeviceType kDoorLockTypes[] = { { 0x000A, 3 } };
+
+/* ---- water valve (0x0042) (nRF 1358-1484) ---------------------
+ *
+ * Catalogue batch 3 audit, ValveConfigurationAndControl (0x0081). The other
+ * verdict type, and the one that needs a DELEGATE OBJECT rather than free
+ * ember callbacks.
+ *
+ *   Code-driven? No, despite appearances. The directory's files were
+ *   renamed valve-configuration-and-control-server.cpp to -cluster.cpp in
+ *   2025 and its BUILD.gn is now an empty group(), which makes it LOOK
+ *   like a port to the ServerCluster path. It is not: there is no
+ *   CodegenIntegration.cpp, no ServerClusterInterface subclass, and the
+ *   cluster is absent from CodeDrivenClusters (config-data.yaml:144-168).
+ *   Confirmed empirically the same way as the door lock:
+ *   CodeDrivenInitShutdown.cpp came back byte-identical.
+ *
+ *   AAI? Yes, wildcard-endpoint, and for exactly ONE attribute.
+ *   ValveConfigAndControlAttrAccess (cluster.cpp:131, constructed with
+ *   Optional<EndpointId>::Missing() at :134) answers RemainingDuration from
+ *   a private shadow array gRemainingDuration[] (:61-67) and falls through
+ *   the default: for everything else without encoding, which the provider
+ *   reads as "not handled" (CodegenDataModelProvider_Read.cpp:112 tries the
+ *   AAI first, :59 decides what counts as handled). No Write() override. So
+ *   OpenDuration, DefaultOpenDuration, CurrentState and TargetState are
+ *   plain ember external storage against the arena; RemainingDuration is
+ *   the BooleanState-shaped split, documented in the seed comment below and
+ *   in the platform README rather than bridged: it is a firmware-managed
+ *   countdown with no host write path, so there is nothing for a bridge to
+ *   push.
+ *
+ *   ServerInit? No per-endpoint init at all. The only init is
+ *   MatterValveConfigurationAndControlPluginServerInitCallback()
+ *   (cluster.cpp:528), which takes no endpoint, runs once from
+ *   MATTER_PLUGINS_INIT, and does nothing but register that AAI. This
+ *   cluster does NOT join the B388 call site.
+ *
+ *   The delegate: chip::app::Clusters::ValveConfigurationAndControl::
+ *   Delegate (delegate.h:34), three pure virtuals (:40-42), registered per
+ *   endpoint with the free function SetDefaultDelegate(EndpointId,
+ *   Delegate*) (cluster.h:40, impl cluster.cpp:262). Task 3 adds this
+ *   port's mt_devtype_create() claim and SetDefaultDelegate() call, and
+ *   with them the ordering rule this forces and why it differs from the
+ *   C6's.
+ *
+ * FeatureMap 0. TS (bit 0) is left clear DELIBERATELY and not merely by
+ * omission: with TS set but no Time Synchronization cluster server on the
+ * image, SetValveLevel() returns CHIP_ERROR_NOT_IMPLEMENTED (cluster.cpp:
+ * 336) and every Open answers Status::Failure. LVL (bit 1) is optional and
+ * not taken, which is why CurrentLevel and TargetLevel are not declared
+ * (AT_MT_SPEC.md 3.19 documents the consequence for AT+MTVALVE's <level>,
+ * and it is the same consequence the C6 has for the same reason).
+ * AutoCloseTime is TS-gated and absent for the same reason.
+ *
+ * ValveFault (0x0009) is optional and is NOT declared. It is the cluster's
+ * only escape hatch for failing a command on the wire: both handlers check
+ * it first and answer AddClusterSpecificFailure(kFailureDueToFault)
+ * (cluster.cpp:445 for Open, :511 for Close) before the delegate is
+ * consulted at all. Declaring it would not help. The +MTCMD verdict arrives
+ * INSIDE the delegate call, which is past that check, so a deny still could
+ * not fail the in-flight command; the attribute would only let a host
+ * pre-arm a fault for the NEXT command, which is not what the verdict frame
+ * is for and is not a surface AT_MT_SPEC.md 3.19 describes. Left out, and
+ * the "verdict cannot fail the valve command" property stays exactly what
+ * the spec already documents.
+ *
+ * ---- the auto-close re-entry (fix round, I1) --------------------------
+ *
+ * One consequence of declaring DefaultOpenDuration writable, which the XML
+ * makes it and the mandatory set requires: a TIMED open is reachable on
+ * this build, and the server closes the valve itself when the countdown
+ * expires. That path re-enters the delegate.
+ *
+ * onValveConfigurationAndControlTick() (cluster.cpp:214) decrements
+ * RemainingDuration and re-arms a 1 s SystemLayer timer through
+ * startRemainingDurationTick() (:235, :248); on the terminal tick it calls
+ * CloseValve() instead (:250-252), and CloseValve() calls
+ * delegate->HandleCloseValve() (:303). So a single controller Open with a
+ * duration produces a SECOND, UNSOLICITED +MTCMD for cluster 129 command 1
+ * that no controller asked for, raised from timer context.
+ *
+ * That forward's verdict is MEANINGLESS, and worse than the ordinary valve
+ * case. CloseValve() has already set TargetState kClosed (:283), set
+ * CurrentState kTransitioning (:285), nulled OpenDuration (:287) and
+ * RemainingDuration (:296), cancelled the tick timer (:298) and emitted
+ * ValveStateChanged (:300) BEFORE the delegate is called at all. A deny
+ * cannot undo any of it, so the fabric-visible state changes either way.
+ * It also blocks the CHIP event loop for up to the mailbox's full 1000 ms
+ * from a timer callback.
+ *
+ * Not fixed here, and no in-scope fix exists: the forward happens because
+ * HandleCloseValve() is the only hook the SDK offers and it cannot tell an
+ * invoke from an auto-close, and core owns the blocking semantics. The C6
+ * has exactly the same behaviour for exactly the same reason. Documented
+ * in the platform README so a host author knows a 129/1 forward may be
+ * server-initiated; the AT_MT_SPEC amendment and the bench case are the
+ * controller's. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(valveAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::OpenDuration::Id, ELAPSED_S, 4,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::DefaultOpenDuration::Id,
+                              ELAPSED_S, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE) | ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::RemainingDuration::Id,
+                              ELAPSED_S, 4, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::CurrentState::Id, ENUM8, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::TargetState::Id, ENUM8, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(ValveConfigurationAndControl::Attributes::FeatureMap::Id, BITMAP32, 4,
+                              0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kWaterValveIncoming[] = { ValveConfigurationAndControl::Commands::Open::Id,
+                                              ValveConfigurationAndControl::Commands::Close::Id,
+                                              kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(waterValveClusters)
+DECLARE_DYNAMIC_CLUSTER(ValveConfigurationAndControl::Id, valveAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kWaterValveIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(waterValveEndpoint, waterValveClusters);
+
+constexpr EmberAfDeviceType kWaterValveTypes[] = { { 0x0042, 1 } };
+
 /* ---- the parenting policy (nRF 3325-3391) ----------------------------- */
 
 /*
@@ -1280,8 +1520,8 @@ constexpr hearth_devtype s_registry[] = {
     { 0x0202, 0, &windowCoveringEndpoint, Span<const EmberAfDeviceType>(kWindowCoveringTypes) },
     { 0x002C, 0, &airQualitySensorEndpoint, Span<const EmberAfDeviceType>(kAirQualitySensorTypes) },
     /* Catalogue batch 3: the command-verdict types. */
-    { 0x000A, 0 },                                                      /* batch 3: door lock */
-    { 0x0042, 0 },                                                      /* batch 3: water valve */
+    { 0x000A, 0, &doorLockEndpoint, Span<const EmberAfDeviceType>(kDoorLockTypes) },
+    { 0x0042, 0, &waterValveEndpoint, Span<const EmberAfDeviceType>(kWaterValveTypes) },
     /* Catalogue batch 4: the appliance and notification types. */
     { 0x0011, 0 },                                                      /* batch 4: power source */
     { 0x0076, 0 },                                                      /* batch 4: smoke/co alarm */
@@ -1524,6 +1764,8 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *   temp/humidity/pressure/light/flow
  *     0x0302 0x0307 0x0305 0x0106 0x0306       3      9      156         160
  *   occupancy sensor       0x0107             3      9      156         160
+ *   door lock              0x000A            3     12      204         208
+ *   water valve            0x0042            3     11      188         192
  *   air quality sensor     0x002C            3      7      124         128
  *   boolean-state sensors
  *     0x0015 0x0044 0x0041 0x0043             3      7      124         128
@@ -1735,7 +1977,8 @@ constexpr size_t kWidestEndpointSlots =
                               kMax2(MT_COUNT(illuminanceAttrs), MT_COUNT(flowAttrs)))))),
         kMax2(
             kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)),
-            kMax2(MT_COUNT(windowCoveringAttrs), MT_COUNT(airQualityAttrs))));
+            kMax2(kMax2(MT_COUNT(windowCoveringAttrs), MT_COUNT(airQualityAttrs)),
+                  kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)))));
 /* The widest cluster list is a max over every declared cluster list, not
  * just the dimmable light's: a future device type with a wider list must
  * fail the floor's static_assert below at build time, not surface later as a
@@ -1749,7 +1992,8 @@ constexpr size_t kWidestClusterList = kMax2(
         kMax2(MT_COUNT(onOffPlugInUnitClusters), MT_COUNT(dimmablePlugInUnitClusters))),
     kMax2(
         kMax2(kMax2(MT_COUNT(thermostatClusters), MT_COUNT(fanClusters)),
-              kMax2(MT_COUNT(windowCoveringClusters), MT_COUNT(airQualitySensorClusters))),
+              kMax2(kMax2(MT_COUNT(windowCoveringClusters), MT_COUNT(airQualitySensorClusters)),
+                    kMax2(MT_COUNT(doorLockClusters), MT_COUNT(waterValveClusters)))),
         kMax2(MT_COUNT(temperatureSensorClusters),
               kMax2(kMax2(MT_COUNT(booleanStateSensorClusters), MT_COUNT(occupancySensorClusters)),
                     kMax2(MT_COUNT(humiditySensorClusters),
@@ -2193,9 +2437,11 @@ const attr_seed s_seeds[] = {
      * than computed. AutoRelockTime 0 disables auto-relock and, more
      * importantly, exists at all: see the B129 note on doorLockAttrs.
      * FeatureMap 0, no PIN/USER/schedule/Aliro features this round.
-     * Revision 7 is DoorLock/Metadata.h kRevision in THIS tree; the C6's
-     * esp-matter pins 10, and the rule here is the tree the build consumes,
-     * not the sibling platform's. */
+     * Revision 9 is DoorLock/Metadata.h kRevision in THIS tree
+     * (third_party/matter_sdk/zzz_generated/app-common/clusters/DoorLock/
+     * Metadata.h, Silabs 2.8.1); the nRF port seeds 7, which is its own
+     * NCS tree's value, so the two ports differ on purpose (graph F540):
+     * the rule is the tree the build consumes. */
     { DoorLock::Id, DoorLock::Attributes::LockState::Id, 1, { 0xFF } }, /* null */
     { DoorLock::Id, DoorLock::Attributes::LockType::Id, 1, { 0x00 } },
     { DoorLock::Id, DoorLock::Attributes::ActuatorEnabled::Id, 1, { 0x01 } },
@@ -2203,7 +2449,7 @@ const attr_seed s_seeds[] = {
     { DoorLock::Id, DoorLock::Attributes::OperatingMode::Id, 1, { 0x00 } },
     { DoorLock::Id, DoorLock::Attributes::SupportedOperatingModes::Id, 2, { 0xF6, 0xFF } },
     { DoorLock::Id, DoorLock::Attributes::FeatureMap::Id, 4, { 0x00, 0x00, 0x00, 0x00 } },
-    { DoorLock::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x07, 0x00 } },
+    { DoorLock::Id, Globals::Attributes::ClusterRevision::Id, 2, { 0x09, 0x00 } },
 
     /* ValveConfigurationAndControl. All five state attributes boot null,
      * which is both the XML's declared default and the truthful answer for
@@ -3286,22 +3532,26 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * cluster server needs one object per endpoint: the valve, the
      * OperationalState trio, chime, mode select, the ModeBase families, the
      * measurement clusters, DEM, WHM, MeterIdentification, the microwave's
-     * three-way construction order and the EVSE. None of the twenty device
-     * types this build constructs carries a delegate family (graph F528), and
-     * the first type that does is the water valve, catalogue batch 3, whose
-     * nRF create is at mt_matter_zephyr.cpp:1818. The types this build does
-     * construct serve OnOff, LevelControl, ColorControl, Thermostat,
-     * FanControl, WindowCovering, AirQuality, TemperatureMeasurement,
+     * three-way construction order and the EVSE. Before catalogue batch 3,
+     * none of the twenty device types this build constructs carried a
+     * delegate family (graph F528); the first type that does is the water
+     * valve, batch 3, whose nRF create is at mt_matter_zephyr.cpp:1818. The
+     * types this build does construct, door lock and water valve included,
+     * serve OnOff, LevelControl, ColorControl, Thermostat, FanControl,
+     * WindowCovering, AirQuality, TemperatureMeasurement,
      * OccupancySensing, RelativeHumidityMeasurement, PressureMeasurement,
      * IlluminanceMeasurement, FlowMeasurement and BooleanState from ember
      * storage and from CHIP's own registered cluster objects, with no
      * per-endpoint delegate at all.
      *
-     * The batch that ports the first delegate-bearing type brings the claim
-     * block, the second halves AND the cluster-object arena the pools live
-     * in (nRF mt_matter_zephyr.cpp 133-386), which is why none of the three
-     * is here in a reduced form: a claim block with nothing to claim from
-     * would be the wrong half to land first.
+     * The batch that ports a delegate-bearing type brings the claim block,
+     * the second halves AND the cluster-object arena the pools live in
+     * (nRF mt_matter_zephyr.cpp 133-386). Catalogue batch 3 is the first
+     * such batch, and its claim block is Task 3's, which lands with the
+     * smoke: until it does, a created valve endpoint answers its commands
+     * through the delegate the SDK registers by default (the water valve
+     * section's audit comment records the ordering rule and the
+     * consequence).
      *
      * The B388 cluster-init call site is absent because this port does not
      * need one. The nRF calls

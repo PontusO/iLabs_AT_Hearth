@@ -1061,6 +1061,8 @@ index, and a round that changes one arm finds the other through it.
 | fan (0x002B) | `mt_devtypes_zephyr.cpp` 1041-1100 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
 | window covering (0x0202) | `mt_devtypes_zephyr.cpp` 1125-1199 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
 | air quality sensor (0x002C) | `mt_devtypes_zephyr.cpp` 1200-1247 | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
+| door lock (0x000A) | `mt_devtypes_zephyr.cpp` 1248-1357 | `port/mt_devtypes_sl.cpp` | catalogue batch 3 |
+| water valve (0x0042) | `mt_devtypes_zephyr.cpp` 1358-1484 | `port/mt_devtypes_sl.cpp` | catalogue batch 3 |
 | the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
