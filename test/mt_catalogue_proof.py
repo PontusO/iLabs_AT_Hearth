@@ -224,13 +224,19 @@ def print_plan(batch):
           "anchor, not re-proven here)" % (ANCHOR_DEVTYPE, ANCHOR_NAME))
     for (ep, dt), t in zip(comp[1:], rows_for(batch)):
         for i, c in enumerate(t["checks"]):
-            urc = "n/a (read-only cluster)"
+            urc = "n/a (no controller action, read-only attribute)"
             if c["controller"] is not None:
                 kind, args, (u_cluster, u_attr, u_val) = c["controller"]
-                urc = (f"{kind} {' '.join(str(a) for a in args)}"
-                       f" -> +MTATTR:{u_cluster},{u_attr},{u_val}")
-            print("  ep %2d %s %s rev %d: AT write %s -> chip-tool %s read %s; controller %s"
-                  % (ep, dt, t["name"], t["revision"], c["at_value"],
+                # The write's args already carry the "write" kind word
+                # ("write percent-setting 70"); printing the kind in front
+                # of them doubles it, so the command text stands alone.
+                cmd = " ".join(str(a) for a in args)
+                urc = f"{cmd} -> +MTATTR:{u_cluster},{u_attr},{u_val}"
+            flags = "".join(
+                f" {name}" for name, on in (("echo", c["echo"]),
+                                            ("null-read", c["null_read"])) if on)
+            print("  ep %2d %s %s rev %d: AT write %s%s -> chip-tool %s read %s; controller %s"
+                  % (ep, dt, t["name"], t["revision"], c["at_value"], flags,
                      c["chip_cluster"] or t["chip_cluster"], c["chip_attr"], urc))
 
 class Ctx:  # the fields pairing_argv() reads
@@ -296,7 +302,7 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
             rc == 0 and got == want)
     own = c["at_value"]
     if c["controller"] is None:
-        s.not_applicable("%s controller write" % prefix, "read-only cluster")
+        s.not_applicable("%s controller write" % prefix, "no controller action (read-only attribute)")
     else:
         kind, args, (ucl, uat, uval) = c["controller"]
         link.drain(0.2)

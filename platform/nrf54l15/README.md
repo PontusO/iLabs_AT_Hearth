@@ -2184,10 +2184,11 @@ Withdrawn 2026-09-25 (catalogue batch 2, graph F529): this arm never had the
 gap. It has run `emberAfLevelControlClusterServerInitCallback()` (and
 `emberAfColorControlClusterServerInitCallback()`) on dynamic endpoints since
 `06c9bd4` (2026-08-28, "fix: dynamic endpoints run the level-control server
-init so the state caches the seeded bounds"), which 1.2.0 (`1842af3`)
-contains, at `port/mt_devtypes_zephyr.cpp:8189-8193`. The claim added by
+init so the state caches the seeded bounds") added the LevelControl call and
+`385ef38` (2026-08-29) added the ColorControl call; both are in 1.2.0
+(`1842af3`), at `port/mt_devtypes_zephyr.cpp:8189-8193`. The claim added by
 `c9c95a8` was wrong: the MG24's `MoveToLevel` clamp was the MG24's own missing
 init, and it is fixed on that arm (`ca05afa`), so B525 is closed on both arms.
-The B388 record in "Batch 2: the attribute-only types" above already stated
-this arm invokes the LevelControl init by hand at endpoint create time, which
-is this line of evidence.
+The B388 record under "What this platform is" above already stated this arm
+invokes the LevelControl init by hand at endpoint create time, which is this
+line of evidence.

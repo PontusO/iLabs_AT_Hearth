@@ -127,7 +127,7 @@ for _t in P.BATCHES["mg24-batch1"] + P.BATCHES["mg24-batch2"]:
     for _c in _t["checks"]:
         if _c["controller"] is not None:
             _CONTROLLER_BY_CLUSTER_ARG.setdefault(
-                _cc or _t["chip_cluster"], []).append(_c)
+                _c["chip_cluster"] or _t["chip_cluster"], []).append(_c)
 
 class TestBatch2Table(unittest.TestCase):
     def test_batch2_lists_every_type_once_after_the_anchor(self):
@@ -256,7 +256,7 @@ class _EchoLink(_FakeLink):
     echo_late=false the write raises no echo at all, and await_urc stays
     empty too, so the late branch has nothing to find. The default
     mirrors _FakeLink: no echo in the write's lines, await_urc answers
-    from the state dict."""
+    from urc_queue."""
 
     def __init__(self, echo_in_lines=False, echo_late=True):
         super().__init__()

@@ -83,7 +83,7 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * attribute slots, 596 payload bytes, 600 after rounding to 8). Catalogue
  * batch 2 moved the widest from batch 1's dimmable light and dimmable
  * plug-in unit (which share a cluster list: 4 clusters, 20 slots, 336
- * payload, 336 rounded - 336 is already a multiple of 8): 536 for the colour
+ * payload, and 336 is already a multiple of 8): 536 for the colour
  * temperature light, 256 for the thermostat, 224 for the window covering,
  * 192 for the on/off light and the on/off plug-in unit, 176 for the fan,
  * 160 for the temperature, humidity, pressure, light, flow and occupancy

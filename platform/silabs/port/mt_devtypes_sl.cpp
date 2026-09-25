@@ -949,7 +949,7 @@ constexpr EmberAfDeviceType kThermostatTypes[] = { { 0x0301, 4 } };
  * Catalogue batch 2 audit, FanControl (0x0202). The simplest of the batch:
  * no CodegenIntegration.cpp and no CodeDrivenInitShutdown case, no
  * AttributeAccessInterface at all, and MatterFanControlPluginServerInit
- * Callback() is an empty definition in CHIP's own src/app/util/util.cpp:112.
+ * Callback() is an empty definition in CHIP's own src/app/util/util.cpp:109.
  * There is no emberAfFanControlClusterServerInitCallback either, so nothing
  * to join the init-hook section with. Plain ember external storage.
  *
@@ -1093,7 +1093,7 @@ constexpr EmberAfDeviceType kWindowCoveringTypes[] = { { 0x0202, 5 } };
  *   it WOULD answer AirQuality and FeatureMap ahead of ember. Nothing in
  *   this firmware constructs one: the object file is linked, but
  *   MatterAirQualityPluginServerInitCallback() is CHIP's own empty
- *   definition in src/app/util/util.cpp:115, not something the cluster
+ *   definition in src/app/util/util.cpp:112, not something the cluster
  *   provides, and this port has no equivalent of the C6's
  *   mt_air_quality_register_all(). With no Instance registered, reads and
  *   writes are plain ember external storage against the arena below - the
@@ -1534,8 +1534,8 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * HEARTH_EP_ARENA_BYTES is 9,600, which is 16 x 600: this arena holds
  * kServiceableEndpoints of the WIDEST type it can build, the extended colour
  * light, with nothing left over and nothing wasted. Catalogue batch 2 kept
- * batch 1's strong promise - every composition the build accepts, it can
- * build - by raising HEARTH_EP_ARENA_BYTES from 5,376 to 9,600 rather than
+ * batch 1's strong promise (every composition the build accepts, it can
+ * build) by raising HEARTH_EP_ARENA_BYTES from 5,376 to 9,600 rather than
  * lowering the floor to the nRF's eight (the ruling of 2026-09-24). It is
  * still a stronger promise than the nRF's, whose 8,112 usable bytes hold
  * only 13 of the same extended colour light. The floor below asserts the
@@ -1783,7 +1783,7 @@ constexpr size_t kArenaUsableBytes = kEpArenaBytes;
  * The floor. The nRF demands room for kMinWidestEndpoints = 8 of its widest
  * uncapped type, eight being "the point below which the capacity table would
  * be describing a different device"; sizing for sixteen of its heaviest is
- * precisely the trade that round declined - and its own arena serves only
+ * precisely the trade that round declined, and its own arena serves only
  * thirteen of the extended colour light this catalogue now builds. This
  * catalogue stays small enough that the strong form holds: sixteen extended
  * colour lights are 9,600 bytes, so the floor stays the full
@@ -3017,14 +3017,15 @@ void emberAfLevelControlClusterInitCallback(EndpointId endpoint)
 }
 
 /*
- * The second half of the pattern above, and the batch that the LevelControl
- * comment's closing line - "The batch that ports a second such cluster adds
- * a second function here" - was waiting for. The dispatch it rides on is the
+ * The second half of the pattern above, and the batch the LevelControl
+ * comment's closing line ("The batch that ports a second such cluster adds
+ * a second function here") was waiting for. The dispatch it rides on is the
  * generated `case ColorControl::Id` in
- * zap-generated/app/cluster-init-callback.cpp:28-29 (Task 2's enabling of
- * ColorControl on the catalogue endpoint created it, exactly as LevelControl's
- * enabling created the `case LevelControl::Id` the first override rides on),
- * landing in the weak emberAfColorControlClusterInitCallback() in
+ * zap-generated/app/cluster-init-callback.cpp:28-29 (Task 1's enabling of
+ * ColorControl on the catalogue endpoint created it, exactly as
+ * LevelControl's enabling created the `case LevelControl::Id` the first
+ * override rides on), landing in the weak
+ * emberAfColorControlClusterInitCallback() in
  * zap-generated/app/callback-stub.cpp:30 that this definition overrides.
  *
  * WHY THIS ONE JOINS THE HOOK. ColorControl's ServerInit is the one in this
@@ -3033,12 +3034,41 @@ void emberAfLevelControlClusterInitCallback(EndpointId endpoint)
  * (color-control-server.cpp:3291) runs startUpColorTempCommand()
  * (:2577-2624), which applies a non-null StartUpColorTemperatureMireds to
  * ColorTemperatureMireds and FORCES ColorMode/EnhancedColorMode to
- * kColorTemperatureMireds. With this batch's seeds (StartUp null, ColorMode
- * already the mireds mode) it writes back the values it just read, so today
- * it is a no-op; it is called anyway, because the moment a StartUp seed
- * appears or a persisted value differs, a dynamic endpoint that never ran it
- * boots in the wrong color mode, and that is exactly the class of bug B388
- * was. The batch's other clusters do not join: Thermostat's ServerInit is an
+ * kColorTemperatureMireds.
+ *
+ * WHAT IT ACTUALLY DOES ON THIS BUILD. StartUpColorTemperatureMireds is
+ * seeded 250, non-null (the seed rows above and the seed comment there), so
+ * on every dynamic colour endpoint's creation the command takes its
+ * indexed branch and writes quietTemperatureMireds[getEndpointIndex(endpoint)]
+ * (:2609-2612), ColorTemperatureMireds, ColorMode and EnhancedColorMode. The
+ * indexed write is unbounded in the SDK. The value it writes equals the seed
+ * (250), so the observable result is unchanged, but the indexed write runs:
+ * a reader who stops at "it is a no-op" would conclude the unbounded path is
+ * never reached, and it is. The reason it is called at all is unchanged: the
+ * moment the StartUp seed changes or a persisted value differs, a dynamic
+ * endpoint that never ran it boots in the wrong color mode, and that is
+ * exactly the class of bug B388 was.
+ *
+ * WHY THE INDEXED WRITE IS SAFE HERE. emberAfEndpointEnableDisable()
+ * (attribute-storage.cpp:991-1003) sets the endpoint's isEnabled flag
+ * BEFORE it calls initializeEndpoint(), which calls
+ * emberAfClusterInitCallback() for every cluster (attribute-storage.cpp:486).
+ * By the time this callback runs, the endpoint is already enabled, so
+ * emberAfGetClusterServerEndpointIndex() (attribute-storage.cpp:959-964)
+ * resolves a dynamic endpoint to
+ * fixedClusterServerEndpointCount + (epIndex - FIXED_ENDPOINT_COUNT): this
+ * build has one fixed server cluster entry (gen_config.h:111) and the fixed
+ * endpoint count is 2, so a dynamic endpoint's index is 1 + (epIndex - 2),
+ * and the largest serviceable dynamic endpoint is 17 (kServiceableEndpoints
+ * = 16, mt_port_ids.h:63), so the index is at most 16. That is below
+ * kColorControlClusterServerMaxEndpointCount = 1 + 16 = 17
+ * (color-control-server.h:293, CHIPProjectConfig.h:34), the size of every
+ * per-endpoint array startUpColorTempCommand() writes. The bound holds
+ * because the port's own arena can create no more than kServiceableEndpoints
+ * dynamic endpoints; the SDK does not enforce it, so a build that widens the
+ * arena past 16 without widening the cluster config overflows the array.
+ *
+ * The batch's other clusters do not join: Thermostat's ServerInit is an
  * empty TODO body, FanControl and AirQuality have none at all, and
  * WindowCovering's only per-endpoint state is the delegate table this port
  * never populates.

@@ -2417,8 +2417,10 @@ colour light, a thermostat, a fan, a window covering and an air quality
 sensor, the batch's seven-endpoint proof composition. Every one of the six
 types answers its `descriptor read device-type-list` with its own id and its
 own revision, and the controller-write types carry the whole round trip as
-well: the `AT+MTATTR` write is echoed, the controller read answers at that
-value, the chip-tool command exits 0, and the second AT read agrees.
+well: the controller read answers at the written value, the chip-tool command
+exits 0, and the second AT read agrees. (The write's echo is not part of this
+round trip for a controller-write type: the proof's echo row is the air
+quality row only, the other rows drain the echo. See the echo row below.)
 
 The two N/A rows are the two read-only rows: the thermostat's
 `LocalTemperature` and the air quality sensor's controller write, recorded by
@@ -2428,8 +2430,8 @@ name rather than silently skipped.
 waits for: the MG24 echoes.** The AT write of the air quality sensor's
 measured value returned `+MTATTR:7,91,0,3` on the AT link. That is the
 behaviour the design spec's echo ruling (DE531) was written to resolve, and
-the MG24 behaves unlike the C6 here: the C6's Thread arm does not echo an AT
-attribute write, the MG24 does, and task 5's amendment of `AT_MT_SPEC.md`
+the MG24 behaves unlike the C6 here: the C6's Thread arm does not echo the
+AirQuality write, the MG24 does, and task 5's amendment of `AT_MT_SPEC.md`
 section 3.25 takes this line as its evidence.
 
 Two more measurements the proof made on the way past. The thermostat's null
@@ -2449,8 +2451,11 @@ either cluster from a host:
   ExecuteIfOff (OptionsMask and OptionsOverride 1,1) for a command to move a
   freshly composed colour light at all; the batch 2 rows send it.
 - **FanMode and PercentSetting are not coupled on a dynamic endpoint.** The
-  cluster server keeps them apart, as on the nRF; writing one leaves the
-  other where it was, and the host owns the coupling if it wants it.
+  cluster server does couple them, `MatterFanControlClusterServerAttributeChangedCallback`
+  (fan-control-server.cpp:327) updates one from the other, but only through
+  the endpoint's functions array, which a dynamic endpoint does not have; the
+  coupling is absent by construction, not by the server keeping them apart.
+  No row writes FanMode, so this is derived rather than measured.
 
 #### Harness Phase 1, re-run on the batch image: 292 passed, 4 failed
 
@@ -2460,8 +2465,11 @@ $ python3 test/mt_regression.py --port "$MT_PORT" --bridge cpico --phase 1 \
   ===== RESULT: 292 passed, 4 failed =====
 ```
 
-**The same four rows.** `git diff` on the result file is the header's
-`fw_repo_head` and timestamp only; all 296 verdicts are unchanged, and the
+**The same four rows.** `git diff` on the result file is the header only:
+`fw_repo_head` and timestamp as always, and `net`, `+MTNET:THREAD,1,0,0` to
+`+MTNET:THREAD,0,0,0`, because the previous baseline was round 2 task 7's
+commissioned run at `a9d6ae6` and this re-run is factory-fresh, uncommissioned;
+all 296 verdicts are unchanged, and the
 four failing rows are task 6's four parked rows, the two unported-type
 compositions (catalogue batches 7a and 7b, the EVSE round). Batch 1's record
 stated that Phase 1 was not re-run on `ca05afa` and was not expected to move;
@@ -2517,9 +2525,10 @@ So the six device types' own metadata again costs **no `.bss` at all**: every
 new table is `const` and lands in flash, the same as batch 1's. And again every
 byte of the `.bss` rise comes straight out of `.memory_manager_heap`: the
 linker hands the heap section whatever RAM is left over, and it gives back
-9 680 B here against 9 664 B of `.bss`, the 16 B difference being this bench's
-boot-to-boot spread, the same spread batch 1's record named against its own
-standings.
+9 680 B here against 9 664 B of `.bss`. The 16 B difference is the `.data`
+section growing 3 384 B to 3 400 B on this image, measured with `size -A`,
+not a spread: the heap section simply shrinks by the whole of the rise,
+`.bss` and `.data` together, and nothing is left over.
 
 #### The arena
 
@@ -2584,10 +2593,11 @@ And **the commissioned figure is not the same measurement as batch 1's**:
 batch 1's 90 928 B was taken with its thirteen-endpoint composition, this one
 with the standard two, so the two are not comparable beyond the fabric cost
 itself, which is the only thing the comparison is used for here. Against
-batch 1's 90 976 B the standing factory-fresh figure is 9 680 B lower, of which
-9 664 B is `.memory_manager_heap` shrinking to pay for this batch's `.bss`;
-the remaining 16 B is this bench's boot-to-boot spread, the same spread batch
-1's record named.
+batch 1's 90 976 B the standing factory-fresh figure is 9 680 B lower, and the
+drop equals the `.memory_manager_heap` section's shrink exactly, 9 680 B:
+9 664 B of it pays this batch's `.bss` rise and the other 16 B pays the `.data`
+section's growth, 3 384 B to 3 400 B on this image (measured with `size -A`);
+there is no boot-to-boot spread at all.
 
 The `+MTREADY` figure is still a floor measured at the worst moment of the
 boot, with `hearth_boot_task`'s own 5 120-byte stack and CHIP's init transients
