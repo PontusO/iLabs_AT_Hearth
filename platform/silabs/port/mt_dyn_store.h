@@ -155,3 +155,13 @@ bool mt_dyn_attr_slot(chip::EndpointId ep, chip::ClusterId cluster, chip::Attrib
  * mt_devtypes_sl.cpp, which owns the arena.
  */
 void mt_dyn_arena_report(void);
+
+/*
+ * Log the cluster-object arena's occupancy on the console: handed out,
+ * capacity, free. Called once per boot from src/main.cpp's
+ * rebuild_composition(), on the line after mt_dyn_arena_report(), so the two
+ * arena lines sit together. Defined in mt_matter_sl.cpp, which owns this
+ * arena. Not an mt_matter.h declaration, so check_decls.py does not cover
+ * this pairing, the way it covers mt_dyn_arena_report's.
+ */
+void mt_obj_arena_report(void);

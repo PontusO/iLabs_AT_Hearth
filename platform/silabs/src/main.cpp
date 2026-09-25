@@ -298,6 +298,7 @@ void rebuild_composition(void)
     /* Beside the line it explains: how much of the endpoint arena that
      * composition actually cost. */
     mt_dyn_arena_report();
+    mt_obj_arena_report();
 }
 
 } // namespace

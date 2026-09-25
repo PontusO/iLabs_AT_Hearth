@@ -63,6 +63,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <new>
 
 extern "C" {
 #include "mt_at.h"
@@ -70,6 +71,7 @@ extern "C" {
 }
 
 #include "hearth_log.h"
+#include "mt_dyn_store.h"
 #include "mt_port_ids.h"
 
 using chip::DeviceLayer::ConnectivityMgr;
@@ -1071,34 +1073,39 @@ extern "C" uint32_t mt_air_quality_feature_mask(void)
 }
 
 /*
- * ---- what is NOT in this file, and what the batch that needs it brings ---
- *
- * THE CLUSTER-OBJECT ARENA (nRF mt_matter_zephyr.cpp 133-386, and its sizing
- * tail at 9137-9472). On the nRF that arena replaced fourteen fixed pools,
- * one slot per endpoint that COULD carry the family: the OperationalState,
- * RvcOperationalState, ModeBase, Chime, valve, EPM, PowerTopology, WHM, DEM,
- * MeterIdentification and EVSE Delegates and the raw storage for their
- * cluster Instances, 14,368 B of .bss and .data before the change. Every one
- * of those families belongs to a device type round 2 task 5 does not build:
- * the two types it does build (the on/off light and the temperature sensor)
- * carry OnOff, TemperatureMeasurement, Identify and Descriptor, none of which
- * has a per-endpoint delegate at all.
- *
- * So the arena is absent rather than reduced. Carrying it would mean a static
- * array sized for allocations nothing makes, a set of template helpers
- * (obj_pair_new, obj_inst_storage, obj_new, obj_inst_new) with no caller, and
- * a sizing tail every constant of which is a sizeof() of a class this image
- * does not compile. The batch that ports the first delegate-bearing device
- * type brings three things together, and they only make sense together: the
- * arena, the family's pool with its depth constant, and mt_devtype_create()'s
- * claim block in port/mt_devtypes_sl.cpp (the note there says the same thing
- * from the other side). The arena mechanism itself is already here:
- * hearth_arena in port/mt_dyn_store.h is the allocator both arenas use, and
- * that batch adds an instance and a budget in port/mt_port_ids.h beside
- * HEARTH_EP_ARENA_BYTES, not a new mechanism.
- *
- * Catalogue batch 2 (2026-09-24): the build now constructs twenty device
- * types, and none of them carries a delegate family either (graph F528), so
- * the arena is still absent. It arrives with the first type that draws on
- * it, the water valve (catalogue batch 3).
+ * THE CLUSTER-OBJECT ARENA. Since catalogue batch 3 (2026-09-25), in its
+ * minimal form (graph DE541): one hearth_arena over HEARTH_OBJ_ARENA_BYTES
+ * (mt_port_ids.h), with obj_new as its only helper, taken from nRF
+ * mt_matter_zephyr.cpp 366-375 and run over this port's bump arena (no
+ * chunk header, 8-byte alignment). Its only customer is the valve delegate:
+ * the water valve is the first device type here that draws on it, and its
+ * cluster server is a free-function singleton, so the delegate stands alone
+ * in the arena. The nRF's other helpers, obj_pair_new (a delegate with its
+ * Instance pair) and obj_inst_new (raw Instance storage), and the budget's
+ * growth to fit them, arrive with batch 4's first caller.
  */
+
+namespace {
+alignas(8) uint8_t s_obj_arena_mem[HEARTH_OBJ_ARENA_BYTES];
+hearth_arena s_obj_arena = { s_obj_arena_mem, HEARTH_OBJ_ARENA_BYTES, 0 };
+
+/* A delegate with no Instance beside it (the valve, whose cluster server is
+ * a free-function singleton). nRF mt_matter_zephyr.cpp 366-375, over this
+ * port's bump arena. */
+template <typename D>
+D *obj_new()
+{
+    static_assert(alignof(D) <= 8, "the cluster-object arena guarantees 8-byte alignment only");
+    void *p = hearth_arena_alloc(s_obj_arena, sizeof(D), "cluster-object arena");
+    return (p == nullptr) ? nullptr : new (p) D();
+}
+} // namespace
+
+/* The cluster-object arena's occupancy, once per boot, on the line after the
+ * endpoint arena's (src/main.cpp). Declared in mt_dyn_store.h. */
+void mt_obj_arena_report(void)
+{
+    HEARTH_LOGI("matter", "cluster-object arena: %u of %u B handed out, %u B free",
+                (unsigned)s_obj_arena.used, (unsigned)s_obj_arena.cap,
+                (unsigned)(s_obj_arena.cap - s_obj_arena.used));
+}
