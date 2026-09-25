@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Self-test for the catalogue proof script: the table is legal, the row
 names match the baseline, and the prove functions record the right rows."""
-import os, re, sys, unittest
+import os, re, sys, threading, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mt_catalogue_proof as P
+import mt_regression as H
 
 BATCH1 = ["0x0101", "0x0015", "0x0044", "0x0041", "0x0043", "0x0107", "0x0307",
           "0x0305", "0x0106", "0x0306", "0x010A", "0x010B"]
@@ -409,6 +410,434 @@ class TestEchoRow(unittest.TestCase):
         echo_rows = [n for n in got if "echoes" in n]
         self.assertEqual(len(echo_rows), 1)
         self.assertFalse(got[echo_rows[0]])
+
+# --------------------------------------------------------------------------
+# Batch 3 (the door lock and the water valve) and the verdict kind.
+#
+# The verdict controller kind is the one the batch 1 and batch 2 fakes never
+# reach: their _FakeLink answers only the MTATTR read/write shape and their
+# _FakeChip queues only +MTATTR URCs. A verdict check instead forwards a
+# +MTCMD to the device, the device waits for AT+MTCMDRESP=<seq>,<verdict>,
+# and the host reports the actuation (rc and the wire status) rather than the
+# controller. So the fakes here model the harness: a link that records every
+# AT line and pops URCs out of a queue, and a chip_call double that enqueues
+# the +MTCMD forward the firmware would raise and returns the (rc, out) the
+# row's rc/status rows read. prove_check builds the ctx itself (chip_call is
+# always None), so the double is installed by patching the module-level
+# H._threaded_chip_call that invoke_chip falls back to; the real production
+# call keeps running chip.run on a background thread, but the double runs it
+# synchronously on the caller's thread, so the forward is enqueued before
+# CmdResponder.expect starts polling and no thread race is in play.
+
+BATCH3 = ["0x000A", "0x0042"]
+
+
+class _VerdictLink(_FakeLink):
+    """_FakeLink widened to the verdict shape: command() records every line
+    it is sent (so a test can assert exactly what went over the wire) and
+    still answers the AT+MTATTR read/write shape _FakeLink answers; the
+    at_cmd commands (AT+MTLOCK / AT+MTVALVE) answer OK and leave the
+    attribute unchanged, mirroring a firmware that answers the interaction
+    but whose actuation the host, not the link, reports. await_urc /
+    await_urc_ts pop from self.urcs, the queue the fake chip_call fills,
+    the way ATLink.await_urc_ts pops ATLink.urcs."""
+
+    def __init__(self, state=None, null_read=None):
+        super().__init__(state=state, null_read=null_read)
+        self.sent = []
+        self.urcs = []
+
+    def command(self, cmd, *a, **k):
+        self.sent.append(cmd)
+        m = re.fullmatch(r"AT\+MTLOCK=(\d+),(\S+)", cmd)
+        if m:
+            self.state[(int(m.group(1)), 0x0101, 0x0000)] = m.group(2)
+            return (0, [])
+        m = re.fullmatch(r"AT\+MTVALVE=(\d+),(\S+)", cmd)
+        if m:
+            self.state[(int(m.group(1)), 0x0081, 0x0004)] = m.group(2)
+            return (0, [])
+        return super().command(cmd, *a, **k)
+
+    def await_urc_ts(self, pattern, timeout=5.0):
+        # Serves from self.urcs, the queue the chip_call double fills
+        # synchronously before CmdResponder starts polling. The one pass is
+        # enough: unlike _FakeLink, whose single-pass await_urc serves a
+        # queue that is already full when the row waits, this queue is full
+        # by the time the first pass runs, and the poll loop of
+        # ATLink.await_urc_ts exists only to wait on a serial port.
+        rx = re.compile(pattern)
+        for i, u in enumerate(self.urcs):
+            if rx.search(u):
+                return (0.0, self.urcs.pop(i))
+        return None
+
+    def await_urc(self, pattern, timeout=5.0):
+        got = self.await_urc_ts(pattern, timeout)
+        return got[1] if got is not None else None
+
+    @property
+    def urc_queue(self):
+        # _FakeLink's instance attribute name for the URC queue; here it is
+        # self.urcs, the same list (so an assignment in _FakeLink.__init__
+        # or an append by the base await_urc reaches the same queue).
+        return self.urcs
+
+    @urc_queue.setter
+    def urc_queue(self, value):
+        self.urcs = list(value)
+
+
+class _VerdictChip:
+    """The chip side of a verdict run, standing in for chip-tool.
+
+    The verdict's chip-tool run goes through H.invoke_chip, which, when
+    ctx.chip_call is unset (prove_check sets it to None), falls back to the
+    module-level H._threaded_chip_call. The test's chip_call double patches
+    that name, so invoke_chip still runs its real logic (ctx.chip_call or
+    the fallback) while the double stands in for the threaded call: it
+    runs chip.run(argv, timeout) synchronously on the caller's thread and
+    wraps the (rc, out) in the same handle shape join() reads, so the
+    forward the firmware would raise is enqueued on the link before
+    CmdResponder.expect starts polling. run() enqueues
+    "+MTCMD:<seq>,<ep>,<cluster>,<cmd>" (+MTCMDTO:<seq> in the unanswered
+    case) and returns the (rc, out) the rc/status rows read; out carries
+    "status = 0xNN" (or a success line) in the shape H.parse_status reads.
+
+    The read path (descriptor / read) prints the attribute under the
+    chip-tool line shape parse_int_attr parses (a ] bracket, 2+ spaces,
+    Label: VALUE at the line end, Label with no hyphen), so the
+    "controller reads" row can pass against the fakes. The descriptor read
+    prints the DeviceType in the shape parse_device_types parses."""
+
+    def __init__(self, link=None, ep=2, cluster=257, command=0, seq=7,
+                 timeout=False, rc=0, status="0x00",
+                 devtype="0x000A", revision=3):
+        self.link = link
+        self.ep = ep
+        self.cluster = cluster
+        self.command = command
+        self.seq = seq
+        self.timeout = timeout
+        self.rc = rc
+        self.status = status
+
+    def run(self, args, timeout=None):
+        if args and args[0] == "descriptor":
+            # The endpoint's own devtype/revision, set per endpoint by the
+            # row-name test (the fake models one endpoint at a time).
+            d, r = self.devtype, self.revision
+            return (0, "CHIP:TOO:   DeviceTypeList: 1 entries\n"
+                       "CHIP:TOO:     [1]: {\n"
+                       "CHIP:TOO:       DeviceType: %d (%s)\n"
+                       "CHIP:TOO:       Revision: %d\n"
+                       "CHIP:TOO:     }\n" % (int(d, 16), d, r))
+        if len(args) >= 4 and args[1] in ("read", "read-event"):
+            if args[1] == "read-event":
+                name = args[2].replace("-", " ").title().replace(" ", "")
+                return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: 1\n" % name)
+            return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: 1\n"
+                       % args[2].replace("-", ""))
+        if self.link is not None:
+            self.link.urcs.append("+MTCMD:%d,%d,%d,%d" % (self.seq, self.ep, self.cluster, self.command))
+            if self.timeout:
+                self.link.urcs.append("+MTCMDTO:%d" % self.seq)
+        # status carries the full hex value with its 0x prefix, matching the
+        # wire shape parse_status's first form expects ("status = 0x01").
+        out = "CHIP:TOO:   status = %s\n" % self.status if self.status else ""
+        return (self.rc, out)
+
+    def chip_call(self, chip, argv, timeout=60):
+        # The synchronous double the tests install for H._threaded_chip_call:
+        # it runs chip.run on the caller's thread (the real threaded call
+        # runs it in a background thread) and returns the same handle shape
+        # join() reads, so the forward is already queued by the time
+        # CmdResponder.expect polls and the ordering the production call
+        # needs (start chip-tool, then adjudicate the forward) is exact.
+        result = {"rc": None, "out": None}
+        result["rc"], result["out"] = chip.run(argv, timeout)
+        t = threading.Thread(target=lambda: None, daemon=True)
+        t.start()
+        return H._ChipCallHandle(t, result)
+
+
+class TestBatch3Table(unittest.TestCase):
+    def test_batch3_lists_every_type_once_after_the_anchor(self):
+        comp = P.composition_for("mg24-batch3")
+        self.assertEqual(comp[0], (1, "0x0100"))
+        self.assertEqual([d for _, d in comp[1:]], BATCH3)
+
+    def test_revisions_match_the_registry(self):
+        want = {"0x000A": 3, "0x0042": 1}
+        got = {t["devtype"]: t["revision"] for t in P.BATCHES["mg24-batch3"]}
+        self.assertEqual(got, want)
+
+    def test_door_lock_verdicts_carry_the_timed_interaction_timeout(self):
+        dl = [t for t in P.BATCHES["mg24-batch3"] if t["devtype"] == "0x000A"][0]
+        for c in dl["checks"]:
+            if c["controller"] is None or c["controller"][0] != "verdict":
+                continue
+            args = c["controller"][1]
+            self.assertIn("--timedInteractionTimeoutMs", args,
+                          "every door lock verdict carries --timedInteractionTimeoutMs")
+            self.assertEqual(args[args.index("--timedInteractionTimeoutMs") + 1], "5000")
+
+    def test_lock_answers_are_exactly_allow_deny_unanswered(self):
+        dl = [t for t in P.BATCHES["mg24-batch3"] if t["devtype"] == "0x000A"][0]
+        answers = [c["controller"][3] for c in dl["checks"]
+                   if c["controller"] is not None and c["controller"][0] == "verdict"]
+        # allow (1), deny (0) and unanswered (None), one of each: sorting
+        # with None last gives the fixed order [0, 1, None].
+        self.assertEqual(sorted(answers, key=lambda a: (a is None, a)), [0, 1, None])
+        self.assertEqual(len(answers), 3)
+
+    def test_valve_verdict_rows_expect_rc0(self):
+        v = [t for t in P.BATCHES["mg24-batch3"] if t["devtype"] == "0x0042"][0]
+        for c in v["checks"]:
+            if c["controller"] is None or c["controller"][0] != "verdict":
+                continue
+            self.assertTrue(c["controller"][4]["rc0"],
+                            "every valve verdict row expects rc 0")
+
+    def test_every_check_is_legal(self):
+        for t in P.BATCHES["mg24-batch3"]:
+            self.assertTrue(t["checks"], t["devtype"])
+            for c in t["checks"]:
+                self.assertIn(c["chip_cluster"] or t["chip_cluster"], P.CHIP_CLUSTERS)
+                self.assertIsInstance(c["cluster"], int)
+                self.assertIsInstance(c["attr"], int)
+                if c["controller"] is not None:
+                    kind = c["controller"][0]
+                    if kind == "verdict":
+                        self.assertEqual(len(c["controller"]), 5)
+                        self.assertEqual(len(c["controller"][2]), 2)
+                    else:
+                        self.assertIn(kind, ("command", "write"))
+                        self.assertEqual(len(c["controller"][2]), 3)
+
+
+class _OrderingLink(_VerdictLink):
+    """A _VerdictLink whose attribute moves AFTER the chip-tool command
+    runs: a read before the command sees the at_value (so the second AT
+    read, which the ordering rule runs before the action, agrees), and a
+    read after it sees the moved value. Models an allowed command that
+    moves the attribute (a locked door's LockState to Locked)."""
+
+    def __init__(self, key, moved):
+        super().__init__()
+        self._key = key
+        self._moved = moved
+        self._acted = False
+
+    def command(self, cmd, *a, **k):
+        m = re.fullmatch(r"AT\+MTATTR=(\d+),(\d+),(\d+)(?:,(\S+))?", cmd)
+        if m and m.group(4) is None:
+            key = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if key == self._key and self._acted:
+                return (0, ["+MTATTR:%s,%s,%s,%s" % (m.group(1), m.group(2), m.group(3), self._moved)])
+        return super().command(cmd, *a, **k)
+
+    def await_urc_ts(self, pattern, timeout=5.0):
+        # The +MTCMD forward is enqueued synchronously by the chip_call
+        # double; when it is answered the chip-tool command has run, which
+        # is when the attribute moves.
+        got = super().await_urc_ts(pattern, timeout)
+        if got is not None:
+            self._acted = True
+        return got
+
+
+class TestVerdictKind(unittest.TestCase):
+    """The verdict controller kind against fakes that model the harness:
+    a link whose command() records every line and whose await_urc pops
+    from a queue, and a chip_call double (installed over the module-level
+    H._threaded_chip_call that invoke_chip falls back to, since prove_check
+    always sets ctx.chip_call to None) that enqueues the +MTCMD forward and
+    returns the (rc, out) the rc/status rows read."""
+
+    def _patch_chip_call(self, chip):
+        self._saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        self.addCleanup(self._unpatch_chip_call)
+
+    def _unpatch_chip_call(self):
+        if getattr(self, "_saved", None) is not None:
+            H._threaded_chip_call = self._saved
+        self._saved = None
+
+    def test_allow_sends_one_mtcmdresp_and_every_row_passes(self):
+        # The door lock's allow check: lock-door, forward (257,0), answer 1,
+        # want rc0 + status 0x0.
+        link = _VerdictLink()
+        chip = _VerdictChip(link=link, ep=2, cluster=257, command=0, seq=7, rc=0, status="0x00")
+        t = [x for x in P.BATCHES["mg24-batch3"] if x["devtype"] == "0x000A"][0]
+        c = [c for c in t["checks"] if c["controller"] and c["controller"][0] == "verdict"
+             and c["controller"][1][0] == "lock-door" and c["controller"][3] == 1][0]
+        s = _FakeSuite()
+        self._patch_chip_call(chip)
+        try:
+            P.prove_check(link, chip, s, "0x4845", 2, t, c, "door lock ep2 lock-state lock-door allow")
+        finally:
+            self._unpatch_chip_call()
+        # Exactly one AT+MTCMDRESP sent, and it is the allow for seq 7.
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         ["AT+MTCMDRESP=7,1"])
+        got = {n: ok for n, ok in s.results}
+        self.assertTrue(all(ok for ok in got.values()),
+                        "every row passes: %s" % [n for n, ok in got.items() if not ok])
+        self.assertIn("door lock ep2 lock-state lock-door allow forward 257/0 answered allow", got)
+        self.assertIn("door lock ep2 lock-state lock-door allow chip-tool exits 0", got)
+        self.assertTrue(got["door lock ep2 lock-state lock-door allow wire status 0x0"])
+
+    def test_deny_with_status_0x1_passes_and_0x0_fails(self):
+        # The door lock's deny check: unlock-door, forward (257,1), answer 0,
+        # want rc fail + status 0x1.
+        t = [x for x in P.BATCHES["mg24-batch3"] if x["devtype"] == "0x000A"][0]
+        c = [c for c in t["checks"] if c["controller"] and c["controller"][0] == "verdict"
+             and c["controller"][1][0] == "unlock-door"][0]
+        # status 0x01 (UNSUPPORTED_COMMAND) with a non-zero rc: the row passes.
+        link = _VerdictLink(null_read=(0x0101, 0x0000))
+        chip = _VerdictChip(link=link, ep=2, cluster=257, command=1, seq=7, rc=1, status="0x01")
+        s = _FakeSuite()
+        self._patch_chip_call(chip)
+        try:
+            P.prove_check(link, chip, s, "0x4845", 2, t, c, "door lock ep2 lock-state unlock-door deny")
+        finally:
+            self._unpatch_chip_call()
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         ["AT+MTCMDRESP=7,0"])
+        self.assertTrue(got["door lock ep2 lock-state unlock-door deny chip-tool fails"])
+        self.assertTrue(got["door lock ep2 lock-state unlock-door deny wire status 0x1"])
+        # The same row with status 0x0 (Success) instead of 0x1 fails.
+        # A fresh link: the first run's write already moved the lock-state
+        # away from the at_value, so the second run's "controller reads
+        # after the AT write" row would fail on a shared link.
+        link2 = _VerdictLink(null_read=(0x0101, 0x0000))
+        chip2 = _VerdictChip(link=link2, ep=2, cluster=257, command=1, seq=7, rc=1, status="0x00")
+        s2 = _FakeSuite()
+        self._patch_chip_call(chip2)
+        try:
+            P.prove_check(link2, chip2, s2, "0x4845", 2, t, c, "door lock ep2 lock-state unlock-door deny")
+        finally:
+            self._unpatch_chip_call()
+        got2 = {n: ok for n, ok in s2.results}
+        self.assertTrue(got2["door lock ep2 lock-state unlock-door deny chip-tool fails"])
+        self.assertFalse(got2["door lock ep2 lock-state unlock-door deny wire status 0x1"])
+
+    def test_unanswered_sends_no_mtcmdresp_and_passes_only_with_mtcmdto(self):
+        # The door lock's unanswered check: lock-door, forward (257,0), answer
+        # None, want rc fail + status 0x1. No AT+MTCMDRESP is sent; the row
+        # passes only when +MTCMDTO:7 arrives, and fails without it.
+        t = [x for x in P.BATCHES["mg24-batch3"] if x["devtype"] == "0x000A"][0]
+        c = [c for c in t["checks"] if c["controller"] and c["controller"][0] == "verdict"
+             and c["controller"][3] is None][0]
+        # +MTCMDTO:7 arrives: passes.
+        link = _VerdictLink()
+        chip = _VerdictChip(link=link, ep=2, cluster=257, command=0, seq=7,
+                            timeout=True, rc=1, status="0x01")
+        s = _FakeSuite()
+        self._patch_chip_call(chip)
+        try:
+            P.prove_check(link, chip, s, "0x4845", 2, t, c, "door lock ep2 lock-state lock-door unanswered")
+        finally:
+            self._unpatch_chip_call()
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")], [])
+        self.assertTrue(got["door lock ep2 lock-state lock-door unanswered forward 257/0 seen"])
+        self.assertTrue(got["door lock ep2 lock-state lock-door unanswered unanswered -> +MTCMDTO"])
+        self.assertTrue(got["door lock ep2 lock-state lock-door unanswered chip-tool fails"])
+        self.assertTrue(got["door lock ep2 lock-state lock-door unanswered wire status 0x1"])
+        # No +MTCMDTO: the forward is seen but the row fails.
+        link2 = _VerdictLink()
+        chip2 = _VerdictChip(link=link2, ep=2, cluster=257, command=0, seq=7,
+                             timeout=False, rc=1, status="0x01")
+        s2 = _FakeSuite()
+        self._patch_chip_call(chip2)
+        try:
+            P.prove_check(link2, chip2, s2, "0x4845", 2, t, c, "door lock ep2 lock-state lock-door unanswered")
+        finally:
+            self._unpatch_chip_call()
+        got2 = {n: ok for n, ok in s2.results}
+        self.assertEqual([x for x in link2.sent if x.startswith("AT+MTCMDRESP=")], [])
+        self.assertTrue(got2["door lock ep2 lock-state lock-door unanswered forward 257/0 seen"])
+        self.assertFalse(got2["door lock ep2 lock-state lock-door unanswered unanswered -> +MTCMDTO"])
+
+    def test_a_forward_for_another_cluster_is_not_taken(self):
+        # The fake chip enqueues a forward for a DIFFERENT cluster than the
+        # check expects; the responder must not take it (it is left queued),
+        # the "forward seen" row fails, and nothing is answered.
+        t = [x for x in P.BATCHES["mg24-batch3"] if x["devtype"] == "0x000A"][0]
+        c = [c for c in t["checks"] if c["controller"] and c["controller"][0] == "verdict"
+             and c["controller"][1][0] == "lock-door" and c["controller"][3] == 1][0]
+        # The check expects forward (257,0); the chip enqueues (999,0).
+        link = _VerdictLink()
+        chip = _VerdictChip(link=link, ep=2, cluster=999, command=0, seq=7, rc=0, status="0x00")
+        s = _FakeSuite()
+        self._patch_chip_call(chip)
+        try:
+            P.prove_check(link, chip, s, "0x4845", 2, t, c, "door lock ep2 lock-state lock-door allow")
+        finally:
+            self._unpatch_chip_call()
+        got = {n: ok for n, ok in s.results}
+        # No AT+MTCMDRESP for a forward that was never taken.
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")], [])
+        self.assertFalse(got["door lock ep2 lock-state lock-door allow forward 257/0 answered allow"])
+        # The stray forward is left queued for its own recipient.
+        self.assertIn("+MTCMD:7,2,999,0", link.urcs)
+
+    def test_attribute_change_after_the_verdict_does_not_fail(self):
+        # Ordering rule: an allowed command may move the attribute. The
+        # "second AT read agrees" row runs BEFORE the chip-tool command is
+        # launched, and nothing about the attribute is asserted after the
+        # action, so a fake whose attribute changes after the verdict does
+        # not fail the check.
+        t = [x for x in P.BATCHES["mg24-batch3"] if x["devtype"] == "0x000A"][0]
+        c = [c for c in t["checks"] if c["controller"] and c["controller"][0] == "verdict"
+             and c["controller"][1][0] == "lock-door" and c["controller"][3] == 1][0]
+        # The attribute moves to 2 (Locked) after the verdict; the second AT
+        # read happens before the chip-tool command, so it still agrees with
+        # the at_value of 1, and nothing after the action re-reads it.
+        link = _OrderingLink((2, 0x0101, 0x0000), "2")
+        chip = _VerdictChip(link=link, ep=2, cluster=257, command=0, seq=7, rc=0, status="0x00")
+        s = _FakeSuite()
+        self._patch_chip_call(chip)
+        try:
+            P.prove_check(link, chip, s, "0x4845", 2, t, c, "door lock ep2 lock-state lock-door allow")
+        finally:
+            self._unpatch_chip_call()
+        got = {n: ok for n, ok in s.results}
+        self.assertTrue(all(ok for ok in got.values()),
+                        "no row fails when the attribute moves after the verdict: %s"
+                        % [n for n, ok in got.items() if not ok])
+        self.assertTrue(got["door lock ep2 lock-state lock-door allow second AT read agrees (1)"])
+
+
+class TestBatch3RowNames(unittest.TestCase):
+    def test_fake_run_yields_no_duplicate_name(self):
+        # Running prove_endpoint over both batch 3 types with the fakes yields
+        # no duplicate row name: the door lock's four checks all prove
+        # LockState, and the " <command> <answer>" suffix the verdict kind
+        # adds disambiguates them.
+        link = _VerdictLink()
+        chip = _VerdictChip(link=link, ep=2, cluster=257, command=0, seq=7)
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            comp = P.composition_for("mg24-batch3")
+            names = []
+            for (ep, dev), t in zip(comp[1:], P.rows_for("mg24-batch3")):
+                chip.ep = ep
+                chip.devtype = t["devtype"]
+                chip.revision = t["revision"]
+                s = _FakeSuite()
+                P.prove_endpoint(link, chip, s, "0x4845", ep, t)
+                names += [n for n, _ in s.results]
+                names += [n for n, _ in s.na]
+        finally:
+            H._threaded_chip_call = saved
+        self.assertEqual(len(names), len(set(names)))
+
 
 if __name__ == "__main__":
     unittest.main()
