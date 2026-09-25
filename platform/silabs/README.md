@@ -2400,6 +2400,59 @@ differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
 
+### Catalogue batch 3: the fabric proof, Phase 1 and 2 and the batch's memory record
+
+The batch image, built 2026-09-25 from the committed tree at `7a28411` in
+`~/silabs/work/hearth-matter-b3`, a fresh `slc generate` with a `make clean`
+inside it, **0 warnings**. The later commits touch only comments, the README and
+`test/`, so the result files' `fw_repo_head` (`a9990df`) is later than the
+image: the image on the module is `7a28411`'s bytes and the tree at run time was
+past it, the way batch 2's record explains.
+
+#### The proof: 54 passed, 0 failed, 1 not applicable
+
+```
+$ python3 test/mt_catalogue_proof.py \
+      --port /dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00 \
+      --bridge cpico --batch mg24-batch3 \
+      --openocd-config platform/silabs/mg24-swd.cfg \
+      --baseline platform/silabs/core-batch3.json
+```
+
+First run, 2026-09-25: 54 passed, 0 failed, 1 not applicable. The `+MTCMD`
+verdict path ran on this port for the first time (graph F546): the door lock's
+`lock-door` answered allow gives status 0x0; `unlock-door` answered deny gives
+status 0x1 (Failure); `lock-door` unanswered gives `+MTCMDTO` and status 0x1,
+which also proves the AT parser task answers while the CHIP task blocks on the
+verdict semaphore. The valve's `open` answered allow exits 0, its `close`
+answered deny still exits 0 (AT_MT_SPEC 3.19), `ValveStateChanged` is present,
+and `AT+MTVALVE` echoes `+MTATTR`. `LockState` and `CurrentState` read
+`+MTERR:5` until first set.
+
+#### Phase 1 and 2 on the batch image
+
+Phase 1 on the batch image: 292 passed, 4 failed, the same four rows (the
+`core-phase1.json` rows are identical). Phase 2: 98 passed, 2 failed (B512's two
+rows), 1 n/a, row-identical; 2.9's cold boot by the hub recipe.
+
+#### The batch's memory record
+
+`arm-none-eabi-size` at `7a28411`, against batch 2's `a271a3f`: text 905,556
+(889,656: +15,900); `.bss` 132,472 (131,704: +768, of which +640 is the two
+cluster servers, measured at Task 1's `43c0f8d`, and +128 the cluster-object
+arena, measured at `7a28411`); `.memory_manager_heap` 121,184 (121,976: -792,
+the `.bss` rise plus `.data` 3,408 to 3,424 and rounding).
+
+Free heap at `+MTREADY`: 80,504 B factory-fresh, 80,456 B commissioned (the
+standard 0x0100,0x0302 composition, Phase 2), 792 B below batch 2's 81,296 and
+81,248: exactly the heap section's shrink; the fabric's 48 B unchanged.
+
+Arenas: the proof composition 0x0100,0x000A,0x0042 used 592 of 9,600 B endpoint
+arena and 8 of 128 B object arena; Task 3's smoke: sixteen 0x0042 use 128 of
+128 B of the object arena, 16 of 16 live, nothing refused (DE541 proven);
+0x0100,0x000A,0x0042,0x0302 used 752 B and 8 B; restored 0x0100,0x0302: 352 B
+and 0 B.
+
 ### The cluster-object arena
 
 Since catalogue batch 3 (2026-09-25), minimal (graph DE541): one `hearth_arena` over
@@ -4932,8 +4985,8 @@ the heap and the arenas.
 |---|---|---|
 | 1 | attribute-only, 14 types | nothing structural. **Built 2026-09-22**, twelve types: the registry's fourteen batch-1 ids include the two milestone types round 2 already built (0x0100, 0x0302). Proof file `core-batch1.json`; see "Catalogue batch 1" under "Measured" |
 | 2 | server-interaction, 6 types | nothing structural: **built 2026-09-24**, six types, no delegate and no object arena (F528). Proof file `core-batch2.json`; see "Catalogue batch 2" under "Measured" |
-| 3 | command-verdict, 2 types | the `+MTCMD` verdict path, and **the cluster-object arena** and the first delegate pool (the valve) |
-| 4 | appliance, 7 types | OperationalState and Chime carve-out rows |
+| 3 | command-verdict, 2 types | **built 2026-09-25**, two types, the `+MTCMD` verdict path's first run on this port, the cluster-object arena (minimal, DE541) and the first delegate (the valve). Proof file `core-batch3.json`; see "Catalogue batch 3" under "Measured" |
+| 4 | appliance, 7 types | OperationalState and Chime carve-out rows; brings obj_pair_new, obj_inst_new and a larger object budget (DE541) |
 | 5 | standalone, 7 types | the Rvc mode rows |
 | 7a | energy foundation, 6 types | the meter Instance pool, ElectricalPowerMeasurement, DEM |
 | 7b | delegate-served pair, 2 types | WaterHeaterManagement |

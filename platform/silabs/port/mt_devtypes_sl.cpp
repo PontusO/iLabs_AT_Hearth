@@ -2441,8 +2441,9 @@ const attr_seed s_seeds[] = {
      * Revision 9 is DoorLock/Metadata.h kRevision in THIS tree
      * (third_party/matter_sdk/zzz_generated/app-common/clusters/DoorLock/
      * Metadata.h, Silabs 2.8.1); the nRF port seeds 7, which is its own
-     * NCS tree's value, so the two ports differ on purpose (graph F540):
-     * the rule is the tree the build consumes. */
+     * NCS tree's value, and the C6's esp-matter pins 10, so the three
+     * ports differ on purpose (graph F540): the rule is the tree the
+     * build consumes. */
     { DoorLock::Id, DoorLock::Attributes::LockState::Id, 1, { 0xFF } }, /* null */
     { DoorLock::Id, DoorLock::Attributes::LockType::Id, 1, { 0x00 } },
     { DoorLock::Id, DoorLock::Attributes::ActuatorEnabled::Id, 1, { 0x01 } },
