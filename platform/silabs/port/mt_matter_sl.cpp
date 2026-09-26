@@ -1483,3 +1483,10 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
     }
     return MT_ATTR_OK;
 }
+
+bool emberAfPluginSmokeCoAlarmSelfTestRequestCommand(chip::EndpointId endpointId)
+{
+    mt_cmd_notify(endpointId, chip::app::Clusters::SmokeCoAlarm::Id,
+                  chip::app::Clusters::SmokeCoAlarm::Commands::SelfTestRequest::Id);
+    return true;
+}

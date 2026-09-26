@@ -1034,7 +1034,7 @@ which is what `app_init()` creates.
 
 ### Source layout: mt_devtypes_sl.cpp and its fragments
 
-Its static data lives in six `port/` fragments, `#include`d in this order:
+Its static data (tables, registry, arena and seeds) lives in six `port/` fragments, `#include`d in this order:
 `mt_devtypes_sl_tables_core.inc` (device tables: milestone types and catalogue
 batch 1), `mt_devtypes_sl_tables_b2.inc` (batch 2),
 `mt_devtypes_sl_tables_b3.inc` (batch 3),
@@ -1044,10 +1044,12 @@ its sizing and floor) and `mt_devtypes_sl_seeds.inc` (the seed table and
 `seed_slots`). Reason: the 65,536-token window; the file was 3,790 lines,
 about 55,000 tokens, and no fragment exceeds about 1,100 lines (the largest,
 the seeds, is 1,097). The anonymous-namespace includes keep one translation
-unit and the same image, proven 2026-09-25 by identical section sizes and
-disassembly; the fragments are not in `hearth.slcp`. Convention: each
+unit and the same image, proven 2026-09-25 by identical loadable section
+sizes, identical object disassembly and .rodata (the debug sections and the
+SDK's build stamp differ); the fragments are not in `hearth.slcp`. Convention: each
 catalogue batch's device tables go in a new `mt_devtypes_sl_tables_bN.inc`
-included after the last, and its new bridge code goes in its own file beside
+included after the last tables fragment and before `mt_devtypes_sl_registry.inc`,
+and its new bridge code goes in its own file beside
 `mt_matter_sl.cpp` (batch 4 decides its linkage).
 
 ### Port sections: what has transferred from the nRF arm

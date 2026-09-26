@@ -344,6 +344,13 @@ component:
   - id: matter_administrator_commissioning
   - id: matter_basic_information
   - id: matter_descriptor
+  # Catalogue batch 4 (2026-09-26): the smoke/CO and power-source clusters.
+  # No SDK patch: none code-driven (F554).
+  - id: matter_chime
+  - id: matter_mode_select
+  - id: matter_operational_state
+  - id: matter_power_source
+  - id: matter_smoke_co_alarm
   # Catalogue batch 3 (2026-09-25): the command-verdict clusters. Neither is
   # code-driven (no CodegenIntegration, no static-cluster-config include), so
   # no SDK patch. DoorLock's per-endpoint state lives in the SDK's own

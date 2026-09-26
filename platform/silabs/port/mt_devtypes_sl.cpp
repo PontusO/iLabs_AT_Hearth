@@ -5,7 +5,12 @@
  *
  * The source is the nRF54L15 port, platform/nrf54l15/port/mt_devtypes_zephyr.cpp
  * in the firmware repository, transferred section by section so the two ports
- * stay diffable. Every section below names the nRF line range it came from;
+ * stay diffable. Most sections now live in the six fragments #included
+ * below, in order: mt_devtypes_sl_tables_core.inc,
+ * mt_devtypes_sl_tables_b2.inc, mt_devtypes_sl_tables_b3.inc,
+ * mt_devtypes_sl_registry.inc, mt_devtypes_sl_arena.inc,
+ * mt_devtypes_sl_seeds.inc. Every section below names the nRF line range it
+ * came from;
  * a future round that changes one arm can find the other by that range. The
  * ranges are against that file as it stands on dev/fota-firmware and are a
  * reading aid, not a promise that the file has not moved since.

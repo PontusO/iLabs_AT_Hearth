@@ -1,7 +1,7 @@
 /*
  * mt_devtypes_sl_seeds.inc: a fragment of mt_devtypes_sl.cpp, NOT a compile unit.
  *
- * Holds the seed table and seed_slots (nRF 5905-6889).
+ * Holds the seed table and seed_slots (nRF 5905-7005).
  * mt_devtypes_sl.cpp #includes it inside its anonymous namespace, in
  * order with the other fragments, so the whole is still one translation
  * unit: file-local names stay file-local and the generated code is the

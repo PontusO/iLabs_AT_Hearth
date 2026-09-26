@@ -1,7 +1,7 @@
 /*
  * mt_devtypes_sl_registry.inc: a fragment of mt_devtypes_sl.cpp, NOT a compile unit.
  *
- * Holds the parenting policy and the registry (nRF 3325-3391, 4402-4641).
+ * Holds the parenting policy and the registry (nRF 3325-3428, 4402-4641).
  * mt_devtypes_sl.cpp #includes it inside its anonymous namespace, in
  * order with the other fragments, so the whole is still one translation
  * unit: file-local names stay file-local and the generated code is the

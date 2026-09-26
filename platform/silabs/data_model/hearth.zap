@@ -7649,7 +7649,7 @@
           "mfgCode": null,
           "define": "POWER_SOURCE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "Status",
@@ -7867,7 +7867,7 @@
           "mfgCode": null,
           "define": "SMOKE_CO_ALARM_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "ExpressedState",
@@ -8130,7 +8130,7 @@
           "mfgCode": null,
           "define": "OPERATIONAL_STATE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "PhaseList",
@@ -8358,7 +8358,7 @@
           "mfgCode": null,
           "define": "MODE_SELECT_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "Description",
@@ -8522,7 +8522,7 @@
           "mfgCode": null,
           "define": "CHIME_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "InstalledChimeSounds",

@@ -25,6 +25,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::BooleanState::Id:
         emberAfBooleanStateClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::Chime::Id:
+        emberAfChimeClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::ColorControl::Id:
         emberAfColorControlClusterInitCallback(endpoint);
         break;
@@ -61,6 +64,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::LevelControl::Id:
         emberAfLevelControlClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::ModeSelect::Id:
+        emberAfModeSelectClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::NetworkCommissioning::Id:
         emberAfNetworkCommissioningClusterInitCallback(endpoint);
         break;
@@ -73,11 +79,20 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::OperationalCredentials::Id:
         emberAfOperationalCredentialsClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::OperationalState::Id:
+        emberAfOperationalStateClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::PowerSource::Id:
+        emberAfPowerSourceClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::PressureMeasurement::Id:
         emberAfPressureMeasurementClusterInitCallback(endpoint);
         break;
      case  app::Clusters::RelativeHumidityMeasurement::Id:
         emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::SmokeCoAlarm::Id:
+        emberAfSmokeCoAlarmClusterInitCallback(endpoint);
         break;
      case  app::Clusters::SoftwareDiagnostics::Id:
         emberAfSoftwareDiagnosticsClusterInitCallback(endpoint);
