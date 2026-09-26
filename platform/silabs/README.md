@@ -1034,11 +1034,12 @@ which is what `app_init()` creates.
 
 ### Source layout: mt_devtypes_sl.cpp and its fragments
 
-Its static data (tables, registry, arena and seeds) lives in seven `port/` fragments, `#include`d in this order:
+Its static data (tables, registry, arena and seeds) lives in eight `port/` fragments, `#include`d in this order:
 `mt_devtypes_sl_tables_core.inc` (device tables: milestone types and catalogue
 batch 1), `mt_devtypes_sl_tables_b2.inc` (batch 2),
 `mt_devtypes_sl_tables_b3.inc` (batch 3),
 `mt_devtypes_sl_tables_b4.inc` (batch 4),
+`mt_devtypes_sl_tables_b5.inc` (batch 5a),
 `mt_devtypes_sl_registry.inc` (the parenting policy and the registry),
 `mt_devtypes_sl_arena.inc` (the external attribute store, the endpoint arena,
 its sizing and floor) and `mt_devtypes_sl_seeds.inc` (the seed table and
@@ -1070,6 +1071,7 @@ index, and a round that changes one arm finds the other through it.
 | the attribute bridge and the `+MTATTR` URC | `mt_matter_zephyr.cpp` 665-1505 | `port/mt_matter_sl.cpp` | round 2 task 6 |
 | the cluster-object arena's pair and Instance helpers | `mt_matter_zephyr.cpp` 290-384 | `port/mt_matter_sl.cpp` | catalogue batch 4 |
 | the smoke/CO, OperationalState, mode select and chime bridge | `mt_matter_zephyr.cpp` 1894-3121, without the refrigerator alarm arm and the oven cavity and RVC branches | `port/mt_matter_sl_b4.inc` | catalogue batch 4 |
+| the `AT+MTSWITCH` bridge | `mt_matter_zephyr.cpp` 3130-3167 | `port/mt_matter_sl_b5.inc` | catalogue batch 5a |
 | shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
@@ -1094,6 +1096,9 @@ index, and a round that changes one arm finds the other through it.
 | laundry washer, dishwasher, laundry dryer (0x0073, 0x0075, 0x007C) | `mt_devtypes_zephyr.cpp` 1673-1818 | `port/mt_devtypes_sl_tables_b4.inc` | catalogue batch 4 |
 | mode select (0x0027) | `mt_devtypes_zephyr.cpp` 1820-1905 | `port/mt_devtypes_sl_tables_b4.inc` | catalogue batch 4 |
 | chime (0x0146) | `mt_devtypes_zephyr.cpp` 1907-2006 | `port/mt_devtypes_sl_tables_b4.inc` | catalogue batch 4 |
+| air purifier (0x002D), mounted on/off control (0x010F), mounted dimmable load control (0x0110): registry rows reusing the fan, on/off plug and dimmable plug endpoints | `mt_devtypes_zephyr.cpp` 1101-1123, 671-698, 722-743 (the type arrays) | `port/mt_devtypes_sl_tables_b5.inc` | catalogue batch 5a |
+| generic switch (0x000F) | `mt_devtypes_zephyr.cpp` 2008-2104 | `port/mt_devtypes_sl_tables_b5.inc` | catalogue batch 5a |
+| the featureless OnOff list, pump (0x0303) and room air conditioner (0x0072) | `mt_devtypes_zephyr.cpp` 2106-2281 | `port/mt_devtypes_sl_tables_b5.inc` | catalogue batch 5a |
 | the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl_arena.inc` | round 2 task 5 |
@@ -2433,6 +2438,67 @@ two are identical (see "Harness Phase 0 and Phase 1"). The two build logs
 differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
+
+### Catalogue batch 5a: the fabric proof, Phase 1 and 2 and the batch's memory record
+
+The registry's batch 5 is two rounds (the user's ruling, 2026-09-26): 5a, the
+six ember-only types here, and 5b, the robotic vacuum cleaner with ModeBase and
+its RvcOperationalState pair under admission limits (graph DE566). The batch
+image, built 2026-09-26 from the committed tree at `62818af` in
+`~/silabs/work/hearth-matter-b5a`, a fresh `slc generate` with a `make
+clean` inside it, **0 warnings**. The final review's fix wave (`e73c74b`)
+changed only comments and the self-tests, so the image is `62818af`'s.
+
+#### The proof: 75 passed, 0 failed, 2 not applicable
+
+```
+$ python3 test/mt_catalogue_proof.py \
+      --port /dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00 \
+      --bridge cpico --batch mg24-batch5a \
+      --openocd-config platform/silabs/mg24-swd.cfg \
+      --baseline platform/silabs/core-batch5a.json
+```
+
+2026-09-26: 75 passed, 0 failed, 2 not applicable, the same as a trial run
+before the self-tests existed; no new row kind. The two n/a rows are the
+switch's read-only attributes. What the rows prove: the air purifier's
+PercentSetting (the fan's row); the mounted on/off control's OnOff and the
+mounted dimmable load control's CurrentLevel (the plugs' rows); the generic
+switch's CurrentPosition, `AT+MTSWITCH=<ep>` answering OK with the
+InitialPress event present afterwards, `AT+MTSWITCH=<ep>,1` refused with
+`+MTERR:1`, FeatureMap 2; the pump's OnOff and OperationMode (a controller
+write raising `+MTATTR`); the room air conditioner's OnOff and Thermostat
+OccupiedHeatingSetpoint. **The pump's OnOff FeatureMap reads 0 and the room
+air conditioner's 2 on the same shared OnOff list**, the seed table's
+per-device-type qualifier.
+
+#### Phase 1 and 2 on the batch image
+
+Phase 1: 292 passed, 4 failed, the same four rows, row-identical. Phase 2
+passed 98 passed, 2 failed (B512's two rows), 1 n/a, row-identical, on one of
+four runs on this image; the committed `core-phase2.json` is that run's. **The
+other three failed commissioning** (2.11's re-commission twice, then 2.3's
+first commission): chip-tool completes BLE, then cannot resolve the node
+("Avahi resolve failed") and times out after 120 s. Graph **B573**, not caused
+by this batch: the failures follow NVM3's free space, not the image (a
+console-captured pass started at 5,144 B free, a console-captured failure at
+1,996 B, with the device console silent for the whole pairing), and nothing in
+this port calls `SilabsConfig::RepackNvm3Flash()`, so every NVM3 repack is a
+forced one inside a write, on the CHIP task, mid-commissioning. A fabric costs
+about 3 KB of NVM3. The fix (an idle repack, repack headroom, a larger store)
+is its own round before batch 5b; see "What is open".
+
+#### The batch's memory record
+
+`arm-none-eabi-size` at `62818af`, against batch 4's `3ba055b`: text
+925,576 (923,300: +2,276, the two cluster servers and the bridge); `.bss`
+137,208 and `.memory_manager_heap` 116,432, both unchanged: the six types
+draw no cluster object and no store, and neither arena changed. Free heap at
+`+MTREADY`: 75,752 B at every boot of the proof session, unchanged.
+Arenas: the proof composition (the anchor and the six types) used 1,648 of
+9,728 B endpoint arena, 7 of 16 endpoints live, and 0 of 4,096 B object
+arena. NVM3 in the proof session: 3,256 B free at the first boot down to
+1,708 B (erase count 13 to 14, one repack); nothing refused.
 
 ### Catalogue batch 4: the fabric proof, Phase 1 and 2 and the batch's memory record
 
@@ -5103,8 +5169,9 @@ are marked there.
 ### The catalogue
 
 The registry carries all 52 rows and the gate predicates; this build constructs
-twenty-nine of them (round 2's two milestone types, catalogue batch 1's twelve,
-batch 2's six, batch 3's two and batch 4's seven). The rest arrive in the nRF
+thirty-five of them (round 2's two milestone types, catalogue batch 1's twelve,
+batch 2's six, batch 3's two, batch 4's seven and batch 5a's six). The rest
+arrive in the nRF
 arm's own order, batch by batch, each
 copying its sections out of `platform/nrf54l15/port/mt_devtypes_zephyr.cpp` at
 the line ranges "Port sections" lists, adding its cluster components to
@@ -5117,7 +5184,7 @@ the heap and the arenas.
 | 2 | server-interaction, 6 types | nothing structural: **built 2026-09-24**, six types, no delegate and no object arena (F528). Proof file `core-batch2.json`; see "Catalogue batch 2" under "Measured" |
 | 3 | command-verdict, 2 types | **built 2026-09-25**, two types, the `+MTCMD` verdict path's first run on this port, the cluster-object arena (minimal, DE541) and the first delegate (the valve). Proof file `core-batch3.json`; see "Catalogue batch 3" under "Measured" |
 | 4 | appliance, 7 types | **built 2026-09-26**, seven types: the OperationalState and Chime Instance-served rows, `obj_pair_new` and `obj_inst_new` with the object arena at 4,096 B (DE555), and the endpoint block's mode select and chime stores. Proof file `core-batch4.json`; see "Catalogue batch 4" under "Measured" |
-| 5 | standalone, 7 types | the Rvc mode rows |
+| 5 | standalone, 7 types | **5a built 2026-09-26**, six types (air purifier, mounted on/off control, mounted dimmable load control, generic switch, pump, room air conditioner), ember-only, no object and no store. Proof file `core-batch5a.json`; see "Catalogue batch 5a" under "Measured". **5b**: the robotic vacuum cleaner, the Rvc mode rows, ModeBase and the RvcOperationalState pair, under admission limits (DE566) |
 | 7a | energy foundation, 6 types | the meter Instance pool, ElectricalPowerMeasurement, DEM |
 | 7b | delegate-served pair, 2 types | WaterHeaterManagement |
 | 8 | composed appliances, 7 types | the oven and refrigerator mode rows |
@@ -5165,6 +5232,7 @@ not a regression against the nRF arm.
 | **A dynamic endpoint's attribute value does not survive a reboot**, warm or cold. Measured 2026-09-21 by harness rows 2.8 and 2.9 (`attribute value survived (B63 guard)`) and reproduced by hand: write `AT+MTATTR=1,6,0,1`, reset over SWD, read back `0`. Every attribute on every dynamic endpoint is `EXTERNAL_STORAGE`, so the value lives in the endpoint arena's RAM; CHIP's write path would persist a `NONVOLATILE` row, but nothing restores one, because `emAfLoadAttributeDefaults()` never runs for a dynamic endpoint and discards `EXTERNAL` rows where it does. The fix is a restore path in the port beside `rebuild_composition()`, before `+MTREADY`, and it needs a ruling on which attributes carry the spec's N quality plus a write-churn budget against the NVM3 row below. **The nRF arm declares the same tables through the same mechanism and carries no `NONVOLATILE` either**, so this is one gap for both Thread arms; **confirmed on the nRF 2026-09-21**, where the same two rows failed with the same reads (`platform/nrf54l15/core-phase2.json`) | the **qualification round**, with the nRF arm; the full account is under "Harness Phase 2" |
 | **Harness Phase 2's cold boot needs this bench's hub recipe.** `uhubctl -l 3-1.3 -p 3 -a off` cuts the carrier's power without the kernel ever seeing the disconnect, so the device node goes stale rather than vanishing and step 2.9 times out; the matching `-a on` does not restore the port either. `uhubctl -l 3-1.3 -a cycle -d 5`, all ports, is what produces a real disconnect and what recovers a carrier left dark. A bench fact, recorded under "Harness Phase 2" | the bench; nothing in the harness or the port is wrong here |
 | **NVM3's usable figure needs a soak** (graph **F503**). 40 960 B configured, 24 objects and about 3.6 KB consumed by one commissioning. `availableMemory` was observed as low as 480 B during round 2 task 7's write churn, before a repack returned it to 5 392 B, and **as low as 176 B on 2026-09-22, during catalogue batch 1's bench session** (a proof run, two Phase 2 runs and a measurement cycle in one day; erase count 5 to 8, so three repacks; the four boot figures are under "Catalogue batch 1"). **176 B is the number the soak has to size against**, not 480. Nothing failed and no write was refused, so the repack is the mechanism working, but the trough is unmeasured over a long run, exactly as the nRF arm's 32 KB ZMS row is | the **qualification round**'s soak, with the nRF row |
+| **Commissioning fails when NVM3 is low: no idle repack** (graph **B573**, found 2026-09-26 by catalogue batch 5a's Phase 2). Three of four Phase 2 runs failed commissioning (chip-tool resolves nothing after BLE and times out); the pass started at 5,144 B NVM3 free, a failure at 1,996 B with the console silent through the pairing. Nothing in this port calls `SilabsConfig::RepackNvm3Flash()` (the sample does it from `MatterConfig.cpp`'s idle hook, not compiled here), so every repack is `repackUntilGood()` inside a write (`nvm3.c` `fifoWriteWrapper`), unbounded, on the CHIP task. `NVM3_DEFAULT_REPACK_HEADROOM` is 0 and the maximum object size (4092 in `hearth.slcp`, 254 in the generated config: which one is compiled in is unestablished) sets both thresholds. Hypothesis until a fix is proven by a low-NVM3 soak | the **NVM3 repack round**, before batch 5b |
 | **Phone commissioning over Thread has never been tried on this arm.** Both commissionings here are the CLI chip-tool on the border router's own host | the **qualification round** |
 | **The EUSART's own RX overflow is neither enabled nor counted.** `EUSART0_RX_IRQHandler` drains the FIFO while `STATUS.RXFL` is set and never looks at `EUSART_IF_RXOF`, so a peripheral-level overrun would lose bytes that `s_rx_ring.dropped` cannot see and the console never reports. Not observed: task 7's burst accounting is fully explained by the ring's own counter plus a lossy host-side bridge. It is an accounting hole, not a known defect, and the cheap close is to enable `RXOF` and fold it into the same warning | whoever next touches `port/hearth_port_sl.c`; see "Sustained traffic" |
 | **`fw/flash.py`'s `read_until()` and the harness's own stream loops do the same job in two places.** A round 1 review minor, still true, still costing nothing | whoever next touches either; it is a tidy-up, not a defect |
