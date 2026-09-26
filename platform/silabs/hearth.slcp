@@ -54,7 +54,6 @@ source:
   # the port and not in src/ because it is platform code, like everything else
   # here that names an SDK symbol.
   - path: port/hearth_matter_init.cpp
-  - path: port/hearth_srp_refresh.cpp
   # The FreeRTOS fault hooks and the ARM fault handlers, a verbatim copy of the
   # extension's examples/platform/silabs/SoftwareFaultReports.cpp. Copied into
   # the repository rather than referenced because slc resolves these paths

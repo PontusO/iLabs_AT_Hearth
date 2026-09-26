@@ -31,7 +31,6 @@
  */
 
 #include "hearth_matter_init.h"
-#include "hearth_srp_refresh.h"
 
 #include <app/DefaultTimerDelegate.h>
 #include <app/clusters/network-commissioning/network-commissioning.h>
@@ -276,6 +275,5 @@ CHIP_ERROR hearth_matter_init(const char *ble_name)
     }
 
     HEARTH_LOGI("matter", "stack up: server initialised, event loop running");
-    hearth_srp_refresh_start();
     return CHIP_NO_ERROR;
 }
