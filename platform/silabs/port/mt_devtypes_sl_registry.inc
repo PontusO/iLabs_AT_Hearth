@@ -104,7 +104,7 @@ struct hearth_shape {
  * span REPLACES the ep_type/ep_type_v1 selection entirely.
  *
  * In THIS build every one of those four members is null or empty on every
- * row but the twenty-nine ported ones, which carry ep_type and device_types
+ * row but the thirty-five ported ones, which carry ep_type and device_types
  * alone.
  */
 struct hearth_devtype {
@@ -241,8 +241,8 @@ static_assert(sizeof(s_registry) / sizeof(s_registry[0]) == 52,
  * unserved, and mt_devtype_create() refuses it before the parent is even
  * looked at. So the per-row body is skipped for those, and what the
  * assertion now proves is the same property over the rows that can be
- * created. It does NOT weaken into vacuity: the twenty-nine ported rows are checked
- * in full, the parent universe is still the whole 52-row registry (so a
+ * created. It does NOT weaken into vacuity: the thirty-five ported rows are
+ * checked in full, the parent universe is still the whole 52-row registry (so a
  * future restricted row is enumerated against every catalogue id from the
  * moment it gains a cluster set), and the day a batch gives the cabinet or
  * the cook surface an ep_type without a shape map, this fails the build

@@ -111,14 +111,17 @@ constexpr EmberAfDeviceType kAirPurifierTypes[] = { { 0x002D, 2 } };
  *   arena.
  *
  *   ServerInit? None. MatterSwitchPluginServerInitCallback and its
- *   Shutdown twin are empty bodies (switch-server.cpp:154-155), no
- *   emberAfSwitchCluster*InitCallback exists, and the XML says
+ *   Shutdown twin are empty bodies (switch-server.cpp:154-155); on this
+ *   tree the regeneration supplies an empty weak
+ *   emberAfSwitchClusterInitCallback (callback-stub.cpp), so there is
+ *   still nothing to hook, and the XML says
  *   <server init="false" tick="false"> (switch-cluster.xml:31). Does NOT
  *   join the B388 call site.
  *
  *   Event emission, the load-bearing part. The server never self-emits:
- *   mt_matter_switch_click() (mt_matter_zephyr.cpp) calls
- *   SwitchServer::Instance().OnInitialPress(ep, 1), whose whole body is
+ *   mt_matter_switch_click() (the bridge, in mt_matter_sl_b5.inc on this
+ *   port) calls SwitchServer::Instance().OnInitialPress(ep, 1), whose
+ *   whole body is
  *   LogEvent(event, endpoint, eventNumber) (switch-server.cpp:66-78). On a
  *   dynamic endpoint DECLARE_DYNAMIC_CLUSTER leaves eventList/eventCount
  *   zero (attribute-storage.h:48-51 supplies only eight initializers), so

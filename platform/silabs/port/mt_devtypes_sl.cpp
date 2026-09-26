@@ -5,9 +5,10 @@
  *
  * The source is the nRF54L15 port, platform/nrf54l15/port/mt_devtypes_zephyr.cpp
  * in the firmware repository, transferred section by section so the two ports
- * stay diffable. Most sections now live in the six fragments #included
+ * stay diffable. Most sections now live in the eight fragments #included
  * below, in order: mt_devtypes_sl_tables_core.inc,
  * mt_devtypes_sl_tables_b2.inc, mt_devtypes_sl_tables_b3.inc,
+ * mt_devtypes_sl_tables_b4.inc, mt_devtypes_sl_tables_b5.inc,
  * mt_devtypes_sl_registry.inc, mt_devtypes_sl_arena.inc,
  * mt_devtypes_sl_seeds.inc. Every section below names the nRF line range it
  * came from;
@@ -44,7 +45,8 @@
  *   water valve (0x0042)               nRF 1358-1484  whole
  *   the parenting policy               nRF 3325-3428  whole (predicate + shape struct)
  *   the registry                       nRF 4402-4641  all 52 rows' identity,
- *                                                     twenty rows' cluster sets
+ *                                                     thirty-five rows' cluster
+ *                                                     sets
  *   the external attribute store       nRF 4642-4658  whole
  *   the endpoint block arena           nRF 4659-5272  on a bump arena
  *   the compiler-checked floor         nRF 5273-5978  recast, this catalogue
@@ -55,7 +57,8 @@
  *   mt_dyn_attr_slot()                 nRF 7052-7069  whole
  *   mt_dyn_mode_store() and
  *     mt_dyn_chime_store()             nRF 7084-7116  whole
- *   the mt_devtypes.h quartet          nRF 7189-8413  the twenty ported types
+ *   the mt_devtypes.h quartet          nRF 7189-8413  the thirty-five ported
+ *                                                     types
  *   the ember external-attribute hooks nRF 8415-8451  whole
  *
  * THE REGISTRY POLICY OF THIS ROUND, stated once here because it is what

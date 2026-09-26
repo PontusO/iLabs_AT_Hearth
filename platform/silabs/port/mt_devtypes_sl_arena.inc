@@ -101,7 +101,9 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * header, no bucket table, so usable bytes are gross bytes). The types of
  * batches 1 to 3 and batch 4's mode select, the widest; batch 4's other
  * types (power source, smoke/CO, the laundry trio, the chime) are narrower
- * than 608 and priced by the candidates below, not tabled here:
+ * than 608 and priced by the candidates below, not tabled here: batch 5a's
+ * pump and room air conditioner (304 B) and generic switch (144 B) are
+ * priced by the candidates too, not tabled:
  *
  *   device type                        clusters  slots  payload  arena cost
  *   mode select           0x0027            3     10      608         608  * over-count price
@@ -445,7 +447,8 @@ attr_slot *block_slots(const dyn_endpoint &d)
 
 constexpr size_t kMax2(size_t a, size_t b) { return a > b ? a : b; }
 
-/* Identify rides on all twenty device types; Descriptor contributes nothing.
+/* Identify rides on all thirty-five device types; Descriptor contributes
+ * nothing.
  * MT_COUNT over an attr list counts DECLARED entries plus the LIST_END
  * ClusterRevision, which over-counts a list whose metadata-only members get
  * no slot; batch 4's mode select and chime lists have one (their

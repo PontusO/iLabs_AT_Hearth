@@ -1719,9 +1719,6 @@ class TestBatch4RowNames(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
 
 
-BATCH5A = ["0x002D", "0x010F", "0x0110", "0x000F", "0x0303", "0x0072"]
-
-
 class TestBatch5aTable(unittest.TestCase):
     def test_batch5a_lists_every_type_once_after_the_anchor(self):
         comp = P.composition_for("mg24-batch5a")
@@ -1810,10 +1807,11 @@ class _Batch5aChip(_Batch4Chip):
 
 
 class _Batch5aLink(_RefusedLink):
-    """A _RefusedLink that refuses the generic switch's Instance-served
-    write AT+MTSWITCH=<ep>,1 with +MTERR:1 (the table's at_refused code).
-    _RefusedLink's command() is the one that answers the refused write;
-    every other line answers as _VerdictLink does."""
+    """A name for _RefusedLink in the batch 5a run; it adds no behaviour.
+    The constructor arguments make it refuse the generic switch's
+    Instance-served write AT+MTSWITCH=<ep>,1 with +MTERR:1 (the table's
+    at_refused code); _RefusedLink's command() answers the refused write,
+    every other line as _VerdictLink does."""
 
 
 class TestBatch5aRowNames(unittest.TestCase):
