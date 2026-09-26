@@ -174,12 +174,15 @@ constexpr hearth_devtype s_registry[] = {
     { 0x0027, 0, &modeSelectEndpoint, Span<const EmberAfDeviceType>(kModeSelectTypes) },
     { 0x0146, 0, &chimeEndpoint, Span<const EmberAfDeviceType>(kChimeTypes) },
     /* Catalogue batch 5: the standalone remainder. */
-    { 0x002D, 0 },                                                      /* batch 5: air purifier */
-    { 0x010F, 0 },                                                      /* batch 5: mounted on/off control */
-    { 0x0110, 0 },                                                      /* batch 5: mounted dimmable load control */
-    { 0x000F, 0 },                                                      /* batch 5: generic switch */
-    { 0x0303, 0 },                                                      /* batch 5: pump */
-    { 0x0072, 0 },                                                      /* batch 5: room air conditioner */
+    { 0x002D, 0, &fanEndpoint, Span<const EmberAfDeviceType>(kAirPurifierTypes) },
+    { 0x010F, 0, &onOffPlugInUnitEndpoint,
+      Span<const EmberAfDeviceType>(kMountedOnOffControlTypes) },
+    { 0x0110, 0, &dimmablePlugInUnitEndpoint,
+      Span<const EmberAfDeviceType>(kMountedDimmableLoadControlTypes) },
+    { 0x000F, 0, &genericSwitchEndpoint, Span<const EmberAfDeviceType>(kGenericSwitchTypes) },
+    { 0x0303, 0, &pumpEndpoint, Span<const EmberAfDeviceType>(kPumpTypes) },
+    { 0x0072, 0, &roomAirConditionerEndpoint,
+      Span<const EmberAfDeviceType>(kRoomAirConditionerTypes) },
     { 0x0074, 0 },                                                      /* batch 5: robotic vacuum cleaner */
     /* Catalogue batch 7a: the energy foundation types, the registry's first
      * variant-carrying rows (variant 0 = power + energy, variant 1 = power
