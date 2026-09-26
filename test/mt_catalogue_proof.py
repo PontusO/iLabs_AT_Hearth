@@ -31,7 +31,8 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "windowcovering", "airquality",
                  "doorlock", "valveconfigurationandcontrol",
                  "powersource", "smokecoalarm", "operationalstate",
-                 "modeselect", "chime"}
+                 "modeselect", "chime",
+                 "switch", "pumpconfigurationandcontrol"}
 
 def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
            echo=False, null_read=False, chip_cluster=None, urc_chip_attr=None,
@@ -285,6 +286,44 @@ BATCHES = {
                    controller=("no_forward", ["play-chime-sound"], {"rc0": True})),
         ], setup=("setup", ["AT+MTCHIMESOUNDS=%(ep)d,7,\"Ding\""],
                   ("chime", "installed-chime-sounds", ["Ding"]))),
+    ],
+    # Batch 5a (catalogue batch 5a design spec section 3): the six ember-only
+    # types in registry order, endpoints 2-7 behind the anchor. Existing row
+    # kinds only. The pump and the room AC share one featureless OnOff list;
+    # their OnOff FeatureMaps (0 and 2) prove the seed table's per-type
+    # qualifier.
+    "mg24-batch5a": [
+        _multi("0x002D", "air purifier", 2, "fancontrol", [
+            _check(0x0202, 0x0002, "percent-setting", 30,
+                   controller=("write", ["write", "percent-setting", "70"],
+                               (0x0202, 0x0002, 70))),
+        ]),
+        _type("0x010F", "mounted on/off control", 2, "onoff", 6, 0, "on-off", 1, parse="bool",
+              controller=("command", ["off"], 0)),
+        _type("0x0110", "mounted dimmable load control", 2, "levelcontrol", 8, 0, "current-level", 100,
+              controller=("command", ["move-to-level-with-on-off", "200", "0", "0", "0"], 200)),
+        _multi("0x000F", "generic switch", 3, "switch", [
+            _check(0x003B, 0x0001, "current-position", 1),
+            _check(0x003B, 0x0000, "number-of-positions", 2, at_cmd="AT+MTSWITCH=%(ep)d"),
+            _check(0x003B, 0x0001, "current-position", 1,
+                   controller=("at_refused", ["AT+MTSWITCH=%(ep)d,1"], 1)),
+        ], extra_reads=[("read-event", "initial-press"), ("read", "feature-map", 2)]),
+        _multi("0x0303", "pump", 3, "onoff", [
+            _check(6, 0, "on-off", 1, parse="bool",
+                   controller=("command", ["off"], (6, 0, 0))),
+            _check(0x0200, 0x0020, "operation-mode", 0,
+                   chip_cluster="pumpconfigurationandcontrol",
+                   controller=("write", ["write", "operation-mode", "1"],
+                               (0x0200, 0x0020, 1))),
+        ], extra_reads=[("read", "feature-map", 0)]),
+        _multi("0x0072", "room air conditioner", 3, "onoff", [
+            _check(6, 0, "on-off", 1, parse="bool",
+                   controller=("command", ["off"], (6, 0, 0))),
+            _check(0x0201, 0x0012, "occupied-heating-setpoint", 2000,
+                   chip_cluster="thermostat",
+                   controller=("command", ["setpoint-raise-lower", "0", "10"],
+                               (0x0201, 0x0012, 2100))),
+        ], extra_reads=[("read", "feature-map", 2)]),
     ],
 }
 

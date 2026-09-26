@@ -1719,5 +1719,147 @@ class TestBatch4RowNames(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
 
 
+BATCH5A = ["0x002D", "0x010F", "0x0110", "0x000F", "0x0303", "0x0072"]
+
+
+class TestBatch5aTable(unittest.TestCase):
+    def test_batch5a_lists_every_type_once_after_the_anchor(self):
+        comp = P.composition_for("mg24-batch5a")
+        self.assertEqual(comp, [(1, "0x0100"), (2, "0x002D"), (3, "0x010F"),
+                                (4, "0x0110"), (5, "0x000F"), (6, "0x0303"),
+                                (7, "0x0072")])
+
+    def test_revisions_match_the_registry(self):
+        self.assertEqual([t["revision"] for t in P.BATCHES["mg24-batch5a"]],
+                         [2, 2, 2, 3, 3, 3])
+
+    def test_generic_switch_checks(self):
+        t = [x for x in P.BATCHES["mg24-batch5a"] if x["devtype"] == "0x000F"][0]
+        self.assertEqual([(c["cluster"], c["attr"]) for c in t["checks"]],
+                         [(59, 1), (59, 0), (59, 1)])
+        self.assertIsNone(t["checks"][0]["controller"])
+        self.assertEqual(t["checks"][1]["at_cmd"], "AT+MTSWITCH=%(ep)d")
+        self.assertIsNone(t["checks"][1]["controller"])
+        self.assertEqual(t["checks"][2]["controller"],
+                         ("at_refused", ["AT+MTSWITCH=%(ep)d,1"], 1))
+
+    def test_generic_switch_extra_reads(self):
+        t = [x for x in P.BATCHES["mg24-batch5a"] if x["devtype"] == "0x000F"][0]
+        self.assertEqual(t["extra_reads"],
+                         [("read-event", "initial-press"),
+                          ("read", "feature-map", 2)])
+
+    def test_pump_checks_and_extra_reads(self):
+        t = [x for x in P.BATCHES["mg24-batch5a"] if x["devtype"] == "0x0303"][0]
+        self.assertEqual([(c["cluster"], c["attr"]) for c in t["checks"]],
+                         [(6, 0), (512, 32)])
+        self.assertEqual(t["checks"][1]["chip_cluster"],
+                         "pumpconfigurationandcontrol")
+        self.assertEqual(t["checks"][1]["controller"][0], "write")
+        self.assertEqual(t["checks"][1]["controller"][2], (512, 32, 1))
+        self.assertEqual(t["extra_reads"], [("read", "feature-map", 0)])
+
+    def test_room_ac_checks_and_extra_reads(self):
+        t = [x for x in P.BATCHES["mg24-batch5a"]
+             if x["devtype"] == "0x0072"][0]
+        self.assertEqual([(c["cluster"], c["attr"]) for c in t["checks"]],
+                         [(6, 0), (513, 18)])
+        self.assertEqual(t["checks"][1]["chip_cluster"], "thermostat")
+        self.assertEqual(t["checks"][1]["controller"][2], (513, 18, 2100))
+        self.assertEqual(t["extra_reads"], [("read", "feature-map", 2)])
+
+    def test_chip_clusters_gains_the_batch5a_names(self):
+        self.assertIn("switch", P.CHIP_CLUSTERS)
+        self.assertIn("pumpconfigurationandcontrol", P.CHIP_CLUSTERS)
+
+
+class _Batch5aChip(_Batch4Chip):
+    """_Batch4Chip widened to the batch 5a read shapes: the extra_reads
+    rows (feature-map, the switch's initial-press read-event) pass on the
+    table's own value, and every write step's controller read (percent-
+    setting, on-off, current-level, current-position, number-of-positions,
+    operation-mode, occupied-heating-setpoint) passes on the controller's
+    URC value -- the value the device holds after the controller action,
+    the way the row's read-back row asserts it."""
+
+    def _read_value(self, t, attr):
+        for c in t["checks"]:
+            if c["chip_attr"] == attr:
+                if c["controller"] is not None:
+                    want = c["controller"][2][2]
+                else:
+                    want = c["at_value"]
+                return (want != 0) if c["parse"] == "bool" else want
+        return None
+
+    def run(self, args, timeout=None):
+        if len(args) >= 4 and args[1] in ("read", "read-event"):
+            if args[1] == "read-event":
+                name = args[2].replace("-", " ").title().replace(" ", "")
+                return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: 1\n"
+                           % name)
+            body = "0"
+            for (ep, dt), t in zip(P.composition_for("mg24-batch5a")[1:],
+                                   P.rows_for("mg24-batch5a")):
+                if int(ep) == int(args[-1]) and t["devtype"] == dt:
+                    body = str(self._read_value(t, args[2]))
+                    break
+            return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: %s\n"
+                       % (args[2].replace("-", ""), body))
+        return super().run(args, timeout=timeout)
+
+
+class _Batch5aLink(_RefusedLink):
+    """A _RefusedLink that refuses the generic switch's Instance-served
+    write AT+MTSWITCH=<ep>,1 with +MTERR:1 (the table's at_refused code).
+    _RefusedLink's command() is the one that answers the refused write;
+    every other line answers as _VerdictLink does."""
+
+
+class TestBatch5aRowNames(unittest.TestCase):
+    def _fake_run_names(self):
+        # Running prove_endpoint over all six batch 5a types with the
+        # fakes (as TestBatch4RowNames does for batch 4): one link per
+        # endpoint keeps each endpoint's queue clean, the chip's forward
+        # follows the endpoint, and the chip's read rows pass on the
+        # table's values so the names come from the table, not from the
+        # answers. Returns the row names, results first, N/A after.
+        comp = P.composition_for("mg24-batch5a")
+        names = []
+        for (ep, dev), t in zip(comp[1:], P.rows_for("mg24-batch5a")):
+            link = _Batch5aLink("AT+MTSWITCH=%d,1" % ep, 1)
+            chip = _Batch5aChip(link=link, ep=ep, devtype=t["devtype"],
+                                revision=t["revision"])
+            saved = H._threaded_chip_call
+            H._threaded_chip_call = chip.chip_call
+            try:
+                s = _FakeSuite()
+                P.prove_endpoint(link, chip, s, "0x4845", ep, t)
+            finally:
+                H._threaded_chip_call = saved
+            names += [n for n, _ in s.results]
+            names += [n for n, _ in s.na]
+        return names
+
+    def test_fake_run_yields_no_duplicate_name(self):
+        # The generic switch's two current-position checks share one
+        # attribute (the second carries the at_refused suffix) and the
+        # pump and the room air conditioner both prove the same OnOff
+        # on-off attribute: the per-type tag and the kind's suffixes must
+        # disambiguate every row.
+        names = self._fake_run_names()
+        self.assertGreater(len(names), 0)
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_the_bench_rows_the_brief_names_occur(self):
+        names = set(self._fake_run_names())
+        for name in ("0x000F generic switch ep5 current-position AT write"
+                     " refused AT+MTSWITCH=5,1 -> +MTERR:1",
+                     "0x000F generic switch ep5 initial-press event present",
+                     "0x0303 pump ep6 feature-map = 0",
+                     "0x0072 room air conditioner ep7 feature-map = 2"):
+            self.assertIn(name, names)
+
+
 if __name__ == "__main__":
     unittest.main()
