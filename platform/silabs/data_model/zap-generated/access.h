@@ -97,6 +97,7 @@
     0x00000101, /* Cluster: Door Lock, Attribute: AutoRelockTime, Privilege: manage */ \
     0x00000101, /* Cluster: Door Lock, Attribute: OperatingMode, Privilege: manage */ \
     0x00000102, /* Cluster: Window Covering, Attribute: Mode, Privilege: manage */ \
+    0x00000200, /* Cluster: Pump Configuration and Control, Attribute: OperationMode, Privilege: manage */ \
     0x00000201, /* Cluster: Thermostat, Attribute: MinHeatSetpointLimit, Privilege: manage */ \
     0x00000201, /* Cluster: Thermostat, Attribute: MaxHeatSetpointLimit, Privilege: manage */ \
     0x00000201, /* Cluster: Thermostat, Attribute: MinCoolSetpointLimit, Privilege: manage */ \
@@ -120,6 +121,7 @@
     0x00000023, /* Cluster: Door Lock, Attribute: AutoRelockTime, Privilege: manage */ \
     0x00000025, /* Cluster: Door Lock, Attribute: OperatingMode, Privilege: manage */ \
     0x00000017, /* Cluster: Window Covering, Attribute: Mode, Privilege: manage */ \
+    0x00000020, /* Cluster: Pump Configuration and Control, Attribute: OperationMode, Privilege: manage */ \
     0x00000015, /* Cluster: Thermostat, Attribute: MinHeatSetpointLimit, Privilege: manage */ \
     0x00000016, /* Cluster: Thermostat, Attribute: MaxHeatSetpointLimit, Privilege: manage */ \
     0x00000017, /* Cluster: Thermostat, Attribute: MinCoolSetpointLimit, Privilege: manage */ \
@@ -143,6 +145,7 @@
     chip::Access::Privilege::kManage, /* Cluster: Door Lock, Attribute: AutoRelockTime, Privilege: manage */ \
     chip::Access::Privilege::kManage, /* Cluster: Door Lock, Attribute: OperatingMode, Privilege: manage */ \
     chip::Access::Privilege::kManage, /* Cluster: Window Covering, Attribute: Mode, Privilege: manage */ \
+    chip::Access::Privilege::kManage, /* Cluster: Pump Configuration and Control, Attribute: OperationMode, Privilege: manage */ \
     chip::Access::Privilege::kManage, /* Cluster: Thermostat, Attribute: MinHeatSetpointLimit, Privilege: manage */ \
     chip::Access::Privilege::kManage, /* Cluster: Thermostat, Attribute: MaxHeatSetpointLimit, Privilege: manage */ \
     chip::Access::Privilege::kManage, /* Cluster: Thermostat, Attribute: MinCoolSetpointLimit, Privilege: manage */ \

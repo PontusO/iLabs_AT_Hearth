@@ -88,6 +88,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::PressureMeasurement::Id:
         emberAfPressureMeasurementClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::PumpConfigurationAndControl::Id:
+        emberAfPumpConfigurationAndControlClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::RelativeHumidityMeasurement::Id:
         emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
         break;
@@ -96,6 +99,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
         break;
      case  app::Clusters::SoftwareDiagnostics::Id:
         emberAfSoftwareDiagnosticsClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::Switch::Id:
+        emberAfSwitchClusterInitCallback(endpoint);
         break;
      case  app::Clusters::TemperatureMeasurement::Id:
         emberAfTemperatureMeasurementClusterInitCallback(endpoint);

@@ -8670,7 +8670,7 @@
           "mfgCode": null,
           "define": "SWITCH_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "NumberOfPositions",
@@ -8801,7 +8801,7 @@
           "mfgCode": null,
           "define": "PUMP_CONFIGURATION_AND_CONTROL_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "MaxPressure",

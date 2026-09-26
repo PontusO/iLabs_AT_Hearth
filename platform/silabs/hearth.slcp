@@ -366,6 +366,10 @@ component:
   - id: matter_identify
   - id: matter_network_commissioning
   - id: matter_on_off
+  # Catalogue batch 5a (2026-09-26): the pump and the switch.
+  # No SDK patch: neither cluster is code-driven.
+  - id: matter_pump_configuration_and_control
+  - id: matter_switch
   # Catalogue batch 1 (2026-09-22): the three clusters of the batch that have a
   # server. LevelControl for the dimmable light and plug (commands MoveToLevel
   # and friends), BooleanState for the four sensors (a code-driven cluster; the
