@@ -1034,10 +1034,11 @@ which is what `app_init()` creates.
 
 ### Source layout: mt_devtypes_sl.cpp and its fragments
 
-Its static data (tables, registry, arena and seeds) lives in six `port/` fragments, `#include`d in this order:
+Its static data (tables, registry, arena and seeds) lives in seven `port/` fragments, `#include`d in this order:
 `mt_devtypes_sl_tables_core.inc` (device tables: milestone types and catalogue
 batch 1), `mt_devtypes_sl_tables_b2.inc` (batch 2),
 `mt_devtypes_sl_tables_b3.inc` (batch 3),
+`mt_devtypes_sl_tables_b4.inc` (batch 4),
 `mt_devtypes_sl_registry.inc` (the parenting policy and the registry),
 `mt_devtypes_sl_arena.inc` (the external attribute store, the endpoint arena,
 its sizing and floor) and `mt_devtypes_sl_seeds.inc` (the seed table and
@@ -1049,8 +1050,11 @@ sizes, identical object disassembly and .rodata (the debug sections and the
 SDK's build stamp differ); the fragments are not in `hearth.slcp`. Convention: each
 catalogue batch's device tables go in a new `mt_devtypes_sl_tables_bN.inc`
 included after the last tables fragment and before `mt_devtypes_sl_registry.inc`,
-and its new bridge code goes in its own file beside
-`mt_matter_sl.cpp` (batch 4 decides its linkage).
+its new bridge code goes in its own `mt_matter_sl_bN.inc`, included at the
+end of `mt_matter_sl.cpp` inside the same translation unit (batch 4's
+ruling: the bridge code needs `obj_new`, the pair helpers and the
+Instance-served table, all file-local there), and the batch's registry
+rows, floor terms and seed rows go into the existing fragments.
 
 ### Port sections: what has transferred from the nRF arm
 
@@ -1064,6 +1068,8 @@ index, and a round that changes one arm finds the other through it.
 | commissioning state, network, Thread | `platform/nrf54l15/port/mt_matter_zephyr.cpp` 388-602 | `port/mt_matter_sl.cpp` | round 2 task 4 |
 | the live endpoint table | `mt_matter_zephyr.cpp` 604-663 | `port/mt_matter_sl.cpp` | round 2 task 5 |
 | the attribute bridge and the `+MTATTR` URC | `mt_matter_zephyr.cpp` 665-1505 | `port/mt_matter_sl.cpp` | round 2 task 6 |
+| the cluster-object arena's pair and Instance helpers | `mt_matter_zephyr.cpp` 290-384 | `port/mt_matter_sl.cpp` | catalogue batch 4 |
+| the smoke/CO, OperationalState, mode select and chime bridge | `mt_matter_zephyr.cpp` 1894-3121, without the refrigerator alarm arm and the oven cavity and RVC branches | `port/mt_matter_sl_b4.inc` | catalogue batch 4 |
 | shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
@@ -1083,13 +1089,21 @@ index, and a round that changes one arm finds the other through it.
 | air quality sensor (0x002C) | `mt_devtypes_zephyr.cpp` 1200-1247 | `port/mt_devtypes_sl_tables_b2.inc` | catalogue batch 2 |
 | door lock (0x000A) | `mt_devtypes_zephyr.cpp` 1248-1357 | `port/mt_devtypes_sl_tables_b3.inc` | catalogue batch 3 |
 | water valve (0x0042) | `mt_devtypes_zephyr.cpp` 1358-1484 | `port/mt_devtypes_sl_tables_b3.inc` | catalogue batch 3 |
+| power source (0x0011) | `mt_devtypes_zephyr.cpp` 1485-1589 | `port/mt_devtypes_sl_tables_b4.inc` | catalogue batch 4 |
+| smoke/CO alarm (0x0076) | `mt_devtypes_zephyr.cpp` 1591-1671 | `port/mt_devtypes_sl_tables_b4.inc` | catalogue batch 4 |
+| laundry washer, dishwasher, laundry dryer (0x0073, 0x0075, 0x007C) | `mt_devtypes_zephyr.cpp` 1673-1818 | `port/mt_devtypes_sl_tables_b4.inc` | catalogue batch 4 |
+| mode select (0x0027) | `mt_devtypes_zephyr.cpp` 1820-1905 | `port/mt_devtypes_sl_tables_b4.inc` | catalogue batch 4 |
+| chime (0x0146) | `mt_devtypes_zephyr.cpp` 1907-2006 | `port/mt_devtypes_sl_tables_b4.inc` | catalogue batch 4 |
 | the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl_arena.inc` | round 2 task 5 |
 | the endpoint block arena and its sizing | `mt_devtypes_zephyr.cpp` 4659-5978 | `port/mt_devtypes_sl_arena.inc` | round 2 task 5 |
+| the block's type-conditional stores and `store_walk()` | `mt_devtypes_zephyr.cpp` 5032-5220 | `port/mt_devtypes_sl_arena.inc` | catalogue batch 4 |
 | the seed table and `seed_slots()` | `mt_devtypes_zephyr.cpp` 5979-7005 | `port/mt_devtypes_sl_seeds.inc` | round 2 task 5 |
 | the ember cluster init hook | `mt_devtypes_zephyr.cpp` 7006-7051 | `port/mt_devtypes_sl.cpp` | catalogue batch 1 (fix round 2, B525) |
 | the ColorControl cluster init hook | the second override beside the first, this port's own | `port/mt_devtypes_sl.cpp` | catalogue batch 2 |
+| the ModeSelect cluster init hook | the third override, this port's own | `port/mt_devtypes_sl.cpp` | catalogue batch 4 |
+| `mt_dyn_mode_store()` and `mt_dyn_chime_store()` | `mt_devtypes_zephyr.cpp` 7084-7116 | `port/mt_devtypes_sl.cpp` | catalogue batch 4 |
 | `mt_dyn_attr_slot()` | `mt_devtypes_zephyr.cpp` 7052-7069 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the `mt_devtypes.h` quartet | `mt_devtypes_zephyr.cpp` 7189-8413 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
 | the ember external-attribute hooks | `mt_devtypes_zephyr.cpp` 8415-8451 | `port/mt_devtypes_sl.cpp` | round 2 task 5 |
@@ -2420,6 +2434,87 @@ differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
 
+### Catalogue batch 4: the fabric proof, Phase 1 and 2 and the batch's memory record
+
+The batch image, built 2026-09-26 from the committed tree at `3ba055b` in
+`~/silabs/work/hearth-matter-b4`, a fresh `slc generate` with a `make clean`
+inside it, **0 warnings**. The later commits touch only `test/`, the result
+files and this README, so the result files' `fw_repo_head` (`54fab27`) is
+later than the image, the way batch 2's record explains.
+
+#### The proof: 142 passed, 0 failed, 6 not applicable
+
+```
+$ python3 test/mt_catalogue_proof.py \
+      --port /dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00 \
+      --bridge cpico --batch mg24-batch4 \
+      --openocd-config platform/silabs/mg24-swd.cfg \
+      --baseline platform/silabs/core-batch4.json
+```
+
+Committed run, 2026-09-26: 142 passed, 0 failed, 6 not applicable, the same
+as the trial run before it. The first trial on the same image (114 passed, 34
+failed) failed only on proof-script defects, fixed in `54fab27` before the
+committed run: OperationalState is attribute 4 and its forwards carry no
+payload, the refusal row sends no write before the refused one, the setup
+lines run before the type's checks, and the chime's SelectedChime and Enabled
+are attributes 1 and 2. The firmware was unchanged between the runs.
+
+What the rows prove. Power source: BatPercentRemaining through `AT+MTATTR`,
+FeatureMap 2. Smoke/CO: `AT+MTALARM` read by the controller; the self-test
+request forwarded notify-only (seq 0, never answered), then the host's
+`AT+MTALARM=<ep>,5,0` and the SelfTestComplete event. Each of the washer,
+dishwasher and dryer: `AT+MTOPSTATE` read by the controller; Start allowed
+(ErrorStateID 0); Pause denied (ErrorStateID 2, and chip-tool still exits 0);
+Stop unanswered (`+MTCMDTO`, ErrorStateID 2); Pause from Stopped refused by
+the server with no forward (ErrorStateID 3); a host write of
+OperationalState refused with `+MTERR:11` (Instance-served). Mode select:
+the `AT+MTMODES` list read by the controller, change-to-mode raising
+`+MTATTR` on CurrentMode. Chime: the `AT+MTCHIMESOUNDS` list read by the
+controller, `AT+MTCHIME` select and enable, play-chime-sound forwarded with
+SelectedChime 7 as its payload, and no forward once disabled.
+
+#### Phase 1 and 2 on the batch image
+
+Phase 1: 292 passed, 4 failed, the same four rows. Phase 2: 98 passed, 2
+failed (B512's two rows), 1 n/a, row-identical; 2.9's cold boot by the hub
+recipe. Both result files differ from batch 3's only in `fw_repo_head` and
+the timestamp.
+
+#### The batch's memory record
+
+`arm-none-eabi-size` at `3ba055b`, against batch 3's `7a28411`: text 923,300
+(905,556: +17,744); `.bss` 137,208 (132,472: +4,736, of which +3,968 is the
+cluster-object arena growing from 128 to 4,096 B, +128 the endpoint arena
+growing from 9,600 to 9,728 B, and the remaining 640 B the five new servers'
+static state, not measured separately); `.memory_manager_heap` 116,432
+(121,184: -4,752).
+
+Free heap at `+MTREADY`: 75,752 B at every boot of both proof sessions,
+4,752 B below batch 3's 80,504: exactly the heap section's shrink.
+
+**The endpoint arena is 9,728 B, not the design's 9,600.** The per-type block
+sizes are priced by the nRF's count, which over-counts metadata-only
+attributes (mode select 608 B against an exact 576), because an exact count
+cannot be `constexpr` over this port's `const` tables; sixteen of the widest
+block is 16 x 608 = 9,728. The ruling is in the batch plan's execution
+record.
+
+Arenas: the proof composition (the anchor and the seven types) used 1,912 of
+9,728 B endpoint arena, 8 of 16 endpoints live, and 824 of 4,096 B object
+arena (three OperationalState pairs at 256 B and one chime pair at 56 B);
+restored 0x0100,0x0302: 352 B and 0 B. Task 4's smoke: sixteen laundry
+washers fill the object arena, 4,096 of 4,096 B, nothing refused (DE555
+proven). Task 6's smoke: sixteen chimes use 896 of 4,096 B object arena and
+5,632 of 9,728 B endpoint arena.
+
+NVM3 (the chime persists SelectedChime and Enabled through the SDK's
+SafeAttributePersistenceProvider): 6,936 B free at the first boot of the
+trial session and 704 B at its last (erase count 11 throughout); after a
+repack (erase count 12), 4,720 B down to 1,380 B across the committed run.
+Nothing was refused, and the low stays above the 176 B the NVM3 soak row
+records.
+
 ### Catalogue batch 3: the fabric proof, Phase 1 and 2 and the batch's memory record
 
 The batch image, built 2026-09-25 from the committed tree at `7a28411` in
@@ -2475,17 +2570,25 @@ and 0 B.
 
 ### The cluster-object arena
 
-Since catalogue batch 3 (2026-09-25), minimal (graph DE541): one `hearth_arena` over
-`HEARTH_OBJ_ARENA_BYTES` = 128 (`port/mt_port_ids.h`), with `obj_new` as its only
-helper (`port/mt_matter_sl.cpp`). Its only customer is the water valve's
-`HearthValveDelegate`, 8 B (a 4-byte vptr plus a 2-byte `EndpointId` plus 2 B of
-padding), sixteen of them exactly, pinned by the two static_asserts. The create
-path claims a valve's delegate before any endpoint memory is spent and registers
-it with `SetDefaultDelegate` after `emberAfSetDynamicEndpoint`; its boot line,
-"cluster-object arena: N of 128 B handed out", follows the endpoint arena's.
-Measured on the bench (build 7a28411, 2026-09-25): 8 of 128 B with one valve,
-128 of 128 B with sixteen, nothing refused; `.bss` +128 B exactly. Batch 4 adds
-`obj_pair_new` and `obj_inst_new` and raises the budget.
+Since catalogue batch 4 (2026-09-26), sized to the strong promise (graph DE555):
+one `hearth_arena` over `HEARTH_OBJ_ARENA_BYTES` = 4,096
+(`port/mt_port_ids.h`), sixteen of the largest per-endpoint object, the
+OperationalState delegate and Instance pair at 256 B. The helpers live in
+`port/mt_matter_sl.cpp`: `obj_new` (batch 3), and `obj_pair_new`,
+`obj_inst_storage` and `obj_inst_new` (nRF `mt_matter_zephyr.cpp` 290-384,
+over this port's bump arena, where the cost is the payload rounded to 8 with
+no header). Its customers are the water valve's delegate (8 B), the washer,
+dishwasher and dryer's OperationalState pair (256 B) and the chime's
+Delegate and ChimeServer pair (56 B); each endpoint draws at most one
+object. `static_assert`s pin the three sizes and the budget as sixteen of the
+largest (the valve's exact-sixteen assert became "at most"). The create path
+claims an endpoint's object before any endpoint memory is spent and
+constructs it after `emberAfSetDynamicEndpoint`; a chime's pair is handed
+back on any later failure. The boot line reads "cluster-object arena: N of
+4096 B handed out". Measured on the bench (build 3ba055b, 2026-09-26):
+sixteen washers 4,096 of 4,096 B, nothing refused; `.bss` +3,968 B over
+batch 3's arena. History: batch 3 (2026-09-25, DE541) built it minimal, 128
+B with `obj_new` only, sixteen valves exactly.
 
 ### Catalogue batch 2: the fabric proof, Phase 1 and 2 and the batch's memory record
 
@@ -4994,8 +5097,9 @@ are marked there.
 ### The catalogue
 
 The registry carries all 52 rows and the gate predicates; this build constructs
-fourteen of them (round 2's two milestone types plus catalogue batch 1's
-twelve). The rest arrive in the nRF arm's own order, batch by batch, each
+twenty-nine of them (round 2's two milestone types, catalogue batch 1's twelve,
+batch 2's six, batch 3's two and batch 4's seven). The rest arrive in the nRF
+arm's own order, batch by batch, each
 copying its sections out of `platform/nrf54l15/port/mt_devtypes_zephyr.cpp` at
 the line ranges "Port sections" lists, adding its cluster components to
 `hearth.slcp` and its clusters to the catalogue endpoint, and recording RAM in
@@ -5006,7 +5110,7 @@ the heap and the arenas.
 | 1 | attribute-only, 14 types | nothing structural. **Built 2026-09-22**, twelve types: the registry's fourteen batch-1 ids include the two milestone types round 2 already built (0x0100, 0x0302). Proof file `core-batch1.json`; see "Catalogue batch 1" under "Measured" |
 | 2 | server-interaction, 6 types | nothing structural: **built 2026-09-24**, six types, no delegate and no object arena (F528). Proof file `core-batch2.json`; see "Catalogue batch 2" under "Measured" |
 | 3 | command-verdict, 2 types | **built 2026-09-25**, two types, the `+MTCMD` verdict path's first run on this port, the cluster-object arena (minimal, DE541) and the first delegate (the valve). Proof file `core-batch3.json`; see "Catalogue batch 3" under "Measured" |
-| 4 | appliance, 7 types | OperationalState and Chime carve-out rows; brings obj_pair_new, obj_inst_new and a larger object budget (DE541) |
+| 4 | appliance, 7 types | **built 2026-09-26**, seven types: the OperationalState and Chime Instance-served rows, `obj_pair_new` and `obj_inst_new` with the object arena at 4,096 B (DE555), and the endpoint block's mode select and chime stores. Proof file `core-batch4.json`; see "Catalogue batch 4" under "Measured" |
 | 5 | standalone, 7 types | the Rvc mode rows |
 | 7a | energy foundation, 6 types | the meter Instance pool, ElectricalPowerMeasurement, DEM |
 | 7b | delegate-served pair, 2 types | WaterHeaterManagement |
