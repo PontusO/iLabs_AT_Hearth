@@ -78,10 +78,13 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * were deliberately not copied: they price Zephyr's sys_heap chunk header
  * and bucket table.
  *
- * 9,600 is 16 x 600, i.e. kServiceableEndpoints blocks of the widest device
- * type this build declares (the extended colour light: 5 clusters and 36
- * attribute slots, 596 payload bytes, 600 after rounding to 8). Catalogue
- * batch 2 moved the widest from batch 1's dimmable light and dimmable
+ * 9,728 is 16 x 608, i.e. kServiceableEndpoints blocks of the widest device
+ * type this build declares (the mode select, catalogue batch 4: 4 clusters
+ * and 11 attribute slots, 192 of slots plus the host-fed mode store's 436
+ * bytes, 608 payload, already a multiple of 8). Catalogue batch 3's widest
+ * was the extended colour light (5 clusters, 36 attribute slots, 596
+ * payload bytes, 600 after rounding to 8); catalogue batch 2 moved the
+ * widest from batch 1's dimmable light and dimmable
  * plug-in unit (which share a cluster list: 4 clusters, 20 slots, 336
  * payload, and 336 is already a multiple of 8): 536 for the colour
  * temperature light, 256 for the thermostat, 224 for the window covering,
@@ -97,12 +100,14 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * 2026-09-22, made with the arithmetic in front of it, +2,304 B of .bss for
  * a capacity claim that needs no footnote. Catalogue batch 2 kept it on the
  * same terms: +4,224 B of .bss, raised to 9,600 rather than lowered to the
- * nRF's floor, the ruling of 2026-09-24. The floor assertion in
- * mt_devtypes_sl.cpp is written to FAIL when a wider device type is added,
- * so the batch that adds one has to choose between raising this number and
- * lowering the promise, in the open.
+ * nRF's floor, the ruling of 2026-09-24. Catalogue batch 4 paid the same
+ * terms again for its store-bearing mode select: +128 B of .bss, raised to
+ * 9,728 rather than lowered to the nRF's floor, the ruling of 2026-09-26.
+ * The floor assertion in mt_devtypes_sl.cpp is written to FAIL when a
+ * wider device type is added, so the batch that adds one has to choose
+ * between raising this number and lowering the promise, in the open.
  */
-#define HEARTH_EP_ARENA_BYTES 9600
+#define HEARTH_EP_ARENA_BYTES 9728
 
 /*
  * The cluster-object arena.

@@ -53,6 +53,8 @@
  *   the ember cluster init hook        nRF 7006-7051  the pattern, for
  *                                                     LevelControl not DoorLock
  *   mt_dyn_attr_slot()                 nRF 7052-7069  whole
+ *   mt_dyn_mode_store() and
+ *     mt_dyn_chime_store()             nRF 7084-7116  whole
  *   the mt_devtypes.h quartet          nRF 7189-8413  the twenty ported types
  *   the ember external-attribute hooks nRF 8415-8451  whole
  *
@@ -75,8 +77,8 @@
  * AT+MTEP=0x000A answer +MTERR:6 (unknown device type), which is a different
  * and wrong statement about a product whose wire contract names all 52.
  *
- * TWO SECTIONS OF THE nRF FILE ARE DELIBERATELY ABSENT, both because every
- * consumer they have belongs to an unported device type:
+ * ONE SECTION OF THE nRF FILE IS DELIBERATELY ABSENT, because every
+ * consumer it has belongs to an unported device type:
  *
  *   - The DE407 quiet table (nRF 4924-4990, kQuietNoSlot and
  *     attr_quiet_no_slot): every row in it is an
@@ -86,12 +88,11 @@
  *     unconditional here, which is the ruling's intent: the table silences
  *     the shout one proven pair at a time and never by type, so it arrives
  *     with the batch that declares the first such pair.
- *   - The type-conditional trailing stores (nRF 5032-5197, kStoreWalk,
- *     store_walk, store_offset and the four sizeof/alignof assertions).
- *     Mode select, chime, the ModeBase families and the TemperatureLevel
- *     cabinet are the only device types that carry one. store_bytes() stays
- *     as the one place the block layout asks the question, so the batch that
- *     ports the first store-bearing type adds a TABLE and not a layout.
+ * The type-conditional trailing stores (nRF 5032-5197, kStoreWalk,
+ * store_walk, store_offset and the four sizeof/alignof assertions) arrived
+ * with catalogue batch 4, when the first store-bearing type, the mode
+ * select, did: they now live in mt_devtypes_sl_arena.inc, and
+ * store_bytes() is the one place the block layout asks the question.
  *
  * The cluster-object arena lives in port/mt_matter_sl.cpp (the
  * hearth_arena block at the top of the file), and its budget is pinned by
@@ -118,6 +119,8 @@ extern "C" {
  * FeatureMap seed reads instead of transcribing the bits again. */
 #include "mt_matter.h"
 }
+#include <new>
+
 #include "hearth_log.h"
 #include "mt_dyn_store.h"
 #include "mt_port_ids.h"
@@ -423,6 +426,21 @@ void emberAfColorControlClusterInitCallback(EndpointId endpoint)
     emberAfColorControlClusterServerInitCallback(endpoint);
 }
 
+/* ModeSelect: its ServerInit (reached only through the functions array
+ * DECLARE_DYNAMIC_CLUSTER nulls) is what applies StartUpMode; on this
+ * composition it finds no StartUpMode and does nothing, and it runs anyway
+ * so the endpoint boots right the day StartUpMode is declared (nRF
+ * mt_devtypes_zephyr.cpp 8195-8203 calls it by hand after create).
+ * Endpoint 240's own functions array runs it (ModeSelect is in the tree's
+ * ClustersWithInitFunctions), so it returns at once there. */
+void emberAfModeSelectClusterInitCallback(EndpointId endpoint)
+{
+    if (endpoint == kCatalogueEndpointId) {
+        return;
+    }
+    emberAfModeSelectClusterServerInitCallback(endpoint);
+}
+
 /*
  * DoorLock's per-endpoint state is the SDK's own mEndpointCtx array,
  * filled only by DoorLockServer::InitEndpoint(), which
@@ -477,6 +495,44 @@ bool mt_dyn_attr_slot(EndpointId ep, ClusterId cluster, AttributeId attr, uint8_
     return false;
 }
 
+/* nRF 7084-7116. The two accessors that know the block layout; contract in
+ * mt_dyn_store.h. The offsets come from store_offset(), the same
+ * alignment-correct store_walk the create path places the stores with, so a
+ * writer and its readers place every store identically. */
+mt_mode_store_t *mt_dyn_mode_store(EndpointId ep)
+{
+    for (auto &d : s_dyn) {
+        if (!d.used || d.ep_id != ep) {
+            continue;
+        }
+        if (!type_has_cluster(d.ep_type, ModeSelect::Id)) {
+            return nullptr;
+        }
+        return reinterpret_cast<mt_mode_store_t *>(
+            static_cast<uint8_t *>(d.block) +
+            block_bytes(d.ep_type->clusterCount, d.slot_capacity) +
+            store_offset(d.ep_type, ModeSelect::Id));
+    }
+    return nullptr;
+}
+
+mt_chime_store_t *mt_dyn_chime_store(EndpointId ep)
+{
+    for (auto &d : s_dyn) {
+        if (!d.used || d.ep_id != ep) {
+            continue;
+        }
+        if (!type_has_cluster(d.ep_type, Chime::Id)) {
+            return nullptr;
+        }
+        return reinterpret_cast<mt_chime_store_t *>(
+            static_cast<uint8_t *>(d.block) +
+            block_bytes(d.ep_type->clusterCount, d.slot_capacity) +
+            store_offset(d.ep_type, Chime::Id));
+    }
+    return nullptr;
+}
+
 /*
  * The endpoint arena's occupancy, on the console, once per boot. Called by
  * src/main.cpp's rebuild_composition() after the loop, so the line is
@@ -529,17 +585,6 @@ extern "C" bool mt_devtype_variant_ok(uint32_t devtype_id, uint8_t variant)
 extern "C" bool mt_devtype_parent_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
 {
     return parent_policy_ok(devtype_id, variant, parent_devtype);
-}
-
-/* Does this endpoint type carry cluster id as a server? nRF type_has_cluster. */
-static bool type_has_cluster(const EmberAfEndpointType *ep_type, ClusterId id)
-{
-    for (uint8_t i = 0; i < ep_type->clusterCount; i++) {
-        if (ep_type->cluster[i].clusterId == id) {
-            return true;
-        }
-    }
-    return false;
 }
 
 extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype,
@@ -691,16 +736,15 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * for a cluster whose ServerInit caches per-endpoint state (LevelControl
      * caches Min/MaxLevel, and without the call every transition clamps to
      * 0); it is a no-op for OnOff and TemperatureMeasurement, neither of
-     * which has a ServerInit worth running. This port runs the LevelControl
-     * and ColorControl server inits it needs from the strong
-     * emberAfLevelControlClusterInitCallback() and
-     * emberAfColorControlClusterInitCallback() overrides in this file (the
+     * which has a ServerInit worth running. This port runs the LevelControl,
+     * ColorControl and ModeSelect server inits it needs from the strong
+     * emberAfLevelControlClusterInitCallback(),
+     * emberAfColorControlClusterInitCallback() and
+     * emberAfModeSelectClusterInitCallback() overrides in this file (the
      * hook section above), which the generated dispatch in
      * zap-generated/app/cluster-init-callback.cpp reaches for dynamic
      * endpoints the same way it reaches them for fixed ones, so there is no
-     * call site to carry. ModeSelect's init, the third one the nRF calls by
-     * hand, arrives with batch 4's mode select, the same shape the
-     * ColorControl override already sets.
+     * call site to carry.
      */
 
     /*
@@ -770,6 +814,26 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 4: mode select's manager handout is the two-halves
+     * pattern collapsed to one half. There is no per-endpoint object at
+     * all, only the ONE process-global SupportedModesManager, and
+     * mt_matter_mode_select_manager() both registers it with the SDK
+     * (setSupportedModesManager, an idempotent bare-pointer store, so a
+     * second mode select endpoint re-registering is harmless) and returns
+     * it for this null check. Nothing to do after create: the manager
+     * dispatches on endpoint id internally, and the endpoint learns
+     * nothing the manager needs. Cannot fail today (the accessor returns
+     * a static object's address); checked anyway so a future refactor
+     * that CAN fail aborts before anything is spent, the pool checks'
+     * rule. */
+    if (type_has_cluster(ep_type, ModeSelect::Id)) {
+        if (mt_matter_mode_select_manager() == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: mode select manager unavailable",
+                        (unsigned)devtype_id);
+            return -1;
+        }
+    }
+
     void *block = hearth_arena_alloc(s_ep_arena, want, "endpoint block arena");
     if (block == nullptr) {
         /* hearth_arena_alloc() has already said what was wanted and what was
@@ -787,11 +851,23 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         return -1;
     }
 
-    /* The nRF constructs each block's type-conditional trailing store here,
-     * with placement new, before the endpoint can be served. store_bytes()
-     * is 0 for every device type this build declares, so there is nothing to
-     * construct; the batch that ports a store-bearing type brings the
-     * constructions back with the table. */
+    /* Construct the trailing store(s) before the endpoint can be served:
+     * arena bytes arrive uninitialized, and value-initialization () is
+     * exactly "count 0, entries zeroed, ModeOptionStructs
+     * default-constructed", the empty-list state every reader maps to the
+     * pre-feed no-slot answers (mt_dyn_store.h). Never destroyed, the block
+     * policy; offsets come from store_offset(), the alignment-correct
+     * store_walk shared with the accessors, so writer and readers place
+     * every store identically (nRF 7958-7965). */
+    {
+        uint8_t *region = static_cast<uint8_t *>(block) + base;
+        if (type_has_cluster(ep_type, ModeSelect::Id)) {
+            new (region + store_offset(ep_type, ModeSelect::Id)) mt_mode_store_t();
+        }
+        if (type_has_cluster(ep_type, Chime::Id)) {
+            new (region + store_offset(ep_type, Chime::Id)) mt_chime_store_t();
+        }
+    }
 
     dyn_endpoint &d = s_dyn[index];
     d.type = type;

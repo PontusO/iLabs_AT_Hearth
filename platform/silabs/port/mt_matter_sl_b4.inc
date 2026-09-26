@@ -657,3 +657,178 @@ static int mt_opstate_attr_read_live(uint16_t ep, uint32_t cluster, uint32_t att
     return MT_ATTR_OK;
 }
 
+/* ---- mode select (0x0027) ---------------------------------------------
+ *
+ * ONE process-global manager for the whole device, not a pool: the SDK
+ * fetches it fresh through getSupportedModesManager() on every
+ * SupportedModes read and every ChangeToMode
+ * (mode-select-server.cpp:84, :123, :469), and setSupportedModesManager()
+ * (:62) stores a bare global pointer, so a second mode select endpoint
+ * re-registering it is harmless. The manager dispatches on endpoint id
+ * itself against that endpoint's host-fed store.
+ *
+ * The store (mt_mode_store_t, mt_dyn_store.h) lives in the endpoint's own
+ * heap block since the store reclaim round, reached through
+ * mt_dyn_mode_store(): only a composition that declares mode select
+ * endpoints pays for it, and the .bss pool this section used to hold
+ * (7,040 B for 16 slots) is gone. Capacity did not move: the block heap
+ * serves at most kServiceableEndpoints (16) endpoints, and an endpoint the
+ * create path refused is unaddressable by AT+MTMODES anyway, the
+ * acceptance-versus-capacity split every pool in this file follows. A
+ * fresh store has count 0, which every reader below maps to exactly the
+ * answers the pool's no-used-slot arm used to give, so the wire cannot
+ * tell the storage moved.
+ *
+ * CharSpan lifetime and the in-place rebuild, the C6's argument re-checked
+ * against THIS tree: both the label bytes and the ModeOptionStruct array
+ * live in the endpoint's block, which is allocated once at boot and never
+ * freed (the allocate-only invariant beside K_HEAP_DEFINE in
+ * mt_devtypes_zephyr.cpp), and the struct array is rebuilt IN PLACE on
+ * every AT+MTMODES write to the same store, never reallocated. What rules
+ * out a reader observing a half-rebuilt entry is mutual exclusion, not the
+ * rebuild order: mt_matter_modes_set() holds the StackLock for the whole
+ * rebuild, and the reads run on the CHIP task under the same lock. The SDK
+ * also re-fetches the provider per access rather than caching one, which
+ * rules out a stale provider outliving a rebuild; secondary, the lock is
+ * the guarantee.
+ */
+
+class HearthSupportedModesManager : public chip::app::Clusters::ModeSelect::SupportedModesManager
+{
+private:
+    /*
+     * SupportedModesManager declares its ModeOptionStructType alias BEFORE
+     * its "public:" (supported-modes-manager.h:36), so the name is private
+     * to the base class even though a public virtual's signature uses it:
+     * a derived class inherits the member but not access to the name. The
+     * same private-alias shadow the esp32 platform's own
+     * StaticSupportedModesManager uses, mirrored from the C6.
+     */
+    using ModeOptionStructType = chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type;
+
+public:
+    ModeOptionsProvider getModeOptionsProvider(chip::EndpointId endpointId) const override
+    {
+        mt_mode_store_t *store = mt_dyn_mode_store(endpointId);
+        if (store != nullptr && store->list.count > 0) {
+            return ModeOptionsProvider(store->structs, store->structs + store->list.count);
+        }
+        /* begin == end == nullptr: no store on this endpoint, or the host
+         * has not fed a list yet (count 0, what the pool's unclaimed slot
+         * used to mean), an empty SupportedModes list either way. */
+        return ModeOptionsProvider();
+    }
+
+    chip::Protocols::InteractionModel::Status getModeOptionByMode(
+        chip::EndpointId endpointId, uint8_t mode, const ModeOptionStructType **dataPtr) const override
+    {
+        mt_mode_store_t *store = mt_dyn_mode_store(endpointId);
+        if (store == nullptr || store->list.count == 0) {
+            /* count 0 lands here, NOT in the InvalidCommand arm below:
+             * before the reclaim round an endpoint the host had not fed
+             * had no used pool slot at all and answered UnsupportedCluster,
+             * and a ChangeToMode against a fresh mode select endpoint must
+             * keep answering exactly that. */
+            return chip::Protocols::InteractionModel::Status::UnsupportedCluster;
+        }
+        for (uint8_t i = 0; i < store->list.count; i++) {
+            if (store->structs[i].mode == mode) {
+                *dataPtr = &store->structs[i];
+                return chip::Protocols::InteractionModel::Status::Success;
+            }
+        }
+        return chip::Protocols::InteractionModel::Status::InvalidCommand;
+    }
+};
+static HearthSupportedModesManager s_mode_select_manager;
+
+/*
+ * The accessor doubles as the registration: on this platform there is no
+ * esp_matter init-callback pass to defer to, so the global is (re)set here,
+ * each call, before mt_devtype_create() spends anything on the endpoint.
+ * Idempotent by construction (same pointer every time), and safe at any
+ * point in boot: setSupportedModesManager() is a bare pointer store with
+ * no CHIP state behind it.
+ */
+extern "C" void *mt_matter_mode_select_manager(void)
+{
+    chip::app::Clusters::ModeSelect::setSupportedModesManager(&s_mode_select_manager);
+    return &s_mode_select_manager;
+}
+
+/*
+ * AT+MTMODES bridge (the ModeSelect form). Grammar and content rules are
+ * enforced by cmd_mtmodes() in mt_at.c before this is called; the bounds
+ * re-checked here are defensive. Mirrors the C6's
+ * mt_matter_modes_set() with the ember lookups in place of esp_matter's
+ * and the same terminal MatterReportingAttributeChangeCallback() so an
+ * active subscription sees the new list; CurrentMode is deliberately not
+ * touched here (a controller's ChangeToMode owns it, and the host
+ * observes that as a +MTATTR URC).
+ */
+extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels,
+                                   uint8_t count)
+{
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::ModeSelect::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1 || count > MT_MODES_MAX_COUNT) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_mode_store_t *slot = mt_dyn_mode_store(ep);
+    if (!slot) {
+        /* Cannot happen: the two lookups above proved ep live with a
+         * ModeSelect server, and every such endpoint's block carries its
+         * store from create. Defensive, the role the exhausted pool arm
+         * used to play. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    /* Fix round, review M5: every label is validated BEFORE any entry is
+     * overwritten. The old single loop returned mid-write on a bad
+     * length, leaving entries[0..i-1] holding new bytes while
+     * slot->structs[] still published the previous list's CharSpan
+     * lengths over them: no overrun (everything stays in-buffer), but a
+     * served label could carry a stale tail. Unreachable in practice,
+     * because cmd_mtmodes has already enforced these exact bounds before
+     * the bridge is called; hardened anyway so the defensive check can
+     * never publish a half-written list, rather than relying on a
+     * comment to say why it could not. The chime twin needs no such
+     * split: its names are re-measured with strlen() on every read, not
+     * cached in a span. */
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(labels[i]);
+        if (len < 1 || len > MT_MODES_MAX_LABEL_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+    }
+    for (uint8_t i = 0; i < count; i++) {
+        slot->list.entries[i].mode = modes[i];
+        memcpy(slot->list.entries[i].label, labels[i], strlen(labels[i]) + 1);
+    }
+    slot->list.count = count;
+
+    /* Rebuild the struct array in place, each CharSpan pointing into the
+     * store's own label buffer (block-resident, never freed; the section
+     * comment's lifetime argument); the lock held across this whole
+     * function is what makes the rebuild atomic against CHIP-task readers
+     * (see the section comment). SemanticTags publishes a
+     * default-constructed empty List per entry, mandatory-but-empty-legal. */
+    for (uint8_t i = 0; i < count; i++) {
+        slot->structs[i].mode = slot->list.entries[i].mode;
+        slot->structs[i].label = chip::CharSpan::fromCharString(slot->list.entries[i].label);
+        slot->structs[i].semanticTags = chip::app::DataModel::List<
+            const chip::app::Clusters::ModeSelect::Structs::SemanticTagStruct::Type>();
+    }
+
+    MatterReportingAttributeChangeCallback(
+        ep, chip::app::Clusters::ModeSelect::Id,
+        chip::app::Clusters::ModeSelect::Attributes::SupportedModes::Id);
+    return MT_ATTR_OK;
+}
+

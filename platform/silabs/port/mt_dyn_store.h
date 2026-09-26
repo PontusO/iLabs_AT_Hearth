@@ -14,17 +14,19 @@
  * platform/silabs/port.
  *
  * WHAT DID NOT COME WITH IT, and why, so the next batch does not go looking:
- * the nRF header's four type-conditional store accessors (mt_dyn_mode_store,
- * mt_dyn_chime_store, mt_dyn_mb_store, mt_dyn_temp_levels_store). Each serves
- * a host-fed list belonging to a device type this round does not build (mode
- * select, chime, the ModeBase families, the TemperatureLevel cabinet), and
- * every one of them is dead code without its device type. They arrive with
- * the batch that ports the first store-bearing type, together with the
- * kStoreWalk table mt_devtypes_sl.cpp's store_bytes() stands in for.
+ * the nRF header's remaining type-conditional store accessors (mt_dyn_mb_store
+ * and mt_dyn_temp_levels_store). Each serves a host-fed list belonging to a
+ * device type this round does not build (the ModeBase families, the
+ * TemperatureLevel cabinet), and every one of them is dead code without its
+ * device type. They arrive with the batch that ports the first of those
+ * types. The mode select and chime accessors (mt_dyn_mode_store,
+ * mt_dyn_chime_store) came with catalogue batch 4's mode select (0x0027),
+ * along with the kStoreWalk table mt_devtypes_sl.cpp's store_bytes() walks.
  */
 
 #pragma once
 
+#include <clusters/ModeSelect/Structs.h>
 #include <lib/core/DataModelTypes.h>
 
 #include <stddef.h>
@@ -32,6 +34,18 @@
 #include <string.h>
 
 #include "hearth_log.h"
+
+/* MT_MODES_MAX_COUNT/MT_MODES_MAX_LABEL_LEN, the core-owned bounds the mode
+ * store shape below is sized by. mt_matter.h carries its own extern "C"
+ * guards. */
+#include "mt_matter.h"
+
+/* mt_mode_list_t and mt_chime_store_t: the plain-C store shapes, one
+ * definition shared with the C6 port. This header wraps mt_mode_list_t with
+ * the CHIP structs[] tail below (that half is C++ and cannot live in the
+ * shared header); the chime store needs no wrapping and is used exactly as
+ * mt_stores.h defines it. */
+#include "mt_stores.h"
 
 /*
  * ---- the bump arena ---------------------------------------------------
@@ -146,6 +160,50 @@ inline void *hearth_arena_alloc(hearth_arena &a, size_t bytes, const char *what)
  */
 bool mt_dyn_attr_slot(chip::EndpointId ep, chip::ClusterId cluster, chip::AttributeId attr,
                       uint8_t **data, uint8_t *size);
+
+/*
+ * ---- the type-conditional host-fed stores --------------------------------
+ *
+ * A mode select endpoint's block carries an mt_mode_store_t after its
+ * attribute slots, and a chime endpoint's block an mt_chime_store_t: the
+ * host-fed lists AT+MTMODES and AT+MTCHIMESOUNDS feed and the SDK's
+ * SupportedModesManager reads back. Only the endpoints that ARE those types
+ * pay for them, priced into the block layout in mt_devtypes_sl_arena.inc.
+ *
+ * CharSpan lifetime: mt_mode_store_t's structs[] members point at its own
+ * list.entries[] label bytes. Both live in the endpoint's block, which is
+ * allocated once at boot and never freed (the allocate-only invariant beside
+ * hearth_arena above), so the spans stay valid for the life of the boot.
+ * The in-place rebuild discipline is unchanged: mt_matter_modes_set()
+ * rebuilds structs[] under the StackLock it holds across its whole body, and
+ * the CHIP-task readers run under that same lock.
+ *
+ * mt_mode_entry_t and mt_mode_list_t (the count + entries[] half) come from
+ * mt_stores.h, the shared plain-C definition; this header wraps that list
+ * with the CHIP structs[] tail, which is C++ and cannot live there.
+ * mt_chime_entry_t and mt_chime_store_t come from mt_stores.h unchanged: the
+ * chime store carries no CHIP-typed half, so it needs no wrapper.
+ */
+
+struct mt_mode_store_t {
+    mt_mode_list_t list;
+    chip::app::Clusters::ModeSelect::Structs::ModeOptionStruct::Type structs[MT_MODES_MAX_COUNT];
+};
+
+/*
+ * Locate ep's mode store / chime store through its block. Returns nullptr
+ * when ep is not a live dynamic endpoint OR its device type carries no
+ * such store (no ModeSelect / Chime cluster in its declared cluster list):
+ * the callers' own endpoint and cluster checks fire first on the AT
+ * surface, so a nullptr from here is their defensive
+ * cannot-happen-once-rebuilt arm. The pointer aliases into the endpoint's
+ * arena block and follows mt_dyn_attr_slot()'s locking rules above:
+ * StackLock or the CHIP thread, never kept across a release. The store is
+ * value-initialized (count 0) at endpoint create, before the endpoint is
+ * served.
+ */
+mt_mode_store_t *mt_dyn_mode_store(chip::EndpointId ep);
+mt_chime_store_t *mt_dyn_chime_store(chip::EndpointId ep);
 
 /*
  * Log the endpoint arena's occupancy on the console: handed out, capacity,

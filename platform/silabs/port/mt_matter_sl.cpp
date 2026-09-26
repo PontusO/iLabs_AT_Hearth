@@ -34,6 +34,7 @@
 #include <app/ConcreteAttributePath.h>
 #include <app/clusters/boolean-state-server/CodegenIntegration.h>
 #include <app/clusters/door-lock-server/door-lock-server.h>
+#include <app/clusters/mode-select-server/supported-modes-manager.h>
 #include <app/clusters/operational-state-server/operational-state-server.h>
 #include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-cluster.h>

@@ -16,8 +16,10 @@
  * Round 2 task 4 retired the first nine: the commissioning state, network
  * and Thread answers come from the running stack in port/mt_matter_sl.cpp
  * now. Round 2 task 5 retired the live-composition trio, and round 2 task 6
- * the attribute read/write pair. What is left below is everything the data
- * model has to exist for.
+ * the attribute read/write pair. Catalogue batch 3 (2026-09-25) retired the
+ * door lock and water valve pair, and catalogue batch 4 (2026-09-26) the
+ * mode select pair. What is left below is everything the data model has to
+ * exist for.
  */
 
 #include <stddef.h>
@@ -120,18 +122,8 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
 /* The door lock and water valve bridge functions left this file in
  * catalogue batch 3 (2026-09-25); they live in mt_matter_sl.cpp. */
 
-/* ---- mode select ------------------------------------------------------------ */
-
-void *mt_matter_mode_select_manager(void) { return NULL; }
-
-int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char *const *labels, uint8_t count)
-{
-    (void)modes;
-    (void)labels;
-    (void)count;
-    /* no ModeSelect cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:394) */
-    return STUB_ATTR_MISS(ep);
-}
+/* The mode select bridge functions left this file in catalogue batch 4
+ * (2026-09-26); they live in mt_matter_sl.cpp. */
 
 /* ---- ModeBase: RVC run/clean mode, microwave mode, and the rest ------------- */
 
