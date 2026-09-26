@@ -1081,12 +1081,13 @@ extern "C" uint32_t mt_air_quality_feature_mask(void)
  * minimal form (graph DE541): one hearth_arena over HEARTH_OBJ_ARENA_BYTES
  * (mt_port_ids.h), with obj_new as its only helper, taken from nRF
  * mt_matter_zephyr.cpp 366-375 and run over this port's bump arena (no
- * chunk header, 8-byte alignment). Its only customer is the valve delegate:
- * the water valve is the first device type here that draws on it, and its
- * cluster server is a free-function singleton, so the delegate stands alone
- * in the arena. The nRF's other helpers, obj_pair_new (a delegate with its
- * Instance pair) and obj_inst_new (raw Instance storage), and the budget's
- * growth to fit them, arrive with batch 4's first caller.
+ * chunk header, 8-byte alignment). Its first customer was the valve
+ * delegate: the water valve is the first device type here that draws on it,
+ * and its cluster server is a free-function singleton, so the delegate
+ * stands alone in the arena. Since catalogue batch 4 (2026-09-26, graph
+ * DE555) the arena also holds Delegate + Instance pairs through
+ * obj_pair_new/obj_inst_storage and raw Instances through obj_inst_new, and
+ * its budget is sixteen of the largest per-endpoint object.
  */
 
 namespace {
@@ -1102,6 +1103,50 @@ D *obj_new()
     static_assert(alignof(D) <= 8, "the cluster-object arena guarantees 8-byte alignment only");
     void *p = hearth_arena_alloc(s_obj_arena, sizeof(D), "cluster-object arena");
     return (p == nullptr) ? nullptr : new (p) D();
+}
+
+/* The Instance's offset inside a Delegate + Instance pair, at the
+ * Instance's own alignment (nRF mt_matter_zephyr.cpp 321-325). */
+template <typename D, typename I>
+constexpr size_t obj_inst_offset()
+{
+    return ((sizeof(D) + alignof(I) - 1) / alignof(I)) * alignof(I);
+}
+
+/* The pair's payload (nRF 327-331). */
+template <typename D, typename I>
+constexpr size_t obj_pair_bytes()
+{
+    return obj_inst_offset<D, I>() + sizeof(I);
+}
+
+/* A Delegate constructed at the start of one zeroed block, with raw room
+ * after it for the Instance, which the caller constructs later with
+ * obj_inst_storage() once the endpoint exists (nRF 337-344). */
+template <typename D, typename I>
+D *obj_pair_new()
+{
+    static_assert(alignof(D) <= 8 && alignof(I) <= 8,
+                  "the cluster-object arena guarantees 8-byte alignment only");
+    void *p = hearth_arena_alloc(s_obj_arena, obj_pair_bytes<D, I>(), "cluster-object arena");
+    return (p == nullptr) ? nullptr : new (p) D();
+}
+
+/* Where the pair's Instance goes (nRF 361-365). */
+template <typename D, typename I>
+uint8_t *obj_inst_storage(D *d)
+{
+    return reinterpret_cast<uint8_t *>(d) + obj_inst_offset<D, I>();
+}
+
+/* Raw zeroed storage for an Instance with no Delegate beside it (nRF
+ * 379-384). No caller in batch 4; kept because the helper set is one unit
+ * and batch 7's MeterIdentification uses it. */
+template <typename I>
+uint8_t *obj_inst_new()
+{
+    static_assert(alignof(I) <= 8, "the cluster-object arena guarantees 8-byte alignment only");
+    return static_cast<uint8_t *>(hearth_arena_alloc(s_obj_arena, sizeof(I), "cluster-object arena"));
 }
 } // namespace
 
@@ -1375,9 +1420,9 @@ private:
 };
 static_assert(sizeof(HearthValveDelegate) == 8,
               "the valve delegate changed size; redo HEARTH_OBJ_ARENA_BYTES and the README");
-static_assert(hearth_arena_cost(sizeof(HearthValveDelegate)) * kServiceableEndpoints ==
+static_assert(hearth_arena_cost(sizeof(HearthValveDelegate)) * kServiceableEndpoints <=
                   HEARTH_OBJ_ARENA_BYTES,
-              "the cluster-object arena holds exactly kServiceableEndpoints valve delegates (DE541)");
+              "sixteen valve delegates fit the cluster-object arena");
 
 
 /*

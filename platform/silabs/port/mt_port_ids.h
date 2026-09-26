@@ -105,21 +105,17 @@ constexpr uint16_t kServiceableEndpoints = 16;
 #define HEARTH_EP_ARENA_BYTES 9600
 
 /*
- * The cluster-object arena, catalogue batch 3.
+ * The cluster-object arena.
  *
  * The second half of the nRF's two-heap model, in this port's bump-arena
- * form (port/mt_dyn_store.h owns the cost story for both halves). It holds
- * the cluster objects that outlive no Instance beside them: today only the
- * valve delegate, one per water valve (mt_matter_sl.cpp's
- * HearthValveDelegate, 8 bytes: a 4-byte vptr, a 2-byte EndpointId, 2 bytes of
- * padding; 8 after hearth_arena_cost's rounding). The budget is exactly
- * sixteen of those, one per serviceable endpoint (kServiceableEndpoints),
- * pinned by the static_asserts in
- * mt_matter_sl.cpp.
+ * form (port/mt_dyn_store.h owns the cost story for both halves).
  *
- * DE541: minimal, grows per batch. The valve delegate is the only customer
- * in this build; batch 4's appliance and notification objects raise this
- * number with the arithmetic in front of it, the way the endpoint arena
- * number above was raised in batches 1 and 2.
+ * DE555 (2026-09-26): sixteen of the largest per-endpoint object, the
+ * OperationalState Delegate + Instance pair (256 B on the nRF's
+ * measurement; its exact size here is pinned by a static_assert in Task
+ * 4); the valve delegate (8 B) and the chime pair (56 B) fit within;
+ * +3,968 B of .bss over batch 3.
+ *
+ * DE541: batch 3's minimal form, 128 B of valve delegates only.
  */
-#define HEARTH_OBJ_ARENA_BYTES 128
+#define HEARTH_OBJ_ARENA_BYTES 4096
