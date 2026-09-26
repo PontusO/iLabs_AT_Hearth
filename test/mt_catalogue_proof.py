@@ -29,7 +29,15 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "illuminancemeasurement", "flowmeasurement",
                  "colorcontrol", "thermostat", "fancontrol",
                  "windowcovering", "airquality",
-                 "doorlock", "valveconfigurationandcontrol"}
+                 "doorlock", "valveconfigurationandcontrol",
+                 "powersource", "smokecoalarm", "operationalstate",
+                 "modeselect", "chime"}
+
+# The "no_forward" kind's per-cluster command id range (AT_MT_SPEC 3.21's
+# OperationalState Pause/Stop/Start/Resume 0-3, 3.24's Chime PlayChimeSound
+# 0): every command the firmware could forward for that cluster, so a
+# refusal on one command is proven to raise nothing at all.
+NO_FORWARD_COMMANDS = {96: (0, 1, 2, 3), 1366: (0,)}
 
 def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
            echo=False, null_read=False, chip_cluster=None, urc_chip_attr=None,
@@ -39,8 +47,23 @@ def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
     "write"; the URC may land on a different attribute from the AT write's
     (the window covering's command writes Target, not Current); kind
     "verdict" instead of the URC triple is (fwd_cluster, fwd_command),
-    the answer 1 (allow) / 0 (deny) / None (unanswered, +MTCMDTO) and
-    the want dict {"rc0": bool, "status": int (optional)}. echo asserts
+    the answer 1 (allow) / 0 (deny) / None (unanswered, +MTCMDTO), the
+    want dict {"rc0": bool, "status": int (optional), "error_state":
+    int (optional: the chip-tool response's ErrorStateID, read by
+    H.parse_status, which answers it for every response shape since the
+    trio's allow/deny/refusal all exit 0)} and an optional payload (batch
+    4) passed to CmdResponder.expect(payload=) (the trio's Start 2, Pause
+    0, Stop 1); kind "notify" is (args, (fwd_cluster, fwd_command),
+    payload or None, [follow-up at_cmd format strings],
+    ("read-event", event_name)) (batch 4): the controller command is
+    invoked threaded, the seq-0 forward is asserted by
+    CmdResponder.expect_notify and NEVER answered, then the host's own
+    AT completion line(s) and the event read (AT_MT_SPEC 3.22's
+    self-test: the notify, then AT+MTALARM=<ep>,5,0, then the
+    SelfTestComplete event); kind "no_forward" is (args, want) (batch 4):
+    after the controller command no +MTCMD for the cluster's own commands
+    may arrive within 3s (the chime disabled, the trio's Pause from
+    Stopped, refused by the SDK server before any forward). echo asserts
     the AT write's own +MTATTR echo instead of draining it (DE531); null_read
     asserts +MTERR:5 on an AT read before the write (AT_MT_SPEC 3.8's null
     rule). chip_cluster overrides the type's for a check on another cluster.
@@ -51,10 +74,16 @@ def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
             "echo": echo, "null_read": null_read, "chip_cluster": chip_cluster,
             "urc_chip_attr": urc_chip_attr, "at_cmd": at_cmd}
 
-def _multi(devtype, name, revision, chip_cluster, checks, extra_reads=()):
+def _multi(devtype, name, revision, chip_cluster, checks, extra_reads=(),
+           setup=()):
+    """The batch 2+ row shape; setup (batch 4) is a
+    ("setup", [at_cmd format strings], (cluster_arg, attr_arg, [substrings]))
+    tuple, or None: run once before the type's checks, each AT line must
+    answer OK, and the following controller list read must name every
+    substring (AT_MT_SPEC 3.20/3.23's set-only list stores)."""
     return {"devtype": devtype, "name": name, "revision": revision,
             "chip_cluster": chip_cluster, "checks": list(checks),
-            "extra_reads": list(extra_reads)}
+            "extra_reads": list(extra_reads), "setup": setup}
 
 def _type(devtype, name, revision, chip_cluster, cluster, attr, chip_attr,
           at_value, parse="int", controller=None, extra_reads=()):
@@ -177,6 +206,92 @@ BATCHES = {
                    controller=("verdict", ["close"], (129, 1), 0, {"rc0": True})),
         ], extra_reads=[("read-event", "valve-state-changed")]),
     ],
+    # Batch 4 (catalogue batch 4 design spec section 4): the rows run in
+    # registry order, endpoints 2-8 behind the anchor 0x0100 (ep 1), and
+    # every new kind appears here at least once: verdict payload and
+    # error_state (the trio), at_refused (the trio's Instance-served
+    # write), notify (the smoke/CO self-test), setup (mode select, chime)
+    # and no_forward (the trio's Pause from Stopped, the chime disabled).
+    "mg24-batch4": [
+        _multi("0x0011", "power source", 1, "powersource", [
+            _check(47, 12, "bat-percent-remaining", 80),
+        ], extra_reads=[("read", "feature-map", 2)]),
+        _multi("0x0076", "smoke/CO alarm", 1, "smokecoalarm", [
+            _check(92, 1, "smoke-state", 1, at_cmd="AT+MTALARM=%(ep)d,1,1"),
+            _check(92, 1, "smoke-state", 0,
+                   at_cmd="AT+MTALARM=%(ep)d,1,0",
+                   controller=("notify", ["self-test-request"], (92, 0), None,
+                               ["AT+MTALARM=%(ep)d,5,0"],
+                               ("read-event", "self-test-complete"))),
+        ]),
+        _multi("0x0073", "laundry washer", 2, "operationalstate", [
+            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0"),
+            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+                   controller=("verdict", ["start"], (96, 2), 1,
+                               {"rc0": True, "error_state": 0}, 2)),
+            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                   controller=("verdict", ["pause"], (96, 0), 0,
+                               {"rc0": True, "error_state": 2}, 0)),
+            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                   controller=("verdict", ["stop"], (96, 1), None,
+                               {"rc0": True, "error_state": 2}, 1)),
+            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+                   controller=("no_forward", ["pause"],
+                               {"rc0": True, "error_state": 3})),
+            _check(96, 0, "operational-state", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,96,4,2"], 11)),
+        ]),
+        _multi("0x0075", "dishwasher", 2, "operationalstate", [
+            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0"),
+            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+                   controller=("verdict", ["start"], (96, 2), 1,
+                               {"rc0": True, "error_state": 0}, 2)),
+            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                   controller=("verdict", ["pause"], (96, 0), 0,
+                               {"rc0": True, "error_state": 2}, 0)),
+            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                   controller=("verdict", ["stop"], (96, 1), None,
+                               {"rc0": True, "error_state": 2}, 1)),
+            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+                   controller=("no_forward", ["pause"],
+                               {"rc0": True, "error_state": 3})),
+            _check(96, 0, "operational-state", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,96,4,2"], 11)),
+        ]),
+        _multi("0x007C", "laundry dryer", 2, "operationalstate", [
+            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0"),
+            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+                   controller=("verdict", ["start"], (96, 2), 1,
+                               {"rc0": True, "error_state": 0}, 2)),
+            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                   controller=("verdict", ["pause"], (96, 0), 0,
+                               {"rc0": True, "error_state": 2}, 0)),
+            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                   controller=("verdict", ["stop"], (96, 1), None,
+                               {"rc0": True, "error_state": 2}, 1)),
+            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+                   controller=("no_forward", ["pause"],
+                               {"rc0": True, "error_state": 3})),
+            _check(96, 0, "operational-state", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,96,4,2"], 11)),
+        ]),
+        _multi("0x0027", "mode select", 1, "modeselect", [
+            _check(80, 3, "current-mode", 0,
+                   controller=("command", ["change-to-mode", "1"],
+                               (80, 3, 1))),
+        ], setup=("setup", ["AT+MTMODES=%(ep)d,0,\"Quiet\",1,\"Normal\",2,\"Boost\""],
+                  ("modeselect", "supported-modes",
+                   ["Quiet", "Normal", "Boost"]))),
+        _multi("0x0146", "chime", 1, "chime", [
+            _check(1366, 0, "selected-chime", 7, at_cmd="AT+MTCHIME=%(ep)d,0,7"),
+            _check(1366, 1, "enabled", 1, parse="bool", at_cmd="AT+MTCHIME=%(ep)d,1,1",
+                   controller=("verdict", ["play-chime-sound"], (1366, 0), 1,
+                               {"rc0": True}, 7)),
+            _check(1366, 1, "enabled", 0, parse="bool", at_cmd="AT+MTCHIME=%(ep)d,1,0",
+                   controller=("no_forward", ["play-chime-sound"], {"rc0": True})),
+        ], setup=("setup", ["AT+MTCHIMESOUNDS=%(ep)d,7,\"Ding\""],
+                  ("chime", "installed-chime-sounds", ["Ding"]))),
+    ],
 }
 
 def composition_for(batch):
@@ -253,15 +368,44 @@ def print_plan(batch):
     print("  ep  1 %s %s: staged only (the regression harness's own "
           "anchor, not re-proven here)" % (ANCHOR_DEVTYPE, ANCHOR_NAME))
     for (ep, dt), t in zip(comp[1:], rows_for(batch)):
+        setup = t.get("setup")
+        if setup:
+            _kind, atlines, (scc, sattr, substrs) = setup
+            for line in atlines:
+                print("  ep %2d %s %s rev %d: setup %s -> OK"
+                      % (ep, dt, t["name"], t["revision"], line % {"ep": ep}))
+            print("  ep %2d %s %s rev %d: setup chip-tool %s read %s "
+                  "carries %s"
+                  % (ep, dt, t["name"], t["revision"], scc, sattr,
+                     " and ".join(substrs)))
         for i, c in enumerate(t["checks"]):
             urc = "n/a (no controller action, read-only attribute)"
             if c["controller"] is not None:
                 if c["controller"][0] == "verdict":
-                    kind, args, (fcl, fcmd), answer, want = c["controller"]
+                    # The 5-element tuple is the batch 1-3 shape, the
+                    # 6th element the batch 4 payload.
+                    kind, args, (fcl, fcmd), answer, want = c["controller"][:5]
+                    payload = c["controller"][5] if len(c["controller"]) > 5 else None
                     # The verdict's forward and answer stand in for the
                     # URC triple: command, forward, answer or "unanswered".
                     cmd = " ".join(str(a) for a in args)
                     urc = f"{cmd} -> +MTCMD:{fcl},{fcmd} answer {answer if answer is not None else 'unanswered'}"
+                    if payload is not None:
+                        urc += f" payload {payload}"
+                elif c["controller"][0] == "notify":
+                    kind, args, (fcl, fcmd), payload, atlines, event = c["controller"]
+                    cmd = " ".join(str(a) for a in args)
+                    follow = " then " + " then ".join(
+                        line % {"ep": ep} for line in atlines)
+                    urc = (f"{cmd} -> +MTCMD:{fcl},{fcmd} notify, not answered"
+                           + follow + f" then read-event {event[1]}")
+                elif c["controller"][0] == "no_forward":
+                    kind, args, want = c["controller"]
+                    urc = "%s -> no +MTCMD within 3s" % " ".join(str(a) for a in args)
+                elif c["controller"][0] == "at_refused":
+                    kind, atlines, err = c["controller"]
+                    urc = "host write %s -> +MTERR:%d (refused, no forward)" % (
+                        atlines[0] % {"ep": ep}, err)
                 else:
                     kind, args, (u_cluster, u_attr, u_val) = c["controller"]
                     # The write's args already carry the "write" kind word
@@ -301,12 +445,33 @@ def prove_endpoint(link, chip, s, node, ep, t):
     multi = len(t["checks"]) > 1
     for c in t["checks"]:
         prefix = "%s ep%d" % (tag, ep) + (" %s" % c["chip_attr"] if multi else "")
-        if c["controller"] is not None and c["controller"][0] == "verdict":
-            kind, args, (fcl, fcmd), answer, want = c["controller"]
-            prefix += " %s %s" % (args[0],
-                                  "allow" if answer == 1 else
-                                  "deny" if answer == 0 else "unanswered")
+        if c["controller"] is not None:
+            if c["controller"][0] == "verdict":
+                kind, args, (fcl, fcmd), answer, want = c["controller"][:5]
+                prefix += " %s %s" % (args[0],
+                                      "allow" if answer == 1 else
+                                      "deny" if answer == 0 else "unanswered")
+                # The payload word keeps the trio's three verdict rows
+                # (start/pause/stop) distinct beyond the command word.
+                if len(c["controller"]) > 5:
+                    prefix += " payload %s" % c["controller"][5]
+            elif c["controller"][0] == "notify":
+                prefix += " self-test-request"
+            elif c["controller"][0] == "no_forward":
+                prefix += " %s no-forward" % c["controller"][1][0]
+            elif c["controller"][0] == "at_refused":
+                prefix += " AT write refused"
         prove_check(link, chip, s, node, ep, t, c, prefix)
+    if t.get("setup"):
+        _kind, atlines, (scc, sattr, substrs) = t["setup"]
+        for line in atlines:
+            wcmd = line % {"ep": ep}
+            res, wlines = link.command(wcmd)
+            s.check("%s ep%d setup %s -> OK" % (tag, ep, wcmd), res == 0)
+        rc, out = chip.run([scc, "read", sattr, node, str(ep)], timeout=30)
+        s.check("%s ep%d setup %s read carries %s"
+                % (tag, ep, sattr, " and ".join(substrs)),
+                rc == 0 and all(x in out for x in substrs))
     for extra in t["extra_reads"]:
         if extra[0] == "read-event":
             rc, out = chip.run([t["chip_cluster"], "read-event", extra[1], node, str(ep)], timeout=30)
@@ -378,6 +543,75 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
     if c["controller"] is None:
         s.not_applicable("%s controller write" % prefix, "no controller action (read-only attribute)")
         _second_at_read(link, s, prefix, at, own)
+    elif c["controller"][0] == "at_refused":
+        # The trio's Instance-served OperationalState row: AT_MT_SPEC 3.21
+        # and 3.8's DE270 rule -- the attribute exists but is served by the
+        # cluster's own Instance, so the AT write is refused with the given
+        # +MTERR code and there is no forward, no read and no second read.
+        _kind, atlines, err = c["controller"]
+        link.drain(0.2)
+        wcmd = atlines[0] % {"ep": ep}
+        res, wlines = link.command(wcmd)
+        s.check("%s %s -> +MTERR:%d" % (prefix, wcmd, err), res == err)
+    elif c["controller"][0] == "notify":
+        _kind, args, (fcl, fcmd), payload, atlines, event = c["controller"]
+        link.drain(0.2)
+        ctx = types.SimpleNamespace(chip=chip, chip_call=None)
+        handle = H.invoke_chip(ctx, [cc] + args[:1] + [node, str(ep)] + args[1:], timeout=30)
+        responder = H.CmdResponder(link)
+        # Seq 0 is notify-only: expect_notify asserts the forward and never
+        # sends AT+MTCMDRESP; the host's own completion line(s) below are
+        # the answer the firmware expects (AT_MT_SPEC 3.22).
+        fwd = responder.expect_notify(cluster=fcl, command=fcmd,
+                                      payload=payload, timeout=5.0)
+        s.check("%s forward %d/%d is seq 0, not answered" % (prefix, fcl, fcmd),
+                fwd is not None)
+        for line in atlines:
+            wcmd = line % {"ep": ep}
+            res, wlines = link.command(wcmd)
+            s.check("%s %s -> OK" % (prefix, wcmd), res == 0)
+        if event[0] == "read-event":
+            rc, out = chip.run([cc, "read-event", event[1], node, str(ep)], timeout=30)
+            # Same printed-name rule as the type's own extra_reads rows:
+            # chip-tool prints SelfTestComplete, the pass test is that
+            # name, not a cluster-specific constant.
+            s.check("%s %s event present" % (prefix, event[1]),
+                    rc == 0 and event[1].replace("-", " ").title().replace(" ", "") in out)
+        else:
+            rc, out = chip.run([cc, "read", event[1], node, str(ep)], timeout=30)
+            s.check("%s %s = %s after the notify" % (prefix, event[1], event[2]),
+                    rc == 0 and H.parse_int_attr(out) == event[2])
+        rc, out = handle.join(30)
+        s.check("%s chip-tool %s exits 0" % (prefix, " ".join(args)), rc == 0)
+    elif c["controller"][0] == "no_forward":
+        # The SDK short-circuits before the delegate: no +MTCMD for this
+        # cluster's commands may arrive within 3s (the chime with Enabled
+        # false, the trio's Pause from Stopped, refused server-side).
+        # NO_FORWARD_COMMANDS names each such cluster's full command id
+        # range (OperationalState 0-3, Chime 0) so a forward on a command
+        # this row does not itself send cannot slip past the row: _match
+        # bakes the pair into the await pattern, so a forward for another
+        # command stays queued for its own row.
+        _kind, args, want = c["controller"]
+        link.drain(0.2)
+        ctx = types.SimpleNamespace(chip=chip, chip_call=None)
+        handle = H.invoke_chip(ctx, [cc] + args[:1] + [node, str(ep)] + args[1:], timeout=30)
+        responder = H.CmdResponder(link)
+        fwd = None
+        for fcmd in NO_FORWARD_COMMANDS[c["cluster"]]:
+            fwd = responder._match(c["cluster"], fcmd, None, 0.75)
+            if fwd is not None:
+                break
+        s.check("%s no +MTCMD within 3s" % prefix, fwd is None)
+        rc, out = handle.join(30)
+        s.check("%s chip-tool %s" % (prefix, "exits 0" if want["rc0"] else "fails"),
+                (rc == 0) == want["rc0"])
+        if "status" in want:
+            s.check("%s wire status 0x%X" % (prefix, want["status"]),
+                    H.parse_status(out) == want["status"])
+        if "error_state" in want:
+            s.check("%s ErrorStateID %d" % (prefix, want["error_state"]),
+                    H.parse_status(out) == want["error_state"])
     elif c["controller"][0] == "verdict":
         # Ordering rule for verdict checks: an allowed command may move the
         # attribute (an opened valve's CurrentState to Transitioning or Open,
@@ -387,7 +621,12 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         # action is deliberately not asserted: nothing here reads it back,
         # and the host, not this proof, owns what the actuation became.
         _second_at_read(link, s, prefix, at, own)
-        kind, args, (fcl, fcmd), answer, want = c["controller"]
+        kind, args, (fcl, fcmd), answer, want = c["controller"][:5]
+        # The 6th tuple element (batch 4) is the forwarded payload the
+        # forward must carry (the trio's Start 2, Pause 0, Stop 1, the
+        # chime's PlayChimeSound 7); None keeps the batch 1-3 shape's
+        # no-payload-filter behaviour of expect().
+        payload = c["controller"][5] if len(c["controller"]) > 5 else None
         ctx = types.SimpleNamespace(chip=chip, chip_call=None)
         # The argv shape puts the command name first, then node and
         # endpoint, then the flags: chip-tool's --help usage lines read
@@ -402,7 +641,8 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
             to = fwd and link.await_urc(r"\+MTCMDTO:%d$" % fwd["seq"], 3.0)
             s.check("%s unanswered -> +MTCMDTO" % prefix, bool(to))
         else:
-            fwd = responder.expect(cluster=fcl, command=fcmd, verdict=answer, timeout=5.0)
+            fwd = responder.expect(cluster=fcl, command=fcmd, verdict=answer,
+                                   payload=payload, timeout=5.0)
             s.check("%s forward %d/%d answered %s" % (prefix, fcl, fcmd,
                                                      "allow" if answer else "deny"),
                     fwd is not None)
@@ -412,6 +652,14 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         if "status" in want:
             s.check("%s wire status 0x%X" % (prefix, want["status"]),
                     H.parse_status(out) == want["status"])
+        # error_state reads the same response as status (H.parse_status
+        # answers both the `status = 0xNN` and the `ErrorStateID: N` wire
+        # shapes, last match wins) but the row name says ErrorStateID,
+        # because the trio's allow/deny/refusal all exit 0 and only the
+        # ErrorStateID separates them.
+        if "error_state" in want:
+            s.check("%s ErrorStateID %d" % (prefix, want["error_state"]),
+                    H.parse_status(out) == want["error_state"])
     else:
         kind, args, (ucl, uat, uval) = c["controller"]
         link.drain(0.2)
