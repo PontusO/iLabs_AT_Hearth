@@ -151,18 +151,9 @@ int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, 
     return STUB_ATTR_MISS(ep);
 }
 
-/* ---- OperationalState trio -------------------------------------------------- */
-
-void *mt_matter_opstate_delegate_alloc(uint32_t cluster_id) { (void)cluster_id; return NULL; }
-void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)delegate; (void)ep; }
-
-int mt_matter_opstate_set(uint16_t ep, uint8_t state)
-{
-    (void)state;
-    /* no OperationalState-family cluster at all: MT_ATTR_ERR_CLUSTER
-     * (mt_matter.h:589) */
-    return STUB_ATTR_MISS(ep);
-}
+/* The OperationalState trio's stubs (mt_matter_opstate_delegate_alloc,
+ * mt_matter_opstate_delegate_set_endpoint, mt_matter_opstate_set) are the real
+ * things now, in mt_matter_sl_b4.inc. */
 
 /* ---- RVC OperationalState ---------------------------------------------------- */
 

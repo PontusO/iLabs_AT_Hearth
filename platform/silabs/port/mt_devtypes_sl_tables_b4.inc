@@ -198,3 +198,149 @@ DECLARE_DYNAMIC_CLUSTER(SmokeCoAlarm::Id, smokeCoAlarmAttrs, ZAP_CLUSTER_MASK(SE
 HEARTH_DECLARE_CONST_ENDPOINT(smokeCoAlarmEndpoint, smokeCoAlarmClusters);
 
 constexpr EmberAfDeviceType kSmokeCoAlarmTypes[] = { { 0x0076, 1 } };
+/* ---- laundry washer (0x0073), dishwasher (0x0075), laundry dryer (0x007C)
+ *
+ * Catalogue batch 4 audit, OperationalState (0x0060). The three appliance
+ * types compose identically (OperationalState + Identify + Descriptor;
+ * the C6's three config_t are literally one aliased type and its three
+ * add() bodies differ only in the device type id), so one cluster list
+ * and one EmberAfEndpointType serve all three, the
+ * booleanStateSensorClusters principle; only the EmberAfDeviceType (id,
+ * revision) differs per registry row. No mode cluster, no controls
+ * cluster, no Temperature Control: the device library makes Operational
+ * State the only mandatory application cluster on all three, and the C6
+ * composes the same.
+ *
+ * Identify IS composed here although the device XML lists it server="false"
+ * on all three types (matter-devices.xml:2718 washer, :2609 dishwasher,
+ * :2749 dryer) and the C6 composes only OperationalState plus Descriptor.
+ * Optional-not-forbidden: server="false" under lockOthers means "not
+ * required as a server", not "locked out" (serverLocked="false" on the same
+ * lines), so adding it is legal, and the port's standing convention
+ * (Identify rides on every device type; the batch 4 brief directed it for
+ * this trio) wins over C6 parity here. The chime below makes the OPPOSITE
+ * call on the same XML shape because there the C6 also omits it and no
+ * brief direction says otherwise; the divergence is priced in the heap
+ * table and recorded in the batch report.
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; regenerating hearth.zap with the cluster on ep240 left
+ *   CodeDrivenInitShutdown.cpp byte-identical). It IS
+ *   CommandHandlerInterface-only (config-data.yaml:63), so no generated
+ *   IMClusterCommandHandler dispatch exists or is needed; the same
+ *   regeneration left IMClusterCommandHandler.cpp byte-identical too, and
+ *   invokes reach the Instance's own CommandHandlerInterface.
+ *
+ *   Delegate or plain ember? Instance PLUS Delegate, one PAIR per
+ *   endpoint, the batch's genuinely new machinery. Instance derives from
+ *   both CommandHandlerInterface and AttributeAccessInterface, each scoped
+ *   MakeOptional(aEndpointId), and its constructor calls
+ *   mDelegate->SetInstance(this) (operational-state-server.cpp:43-52);
+ *   Delegate::SetInstance() VerifyOrDies if a second Instance tries to
+ *   share one delegate object (operational-state-server.h:349-355), so the
+ *   pools in mt_matter_zephyr.cpp are strictly one delegate and one
+ *   Instance per endpoint, kServiceableEndpoints deep. All six cluster
+ *   attributes are AAI-served, never ember (the Read() switch from
+ *   operational-state-server.cpp:336: OperationalStateList :341,
+ *   OperationalState :360, OperationalError :365, PhaseList :370,
+ *   CurrentPhase :398, ClusterRevision :408 from Metadata kRevision).
+ *   They are declared below anyway so AttributeList is truthful; the two
+ *   scalars get inert slots, the arrays and the struct get none
+ *   (attr_gets_slot refuses ARRAY and STRUCT; the declared ARRAY/STRUCT
+ *   sizes are 0, mirroring what ZAP generates for External-storage list
+ *   attributes on the static endpoint).
+ *
+ *   Split to know on the bench: an AT+MTATTR read goes through the classic
+ *   ember path (emberAfReadAttribute) and answers this ARENA, not the
+ *   Instance, so OperationalState over AT reads the inert seed (0,
+ *   Stopped) no matter what the Instance last published; the fabric sees
+ *   the Instance. The host's state authority is its own AT+MTOPSTATE round
+ *   trip, and Instance-owned attributes never raise +MTATTR URCs, the
+ *   same rule the C6 documents for every Instance-served cluster.
+ *
+ *   ServerInit? None by name: no emberAfOperationalStateClusterServerInit
+ *   Callback exists, and MatterOperationalStatePluginServerInitCallback is
+ *   an empty definition in src/app/util/util.cpp:131. The REAL init is
+ *   Instance::Init(), the application's job, and its first act is
+ *   `if (!emberAfContainsServer(mEndpointId, mClusterId)) return
+ *   CHIP_ERROR_INVALID_ARGUMENT` (operational-state-server.cpp:65-70),
+ *   which forces construct-and-Init() to run only AFTER
+ *   emberAfSetDynamicEndpoint() succeeds: the same forced ordering as the
+ *   valve's SetDefaultDelegate(), one mechanism further in. It does NOT
+ *   join the B388 call site (that site substitutes for the ember
+ *   INIT_FUNCTION slot; this is not that mechanism); construction happens
+ *   in mt_matter_opstate_delegate_set_endpoint(), the delegate handout's
+ *   second half in mt_devtype_create() below.
+ *
+ *   Never destroyed, matching the valve pool and the allocate-only block
+ *   heap: ~Instance() would unregister both interfaces
+ *   (operational-state-server.cpp:55-63), but no teardown path exists on
+ *   this platform (the composition is edited by AT+MTEP and applied by a
+ *   reboot, which resets every pool wholesale, the same policy the valve
+ *   delegate pool set), so no explicit destructor call is ever needed or
+ *   made.
+ *
+ * Commands are hand-declared: the Instance registers NO
+ * EnumerateAcceptedCommands override, so AcceptedCommandList comes from
+ * this ember metadata, and operational_state::create() on the C6 famously
+ * created no command entries at all (finding F-C10-1, every invoke
+ * answered 0x81 until the thunk hand-added them). Pause 0x00, Stop 0x01,
+ * Start 0x02, Resume 0x03; the OperationalCommandResponse is the
+ * server-to-client response, so it lives in the OUTGOING list (fix round
+ * I1/DE399, see kOpStateOutgoing below), never the incoming one.
+ *
+ * The delegate publishes exactly Stopped/Running/Paused/Error in
+ * OperationalStateList and answers CHIP_ERROR_NOT_FOUND at phase index 0
+ * so PhaseList reads null; the verdict mapping (allow kNoError, deny
+ * kUnableToCompleteOperation, and why the delegate never calls
+ * SetOperationalState on allow) is on HearthOpStateDelegate in
+ * mt_matter_zephyr.cpp. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(opStateAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::PhaseList::Id, ARRAY, 0,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::CurrentPhase::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalStateList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalError::Id, STRUCT, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kOpStateIncoming[] = { OperationalState::Commands::Pause::Id,
+                                           OperationalState::Commands::Stop::Id,
+                                           OperationalState::Commands::Start::Id,
+                                           OperationalState::Commands::Resume::Id,
+                                           kInvalidCommandId };
+
+/* Fix round, review I1, RULED (graph DE399): the outgoing list is declared,
+ * NOT left nullptr like every other cluster in this file, because this is
+ * the port's first cluster that answers its commands with a RESPONSE
+ * COMMAND rather than a plain status: every one of the four handlers
+ * builds an OperationalCommandResponse and AddResponse()s it
+ * (operational-state-server.cpp:443-446 for Pause, and identically in the
+ * Stop/Start/Resume handlers), and the cluster spec requires that command
+ * in GeneratedCommandList when its triggers are supported. Introduced as a
+ * knowing divergence from the C6, whose identical gap was tracked as bug
+ * B400 (fabric metadata truthfulness beats parity of an untruth, and
+ * GeneratedCommandList is not part of the AT contract, so no host-visible
+ * behaviour moves). The C6 closed B400 in the parity round of 2026-09-01
+ * by adding create_operational_command_response() to its own
+ * mt_opstate_add_commands(), so the two ports agree again. */
+constexpr CommandId kOpStateOutgoing[] = {
+    OperationalState::Commands::OperationalCommandResponse::Id, kInvalidCommandId
+};
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(applianceOpStateClusters)
+DECLARE_DYNAMIC_CLUSTER(OperationalState::Id, opStateAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kOpStateIncoming, kOpStateOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(applianceOpStateEndpoint, applianceOpStateClusters);
+
+constexpr EmberAfDeviceType kLaundryWasherTypes[] = { { 0x0073, 2 } };
+constexpr EmberAfDeviceType kDishwasherTypes[] = { { 0x0075, 2 } };
+constexpr EmberAfDeviceType kLaundryDryerTypes[] = { { 0x007C, 2 } };

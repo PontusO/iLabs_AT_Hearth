@@ -748,6 +748,28 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 4: the OperationalState trio reuses the two-halves
+     * pattern verbatim. The alloc takes the CLUSTER id (mt_matter.h fixes
+     * it at alloc time; only the base 0x0060 exists in this catalogue),
+     * and set_endpoint below does more than the valve's: it
+     * placement-constructs the per-endpoint Instance and runs Init(),
+     * which is only legal below a successful emberAfSetDynamicEndpoint()
+     * because Init() bails on emberAfContainsServer (see the opStateAttrs
+     * audit note). Pool exhaustion aborts here, before anything is spent,
+     * for the valve's exact reasons. */
+    void *opstate_delegate = nullptr;
+    if (type_has_cluster(ep_type, OperationalState::Id)) {
+        opstate_delegate = mt_matter_opstate_delegate_alloc(OperationalState::Id);
+        if (opstate_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: opstate delegate unavailable: the "
+                                    "cluster-object arena or the opstate cap (kServiceableEndpoints) "
+                                    "is exhausted; %u of %u serviceable endpoints in use",
+                        (unsigned)devtype_id, (unsigned)live_endpoints(),
+                        (unsigned)kServiceableEndpoints);
+            return -1;
+        }
+    }
+
     void *block = hearth_arena_alloc(s_ep_arena, want, "endpoint block arena");
     if (block == nullptr) {
         /* hearth_arena_alloc() has already said what was wanted and what was
@@ -831,6 +853,18 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * endpoint is configured and enabled (nRF 8205-8221). */
     if (valve_delegate != nullptr) {
         mt_matter_valve_delegate_set_endpoint(valve_delegate, d.ep_id);
+    }
+
+    /* The trio's second half: constructs the OperationalState::Instance in
+     * its slot's raw storage and runs Init(), which registers the
+     * endpoint-scoped command handler and AAI. Below the successful
+     * emberAfSetDynamicEndpoint() by necessity (Init() checks
+     * emberAfContainsServer) and below the B388 inits for tidiness. An
+     * Init() failure is logged loudly inside and does not abort, the
+     * valve read-back's reasoning: unreachable by ordering, and the
+     * endpoint is live and correct in every other respect by then. */
+    if (opstate_delegate != nullptr) {
+        mt_matter_opstate_delegate_set_endpoint(opstate_delegate, d.ep_id);
     }
 
     s_next_ep_id++;

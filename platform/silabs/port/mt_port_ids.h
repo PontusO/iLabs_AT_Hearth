@@ -112,8 +112,9 @@ constexpr uint16_t kServiceableEndpoints = 16;
  *
  * DE555 (2026-09-26): sixteen of the largest per-endpoint object, the
  * OperationalState Delegate + Instance pair (256 B on the nRF's
- * measurement; its exact size here is pinned by a static_assert in Task
- * 4); the valve delegate (8 B) and the chime pair (56 B) fit within;
+ * measurement; its exact size here is pinned by a static_assert beside
+ * HearthOpStateDelegate in mt_matter_sl_b4.inc); the valve delegate
+ * (8 B) and the chime pair (56 B) fit within;
  * +3,968 B of .bss over batch 3.
  *
  * DE541: batch 3's minimal form, 128 B of valve delegates only.

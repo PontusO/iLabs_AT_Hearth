@@ -34,6 +34,7 @@
 #include <app/ConcreteAttributePath.h>
 #include <app/clusters/boolean-state-server/CodegenIntegration.h>
 #include <app/clusters/door-lock-server/door-lock-server.h>
+#include <app/clusters/operational-state-server/operational-state-server.h>
 #include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-cluster.h>
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-delegate.h>
@@ -550,6 +551,10 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::BasicInformation::Attributes::HardwareVersion::Id },
     { chip::app::Clusters::BasicInformation::Id,
       chip::app::Clusters::BasicInformation::Attributes::SoftwareVersion::Id },
+    { chip::app::Clusters::OperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
+    { chip::app::Clusters::OperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -694,7 +699,17 @@ static uint64_t attr_null_sentinel(bool is_unsigned, uint8_t bytes)
  * comment says plainly not to use it for this: the ember path validates
  * against the metadata and is the same path a controller's read takes, so the
  * two cannot disagree.
+ *
+ * The fragment mt_matter_sl_b4.inc is included at the END of this file, after
+ * the dispatch below, so its live reader needs a forward declaration at file
+ * scope here (a function-local declaration is not legal, and it must match the
+ * fragment's static storage class, since a static definition cannot follow an
+ * extern one). The definition in the fragment carries the same signature, so
+ * the two are one symbol.
  */
+static int mt_opstate_attr_read_live(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
+                                     bool *is_unsigned);
+
 extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
                                    bool *is_unsigned)
 {
@@ -716,6 +731,8 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         switch (cluster) {
         case chip::app::Clusters::BasicInformation::Id:
             return mt_basic_info_attr_read_live(attr, out, is_unsigned);
+        case chip::app::Clusters::OperationalState::Id:
+            return mt_opstate_attr_read_live(ep, cluster, attr, out, is_unsigned);
         default:
             return MT_ATTR_ERR_FAILED;
         }
