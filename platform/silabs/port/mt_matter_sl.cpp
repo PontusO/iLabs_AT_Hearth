@@ -34,6 +34,7 @@
 #include <app/ConcreteAttributePath.h>
 #include <app/clusters/boolean-state-server/CodegenIntegration.h>
 #include <app/clusters/door-lock-server/door-lock-server.h>
+#include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-cluster.h>
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-delegate.h>
 #include <app/server/CommissioningWindowManager.h>
@@ -1484,9 +1485,4 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
     return MT_ATTR_OK;
 }
 
-bool emberAfPluginSmokeCoAlarmSelfTestRequestCommand(chip::EndpointId endpointId)
-{
-    mt_cmd_notify(endpointId, chip::app::Clusters::SmokeCoAlarm::Id,
-                  chip::app::Clusters::SmokeCoAlarm::Commands::SelfTestRequest::Id);
-    return true;
-}
+#include "mt_matter_sl_b4.inc"

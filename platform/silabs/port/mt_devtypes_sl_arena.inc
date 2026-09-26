@@ -306,26 +306,19 @@ constexpr size_t kMax2(size_t a, size_t b) { return a > b ? a : b; }
  * no slot; no list here has one, so these counts are exact, and an
  * over-count would only ever make the asserted floor MORE conservative. */
 constexpr size_t kIdentifySlots = MT_COUNT(identifyAttrs);
+/* Catalogue batch 4 brought the first device type WITHOUT Identify (the
+ * power source), so the widest-endpoint computation gained a second family:
+ * a type that rides without the kIdentifySlots term. Its MT_COUNT over
+ * powerSourceAttrs over-counts by one (Description is a metadata-only
+ * member, no slot), the same conservative direction as the note above. */
+constexpr size_t kNoIdentifySlots = MT_COUNT(powerSourceAttrs);
 /* The widest endpoint is the one with the most slots: the colour lights
  * carry OnOff AND LevelControl AND ColorControl, and the extended one
  * declares sixteen ColorControl attributes. Each MT_COUNT counts declared
  * entries plus the LIST_END ClusterRevision; no list here has a
  * metadata-only member, so the counts are exact. */
 constexpr size_t kWidestEndpointSlots =
-    kIdentifySlots +
-    kMax2(
-        kMax2(
-            kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(colorTempAttrs),
-                  MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(extendedColorAttrs)),
-            kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs),
-                  kMax2(kMax2(kMax2(MT_COUNT(tempAttrs), MT_COUNT(booleanStateAttrs)),
-                              kMax2(MT_COUNT(occupancyAttrs), MT_COUNT(humidityAttrs))),
-                        kMax2(MT_COUNT(pressureAttrs),
-                              kMax2(MT_COUNT(illuminanceAttrs), MT_COUNT(flowAttrs)))))),
-        kMax2(
-            kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)),
-            kMax2(kMax2(MT_COUNT(windowCoveringAttrs), MT_COUNT(airQualityAttrs)),
-                  kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)))));
+    kMax2(kIdentifySlots + kMax2(kMax2(kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(colorTempAttrs), MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(extendedColorAttrs)), kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs), kMax2(kMax2(kMax2(MT_COUNT(tempAttrs), MT_COUNT(booleanStateAttrs)), kMax2(MT_COUNT(occupancyAttrs), MT_COUNT(humidityAttrs))), kMax2(MT_COUNT(pressureAttrs), kMax2(MT_COUNT(illuminanceAttrs), MT_COUNT(flowAttrs)))))), kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)), kMax2(kMax2(MT_COUNT(windowCoveringAttrs), MT_COUNT(airQualityAttrs)), kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)))), kIdentifySlots + MT_COUNT(smokeCoAlarmAttrs))), kNoIdentifySlots);
 /* The widest cluster list is a max over every declared cluster list, not
  * just the dimmable light's: a future device type with a wider list must
  * fail the floor's static_assert below at build time, not surface later as a
@@ -338,14 +331,16 @@ constexpr size_t kWidestClusterList = kMax2(
               kMax2(MT_COUNT(colorTemperatureLightClusters), MT_COUNT(extendedColorLightClusters))),
         kMax2(MT_COUNT(onOffPlugInUnitClusters), MT_COUNT(dimmablePlugInUnitClusters))),
     kMax2(
-        kMax2(kMax2(MT_COUNT(thermostatClusters), MT_COUNT(fanClusters)),
-              kMax2(kMax2(MT_COUNT(windowCoveringClusters), MT_COUNT(airQualitySensorClusters)),
-                    kMax2(MT_COUNT(doorLockClusters), MT_COUNT(waterValveClusters)))),
-        kMax2(MT_COUNT(temperatureSensorClusters),
-              kMax2(kMax2(MT_COUNT(booleanStateSensorClusters), MT_COUNT(occupancySensorClusters)),
-                    kMax2(MT_COUNT(humiditySensorClusters),
-                          kMax2(MT_COUNT(pressureSensorClusters),
-                                kMax2(MT_COUNT(lightSensorClusters), MT_COUNT(flowSensorClusters))))))));
+        kMax2(
+            kMax2(kMax2(MT_COUNT(thermostatClusters), MT_COUNT(fanClusters)),
+                  kMax2(kMax2(MT_COUNT(windowCoveringClusters), MT_COUNT(airQualitySensorClusters)),
+                        kMax2(MT_COUNT(doorLockClusters), MT_COUNT(waterValveClusters)))),
+            kMax2(MT_COUNT(temperatureSensorClusters),
+                  kMax2(kMax2(MT_COUNT(booleanStateSensorClusters), MT_COUNT(occupancySensorClusters)),
+                        kMax2(MT_COUNT(humiditySensorClusters),
+                              kMax2(MT_COUNT(pressureSensorClusters),
+                                    kMax2(MT_COUNT(lightSensorClusters), MT_COUNT(flowSensorClusters))))))),
+        kMax2(MT_COUNT(powerSourceClusters), MT_COUNT(smokeCoAlarmClusters))));
 
 constexpr size_t kWidestBlockBytes =
     block_bytes(kWidestClusterList, kWidestEndpointSlots) +

@@ -104,7 +104,7 @@ struct hearth_shape {
  * span REPLACES the ep_type/ep_type_v1 selection entirely.
  *
  * In THIS build every one of those four members is null or empty on every
- * row but the twenty ported ones, which carry ep_type and device_types
+ * row but the twenty-four ported ones, which carry ep_type and device_types
  * alone.
  */
 struct hearth_devtype {
@@ -166,8 +166,8 @@ constexpr hearth_devtype s_registry[] = {
     { 0x000A, 0, &doorLockEndpoint, Span<const EmberAfDeviceType>(kDoorLockTypes) },
     { 0x0042, 0, &waterValveEndpoint, Span<const EmberAfDeviceType>(kWaterValveTypes) },
     /* Catalogue batch 4: the appliance and notification types. */
-    { 0x0011, 0 },                                                      /* batch 4: power source */
-    { 0x0076, 0 },                                                      /* batch 4: smoke/co alarm */
+    { 0x0011, 0, &powerSourceEndpoint, Span<const EmberAfDeviceType>(kPowerSourceTypes) },
+    { 0x0076, 0, &smokeCoAlarmEndpoint, Span<const EmberAfDeviceType>(kSmokeCoAlarmTypes) },
     { 0x0073, 0 },                                                      /* batch 4: laundry washer */
     { 0x0075, 0 },                                                      /* batch 4: dishwasher */
     { 0x007C, 0 },                                                      /* batch 4: laundry dryer */
@@ -238,7 +238,7 @@ static_assert(sizeof(s_registry) / sizeof(s_registry[0]) == 52,
  * unserved, and mt_devtype_create() refuses it before the parent is even
  * looked at. So the per-row body is skipped for those, and what the
  * assertion now proves is the same property over the rows that can be
- * created. It does NOT weaken into vacuity: the twenty ported rows are checked
+ * created. It does NOT weaken into vacuity: the twenty-four ported rows are checked
  * in full, the parent universe is still the whole 52-row registry (so a
  * future restricted row is enumerated against every catalogue id from the
  * moment it gains a cluster set), and the day a batch gives the cabinet or

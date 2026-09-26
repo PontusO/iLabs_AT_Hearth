@@ -177,13 +177,9 @@ void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep) { 
 
 /* ---- smoke/co alarm + refrigerator alarm ------------------------------------- */
 
-int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
-{
-    (void)field;
-    (void)value;
-    /* ep has neither alarm cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:696) */
-    return STUB_ATTR_MISS(ep);
-}
+/* mt_matter_alarm_set() left this file in catalogue batch 4 (2026-09-26);
+ * it lives in mt_matter_sl.cpp (the smoke/co arm only; the refrigerator
+ * alarm arm is catalogue batch 8). */
 
 /* ---- chime -------------------------------------------------------------------- */
 

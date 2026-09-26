@@ -243,6 +243,7 @@ namespace {
 #include "mt_devtypes_sl_tables_core.inc"
 #include "mt_devtypes_sl_tables_b2.inc"
 #include "mt_devtypes_sl_tables_b3.inc"
+#include "mt_devtypes_sl_tables_b4.inc"
 #include "mt_devtypes_sl_registry.inc"
 #include "mt_devtypes_sl_arena.inc"
 #include "mt_devtypes_sl_seeds.inc"

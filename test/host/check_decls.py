@@ -26,17 +26,45 @@ def names_from(header):
     return names
 
 
+INC = re.compile(r'^\s*#include\s+"([^"/]+\.inc)"\s*$')
+
+
+def read_expanded(path, seen=None):
+    """A port file's lines with its local fragment includes inlined, as the
+    compiler sees them: #include "name.inc" (same directory, no path) is
+    replaced by that fragment's own expanded lines. Since 2026-09-25 the
+    MG24 port splits mt_devtypes_sl.cpp and mt_matter_sl.cpp into such
+    fragments (graph T549, DE550), and a definition inside one must still
+    count exactly once."""
+    seen = set() if seen is None else seen
+    real = os.path.realpath(path)
+    if real in seen:
+        return []
+    seen.add(real)
+    out = []
+    for line in open(path).read().splitlines():
+        m = INC.match(line)
+        if m:
+            frag = os.path.join(os.path.dirname(path), m.group(1))
+            if os.path.exists(frag):
+                out += read_expanded(frag, seen)
+                continue
+        out.append(line)
+    return out
+
+
 def check(header, impls, label):
     """Exactly one definition per declared name across the CONCATENATION of
     impls, not once per file: as the Matter port lands, a name moves from
     mt_matter_stub.c to mt_matter_sl.cpp and must be defined in exactly one
     of the two, never in both. A listed file that does not exist yet is
-    skipped, so this reads the same before and after that file appears."""
+    skipped, so this reads the same before and after that file appears.
+    Fragments a file #includes are read as part of it."""
     names = names_from(header)
     present = [f for f in impls if os.path.exists(f)]
     lines = []
     for f in present:
-        lines += open(f).read().splitlines()
+        lines += read_expanded(f)
     ok, problems = 0, []
     for name in names:
         pat = re.compile(r'^[a-zA-Z_].*\b' + re.escape(name) + r'\s*\(')

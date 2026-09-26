@@ -12,7 +12,7 @@
 
 /*
  * Boot values for attributes where zero is the wrong answer, little-endian
- * as the attribute store holds them (nRF 5905-6889). Two kinds of entry live
+ * as the attribute store holds them (nRF 5979-6889). Two kinds of entry live
  * here:
  *
  *   Functional. LevelControl reads MinLevel and MaxLevel out of the store
