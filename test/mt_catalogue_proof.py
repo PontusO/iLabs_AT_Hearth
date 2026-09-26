@@ -33,12 +33,6 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "powersource", "smokecoalarm", "operationalstate",
                  "modeselect", "chime"}
 
-# The "no_forward" kind's per-cluster command id range (AT_MT_SPEC 3.21's
-# OperationalState Pause/Stop/Start/Resume 0-3, 3.24's Chime PlayChimeSound
-# 0): every command the firmware could forward for that cluster, so a
-# refusal on one command is proven to raise nothing at all.
-NO_FORWARD_COMMANDS = {96: (0, 1, 2, 3), 1366: (0,)}
-
 def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
            echo=False, null_read=False, chip_cluster=None, urc_chip_attr=None,
            at_cmd=None):
@@ -461,8 +455,9 @@ def prove_endpoint(link, chip, s, node, ep, t):
                 prefix += " %s %s" % (args[0],
                                       "allow" if answer == 1 else
                                       "deny" if answer == 0 else "unanswered")
-                # The payload word keeps the trio's three verdict rows
-                # (start/pause/stop) distinct beyond the command word.
+                # Only the chime's play-chime-sound verdict carries the 6th
+                # tuple element (the forwarded chimeID); the trio's verdict
+                # tuples carry none, so the payload word is chime-only.
                 if len(c["controller"]) > 5:
                     prefix += " payload %s" % c["controller"][5]
             elif c["controller"][0] == "notify":
@@ -588,22 +583,18 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
     elif c["controller"][0] == "no_forward":
         # The SDK short-circuits before the delegate: no +MTCMD for this
         # cluster's commands may arrive within 3s (the chime with Enabled
-        # false, the trio's Pause from Stopped, refused server-side).
-        # NO_FORWARD_COMMANDS names each such cluster's full command id
-        # range (OperationalState 0-3, Chime 0) so a forward on a command
-        # this row does not itself send cannot slip past the row: _match
-        # bakes the pair into the await pattern, so a forward for another
-        # command stays queued for its own row.
+        # false, the trio's Pause from Stopped, refused server-side). One
+        # 3 s window, one await: the pattern names the endpoint and the
+        # cluster but not the command, so a forward on any command of the
+        # cluster fails this row, including one this row does not itself
+        # send. (The earlier shape awaited each command id for 0.75 s in
+        # turn, so a forward arriving after its own slice sat in the queue
+        # unseen and the row passed: the final review's I1.)
         _kind, args, want = c["controller"]
         link.drain(0.2)
         ctx = types.SimpleNamespace(chip=chip, chip_call=None)
         handle = H.invoke_chip(ctx, [cc] + args[:1] + [node, str(ep)] + args[1:], timeout=30)
-        responder = H.CmdResponder(link)
-        fwd = None
-        for fcmd in NO_FORWARD_COMMANDS[c["cluster"]]:
-            fwd = responder._match(c["cluster"], fcmd, None, 0.75)
-            if fwd is not None:
-                break
+        fwd = link.await_urc(r"^\+MTCMD:\d+,%d,%d,\d+(,|$)" % (ep, c["cluster"]), 3.0)
         s.check("%s no +MTCMD within 3s" % prefix, fwd is None)
         rc, out = handle.join(30)
         s.check("%s chip-tool %s" % (prefix, "exits 0" if want["rc0"] else "fails"),

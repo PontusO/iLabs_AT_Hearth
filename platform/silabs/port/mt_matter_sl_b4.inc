@@ -90,18 +90,16 @@ static const std::array<SmokeCoAlarmServer::ExpressedStateEnum, SmokeCoAlarmServ
  * (platform/esp32c6/main/main.cpp mt_matter_alarm_set()). mt_at.c's
  * cmd_mtalarm only checks the UNION bound 0..11 before calling this (it
  * cannot know which cluster <ep> carries); this bridge dispatches on the
- * cluster the endpoint actually has. TWO clusters since catalogue batch 8,
- * which added the RefrigeratorAlarm branch below rather than restructuring
- * (batch 8's branch is not on this port yet);
- * this function, exactly as the pre-batch-8 version of this comment
- * predicted it would; an endpoint carrying neither still answers
- * MT_ATTR_ERR_CLUSTER through the single fall-through at the end, the same
- * code the C6 answers.
+ * cluster the endpoint actually has. ONE cluster on this port, the
+ * SmokeCoAlarm branch below; the C6's second (the RefrigeratorAlarm batch 8
+ * added there) is not on this port, so the single fall-through at the end,
+ * MT_ATTR_ERR_CLUSTER, is the same code the C6 answers for an endpoint
+ * carrying neither.
  *
  * Field 0 (ExpressedState) is derived by the server from the other fields
  * and never settable directly; rejected here rather than in mt_at.c because
  * field 0 is a legal RefrigeratorAlarm bit on the C6 (batch 8's, not on this
- * port yet) and the union bound
+ * port) and the union bound
  * must stay shared (core/include/mt_matter.h:647-651, binding).
  *
  * Every legal field maps to the matching SmokeCoAlarmServer setter, never a
@@ -682,8 +680,9 @@ static int mt_opstate_attr_read_live(uint16_t ep, uint32_t cluster, uint32_t att
  * CharSpan lifetime and the in-place rebuild, the C6's argument re-checked
  * against THIS tree: both the label bytes and the ModeOptionStruct array
  * live in the endpoint's block, which is allocated once at boot and never
- * freed (the allocate-only invariant beside K_HEAP_DEFINE in
- * mt_devtypes_zephyr.cpp), and the struct array is rebuilt IN PLACE on
+ * freed (the allocate-only invariant of this port's cluster-object arena,
+ * s_obj_arena and hearth_arena_alloc in mt_matter_sl.cpp), and the struct
+ * array is rebuilt IN PLACE on
  * every AT+MTMODES write to the same store, never reallocated. What rules
  * out a reader observing a half-rebuilt entry is mutual exclusion, not the
  * rebuild order: mt_matter_modes_set() holds the StackLock for the whole
@@ -933,7 +932,10 @@ private:
     chip::EndpointId m_ep = chip::kInvalidEndpointId;
 };
 
-/* The Chime Delegate + ChimeServer pair (56 B on the nRF's measurement). */
+/* The Chime Delegate + ChimeServer pair, 56 B on the nRF's measurement;
+ * this pins the MG24's. */
+static_assert(hearth_arena_cost(obj_pair_bytes<HearthChimeDelegate, chip::app::Clusters::ChimeServer>()) == 56,
+              "the chime pair changed size; redo the README's object arena figures");
 static_assert(hearth_arena_cost(obj_pair_bytes<HearthChimeDelegate, chip::app::Clusters::ChimeServer>()) *
                       kServiceableEndpoints <= HEARTH_OBJ_ARENA_BYTES,
               "sixteen chime pairs no longer fit the cluster-object arena");
@@ -1001,7 +1003,7 @@ extern "C" void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t e
  *
  * Deliberately NOT declared in core/include/mt_matter.h (read-only this
  * round): the pair contract there is unchanged, and the one caller
- * declares this port-local extension itself (mt_devtypes_zephyr.cpp,
+ * declares this port-local extension itself (mt_devtypes_sl.cpp,
  * beside the chime handout).
  *
  * Memory reclaim round A: what comes back is the SLOT, not the heap block.

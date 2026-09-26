@@ -98,11 +98,13 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *
  * Block payload is 4 * clusterCount + 16 * slots. The cost is that rounded
  * up to 8 and nothing more (hearth_arena_cost, mt_dyn_store.h: no chunk
- * header, no bucket table, so usable bytes are gross bytes). The whole
- * catalogue this build declares:
+ * header, no bucket table, so usable bytes are gross bytes). The types of
+ * batches 1 to 3 and batch 4's mode select, the widest; batch 4's other
+ * types (power source, smoke/CO, the laundry trio, the chime) are narrower
+ * than 608 and priced by the candidates below, not tabled here:
  *
  *   device type                        clusters  slots  payload  arena cost
- *   mode select           0x0027            4     11      608         608
+ *   mode select           0x0027            3     10      608         608  * over-count price
  *   extended colour light   0x010D            5     36      596         600
  *   colour temperature lt   0x010C            5     32      532         536
  *   dimmable light / plug  0x0101 0x010B       4     20      336         336
@@ -120,7 +122,11 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  *     0x0015 0x0044 0x0041 0x0043             3      7      124         128
  *
  * Slots are the declared attributes plus the LIST_END ClusterRevision each
- * cluster carries, Identify's four included and Descriptor's none.
+ * cluster carries, Identify's four included and Descriptor's none. The
+ * mode select's block is the over-count price 608 (3 clusters, 10 slots:
+ * 12 + 160 + the host-fed mode store's 436); its exact runtime block is 3
+ * clusters, 8 slots (the 5 modeSelect plus the 3 identify, no descriptor
+ * slots), 140 + 436 = 576.
  *
  * HEARTH_EP_ARENA_BYTES is 9,728, which is 16 x 608: this arena holds
  * kServiceableEndpoints of the WIDEST type it can build, the mode select's
@@ -338,9 +344,11 @@ static_assert(sizeof(mt_temp_levels_store_t) == 273,
               "surface variant-1 rows");
 
 /* The trailing store begins at 4 * clusterCount + 16 * n_slots, a multiple
- * of 4, and a hearth_arena block is 4-byte aligned (the layout note beside
- * K_HEAP_DEFINE), so nothing wanting more than DataVersion's alignment may
- * ever live there. */
+ * of 4, and a hearth_arena block is 8-aligned (hearth_arena_cost rounds the
+ * payload up to 8, the layout note beside s_obj_arena in mt_matter_sl.cpp),
+ * so nothing wanting more than DataVersion's alignment may ever live there.
+ * The conclusion stays conservative: the old note said 4-byte aligned, and
+ * the 8-aligned figure only tightens the bound. */
 static_assert(alignof(mt_mode_store_t) <= alignof(DataVersion),
               "mt_mode_store_t must not out-align the block's store offset");
 static_assert(alignof(mt_chime_store_t) <= alignof(DataVersion),

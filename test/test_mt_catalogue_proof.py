@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for the catalogue proof script: the table is legal, the row
 names match the baseline, and the prove functions record the right rows."""
-import os, re, sys, threading, unittest
+import os, re, sys, threading, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mt_catalogue_proof as P
 import mt_regression as H
@@ -1178,8 +1178,8 @@ class TestNotifyKind(unittest.TestCase):
              if c["controller"] and c["controller"][0] == "notify"][0]
         return t, c
 
-    def _run(self, ep=2, **chipkw):
-        link = _VerdictLink()
+    def _run(self, ep=2, link=None, **chipkw):
+        link = link if link is not None else _VerdictLink()
         chip = _Batch4Chip(link=link, ep=ep, **chipkw)
         s = _FakeSuite()
         t, c = self._self_test_check()
@@ -1219,6 +1219,55 @@ class TestNotifyKind(unittest.TestCase):
                          [])
         self.assertFalse(got["smoke/CO alarm ep2 smoke-state self-test-request"
                           " forward 92/0 is seq 0, not answered"])
+
+    def test_nonseq0_forward_fails_and_is_not_answered(self):
+        # An adjudicated forward where a notify is required: the +MTCMD
+        # carries seq 7, not 0: expect_notify answers None, the forward
+        # row fails, and expect_notify NEVER sends AT+MTCMDRESP -- the
+        # seq-7 line is consumed by the await and is not answered.
+        link, s = self._run(ep=2, cluster=92, command=0, seq=7, rc=0)
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         [])
+        self.assertEqual(link.urcs, [])
+        self.assertFalse(got["smoke/CO alarm ep2 smoke-state self-test-request"
+                             " forward 92/0 is seq 0, not answered"])
+
+    def test_missing_selftestcomplete_event_fails_the_event_row(self):
+        # chip-tool's read-event carries no SelfTestComplete: the event row
+        # fails. The forward and the AT+MTALARM completion row still pass
+        # (the firmware raised its seq-0 notify and the host's completion
+        # line answered OK; the link answers every command the check sends).
+        # The chip's read-event arm is patched to print nothing (the shape
+        # _SetupChip uses for its list reads), every other run shape is
+        # the _Batch4Chip default.
+        link = _VerdictLink()
+        chip = _Batch4Chip(link=link, ep=2, cluster=92, command=0, seq=0, rc=0)
+        saved_run = chip.run
+        def _no_event(args, timeout=None):
+            if len(args) >= 4 and args[1] == "read-event":
+                return (0, "")
+            return saved_run(args, timeout=timeout)
+        chip.run = _no_event
+        s = _FakeSuite()
+        t, c = self._self_test_check()
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            P.prove_check(link, chip, s, "0x4845", 2, t, c,
+                          "smoke/CO alarm ep2 smoke-state self-test-request")
+        finally:
+            H._threaded_chip_call = saved
+            chip.run = saved_run
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         [])
+        self.assertFalse(got["smoke/CO alarm ep2 smoke-state self-test-request"
+                             " self-test-complete event present"])
+        self.assertTrue(got["smoke/CO alarm ep2 smoke-state self-test-request"
+                            " forward 92/0 is seq 0, not answered"])
+        self.assertTrue(got["smoke/CO alarm ep2 smoke-state self-test-request"
+                            " AT+MTALARM=2,5,0 -> OK"])
 
 
 class TestVerdictPayloadKind(unittest.TestCase):
@@ -1270,9 +1319,9 @@ class TestVerdictPayloadKind(unittest.TestCase):
     def test_forward_with_payload_9_is_not_taken(self):
         # The forward carries 9, not the expected 7: _match's payload
         # filter answers None (it is a genuine failure to report, not a
-        # foreign forward to leave queued -- the line is consumed from the
-        # queue), the "answered" row fails, and the forward is not
-        # answered (no AT+MTCMDRESP).
+        # foreign forward to leave alone -- the line was popped from the
+        # queue by the await and is NOT left there), the "answered" row
+        # fails, and the forward is not answered (no AT+MTCMDRESP).
         link, s = self._run(ep=7, cluster=1366, command=0, seq=7, payload=[9],
                             rc=0, value=1)
         got = {n: ok for n, ok in s.results}
@@ -1509,11 +1558,12 @@ class TestSetupKind(unittest.TestCase):
 
 
 class TestNoForwardKind(unittest.TestCase):
-    """The no_forward kind: nothing for the cluster's command range may be
-    forwarded within the window (NO_FORWARD_COMMANDS names the full range
-    so a forward the row itself does not send cannot slip past). No
-    AT+MTCMDRESP is ever sent; the want dict carries rc0 and the
-    optional ErrorStateID."""
+    """The no_forward kind: one 3 s await for any +MTCMD on the
+    endpoint and cluster (the pattern names neither command nor seq, so
+    a forward on ANY command of the cluster fails the row -- including
+    one the row itself does not send), None only when the window closes
+    empty. No AT+MTCMDRESP is ever sent; the want dict carries rc0 and
+    the optional ErrorStateID."""
 
     def _pause_no_forward_check(self):
         t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0073"][0]
@@ -1521,8 +1571,8 @@ class TestNoForwardKind(unittest.TestCase):
              if c["controller"] and c["controller"][0] == "no_forward"][0]
         return t, c
 
-    def _run(self, ep=2, **chipkw):
-        link = _VerdictLink()
+    def _run(self, ep=2, link=None, **chipkw):
+        link = link if link is not None else _VerdictLink()
         chip = _Batch4Chip(link=link, ep=ep, **chipkw)
         s = _FakeSuite()
         t, c = self._pause_no_forward_check()
@@ -1565,6 +1615,56 @@ class TestNoForwardKind(unittest.TestCase):
                          [])
         self.assertFalse(got["laundry washer ep2 operational-state pause no-forward"
                           " no +MTCMD within 3s"])
+
+    def test_a_late_forward_within_the_3s_window_fails(self):
+        # The forward arrives late: it lands in the serial buffer while the
+        # row's 3 s window is still open, and the row's await hands the
+        # link that full window, so a +MTCMD for the cluster on ANY command
+        # that lands within it fails the row. The fake models the real
+        # link: its await_urc polls until its deadline (the base class's
+        # single pass is the first poll of that loop), and the chip
+        # enqueues the line while the window is open -- after the first
+        # poll has already read the empty queue -- so the poll that the
+        # real await_urc_ts runs when the line lands returns it, exactly
+        # as the row's check would read it.
+        class _LateChip(_Batch4Chip):
+            def run(self, args, timeout=None):
+                rc, out = super().run(args, timeout=timeout)
+                if self.link is not None:
+                    self.link.urcs.append("+MTCMD:7,2,96,9")
+                return (rc, out)
+
+        class _LateLink(_VerdictLink):
+            def await_urc(self, pattern, timeout=5.0):
+                self.last_timeout = timeout
+                deadline = time.monotonic() + timeout
+                rx = re.compile(pattern)
+                while True:
+                    for i, u in enumerate(self.urcs):
+                        if rx.search(u):
+                            return self.urcs.pop(i)
+                    if time.monotonic() >= deadline:
+                        return None
+                    time.sleep(0.05)
+
+        link = _LateLink()
+        chip = _LateChip(link=link, ep=2, cluster=96, command=0, seq=7,
+                         rc=0, error_state=3)
+        s = _FakeSuite()
+        t, c = self._pause_no_forward_check()
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            P.prove_check(link, chip, s, "0x4845", 2, t, c,
+                          "laundry washer ep2 operational-state pause no-forward")
+        finally:
+            H._threaded_chip_call = saved
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual(link.last_timeout, 3.0)
+        self.assertEqual([x for x in link.sent
+                          if x.startswith("AT+MTCMDRESP=")], [])
+        self.assertFalse(got["laundry washer ep2 operational-state pause no-forward"
+                             " no +MTCMD within 3s"])
 
 
 class TestBatch4RowNames(unittest.TestCase):

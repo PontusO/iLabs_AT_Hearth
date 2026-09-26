@@ -447,11 +447,14 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * WHAT IS IN IT HERE IS NOT WHAT IS IN IT ON THE nRF, and the difference is
  * the point of this comment. On the nRF every row is an attribute a
  * per-endpoint cluster Instance serves on a DYNAMIC endpoint, and the ember
- * slot beneath it is an inert shadow. Not one of those clusters is compiled
- * into this image: this build declares four (OnOff, Identify, Descriptor,
- * TemperatureMeasurement, port/mt_devtypes_sl.cpp) and none of them is served
- * by a per-endpoint object. Every one of the nRF's rows is listed below with
- * the batch that brings it back.
+ * slot beneath it is an inert shadow. This image's table holds eight rows,
+ * four of them per-endpoint (the OperationalState pair and the Chime pair,
+ * both catalogue batch 4) and served by the per-endpoint objects the
+ * mt_matter_sl_b4.inc fragment hands out; the other four are the Basic
+ * Information identity values of ruling F500, which live in the root
+ * endpoint's device instance info and have no per-endpoint object. Every one
+ * of the nRF's rows that this image still lacks is listed below with the
+ * batch that brings it back.
  *
  * What this image needs the mechanism for instead is the FIXED endpoint.
  * This SDK's CHIP serves endpoint 0's framework clusters through registered
@@ -531,13 +534,17 @@ struct instance_served_attr {
 };
 
 /*
- * Basic Information's four integer attributes on the root node (ruling F500).
- * The strings (VendorName, ProductName, NodeLabel, Location and the rest) and
- * CapabilityMinima are deliberately NOT here: CHAR_STRING and STRUCT fall out
- * of attr_type_info() and answer +MTERR:5 on the generic path before ember is
- * ever reached, which is the same code the other two arms answer for them and
- * is what AT_MT_SPEC.md 3.8 says a non-integer attribute gets. A row for one
- * would be dead text.
+ * Eight rows: Basic Information's four integer attributes on the root node
+ * (ruling F500), the per-endpoint OperationalState pair, and the per-endpoint
+ * Chime pair (both brought in by catalogue batch 4 with the trio and the
+ * chime).
+ *
+ * The Basic Information strings (VendorName, ProductName, NodeLabel,
+ * Location and the rest) and CapabilityMinima are deliberately NOT here:
+ * CHAR_STRING and STRUCT fall out of attr_type_info() and answer +MTERR:5 on
+ * the generic path before ember is ever reached, which is the same code the
+ * other two arms answer for them and is what AT_MT_SPEC.md 3.8 says a
+ * non-integer attribute gets. A row for one would be dead text.
  *
  * DataModelRevision, SpecificationVersion, MaxPathsPerInvoke, FeatureMap and
  * ClusterRevision are integers and are also not here: the ruling names four,
@@ -852,10 +859,12 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
     }
 
     /*
-     * Ruling F500: the carved-out attributes refuse the write. All four are
-     * Basic Information identity values that the device instance info provider
-     * owns and that ZAP declares READABLE without WRITABLE; there is nowhere
-     * for a write to land and nothing on the wire asks to change them.
+     * Ruling F500: the carved-out attributes refuse the write. Everything
+     * but the Chime pair does: the four Basic Information identity values
+     * that the device instance info provider owns and that ZAP declares
+     * READABLE without WRITABLE, plus the OperationalState pair (AT+MTOPSTATE
+     * is its write path, the other side of this split); there is nowhere
+     * else for a write to land and nothing on the wire asks to change them.
      * MT_ATTR_ERR_READONLY (+MTERR:11) is the code AT_MT_SPEC.md 3.8 defines
      * for exactly this: "an attribute that exists but is served by a cluster
      * Instance and cannot be written over AT".

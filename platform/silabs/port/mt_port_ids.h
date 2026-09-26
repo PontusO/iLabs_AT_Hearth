@@ -79,9 +79,13 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * and bucket table.
  *
  * 9,728 is 16 x 608, i.e. kServiceableEndpoints blocks of the widest device
- * type this build declares (the mode select, catalogue batch 4: 4 clusters
- * and 11 attribute slots, 192 of slots plus the host-fed mode store's 436
- * bytes, 608 payload, already a multiple of 8). Catalogue batch 3's widest
+ * type this build declares. The mode select (catalogue batch 4) prices at 608,
+ * which is the OVER-COUNT, not the block it actually gets: the price counts
+ * modeSelectClusters' 3 clusters and MT_COUNT's 10 slots (12 of clusters plus
+ * 160 of slots plus the host-fed mode store's 436 bytes, 608 payload, already
+ * a multiple of 8), while the exact runtime block is 3 clusters, 8 slots (the
+ * 5 modeSelect plus the 3 identify, no descriptor slots), 140 + 436 = 576
+ * payload. Catalogue batch 3's widest
  * was the extended colour light (5 clusters, 36 attribute slots, 596
  * payload bytes, 600 after rounding to 8); catalogue batch 2 moved the
  * widest from batch 1's dimmable light and dimmable
