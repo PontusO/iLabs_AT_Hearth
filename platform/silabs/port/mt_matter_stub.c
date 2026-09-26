@@ -105,10 +105,6 @@ static bool stub_endpoint_live(uint16_t ep)
  * that raises the +MTATTR URC. The banner stays so the section can be found
  * by the same name in both files. */
 
-/* Switch has no cluster on either device type this build declares
- * (MT_ATTR_ERR_CLUSTER, mt_matter.h's "the usual lookup failures"). */
-int mt_matter_switch_click(uint16_t ep) { return STUB_ATTR_MISS(ep); }
-
 /* ---- temperature level labels (C3) --------------------------------------- */
 
 int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count)

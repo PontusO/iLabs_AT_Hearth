@@ -34,6 +34,9 @@
 #include <app/ConcreteAttributePath.h>
 #include <app/clusters/boolean-state-server/CodegenIntegration.h>
 #include <app/clusters/chime-server/chime-server.h>
+/* Catalogue batch 5: the stateless Switch event singleton for the generic
+ * switch's AT+MTSWITCH bridge. */
+#include <app/clusters/switch-server/switch-server.h>
 #include <app/clusters/door-lock-server/door-lock-server.h>
 #include <app/clusters/mode-select-server/supported-modes-manager.h>
 #include <app/clusters/operational-state-server/operational-state-server.h>
@@ -485,7 +488,8 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * ones the wire contract actually asks for.
  *
  * Every row of the nRF's table, and the batch that ports the device type it
- * belongs to (nRF README batch roster), none of them present here:
+ * belongs to (nRF README batch roster); the batch 4 rows are present here, the
+ * rest arrive with their batches:
  *
  *   OperationalState OperationalState, CurrentPhase           batch 4
  *   Chime SelectedChime, Enabled                              batch 4
@@ -1574,3 +1578,4 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
 }
 
 #include "mt_matter_sl_b4.inc"
+#include "mt_matter_sl_b5.inc"
