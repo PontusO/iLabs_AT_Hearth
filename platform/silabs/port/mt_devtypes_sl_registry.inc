@@ -104,7 +104,7 @@ struct hearth_shape {
  * span REPLACES the ep_type/ep_type_v1 selection entirely.
  *
  * In THIS build every one of those four members is null or empty on every
- * row but the twenty-eight ported ones, which carry ep_type and device_types
+ * row but the twenty-nine ported ones, which carry ep_type and device_types
  * alone.
  */
 struct hearth_devtype {
@@ -172,7 +172,7 @@ constexpr hearth_devtype s_registry[] = {
     { 0x0075, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kDishwasherTypes) },
     { 0x007C, 0, &applianceOpStateEndpoint, Span<const EmberAfDeviceType>(kLaundryDryerTypes) },
     { 0x0027, 0, &modeSelectEndpoint, Span<const EmberAfDeviceType>(kModeSelectTypes) },
-    { 0x0146, 0 },                                                      /* batch 4: chime */
+    { 0x0146, 0, &chimeEndpoint, Span<const EmberAfDeviceType>(kChimeTypes) },
     /* Catalogue batch 5: the standalone remainder. */
     { 0x002D, 0 },                                                      /* batch 5: air purifier */
     { 0x010F, 0 },                                                      /* batch 5: mounted on/off control */
@@ -238,7 +238,7 @@ static_assert(sizeof(s_registry) / sizeof(s_registry[0]) == 52,
  * unserved, and mt_devtype_create() refuses it before the parent is even
  * looked at. So the per-row body is skipped for those, and what the
  * assertion now proves is the same property over the rows that can be
- * created. It does NOT weaken into vacuity: the twenty-eight ported rows are checked
+ * created. It does NOT weaken into vacuity: the twenty-nine ported rows are checked
  * in full, the parent universe is still the whole 52-row registry (so a
  * future restricted row is enumerated against every catalogue id from the
  * moment it gains a cluster set), and the day a batch gives the cabinet or

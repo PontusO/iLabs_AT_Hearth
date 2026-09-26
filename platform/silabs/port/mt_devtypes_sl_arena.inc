@@ -444,12 +444,13 @@ constexpr size_t kMax2(size_t a, size_t b) { return a > b ? a : b; }
  * Description), so an over-count would only ever make the asserted floor
  * MORE conservative. */
 constexpr size_t kIdentifySlots = MT_COUNT(identifyAttrs);
-/* Catalogue batch 4 brought the first device type WITHOUT Identify (the
- * power source), so the widest-endpoint computation gained a second family:
- * a type that rides without the kIdentifySlots term. Its MT_COUNT over
- * powerSourceAttrs over-counts by one (Description is a metadata-only
- * member, no slot), the same conservative direction as the note above. */
-constexpr size_t kNoIdentifySlots = MT_COUNT(powerSourceAttrs);
+/* Catalogue batch 4 brought the first device types WITHOUT Identify (the
+ * power source and, later in the batch, the chime), so the widest-endpoint
+ * computation gained a second family: types that ride without the
+ * kIdentifySlots term. Its MT_COUNT over powerSourceAttrs over-counts by one
+ * (Description is a metadata-only member, no slot), the same conservative
+ * direction as the note above. */
+constexpr size_t kNoIdentifySlots = kMax2(MT_COUNT(powerSourceAttrs), MT_COUNT(chimeAttrs));
 /* The widest endpoint is the one with the most slots: the colour lights
  * carry OnOff AND LevelControl AND ColorControl, and the extended one
  * declares sixteen ColorControl attributes; the mode select's eleven tie the
@@ -481,14 +482,22 @@ constexpr size_t kWidestClusterList = kMax2(MT_COUNT(modeSelectClusters), kMax2(
                               kMax2(MT_COUNT(pressureSensorClusters),
                                     kMax2(MT_COUNT(lightSensorClusters), MT_COUNT(flowSensorClusters))))))),
             kMax2(kMax2(MT_COUNT(powerSourceClusters), MT_COUNT(smokeCoAlarmClusters)),
-                  MT_COUNT(applianceOpStateClusters)))));
+                  kMax2(MT_COUNT(applianceOpStateClusters), MT_COUNT(chimeClusters))))));
 
 constexpr size_t kModeSelectBlockBytes =
     block_bytes(MT_COUNT(modeSelectClusters), kIdentifySlots + MT_COUNT(modeSelectAttrs)) +
     sizeof(mt_mode_store_t);
+/* Catalogue batch 4, the chime candidate: the same own-lists-plus-stores
+ * shape as the mode select's, with NO kIdentifySlots term (the chime has no
+ * Identify, like the power source) and its own MT_COUNT(chimeAttrs) rather
+ * than the no-Identify family maximum, so the candidate prices the chime's
+ * own count. */
+constexpr size_t kChimeBlockBytes =
+    block_bytes(MT_COUNT(chimeClusters), MT_COUNT(chimeAttrs)) + sizeof(mt_chime_store_t);
 
 constexpr size_t kWidestBlockBytes =
-    kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots), kModeSelectBlockBytes);
+    kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
+          kMax2(kModeSelectBlockBytes, kChimeBlockBytes));
 
 /* Pinned, so the sizing table above cannot go stale without the build
  * noticing: the mode select is the widest type this build declares, at 608

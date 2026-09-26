@@ -430,3 +430,103 @@ DECLARE_DYNAMIC_CLUSTER(ModeSelect::Id, modeSelectAttrs, ZAP_CLUSTER_MASK(SERVER
 HEARTH_DECLARE_CONST_ENDPOINT(modeSelectEndpoint, modeSelectClusters);
 
 constexpr EmberAfDeviceType kModeSelectTypes[] = { { 0x0027, 1 } };
+/* ---- chime (0x0146) ---------------------------------------------------
+ *
+ * Catalogue batch 4 audit, Chime (0x0556; the DEVICE type is 0x0146, the
+ * cluster 0x0556, easy to transpose). Marked apiMaturity="provisional" in
+ * this tree's XML (chime-cluster.xml:31).
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; regeneration left CodeDrivenInitShutdown.cpp byte-identical).
+ *   It IS CommandHandlerInterface-only (config-data.yaml:34), so
+ *   PlayChimeSound reaches the per-endpoint ChimeServer's own
+ *   CommandHandlerInterface and the same regeneration left
+ *   IMClusterCommandHandler.cpp byte-identical too.
+ *
+ *   Delegate or plain ember? Per-endpoint ChimeServer object PLUS a
+ *   ChimeDelegate, the OperationalState shape with the roles renamed.
+ *   ChimeServer(EndpointId, ChimeDelegate&) privately inherits
+ *   AttributeAccessInterface and CommandHandlerInterface
+ *   (chime-server.h:35, ctor :45) and is non-default-constructible, so
+ *   its pool in mt_matter_zephyr.cpp is alignas raw storage,
+ *   placement-constructed once per endpoint and never destroyed, the
+ *   same policy as the OperationalState Instances. Init() (:52, impl
+ *   chime-server.cpp:59-66) loads the two persisted attributes and
+ *   registers both endpoint-scoped interfaces, so it runs only AFTER
+ *   emberAfSetDynamicEndpoint() succeeds; LoadPersistentAttributes()
+ *   keys its KVS reads on GetEndpointId() (chime-server.cpp:68-97).
+ *
+ *   ServerInit? None: MatterChimePluginServerInitCallback and its
+ *   Shutdown twin are empty bodies (chime-server.cpp:285-286), the XML
+ *   says init="false" (chime-cluster.xml:38). Does NOT join B388; the
+ *   construction lives in mt_matter_chime_delegate_set_endpoint().
+ *
+ * NO Identify, matching the C6: the device type lists Identify with
+ * server="false" (matter-devices.xml:1179-1192, MA-chime), so only the
+ * Chime cluster and Descriptor are mandated.
+ *
+ * SelectedChime and Enabled are AAI-SHADOWED: the ChimeServer holds them
+ * as members (chime-server.h:98-99), serves every fabric read and write
+ * through its own AAI, and PERSISTS writes through
+ * SafeAttributePersistenceProvider into the settings partition
+ *   (SetSelectedChime/SetEnabled, chime-server.cpp:206-248; restored by
+ *   LoadPersistentAttributes at every endpoint create). Two consequences
+ *   worth naming: the ember slots declared below are inert on the fabric
+ *   (declared WRITABLE to keep the metadata honest about the cluster's
+ *   contract), and unlike everything else in this catalogue the pair
+ *   SURVIVES a reboot server-side, so a chatty host driving AT+MTCHIME is
+ *   a new ZMS wear source on a settings_storage partition whose occupancy
+ *   is already a watch item (platform README, measured section).
+ *
+ *   Fix round, review M6, platform note: the persistence keys on
+ *   ConcreteAttributePath(GetEndpointId(), Chime::Id, ...) and NOTHING on
+ *   this platform ever clears those keys (no endpoint teardown path
+ *   exists), so the pair survives a COMPOSITION change too, not just a
+ *   reboot: a host that re-edits its composition such that a chime lands
+ *   on an endpoint id a previous chime once occupied inherits that
+ *   chime's persisted SelectedChime and Enabled. The C6 does not have
+ *   this (its pair was not KVS-persisted). Deliberately documented, not
+ *   cleared-on-create: writing the fresh defaults at create would also
+ *   erase the LEGITIMATE reboot persistence the server implements on
+ *   purpose, and the create path cannot tell "same chime as last boot"
+ *   from "different chime, recycled endpoint id". Belongs in the
+ *   controller's AT_MT_SPEC amendment beside the DE396 payload note.
+ *
+ * InstalledChimeSounds is the host-fed array (AT+MTCHIMESOUNDS), served
+ * by the server's AAI walking the delegate's GetChimeSoundByIndex();
+ * no slot, declared for AttributeList truth.
+ *
+ * The PlayChimeSound wire divergence from the C6, DECIDED (user ruling
+ * DE396): in THIS tree the command takes NO argument
+ * (chime-cluster.xml:43-45 declares none; the delegate's PlayChimeSound()
+ * is argument-free, chime-server.h:164), where the esp tree's revision
+ * carries an optional ChimeID. The +MTCMD payload arity stays
+ * byte-identical to the C6 by forwarding the owning server's
+ * GetSelectedChime() as the single trailing field: the payload means
+ * "the chime id that will play". Also gone in this revision, both spec
+ * paragraphs handled by the controller side: the unknown-chimeID
+ * NotFound pre-check (HandlePlayChimeSound checks only mEnabled,
+ * chime-server.cpp:260-274) and the ChimeStartedPlaying event (no
+ * <event> in chime-cluster.xml at all). Enabled false answers Success
+ * with NO delegate call (:266-271), so no +MTCMD is raised then, same
+ * as the C6. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(chimeAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::InstalledChimeSounds::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::SelectedChime::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::Enabled::Id, BOOLEAN, 1,
+                              ZAP_ATTRIBUTE_MASK(WRITABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(Chime::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kChimeIncoming[] = { Chime::Commands::PlayChimeSound::Id, kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(chimeClusters)
+DECLARE_DYNAMIC_CLUSTER(Chime::Id, chimeAttrs, ZAP_CLUSTER_MASK(SERVER), kChimeIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(chimeEndpoint, chimeClusters);
+
+constexpr EmberAfDeviceType kChimeTypes[] = { { 0x0146, 1 } };

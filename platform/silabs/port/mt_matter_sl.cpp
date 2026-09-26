@@ -33,6 +33,7 @@
 #include <clusters/AirQuality/Enums.h>
 #include <app/ConcreteAttributePath.h>
 #include <app/clusters/boolean-state-server/CodegenIntegration.h>
+#include <app/clusters/chime-server/chime-server.h>
 #include <app/clusters/door-lock-server/door-lock-server.h>
 #include <app/clusters/mode-select-server/supported-modes-manager.h>
 #include <app/clusters/operational-state-server/operational-state-server.h>
@@ -440,7 +441,8 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * value. It is consulted only AFTER attr_locate() has proven the endpoint
  * carries the cluster, so it can never change the
  * ENDPOINT/CLUSTER/ATTRIBUTE error division below. Reads answer the live
- * owner; writes answer MT_ATTR_ERR_READONLY.
+ * owner; writes answer MT_ATTR_ERR_READONLY, the Chime pair alone excepted
+ * (it routes to the server's own setters, the write-path comment names it).
  *
  * WHAT IS IN IT HERE IS NOT WHAT IS IN IT ON THE nRF, and the difference is
  * the point of this comment. On the nRF every row is an attribute a
@@ -556,6 +558,8 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
     { chip::app::Clusters::OperationalState::Id,
       chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
+    { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::SelectedChime::Id },
+    { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::Enabled::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -710,6 +714,11 @@ static uint64_t attr_null_sentinel(bool is_unsigned, uint8_t bytes)
  */
 static int mt_opstate_attr_read_live(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
                                      bool *is_unsigned);
+/* The chime live readers/writers, defined in the mt_matter_sl_b4.inc
+ * fragment at the END of this file: the same forward-declaration need as
+ * the opstate reader's above. */
+static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
 
 extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
                                    bool *is_unsigned)
@@ -734,6 +743,8 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_basic_info_attr_read_live(attr, out, is_unsigned);
         case chip::app::Clusters::OperationalState::Id:
             return mt_opstate_attr_read_live(ep, cluster, attr, out, is_unsigned);
+        case chip::app::Clusters::Chime::Id:
+            return mt_chime_attr_read_live(ep, attr, out, is_unsigned);
         default:
             return MT_ATTR_ERR_FAILED;
         }
@@ -849,15 +860,20 @@ extern "C" int mt_matter_attr_write(uint16_t ep, uint32_t cluster, uint32_t attr
      * for exactly this: "an attribute that exists but is served by a cluster
      * Instance and cannot be written over AT".
      *
-     * The nRF splits this arm two ways, refusing everything but the Chime
-     * pair, which routes to the live ChimeServer's own setters and raises no
+     * The nRF splits this arm two ways, and this one now does: everything
+     * but the Chime pair is refused with +MTERR:11 (the opstate pair is the
+     * other side of this split, AT+MTOPSTATE its write path), while the
+     * chime pair routes to the live ChimeServer's own setters and raises no
      * +MTATTR URC in either notify mode because it bypasses
-     * emberAfWriteAttribute entirely. There is no writable carved-out
-     * attribute in this image, so the split has no second half to have; the
-     * batch that brings the chime brings it.
+     * emberAfWriteAttribute entirely. The chime rows persist through the
+     * server into the settings partition, the wear note the tables' comment
+     * names; this image's only writable carved-out attributes.
      */
     if (instance_attr_served(cluster, attr)) {
-        return MT_ATTR_ERR_READONLY;
+        if (cluster != chip::app::Clusters::Chime::Id) {
+            return MT_ATTR_ERR_READONLY;
+        }
+        return mt_chime_attr_write_live(ep, attr, val);
     }
 
     bool unsigned_type;

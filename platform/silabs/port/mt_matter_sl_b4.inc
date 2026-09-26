@@ -832,3 +832,371 @@ extern "C" int mt_matter_modes_set(uint16_t ep, const uint8_t *modes, const char
     return MT_ATTR_OK;
 }
 
+/* ---- chime (0x0146) ---------------------------------------------------
+ *
+ * Per-endpoint ChimeServer plus ChimeDelegate; the composition-side audit
+ * (CHI-only, no ServerInit, the AAI-shadowed KVS-persisted pair, the
+ * missing NotFound pre-check and event) is on chimeAttrs in
+ * mt_devtypes_zephyr.cpp. This section owns the objects and the two AT
+ * bridges.
+ *
+ * The verdict is the one on this firmware's whole +MTCMD surface that
+ * reaches the controller exactly as given: HandlePlayChimeSound() copies
+ * whatever Status the delegate returns straight into the command's
+ * response (chime-server.cpp:260-274), with no SDK-side remapping.
+ * Status::Success on allow, Status::Failure on deny.
+ *
+ * The payload, DECIDED (user ruling DE396): this tree's PlayChimeSound()
+ * takes NO argument (chime-server.h:164; the command XML declares none),
+ * so the C6's invoke-supplied chimeID does not exist to forward. The
+ * single trailing +MTCMD field instead carries the owning server's
+ * GetSelectedChime(): the wire arity stays byte-identical to the C6 and
+ * the payload means "the chime id that will play", which is also what the
+ * server will play by its own rules. The server pointer comes from the
+ * base class's own back-reference (the ctor calls SetChimeServer(this),
+ * chime-server.cpp:46, readable through the protected GetChimeServer(),
+ * chime-server.h:173), the OperationalState GetInstance() mechanism under
+ * another name.
+ */
+/* The sounds store (mt_chime_store_t, mt_dyn_store.h) lives in the chime
+ * endpoint's own heap block since the store reclaim round, reached through
+ * mt_dyn_chime_store(); the 4,448 B .bss pool this section used to hold is
+ * gone, and only compositions that declare chime endpoints pay for the
+ * store. A fresh store has count 0, which both delegate lookups below
+ * already answer with PROVIDER_LIST_EXHAUSTED at any index, exactly what
+ * the pool's no-slot arm produced. */
+
+class HearthChimeDelegate : public chip::app::Clusters::ChimeDelegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+
+    /* GetChimeServer() is protected in the base; this passthrough is how
+     * the AT bridges below reach each endpoint's server object. */
+    chip::app::Clusters::ChimeServer *server() { return GetChimeServer(); }
+
+    CHIP_ERROR GetChimeSoundByIndex(uint8_t chimeIndex, uint8_t &chimeID,
+                                    chip::MutableCharSpan &name) override
+    {
+        mt_chime_store_t *slot = mt_dyn_chime_store(m_ep);
+        if (slot == nullptr || chimeIndex >= slot->count) {
+            /* PROVIDER_LIST_EXHAUSTED, NOT the CHIP_ERROR_NOT_FOUND the
+             * header's doc comment names (chime-server.h:137-138): the
+             * implementation's two iteration loops terminate ONLY on
+             * PROVIDER_LIST_EXHAUSTED (EncodeSupportedChimeSounds,
+             * chime-server.cpp:148-151, and IsSupportedChimeID, :168).
+             * Answering NOT_FOUND would fail every InstalledChimeSounds
+             * read outright and, worse, spin IsSupportedChimeID forever
+             * on an unmatched id (its uint8_t index wraps and nothing
+             * else stops it), hanging the CHIP task. The code wins over
+             * its comment; same sentinel the C6 returns. */
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        chimeID = slot->entries[chimeIndex].id;
+        chip::CharSpan src(slot->entries[chimeIndex].name, strlen(slot->entries[chimeIndex].name));
+        return chip::CopyCharSpanToMutableCharSpan(src, name);
+    }
+
+    CHIP_ERROR GetChimeIDByIndex(uint8_t chimeIndex, uint8_t &chimeID) override
+    {
+        mt_chime_store_t *slot = mt_dyn_chime_store(m_ep);
+        if (slot == nullptr || chimeIndex >= slot->count) {
+            /* Same sentinel note as GetChimeSoundByIndex above. */
+            return CHIP_ERROR_PROVIDER_LIST_EXHAUSTED;
+        }
+        chimeID = slot->entries[chimeIndex].id;
+        return CHIP_NO_ERROR;
+    }
+
+    /* Only reached when Enabled is true (chime-server.cpp:266-271; a
+     * disabled chime answers Success with no delegate call and no
+     * +MTCMD). Runs on the CHIP task, no StackLock. */
+    chip::Protocols::InteractionModel::Status PlayChimeSound() override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        chip::app::Clusters::ChimeServer *srv = GetChimeServer();
+        if (srv == nullptr) {
+            /* Unreachable by construction (the server's ctor set the
+             * back-reference before any command could dispatch);
+             * defensive, and failing closed beats forwarding a payload
+             * this delegate cannot know. */
+            return Status::Failure;
+        }
+        bool allow = mt_cmd_forward_payload(m_ep, chip::app::Clusters::Chime::Id,
+                                            chip::app::Clusters::Chime::Commands::PlayChimeSound::Id,
+                                            srv->GetSelectedChime());
+        return allow ? Status::Success : Status::Failure;
+    }
+
+private:
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+};
+
+/* The Chime Delegate + ChimeServer pair (56 B on the nRF's measurement). */
+static_assert(hearth_arena_cost(obj_pair_bytes<HearthChimeDelegate, chip::app::Clusters::ChimeServer>()) *
+                      kServiceableEndpoints <= HEARTH_OBJ_ARENA_BYTES,
+              "sixteen chime pairs no longer fit the cluster-object arena");
+
+/* Delegate pool with the raw storage for the non-default-constructible
+ * ChimeServer behind each delegate in its own cluster-object heap block,
+ * the OperationalState pools' exact shape since memory reclaim round A and
+ * the same construct-once, never-destroy policy (chime's ~ChimeServer
+ * would unregister both interfaces, chime-server.cpp:49-57, and no
+ * teardown path exists on this platform). */
+static HearthChimeDelegate *s_chime_delegates[kServiceableEndpoints];
+static size_t s_chime_delegate_next;
+
+extern "C" void *mt_matter_chime_delegate_alloc(void)
+{
+    if (s_chime_delegate_next >= kServiceableEndpoints) {
+        return nullptr;
+    }
+    HearthChimeDelegate *d =
+        obj_pair_new<HearthChimeDelegate, chip::app::Clusters::ChimeServer>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_chime_delegates[s_chime_delegate_next++] = d;
+    return d;
+}
+
+/*
+ * The second half: placement-constructs the ChimeServer (its ctor stores
+ * the delegate reference and sets the delegate's back-reference) and runs
+ * Init(), which loads the two KVS-persisted attributes and registers the
+ * endpoint-scoped AAI and command handler (chime-server.cpp:59-66). Below
+ * a successful emberAfSetDynamicEndpoint() by the same reasoning as the
+ * OperationalState pool; an Init() failure is logged loudly and does not
+ * abort, the same unreachable-by-ordering argument.
+ */
+extern "C" void mt_matter_chime_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    auto *d = static_cast<HearthChimeDelegate *>(delegate);
+    d->set_endpoint(ep);
+    auto *srv =
+        new (obj_inst_storage<HearthChimeDelegate, chip::app::Clusters::ChimeServer>(d))
+            chip::app::Clusters::ChimeServer(ep, *d);
+    CHIP_ERROR err = srv->Init();
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "chime ChimeServer::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
+                              "; the chime cluster on it will not be served",
+                    (unsigned)ep, err.Format());
+    }
+}
+
+/*
+ * Fix round M3: hand back the slot mt_matter_chime_delegate_alloc() gave
+ * out, for the create paths that fail AFTER the claim and BEFORE
+ * mt_matter_chime_delegate_set_endpoint(). Without this, every post-claim
+ * -1 return in mt_devtype_create() stranded one pool slot per boot
+ * (bounded, because the rebuild stops at the failure, but the unwind was
+ * incomplete where the door lock's is complete). Only the MOST RECENT
+ * claim can come back, which is the only case the caller can produce:
+ * claims and unclaims both run under the StackLock mt_devtype_create()
+ * holds, one endpoint at a time, and a slot that reached set_endpoint
+ * (its ChimeServer constructed and registered) is only reachable from the
+ * success path, so it can never be offered here. Anything else is a
+ * caller bug worth shouting about, not silently absorbing.
+ *
+ * Deliberately NOT declared in core/include/mt_matter.h (read-only this
+ * round): the pair contract there is unchanged, and the one caller
+ * declares this port-local extension itself (mt_devtypes_zephyr.cpp,
+ * beside the chime handout).
+ *
+ * Memory reclaim round A: what comes back is the SLOT, not the heap block.
+ * The cluster-object heap is allocate-only and has no free, so the
+ * unclaimed delegate's block stays out. That is bounded at one stranded
+ * block per boot for the same reason the stranded-CLAIM policy is bounded
+ * at one: the rebuild stops at the failure that provoked the unclaim and
+ * nothing retries within a boot.
+ */
+extern "C" void mt_matter_chime_delegate_unclaim(void *delegate)
+{
+    if (s_chime_delegate_next > 0 &&
+        delegate == s_chime_delegates[s_chime_delegate_next - 1]) {
+        s_chime_delegates[--s_chime_delegate_next] = nullptr;
+        return;
+    }
+    HEARTH_LOGE("matter", "chime delegate unclaim ignored: not the most recent claim");
+}
+
+/*
+ * AT+MTCHIMESOUNDS bridge. Grammar and content rules are enforced by
+ * cmd_mtchimesounds() in mt_at.c; the bounds re-checked here are
+ * defensive. Ends by marking InstalledChimeSounds dirty with
+ * MatterReportingAttributeChangeCallback(), and NOT with the SDK's
+ * ReportInstalledChimeSoundsChange(): that method is DECLARED on
+ * ChimeServer (chime-server.h:92) and its own doc comments demand
+ * calling it, but it has NO DEFINITION anywhere in this tree (grep over
+ * src/, examples/ and zzz_generated/ finds only the declaration and the
+ * two doc mentions), so calling it is a link error. The same
+ * documented-but-nonexistent hole the C6 recorded against ITS tree
+ * (core/include/mt_matter.h's note), one revision later and one symbol
+ * shape over; the substitute is the same one, and it works identically
+ * here because the reporting engine's dirty-marking is not
+ * ember-specific.
+ */
+extern "C" int mt_matter_chime_sounds_set(uint16_t ep, const uint8_t *ids,
+                                          const char *const *names, uint8_t count)
+{
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::Chime::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1 || count > MT_CHIME_MAX_SOUNDS) {
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    mt_chime_store_t *slot = mt_dyn_chime_store(ep);
+    if (!slot) {
+        /* Cannot happen: the two lookups above proved ep live with a
+         * Chime server, and every such endpoint's block carries its store
+         * from create. Defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        size_t len = strlen(names[i]);
+        if (len < 1 || len > MT_CHIME_MAX_NAME_LEN) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        slot->entries[i].id = ids[i];
+        memcpy(slot->entries[i].name, names[i], len + 1);
+    }
+    slot->count = count;
+
+    MatterReportingAttributeChangeCallback(
+        ep, chip::app::Clusters::Chime::Id,
+        chip::app::Clusters::Chime::Attributes::InstalledChimeSounds::Id);
+    return MT_ATTR_OK;
+}
+
+/*
+ * AT+MTCHIME bridge. mt_at.c's cmd_mtchime has already checked <what> is
+ * 0 or 1 and <value> fits a u8. Goes through the server object's own
+ * SetSelectedChime()/SetEnabled(), never a raw attribute write: the
+ * members are the served truth (the ember slots are inert shadows), and
+ * the setters persist to KVS and mark the path dirty themselves
+ * (chime-server.cpp:206-248). SetSelectedChime answers Status::NotFound
+ * for an id AT+MTCHIMESOUNDS never installed, mapped to MT_ATTR_ERR_VALUE
+ * (+MTERR:1), the C6's mapping.
+ */
+extern "C" int mt_matter_chime_set(uint16_t ep, uint8_t what, uint8_t value)
+{
+    using chip::Protocols::InteractionModel::Status;
+    chip::DeviceLayer::StackLock lock;
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::Chime::Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+
+    chip::app::Clusters::ChimeServer *srv = nullptr;
+    for (size_t i = 0; i < s_chime_delegate_next; i++) {
+        HearthChimeDelegate *d = s_chime_delegates[i];
+        if (d->endpoint() == ep) {
+            srv = d->server();
+            break;
+        }
+    }
+    if (srv == nullptr) {
+        /* Cannot happen once the boot rebuild has run. Defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    Status st;
+    switch (what) {
+    case 0: /* SelectedChime */
+        st = srv->SetSelectedChime(value);
+        break;
+    case 1: /* Enabled */
+        st = srv->SetEnabled(value != 0);
+        break;
+    default:
+        /* cmd_mtchime already rejects <what> outside 0..1. Defensive. */
+        return MT_ATTR_ERR_VALUE;
+    }
+    return (st == Status::Success) ? MT_ATTR_OK : MT_ATTR_ERR_VALUE;
+}
+
+/*
+ * DE397 live read for the chime's two AAI-shadowed, KVS-persisted
+ * attributes, dispatched from mt_matter_attr_read() (see the carve-out
+ * comment above attr_locate()). Runs under that bridge's StackLock. Both
+ * unsigned, neither nullable; the values are the ChimeServer members a
+ * subscribed controller reads, KVS restore and all, so an AT read after a
+ * reboot answers the persisted pair rather than the arena's fresh seeds.
+ */
+static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned)
+{
+    if (is_unsigned) {
+        *is_unsigned = true;
+    }
+    chip::app::Clusters::ChimeServer *srv = nullptr;
+    for (size_t i = 0; i < s_chime_delegate_next; i++) {
+        HearthChimeDelegate *d = s_chime_delegates[i];
+        if (d->endpoint() == ep) {
+            srv = d->server();
+            break;
+        }
+    }
+    if (srv == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (attr == chip::app::Clusters::Chime::Attributes::SelectedChime::Id) {
+        *out = srv->GetSelectedChime();
+    } else {
+        *out = srv->GetEnabled() ? 1 : 0;
+    }
+    return MT_ATTR_OK;
+}
+
+/*
+ * DE397 as amended, fix round 2: the AT+MTATTR write leg for the chime
+ * pair, routed to the live server the way the C6's
+ * MANAGED_INTERNALLY+WRITABLE branch routes through the data model
+ * provider. Dispatched from mt_matter_attr_write() under its StackLock;
+ * the status-to-wire mapping mirrors the traced C6 behaviour point for
+ * point (see the carve-out comment above attr_locate()): out-of-width
+ * +MTERR:1, uninstalled SelectedChime id a bare ERROR (NotFound collapsed,
+ * exactly as the C6's ESP_FAIL default arm renders it, and deliberately
+ * NOT AT+MTCHIME's +MTERR:1 for the same NotFound), success and
+ * same-value OK, no +MTATTR URC in either notify mode, KVS persistence
+ * on every changed write (the wear note is in the carve-out comment).
+ */
+static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val)
+{
+    using chip::Protocols::InteractionModel::Status;
+    chip::app::Clusters::ChimeServer *srv = nullptr;
+    for (size_t i = 0; i < s_chime_delegate_next; i++) {
+        HearthChimeDelegate *d = s_chime_delegates[i];
+        if (d->endpoint() == ep) {
+            srv = d->server();
+            break;
+        }
+    }
+    if (srv == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    Status st;
+    if (attr == chip::app::Clusters::Chime::Attributes::SelectedChime::Id) {
+        if (val < 0 || val > 0xFF) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        st = srv->SetSelectedChime((uint8_t)val);
+    } else {
+        if (val < 0 || val > 1) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        st = srv->SetEnabled(val != 0);
+    }
+    return (st == Status::Success) ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+}
+

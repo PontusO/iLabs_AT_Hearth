@@ -125,6 +125,15 @@ extern "C" {
 #include "mt_dyn_store.h"
 #include "mt_port_ids.h"
 
+/* Catalogue batch 4: the chime pool's unclaim, the port-local completion of
+ * mt_matter.h's alloc/set_endpoint pair, called on every
+ * mt_devtype_create() failure path between the claim and set_endpoint so
+ * a failed create no longer strands a pool slot. File-local to the port
+ * (not in mt_matter.h); defined in the mt_matter_sl_b4.inc fragment at the
+ * end of mt_matter_sl.cpp, which documents the most-recent-claim-only
+ * contract. */
+extern "C" void mt_matter_chime_delegate_unclaim(void *delegate);
+
 using namespace chip;
 using namespace chip::app::Clusters;
 
@@ -834,6 +843,25 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 4: the chime's handout, the trio's pattern with a
+     * ChimeServer in place of an Instance. Same two halves, same
+     * exhaustion-aborts-before-spending rule. Unlike the opstate and valve
+     * claims, this one is handed back through
+     * mt_matter_chime_delegate_unclaim() on every failure path below, so a
+     * -1 between here and set_endpoint no longer strands a pool slot. */
+    void *chime_delegate = nullptr;
+    if (type_has_cluster(ep_type, Chime::Id)) {
+        chime_delegate = mt_matter_chime_delegate_alloc();
+        if (chime_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: chime delegate unavailable: the "
+                                    "cluster-object arena or the chime cap (kServiceableEndpoints) "
+                                    "is exhausted; %u of %u serviceable endpoints in use",
+                        (unsigned)devtype_id, (unsigned)live_endpoints(),
+                        (unsigned)kServiceableEndpoints);
+            return -1;
+        }
+    }
+
     void *block = hearth_arena_alloc(s_ep_arena, want, "endpoint block arena");
     if (block == nullptr) {
         /* hearth_arena_alloc() has already said what was wanted and what was
@@ -848,6 +876,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
                     (unsigned)s_ep_arena.used, (unsigned)kArenaUsableBytes,
                     (unsigned)(kArenaUsableBytes - s_ep_arena.used), (unsigned)(index + 1),
                     (unsigned)kServiceableEndpoints);
+        if (chime_delegate != nullptr) {
+            mt_matter_chime_delegate_unclaim(chime_delegate);
+        }
         return -1;
     }
 
@@ -906,6 +937,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         d.block = nullptr;
         HEARTH_LOGE("devtypes", "emberAfSetDynamicEndpoint(0x%04X) failed: %" CHIP_ERROR_FORMAT,
                     (unsigned)devtype_id, err.Format());
+        if (chime_delegate != nullptr) {
+            mt_matter_chime_delegate_unclaim(chime_delegate);
+        }
         return -1;
     }
 
@@ -922,6 +956,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         emberAfClearDynamicEndpoint(index);
         d.used = false;
         d.block = nullptr;
+        if (chime_delegate != nullptr) {
+            mt_matter_chime_delegate_unclaim(chime_delegate);
+        }
         return -1;
     }
     /* The valve delegate's second half: SetDefaultDelegate resolves through
@@ -941,6 +978,17 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * endpoint is live and correct in every other respect by then. */
     if (opstate_delegate != nullptr) {
         mt_matter_opstate_delegate_set_endpoint(opstate_delegate, d.ep_id);
+    }
+
+    /* The chime's second half: placement-constructs the ChimeServer
+     * (endpoint id plus delegate reference) and runs Init(), whose AAI
+     * and command-handler registrations are endpoint-scoped and whose
+     * LoadPersistentAttributes() keys on GetEndpointId(), so it belongs
+     * below the successful emberAfSetDynamicEndpoint() like the trio's.
+     * Failure is logged loudly inside and does not abort, the same
+     * reasoning. */
+    if (chime_delegate != nullptr) {
+        mt_matter_chime_delegate_set_endpoint(chime_delegate, d.ep_id);
     }
 
     s_next_ep_id++;
