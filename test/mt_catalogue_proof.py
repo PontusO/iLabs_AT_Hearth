@@ -52,8 +52,8 @@ def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
     int (optional: the chip-tool response's ErrorStateID, read by
     H.parse_status, which answers it for every response shape since the
     trio's allow/deny/refusal all exit 0)} and an optional payload (batch
-    4) passed to CmdResponder.expect(payload=) (the trio's Start 2, Pause
-    0, Stop 1); kind "notify" is (args, (fwd_cluster, fwd_command),
+    4) passed to CmdResponder.expect(payload=) (the chime's PlayChimeSound
+    7); kind "notify" is (args, (fwd_cluster, fwd_command),
     payload or None, [follow-up at_cmd format strings],
     ("read-event", event_name)) (batch 4): the controller command is
     invoked threaded, the seq-0 forward is asserted by
@@ -225,54 +225,54 @@ BATCHES = {
                                ("read-event", "self-test-complete"))),
         ]),
         _multi("0x0073", "laundry washer", 2, "operationalstate", [
-            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0"),
-            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+            _check(96, 4, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0"),
+            _check(96, 4, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
                    controller=("verdict", ["start"], (96, 2), 1,
-                               {"rc0": True, "error_state": 0}, 2)),
-            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                               {"rc0": True, "error_state": 0})),
+            _check(96, 4, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
                    controller=("verdict", ["pause"], (96, 0), 0,
-                               {"rc0": True, "error_state": 2}, 0)),
-            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                               {"rc0": True, "error_state": 2})),
+            _check(96, 4, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
                    controller=("verdict", ["stop"], (96, 1), None,
-                               {"rc0": True, "error_state": 2}, 1)),
-            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+                               {"rc0": True, "error_state": 2})),
+            _check(96, 4, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
                    controller=("no_forward", ["pause"],
                                {"rc0": True, "error_state": 3})),
-            _check(96, 0, "operational-state", 0,
+            _check(96, 4, "operational-state", 0,
                    controller=("at_refused", ["AT+MTATTR=%(ep)d,96,4,2"], 11)),
         ]),
         _multi("0x0075", "dishwasher", 2, "operationalstate", [
-            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0"),
-            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+            _check(96, 4, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0"),
+            _check(96, 4, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
                    controller=("verdict", ["start"], (96, 2), 1,
-                               {"rc0": True, "error_state": 0}, 2)),
-            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                               {"rc0": True, "error_state": 0})),
+            _check(96, 4, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
                    controller=("verdict", ["pause"], (96, 0), 0,
-                               {"rc0": True, "error_state": 2}, 0)),
-            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                               {"rc0": True, "error_state": 2})),
+            _check(96, 4, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
                    controller=("verdict", ["stop"], (96, 1), None,
-                               {"rc0": True, "error_state": 2}, 1)),
-            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+                               {"rc0": True, "error_state": 2})),
+            _check(96, 4, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
                    controller=("no_forward", ["pause"],
                                {"rc0": True, "error_state": 3})),
-            _check(96, 0, "operational-state", 0,
+            _check(96, 4, "operational-state", 0,
                    controller=("at_refused", ["AT+MTATTR=%(ep)d,96,4,2"], 11)),
         ]),
         _multi("0x007C", "laundry dryer", 2, "operationalstate", [
-            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0"),
-            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+            _check(96, 4, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0"),
+            _check(96, 4, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
                    controller=("verdict", ["start"], (96, 2), 1,
-                               {"rc0": True, "error_state": 0}, 2)),
-            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                               {"rc0": True, "error_state": 0})),
+            _check(96, 4, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
                    controller=("verdict", ["pause"], (96, 0), 0,
-                               {"rc0": True, "error_state": 2}, 0)),
-            _check(96, 0, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                               {"rc0": True, "error_state": 2})),
+            _check(96, 4, "operational-state", 1, at_cmd="AT+MTOPSTATE=%(ep)d,1",
                    controller=("verdict", ["stop"], (96, 1), None,
-                               {"rc0": True, "error_state": 2}, 1)),
-            _check(96, 0, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
+                               {"rc0": True, "error_state": 2})),
+            _check(96, 4, "operational-state", 0, at_cmd="AT+MTOPSTATE=%(ep)d,0",
                    controller=("no_forward", ["pause"],
                                {"rc0": True, "error_state": 3})),
-            _check(96, 0, "operational-state", 0,
+            _check(96, 4, "operational-state", 0,
                    controller=("at_refused", ["AT+MTATTR=%(ep)d,96,4,2"], 11)),
         ]),
         _multi("0x0027", "mode select", 1, "modeselect", [
@@ -283,11 +283,11 @@ BATCHES = {
                   ("modeselect", "supported-modes",
                    ["Quiet", "Normal", "Boost"]))),
         _multi("0x0146", "chime", 1, "chime", [
-            _check(1366, 0, "selected-chime", 7, at_cmd="AT+MTCHIME=%(ep)d,0,7"),
-            _check(1366, 1, "enabled", 1, parse="bool", at_cmd="AT+MTCHIME=%(ep)d,1,1",
+            _check(1366, 1, "selected-chime", 7, at_cmd="AT+MTCHIME=%(ep)d,0,7"),
+            _check(1366, 2, "enabled", 1, parse="bool", at_cmd="AT+MTCHIME=%(ep)d,1,1",
                    controller=("verdict", ["play-chime-sound"], (1366, 0), 1,
                                {"rc0": True}, 7)),
-            _check(1366, 1, "enabled", 0, parse="bool", at_cmd="AT+MTCHIME=%(ep)d,1,0",
+            _check(1366, 2, "enabled", 0, parse="bool", at_cmd="AT+MTCHIME=%(ep)d,1,0",
                    controller=("no_forward", ["play-chime-sound"], {"rc0": True})),
         ], setup=("setup", ["AT+MTCHIMESOUNDS=%(ep)d,7,\"Ding\""],
                   ("chime", "installed-chime-sounds", ["Ding"]))),
@@ -442,6 +442,16 @@ def prove_endpoint(link, chip, s, node, ep, t):
     # row must name the command and the adjudication it proves, while batch
     # 1's and batch 2's row names stay byte-for-byte (neither carries a
     # verdict kind).
+    if t.get("setup"):
+        _kind, atlines, (scc, sattr, substrs) = t["setup"]
+        for line in atlines:
+            wcmd = line % {"ep": ep}
+            res, wlines = link.command(wcmd)
+            s.check("%s ep%d setup %s -> OK" % (tag, ep, wcmd), res == 0)
+        rc, out = chip.run([scc, "read", sattr, node, str(ep)], timeout=30)
+        s.check("%s ep%d setup %s read carries %s"
+                % (tag, ep, sattr, " and ".join(substrs)),
+                rc == 0 and all(x in out for x in substrs))
     multi = len(t["checks"]) > 1
     for c in t["checks"]:
         prefix = "%s ep%d" % (tag, ep) + (" %s" % c["chip_attr"] if multi else "")
@@ -462,16 +472,6 @@ def prove_endpoint(link, chip, s, node, ep, t):
             elif c["controller"][0] == "at_refused":
                 prefix += " AT write refused"
         prove_check(link, chip, s, node, ep, t, c, prefix)
-    if t.get("setup"):
-        _kind, atlines, (scc, sattr, substrs) = t["setup"]
-        for line in atlines:
-            wcmd = line % {"ep": ep}
-            res, wlines = link.command(wcmd)
-            s.check("%s ep%d setup %s -> OK" % (tag, ep, wcmd), res == 0)
-        rc, out = chip.run([scc, "read", sattr, node, str(ep)], timeout=30)
-        s.check("%s ep%d setup %s read carries %s"
-                % (tag, ep, sattr, " and ".join(substrs)),
-                rc == 0 and all(x in out for x in substrs))
     for extra in t["extra_reads"]:
         if extra[0] == "read-event":
             rc, out = chip.run([t["chip_cluster"], "read-event", extra[1], node, str(ep)], timeout=30)
@@ -493,6 +493,18 @@ def _second_at_read(link, s, prefix, at, own):
 def prove_check(link, chip, s, node, ep, t, c, prefix):
     cc = c["chip_cluster"] or t["chip_cluster"]
     at = "%d,%d,%d" % (ep, c["cluster"], c["attr"])
+    if c["controller"] is not None and c["controller"][0] == "at_refused":
+        # The trio's Instance-served OperationalState row: AT_MT_SPEC 3.21
+        # and 3.8's DE270 rule -- the attribute exists but is served by the
+        # cluster's own Instance, so the AT write is refused with the given
+        # +MTERR code; there is no write step before it, no forward, no read
+        # and no second read.
+        _kind, atlines, err = c["controller"]
+        link.drain(0.2)
+        wcmd = atlines[0] % {"ep": ep}
+        res, wlines = link.command(wcmd)
+        s.check("%s %s -> +MTERR:%d" % (prefix, wcmd, err), res == err)
+        return
     if c["null_read"]:
         # AT_MT_SPEC 3.8's null rule: reading an attribute that has never
         # been set answers +MTERR:5. ATLink._collect() consumes the
@@ -543,16 +555,6 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
     if c["controller"] is None:
         s.not_applicable("%s controller write" % prefix, "no controller action (read-only attribute)")
         _second_at_read(link, s, prefix, at, own)
-    elif c["controller"][0] == "at_refused":
-        # The trio's Instance-served OperationalState row: AT_MT_SPEC 3.21
-        # and 3.8's DE270 rule -- the attribute exists but is served by the
-        # cluster's own Instance, so the AT write is refused with the given
-        # +MTERR code and there is no forward, no read and no second read.
-        _kind, atlines, err = c["controller"]
-        link.drain(0.2)
-        wcmd = atlines[0] % {"ep": ep}
-        res, wlines = link.command(wcmd)
-        s.check("%s %s -> +MTERR:%d" % (prefix, wcmd, err), res == err)
     elif c["controller"][0] == "notify":
         _kind, args, (fcl, fcmd), payload, atlines, event = c["controller"]
         link.drain(0.2)
@@ -623,9 +625,8 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         _second_at_read(link, s, prefix, at, own)
         kind, args, (fcl, fcmd), answer, want = c["controller"][:5]
         # The 6th tuple element (batch 4) is the forwarded payload the
-        # forward must carry (the trio's Start 2, Pause 0, Stop 1, the
-        # chime's PlayChimeSound 7); None keeps the batch 1-3 shape's
-        # no-payload-filter behaviour of expect().
+        # forward must carry (the chime's PlayChimeSound 7); None keeps the
+        # batch 1-3 shape's no-payload-filter behaviour of expect().
         payload = c["controller"][5] if len(c["controller"]) > 5 else None
         ctx = types.SimpleNamespace(chip=chip, chip_call=None)
         # The argv shape puts the command name first, then node and

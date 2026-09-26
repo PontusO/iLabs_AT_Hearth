@@ -1020,14 +1020,14 @@ BATCH4 = ["0x0011", "0x0076", "0x0073", "0x0075", "0x007C", "0x0027", "0x0146"]
 
 class _Batch4Chip(_VerdictChip):
     """_VerdictChip widened to the batch 4 shapes: the forwarded payload
-    the verdict rows filter on (the trio's Start 2 / Pause 0 / Stop 1, the
-    chime's PlayChimeSound 7), the ErrorStateID wire shape H.parse_status
-    reads after a `status = 0xNN` line, and a no-forward switch for the
-    no_forward rows (the SDK short-circuits before the delegate, so the
-    firmware raises nothing). The +MTCMD line gains its payload fields
-    positionally, the shape the _RX regex's {0,5} tail parses (a 2-field
-    payload like the trio's Start is fields [2], a 1-field one like the
-    chime's is [7]). The link is the one passed to prove_endpoint or
+    the verdict rows filter on (the chime's PlayChimeSound 7; the trio's
+    verdict forwards carry no payload), the ErrorStateID wire shape
+    H.parse_status reads after a `status = 0xNN` line, and a no-forward
+    switch for the no_forward rows (the SDK short-circuits before the
+    delegate, so the firmware raises nothing). The +MTCMD line gains its
+    payload fields positionally, the shape the _RX regex's {0,5} tail
+    parses (the chime's 1-field payload is [7]). The link is the one
+    passed to prove_endpoint or
     prove_check (the _VerdictLink's queue is the single wire both sides
     see): the chip_call double enqueues the +MTCMD forward the firmware
     would raise on that same link, so the queue the rows poll is the queue
@@ -1072,32 +1072,23 @@ class _Batch4Chip(_VerdictChip):
 
 
 class _RefusedLink(_VerdictLink):
-    """A _VerdictLink that refuses ONE AT+MTATTR write with a +MTERR code:
+    """A _VerdictLink that answers the refused write with a +MTERR code:
     the trio's Instance-served OperationalState row (AT+MTATTR=<ep>,96,4,2,
-    AT_MT_SPEC 3.21's DE270). The refused write is the Instance's own
-    write, so it is also the attribute's value: a read of the same
-    (ep, cluster, attr) answers with the refused value, the shape that
-    lets the write step's own read rows pass around the refusal. Every
-    other command answers as _VerdictLink does."""
+    AT_MT_SPEC 3.21's DE270). The at_refused kind sends that one line and
+    nothing else -- no normal write before it, no read after it -- so the
+    link only needs to refuse it; every other command answers as
+    _VerdictLink does (and the check sends no other)."""
 
-    def __init__(self, cmd, code, write_value):
+    def __init__(self, cmd, code):
         super().__init__()
         self._refuse = cmd
         self._code = code
-        self._write_value = write_value
-        self._refused = False
 
     def command(self, cmd, *a, **k):
-        m = re.fullmatch(r"AT\+MTATTR=(\d+),(\d+),(\d+)(?:,(\S+))?", cmd)
-        if m and m.group(4) is not None and cmd == self._refuse:
+        if cmd == self._refuse:
             # ATLink._collect consumes the +MTERR:<n> line into the result
             # code (it never lands in lines), so (code, []) is the shape
-            # prove_check's res == err check reads. The write still lands
-            # (a refusal is a protocol answer, not a value rejection): a
-            # later read of the same attribute carries the written value,
-            # the shape the common write step's own read rows read.
-            self.state[(int(m.group(1)), int(m.group(2)), int(m.group(3)))] = self._write_value
-            self._refused = True
+            # prove_check's res == err check reads.
             return (self._code, [])
         return super().command(cmd, *a, **k)
 
@@ -1153,6 +1144,26 @@ class TestBatch4Table(unittest.TestCase):
         for name in ("powersource", "smokecoalarm", "operationalstate",
                      "modeselect", "chime"):
             self.assertIn(name, P.CHIP_CLUSTERS)
+
+    def test_trio_checks_use_operational_state_attribute_4(self):
+        # OperationalState's OperationalState attribute is id 4 (the
+        # refusal row's own AT line says AT+MTATTR=<ep>,96,4,2); every trio
+        # check must prove that attribute, not id 0.
+        for dt in ("0x0073", "0x0075", "0x007C"):
+            t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == dt][0]
+            for c in t["checks"]:
+                self.assertEqual((c["cluster"], c["attr"]), (96, 4), dt)
+
+    def test_chime_checks_use_selected_chime_1_and_enabled_2(self):
+        # Chime attributes: InstalledChimeSounds 0, SelectedChime 1,
+        # Enabled 2 (the AT+MTCHIME <what> field is a different numbering).
+        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0146"][0]
+        for c in t["checks"]:
+            self.assertEqual(c["cluster"], 1366)
+            if c["chip_attr"] == "selected-chime":
+                self.assertEqual(c["attr"], 1)
+            elif c["chip_attr"] == "enabled":
+                self.assertEqual(c["attr"], 2)
 
 
 class TestNotifyKind(unittest.TestCase):
@@ -1215,58 +1226,61 @@ class TestVerdictPayloadKind(unittest.TestCase):
     forward must carry. A matching forward is answered, a mismatching one
     is not taken (expect returns None, the row fails, no AT+MTCMDRESP)."""
 
-    def _start_check(self):
-        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0073"][0]
+    def _chime_check(self):
+        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0146"][0]
         c = [c for c in t["checks"] if c["controller"]
              and c["controller"][0] == "verdict"
-             and c["controller"][1][0] == "start"][0]
+             and c["controller"][1][0] == "play-chime-sound"][0]
         return t, c
 
-    def _run(self, ep=2, **chipkw):
+    def _run(self, ep=7, **chipkw):
         link = _VerdictLink()
         chip = _Batch4Chip(link=link, ep=ep, **chipkw)
         s = _FakeSuite()
-        t, c = self._start_check()
+        t, c = self._chime_check()
         saved = H._threaded_chip_call
         H._threaded_chip_call = chip.chip_call
         try:
             P.prove_check(link, chip, s, "0x4845", ep, t, c,
-                          "laundry washer ep2 operational-state start allow")
+                          "0x0146 chime ep7 enabled play-chime-sound allow")
         finally:
             H._threaded_chip_call = saved
         return link, s
 
-    def test_forward_with_payload_2_is_answered_and_passes(self):
-        # The trio's Start forward carries payload 2: the row answers the
-        # seq-7 forward with the allow and every row passes.
-        link, s = self._run(ep=2, cluster=96, command=2, seq=7, payload=[2],
-                            rc=0, error_state=0, value=0)
+    def test_forward_with_payload_7_is_answered_and_passes(self):
+        # The chime's PlayChimeSound forward carries payload 7 (the
+        # SelectedChime the chime forwards): the row answers the seq-7
+        # forward with the allow and every row passes.
+        link, s = self._run(ep=7, cluster=1366, command=0, seq=7, payload=[7],
+                            rc=0, value=1)
         got = {n: ok for n, ok in s.results}
         self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
                          ["AT+MTCMDRESP=7,1"])
-        self.assertTrue(got["laundry washer ep2 operational-state start allow"
-                          " forward 96/2 answered allow"])
-        self.assertTrue(got["laundry washer ep2 operational-state start allow"
+        self.assertTrue(got["0x0146 chime ep7 enabled play-chime-sound allow"
+                          " forward 1366/0 answered allow"])
+        self.assertTrue(got["0x0146 chime ep7 enabled play-chime-sound allow"
                           " chip-tool exits 0"])
-        self.assertTrue(got["laundry washer ep2 operational-state start allow"
-                          " ErrorStateID 0"])
-        self.assertTrue(all(ok for ok in got.values()),
-                        "every row passes: %s" % [n for n, ok in got.items() if not ok])
+        # The verdict kind's own rows pass; the write step's read rows read
+        # the fake's fixed value (no value double in this class) and are
+        # not this test's subject.
+        for n, ok in s.results:
+            if " forward " in n or " chip-tool " in n:
+                self.assertTrue(ok, n)
 
     def test_forward_with_payload_9_is_not_taken(self):
-        # The forward carries 9, not the expected 2: _match's payload
+        # The forward carries 9, not the expected 7: _match's payload
         # filter answers None (it is a genuine failure to report, not a
         # foreign forward to leave queued -- the line is consumed from the
         # queue), the "answered" row fails, and the forward is not
         # answered (no AT+MTCMDRESP).
-        link, s = self._run(ep=2, cluster=96, command=2, seq=7, payload=[9],
-                            rc=0, error_state=0)
+        link, s = self._run(ep=7, cluster=1366, command=0, seq=7, payload=[9],
+                            rc=0, value=1)
         got = {n: ok for n, ok in s.results}
         self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
                          [])
-        self.assertFalse(got["laundry washer ep2 operational-state start allow"
-                          " forward 96/2 answered allow"])
-        self.assertNotIn("+MTCMD:7,2,96,2,9", link.urcs)
+        self.assertFalse(got["0x0146 chime ep7 enabled play-chime-sound allow"
+                          " forward 1366/0 answered allow"])
+        self.assertNotIn("+MTCMD:7,7,1366,0,9", link.urcs)
 
 
 class TestVerdictErrorStateKind(unittest.TestCase):
@@ -1298,9 +1312,9 @@ class TestVerdictErrorStateKind(unittest.TestCase):
         return link, s
 
     def test_error_state_2_answers_the_deny_row(self):
-        # ErrorStateID: 2 (with the forward carrying the expected payload
-        # 0): the row passes and the allow/deny answer went out.
-        link, s = self._run(ep=2, cluster=96, command=0, seq=7, payload=[0],
+        # ErrorStateID: 2 (the pause forward carries no payload): the row
+        # passes and the allow/deny answer went out.
+        link, s = self._run(ep=2, cluster=96, command=0, seq=7,
                             rc=0, error_state=2)
         got = {n: ok for n, ok in s.results}
         self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
@@ -1312,7 +1326,7 @@ class TestVerdictErrorStateKind(unittest.TestCase):
 
     def test_error_state_0_fails_the_deny_row(self):
         # ErrorStateID: 0 instead of 2: the row fails.
-        link, s = self._run(ep=2, cluster=96, command=0, seq=7, payload=[0],
+        link, s = self._run(ep=2, cluster=96, command=0, seq=7,
                             rc=0, error_state=0)
         got = {n: ok for n, ok in s.results}
         self.assertFalse(got["laundry washer ep2 operational-state pause deny"
@@ -1334,18 +1348,22 @@ class TestAtRefusedKind(unittest.TestCase):
     def _run(self, link, ep=2):
         s = _FakeSuite()
         t, c = self._refused_check()
-        # The read-back row compares against the table's at_value (0, the
-        # state the controller would write), so the fake prints that shape;
-        # the refusal's own row is the one that carries the +MTERR code.
-        chip = _Batch4Chip(link=link, ep=ep, cluster=96, command=0, seq=7,
-                           rc=0, value=0)
+        # The at_refused kind sends the refused write and nothing else --
+        # no normal write before it, no read after it -- so the check
+        # produces exactly one row, named with the AT line and the +MTERR
+        # code the table names.
+        chip = _Batch4Chip(link=link, ep=ep, rc=0, value=0)
         P.prove_check(link, chip, s, "0x4845", ep, t, c,
                       "laundry washer ep2 operational-state AT write refused")
         return s
 
     def test_refused_with_code_11_passes(self):
-        link = _RefusedLink("AT+MTATTR=2,96,4,2", 11, "2")
-        got = {n: ok for n, ok in self._run(link).results}
+        link = _RefusedLink("AT+MTATTR=2,96,4,2", 11)
+        s = self._run(link)
+        self.assertEqual([n for n, _ in s.results],
+                         ["laundry washer ep2 operational-state AT write refused"
+                          " AT+MTATTR=2,96,4,2 -> +MTERR:11"])
+        got = {n: ok for n, ok in s.results}
         self.assertTrue(got["laundry washer ep2 operational-state AT write refused"
                           " AT+MTATTR=2,96,4,2 -> +MTERR:11"])
         self.assertTrue(all(ok for ok in got.values()),
@@ -1354,8 +1372,12 @@ class TestAtRefusedKind(unittest.TestCase):
     def test_refused_with_code_0_fails(self):
         # The write is accepted (res 0) instead of refused with 11: the row
         # fails.
-        link = _RefusedLink("AT+MTATTR=2,96,4,2", 0, "2")
-        got = {n: ok for n, ok in self._run(link).results}
+        link = _RefusedLink("AT+MTATTR=2,96,4,2", 0)
+        s = self._run(link)
+        self.assertEqual([n for n, _ in s.results],
+                         ["laundry washer ep2 operational-state AT write refused"
+                          " AT+MTATTR=2,96,4,2 -> +MTERR:11"])
+        got = {n: ok for n, ok in s.results}
         self.assertFalse(got["laundry washer ep2 operational-state AT write refused"
                           " AT+MTATTR=2,96,4,2 -> +MTERR:11"])
 
@@ -1373,7 +1395,7 @@ class TestSetupKind(unittest.TestCase):
         # chip-tool: the fake must print the table's value, in the parse
         # shape the check names (the chime's enabled is bool), so those
         # rows pass on the value, not on the fake's fixed 1.
-        def _value_for(chip=chip, t=t):
+        def _value_for(chip=chip, t=t, saved_run=None):
             def _run(args, timeout=None):
                 for c in t["checks"]:
                     if args and args[1] == "read" and args[2] == c["chip_attr"]:
@@ -1385,12 +1407,12 @@ class TestSetupKind(unittest.TestCase):
                 if t.get("setup") and args and args[1] == "read" \
                         and args[2] == t["setup"][2][1]:
                     return (0, chip.read_body)
-                return super(_SetupChip, chip).run(args, timeout=timeout)
+                return saved_run(args, timeout=timeout)
             return _run
         saved_run = chip.run
         saved = H._threaded_chip_call
         H._threaded_chip_call = chip.chip_call
-        chip.run = _value_for()
+        chip.run = _value_for(saved_run=saved_run)
         try:
             P.prove_endpoint(link, chip, s, "0x4845", ep, t)
         finally:
@@ -1452,6 +1474,38 @@ class TestSetupKind(unittest.TestCase):
         got = {n: ok for n, ok in s.results}
         self.assertFalse(got["0x0146 chime ep7 setup installed-chime-sounds"
                              " read carries Ding"])
+
+    def test_setup_runs_before_the_checks(self):
+        # The mode list must exist before change-to-mode 1: record the
+        # order of link.command calls and the AT+MTMODES setup line must
+        # precede the first AT+MTATTR write on that endpoint. The link
+        # answers as the plain _FakeLink (its command answers an
+        # AT+MTATTR write from its state) but records every command in
+        # `order`, not in a sent/urcs list: the change-to-mode forward
+        # arrives only as the chip-tool response this run patches in,
+        # so the link never needs the _VerdictLink's urcs queue.
+        link = _FakeLink()
+        order = []
+        inner = link.command
+        def command(cmd, *a, **k):
+            order.append(cmd)
+            return inner(cmd, *a, **k)
+        link.command = command
+        chip = _SetupChip(link=link, ep=6, devtype="0x0027", revision=1,
+                          read_body="CHIP:TOO:   SupportedModes: 3\n"
+                                    "CHIP:TOO:     Quiet\n"
+                                    "CHIP:TOO:     Normal\n"
+                                    "CHIP:TOO:     Boost\n")
+        def _status_only(args, timeout=None):
+            return (0, "status = 0x00\n")
+        chip.run = _status_only
+        t, s = self._run(link, chip, 6, "0x0027")
+        atlines = [c for c in order
+                   if c.startswith("AT+MTMODES=") or c.startswith("AT+MTATTR=")]
+        self.assertIn('AT+MTMODES=6,0,"Quiet",1,"Normal",2,"Boost"', atlines)
+        self.assertLess(
+            atlines.index('AT+MTMODES=6,0,"Quiet",1,"Normal",2,"Boost"'),
+            atlines.index("AT+MTATTR=6,80,3,0"))
 
 
 class TestNoForwardKind(unittest.TestCase):
@@ -1516,20 +1570,20 @@ class TestNoForwardKind(unittest.TestCase):
 class TestBatch4RowNames(unittest.TestCase):
     def _fake_run_names(self):
         # Running prove_endpoint over all seven batch 4 types with the
-        # fakes: the verdict rows enqueue their payload-carrying +MTCMD
-        # forwards, the notify row its seq-0 forward, the no_forward and
-        # at_refused rows nothing. One link per endpoint (as the batch 3
-        # name test uses one link per endpoint's run shape) keeps each
-        # endpoint's queue clean, and the chip's forward follows the
-        # endpoint. Returns the row names, results first, N/A after.
+        # fakes: the chime's play-chime-sound row enqueues its
+        # payload-carrying +MTCMD forward, the trio's verdict rows their
+        # payload-less forwards, the notify row its seq-0 forward, the
+        # no_forward and at_refused rows nothing. One link per endpoint (as
+        # the batch 3 name test uses one link per endpoint's run shape)
+        # keeps each endpoint's queue clean, and the chip's forward follows
+        # the endpoint. Returns the row names, results first, N/A after.
         comp = P.composition_for("mg24-batch4")
         names = []
         for (ep, dev), t in zip(comp[1:], P.rows_for("mg24-batch4")):
             link = _VerdictLink()
             chip = _Batch4Chip(link=link, ep=ep, devtype=t["devtype"],
                                revision=t["revision"])
-            chip.payload = [2] if t["devtype"] in ("0x0073", "0x0075", "0x007C") \
-                else ([7] if t["devtype"] == "0x0146" else None)
+            chip.payload = [7] if t["devtype"] == "0x0146" else None
             # The write step's own read rows read the attribute back: print
             # the table's value per read (the chime's enabled in its bool
             # shape) so those rows pass on the value, not on a fixed 1.
@@ -1557,9 +1611,9 @@ class TestBatch4RowNames(unittest.TestCase):
 
     def test_fake_run_yields_no_duplicate_name(self):
         # The trio's three types share one check table (same attribute,
-        # same commands, same payloads) and the chime's two enabled checks
-        # share one attribute: the per-type tag and the kind's suffixes
-        # must disambiguate every row.
+        # same commands) and the chime's two enabled checks share one
+        # attribute: the per-type tag and the kind's suffixes must
+        # disambiguate every row.
         names = self._fake_run_names()
         self.assertGreater(len(names), 0)
         self.assertEqual(len(names), len(set(names)))
