@@ -524,7 +524,7 @@ class _VerdictChip:
 
     def __init__(self, link=None, ep=2, cluster=257, command=0, seq=7,
                  timeout=False, rc=0, status="0x00",
-                 devtype="0x000A", revision=3):
+                 devtype="0x000A", revision=3, value=None):
         self.link = link
         self.ep = ep
         self.cluster = cluster
@@ -535,6 +535,7 @@ class _VerdictChip:
         self.status = status
         self.devtype = devtype
         self.revision = revision
+        self.value = value
 
     def run(self, args, timeout=None):
         if args and args[0] == "descriptor":
@@ -550,8 +551,18 @@ class _VerdictChip:
             if args[1] == "read-event":
                 name = args[2].replace("-", " ").title().replace(" ", "")
                 return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: 1\n" % name)
-            return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: 1\n"
-                       % args[2].replace("-", ""))
+            # The chime's enabled check is parse="bool": the line must carry
+            # the table's value in the TRUE/FALSE shape parse_bool_attr reads
+            # (chip-tool prints booleans that way). The int shape stays the
+            # default for every other read.
+            if self.value is None:
+                body = "1"
+            elif isinstance(self.value, bool):
+                body = "TRUE" if self.value else "FALSE"
+            else:
+                body = str(self.value)
+            return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: %s\n"
+                       % (args[2].replace("-", ""), body))
         if self.link is not None:
             self.link.urcs.append("+MTCMD:%d,%d,%d,%d" % (self.seq, self.ep, self.cluster, self.command))
             if self.timeout:
@@ -998,6 +1009,560 @@ class TestBatch3RowNames(unittest.TestCase):
         path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "platform", "silabs", "core-batch3.json")
         self.assertEqual(set(self._fake_run_names()), _baseline_endpoint_names(path))
+
+
+# ---------------------------------------------------------------- batch 4
+
+# Batch 4's devtypes in table order: power source, smoke/CO alarm, the
+# trio (washer, dishwasher, dryer), mode select, chime.
+BATCH4 = ["0x0011", "0x0076", "0x0073", "0x0075", "0x007C", "0x0027", "0x0146"]
+
+
+class _Batch4Chip(_VerdictChip):
+    """_VerdictChip widened to the batch 4 shapes: the forwarded payload
+    the verdict rows filter on (the trio's Start 2 / Pause 0 / Stop 1, the
+    chime's PlayChimeSound 7), the ErrorStateID wire shape H.parse_status
+    reads after a `status = 0xNN` line, and a no-forward switch for the
+    no_forward rows (the SDK short-circuits before the delegate, so the
+    firmware raises nothing). The +MTCMD line gains its payload fields
+    positionally, the shape the _RX regex's {0,5} tail parses (a 2-field
+    payload like the trio's Start is fields [2], a 1-field one like the
+    chime's is [7]). The link is the one passed to prove_endpoint or
+    prove_check (the _VerdictLink's queue is the single wire both sides
+    see): the chip_call double enqueues the +MTCMD forward the firmware
+    would raise on that same link, so the queue the rows poll is the queue
+    the rows read."""
+
+    def __init__(self, payload=None, error_state=None,
+                 forward=True, **kw):
+        super().__init__(**kw)
+        self.payload = payload
+        self.error_state = error_state
+        self.forward = forward
+
+    def _response(self):
+        # The response the rc/status rows read. The error_state and status
+        # shapes are mutually exclusive: H.parse_status tries the
+        # `status = 0xNN` shape FIRST, last match wins, so an output that
+        # carried both would answer the hex status and the ErrorStateID
+        # rows would read the wrong value.
+        if self.error_state is not None:
+            return (self.rc, "CHIP:TOO:   ErrorStateID: %d\n" % self.error_state)
+        if self.status:
+            return (self.rc, "CHIP:TOO:   status = %s\n" % self.status)
+        return (self.rc, "")
+
+    def run(self, args, timeout=None):
+        if self.forward:
+            if len(args) >= 4 and args[1] in ("read", "read-event"):
+                return super().run(args, timeout=timeout)
+            if self.link is not None:
+                tail = ",".join(str(p) for p in self.payload) if self.payload else ""
+                line = "+MTCMD:%d,%d,%d,%d" % (self.seq, self.ep,
+                                               self.cluster, self.command)
+                if tail:
+                    line += "," + tail
+                self.link.urcs.append(line)
+                if self.timeout:
+                    self.link.urcs.append("+MTCMDTO:%d" % self.seq)
+            return self._response()
+        # No forward at all (the no_forward rows): nothing is enqueued and
+        # the response carries only what the rc/status rows read.
+        return self._response()
+
+
+class _RefusedLink(_VerdictLink):
+    """A _VerdictLink that refuses ONE AT+MTATTR write with a +MTERR code:
+    the trio's Instance-served OperationalState row (AT+MTATTR=<ep>,96,4,2,
+    AT_MT_SPEC 3.21's DE270). The refused write is the Instance's own
+    write, so it is also the attribute's value: a read of the same
+    (ep, cluster, attr) answers with the refused value, the shape that
+    lets the write step's own read rows pass around the refusal. Every
+    other command answers as _VerdictLink does."""
+
+    def __init__(self, cmd, code, write_value):
+        super().__init__()
+        self._refuse = cmd
+        self._code = code
+        self._write_value = write_value
+        self._refused = False
+
+    def command(self, cmd, *a, **k):
+        m = re.fullmatch(r"AT\+MTATTR=(\d+),(\d+),(\d+)(?:,(\S+))?", cmd)
+        if m and m.group(4) is not None and cmd == self._refuse:
+            # ATLink._collect consumes the +MTERR:<n> line into the result
+            # code (it never lands in lines), so (code, []) is the shape
+            # prove_check's res == err check reads. The write still lands
+            # (a refusal is a protocol answer, not a value rejection): a
+            # later read of the same attribute carries the written value,
+            # the shape the common write step's own read rows read.
+            self.state[(int(m.group(1)), int(m.group(2)), int(m.group(3)))] = self._write_value
+            self._refused = True
+            return (self._code, [])
+        return super().command(cmd, *a, **k)
+
+
+class _SetupChip(_VerdictChip):
+    """A _VerdictChip whose attribute reads carry a configurable body, so
+    the setup read rows (the substrings prove_endpoint greps the chip-tool
+    read for) pass when the list carries every named entry and fail when
+    one is missing (a firmware that answers the list read but whose
+    supported-modes / installed-chime-sounds list drops an entry)."""
+
+    def __init__(self, link=None, read_body="", **kw):
+        super().__init__(link=link, **kw)
+        self.read_body = read_body
+
+    def run(self, args, timeout=None):
+        if len(args) >= 4 and args[1] in ("read", "read-event"):
+            return (0, self.read_body)
+        return super().run(args, timeout=timeout)
+
+
+class TestBatch4Table(unittest.TestCase):
+    def test_batch4_lists_every_type_once_after_the_anchor(self):
+        comp = P.composition_for("mg24-batch4")
+        self.assertEqual(comp[0], (1, "0x0100"))
+        self.assertEqual([d for _, d in comp[1:]], BATCH4)
+
+    def test_revisions_match_the_registry(self):
+        want = {"0x0011": 1, "0x0076": 1, "0x0073": 2, "0x0075": 2,
+                "0x007C": 2, "0x0027": 1, "0x0146": 1}
+        got = {t["devtype"]: t["revision"] for t in P.BATCHES["mg24-batch4"]}
+        self.assertEqual(got, want)
+
+    def test_every_verdict_trio_carries_the_error_state(self):
+        for dt in ("0x0073", "0x0075", "0x007C"):
+            t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == dt][0]
+            for c in t["checks"]:
+                if c["controller"] is None or c["controller"][0] != "verdict":
+                    continue
+                want = c["controller"][4]
+                self.assertIn("error_state", want, dt)
+                self.assertEqual(want["rc0"], True, dt)
+
+    def test_chime_play_chime_sound_carries_payload_7_without_a_chime_id(self):
+        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0146"][0]
+        c = [c for c in t["checks"]
+             if c["controller"] and c["controller"][0] == "verdict"
+             and c["controller"][1][0] == "play-chime-sound"][0]
+        self.assertEqual(c["controller"][5], 7)
+        self.assertNotIn("--ChimeID", c["controller"][1])
+
+    def test_chip_clusters_gains_the_batch4_names(self):
+        for name in ("powersource", "smokecoalarm", "operationalstate",
+                     "modeselect", "chime"):
+            self.assertIn(name, P.CHIP_CLUSTERS)
+
+
+class TestNotifyKind(unittest.TestCase):
+    """The notify kind against the fakes: the smoke/CO self-test-request
+    forward is seq 0 (notify-only), so expect_notify must see it and NEVER
+    send AT+MTCMDRESP; the host's own completion line (AT+MTALARM) and the
+    read-event are the answer the firmware expects (AT_MT_SPEC 3.22)."""
+
+    def _self_test_check(self):
+        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0076"][0]
+        c = [c for c in t["checks"]
+             if c["controller"] and c["controller"][0] == "notify"][0]
+        return t, c
+
+    def _run(self, ep=2, **chipkw):
+        link = _VerdictLink()
+        chip = _Batch4Chip(link=link, ep=ep, **chipkw)
+        s = _FakeSuite()
+        t, c = self._self_test_check()
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            P.prove_check(link, chip, s, "0x4845", ep, t, c,
+                          "smoke/CO alarm ep2 smoke-state self-test-request")
+        finally:
+            H._threaded_chip_call = saved
+        return link, s
+
+    def test_seq0_forward_is_seen_and_never_answered(self):
+        # The firmware raises +MTCMD:0,... (notify-only): the forward row
+        # passes, the follow-up AT line and the event pass, and no
+        # AT+MTCMDRESP is ever sent.
+        link, s = self._run(ep=2, cluster=92, command=0, seq=0, rc=0)
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         [])
+        self.assertTrue(got["smoke/CO alarm ep2 smoke-state self-test-request"
+                          " forward 92/0 is seq 0, not answered"])
+        self.assertTrue(got["smoke/CO alarm ep2 smoke-state self-test-request"
+                          " AT+MTALARM=2,5,0 -> OK"])
+        self.assertTrue(got["smoke/CO alarm ep2 smoke-state self-test-request"
+                          " self-test-complete event present"])
+        self.assertTrue(got["smoke/CO alarm ep2 smoke-state self-test-request"
+                          " chip-tool self-test-request exits 0"])
+
+    def test_no_forward_fails_the_row_and_stays_unanswered(self):
+        # The firmware raises no forward at all: the forward row fails and
+        # still nothing is answered.
+        link, s = self._run(ep=2, cluster=92, command=0, seq=0,
+                            forward=False, rc=0)
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         [])
+        self.assertFalse(got["smoke/CO alarm ep2 smoke-state self-test-request"
+                          " forward 92/0 is seq 0, not answered"])
+
+
+class TestVerdictPayloadKind(unittest.TestCase):
+    """The verdict kind's 6th tuple element (batch 4): the payload the
+    forward must carry. A matching forward is answered, a mismatching one
+    is not taken (expect returns None, the row fails, no AT+MTCMDRESP)."""
+
+    def _start_check(self):
+        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0073"][0]
+        c = [c for c in t["checks"] if c["controller"]
+             and c["controller"][0] == "verdict"
+             and c["controller"][1][0] == "start"][0]
+        return t, c
+
+    def _run(self, ep=2, **chipkw):
+        link = _VerdictLink()
+        chip = _Batch4Chip(link=link, ep=ep, **chipkw)
+        s = _FakeSuite()
+        t, c = self._start_check()
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            P.prove_check(link, chip, s, "0x4845", ep, t, c,
+                          "laundry washer ep2 operational-state start allow")
+        finally:
+            H._threaded_chip_call = saved
+        return link, s
+
+    def test_forward_with_payload_2_is_answered_and_passes(self):
+        # The trio's Start forward carries payload 2: the row answers the
+        # seq-7 forward with the allow and every row passes.
+        link, s = self._run(ep=2, cluster=96, command=2, seq=7, payload=[2],
+                            rc=0, error_state=0, value=0)
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         ["AT+MTCMDRESP=7,1"])
+        self.assertTrue(got["laundry washer ep2 operational-state start allow"
+                          " forward 96/2 answered allow"])
+        self.assertTrue(got["laundry washer ep2 operational-state start allow"
+                          " chip-tool exits 0"])
+        self.assertTrue(got["laundry washer ep2 operational-state start allow"
+                          " ErrorStateID 0"])
+        self.assertTrue(all(ok for ok in got.values()),
+                        "every row passes: %s" % [n for n, ok in got.items() if not ok])
+
+    def test_forward_with_payload_9_is_not_taken(self):
+        # The forward carries 9, not the expected 2: _match's payload
+        # filter answers None (it is a genuine failure to report, not a
+        # foreign forward to leave queued -- the line is consumed from the
+        # queue), the "answered" row fails, and the forward is not
+        # answered (no AT+MTCMDRESP).
+        link, s = self._run(ep=2, cluster=96, command=2, seq=7, payload=[9],
+                            rc=0, error_state=0)
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         [])
+        self.assertFalse(got["laundry washer ep2 operational-state start allow"
+                          " forward 96/2 answered allow"])
+        self.assertNotIn("+MTCMD:7,2,96,2,9", link.urcs)
+
+
+class TestVerdictErrorStateKind(unittest.TestCase):
+    """The want["error_state"] row: H.parse_status answers the
+    `ErrorStateID: N` wire shape (a Success at the StatusIB level can still
+    carry a non-zero ErrorStateID, so the row reads ErrorStateID, not the
+    hex status). The trio's pause deny wants ErrorStateID 2; a response
+    with ErrorStateID 0 fails the row."""
+
+    def _pause_check(self):
+        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0073"][0]
+        c = [c for c in t["checks"] if c["controller"]
+             and c["controller"][0] == "verdict"
+             and c["controller"][1][0] == "pause"][0]
+        return t, c
+
+    def _run(self, ep=2, **chipkw):
+        link = _VerdictLink()
+        chip = _Batch4Chip(link=link, ep=ep, **chipkw)
+        s = _FakeSuite()
+        t, c = self._pause_check()
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            P.prove_check(link, chip, s, "0x4845", ep, t, c,
+                          "laundry washer ep2 operational-state pause deny")
+        finally:
+            H._threaded_chip_call = saved
+        return link, s
+
+    def test_error_state_2_answers_the_deny_row(self):
+        # ErrorStateID: 2 (with the forward carrying the expected payload
+        # 0): the row passes and the allow/deny answer went out.
+        link, s = self._run(ep=2, cluster=96, command=0, seq=7, payload=[0],
+                            rc=0, error_state=2)
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         ["AT+MTCMDRESP=7,0"])
+        self.assertTrue(got["laundry washer ep2 operational-state pause deny"
+                          " ErrorStateID 2"])
+        self.assertTrue(got["laundry washer ep2 operational-state pause deny"
+                          " forward 96/0 answered deny"])
+
+    def test_error_state_0_fails_the_deny_row(self):
+        # ErrorStateID: 0 instead of 2: the row fails.
+        link, s = self._run(ep=2, cluster=96, command=0, seq=7, payload=[0],
+                            rc=0, error_state=0)
+        got = {n: ok for n, ok in s.results}
+        self.assertFalse(got["laundry washer ep2 operational-state pause deny"
+                          " ErrorStateID 2"])
+
+
+class TestAtRefusedKind(unittest.TestCase):
+    """The at_refused kind: the AT write for the Instance-served
+    OperationalState attribute (AT+MTATTR=<ep>,96,4,2) is refused with the
+    +MTERR code the table names (11) -- no forward, no read, no second
+    read (AT_MT_SPEC 3.21's DE270 rule)."""
+
+    def _refused_check(self):
+        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0073"][0]
+        c = [c for c in t["checks"]
+             if c["controller"] and c["controller"][0] == "at_refused"][0]
+        return t, c
+
+    def _run(self, link, ep=2):
+        s = _FakeSuite()
+        t, c = self._refused_check()
+        # The read-back row compares against the table's at_value (0, the
+        # state the controller would write), so the fake prints that shape;
+        # the refusal's own row is the one that carries the +MTERR code.
+        chip = _Batch4Chip(link=link, ep=ep, cluster=96, command=0, seq=7,
+                           rc=0, value=0)
+        P.prove_check(link, chip, s, "0x4845", ep, t, c,
+                      "laundry washer ep2 operational-state AT write refused")
+        return s
+
+    def test_refused_with_code_11_passes(self):
+        link = _RefusedLink("AT+MTATTR=2,96,4,2", 11, "2")
+        got = {n: ok for n, ok in self._run(link).results}
+        self.assertTrue(got["laundry washer ep2 operational-state AT write refused"
+                          " AT+MTATTR=2,96,4,2 -> +MTERR:11"])
+        self.assertTrue(all(ok for ok in got.values()),
+                        "every row passes: %s" % [n for n, ok in got.items() if not ok])
+
+    def test_refused_with_code_0_fails(self):
+        # The write is accepted (res 0) instead of refused with 11: the row
+        # fails.
+        link = _RefusedLink("AT+MTATTR=2,96,4,2", 0, "2")
+        got = {n: ok for n, ok in self._run(link).results}
+        self.assertFalse(got["laundry washer ep2 operational-state AT write refused"
+                          " AT+MTATTR=2,96,4,2 -> +MTERR:11"])
+
+
+class TestSetupKind(unittest.TestCase):
+    """The setup kind (mode select, chime): every AT line of the setup
+    goes out once, in table order, and the chip-tool list read must carry
+    every named entry (a missing supported-mode or installed chime sound
+    fails the row)."""
+
+    def _run(self, link, chip, ep, dt):
+        s = _FakeSuite()
+        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == dt][0]
+        # The write step's own read rows read the attribute back through
+        # chip-tool: the fake must print the table's value, in the parse
+        # shape the check names (the chime's enabled is bool), so those
+        # rows pass on the value, not on the fake's fixed 1.
+        def _value_for(chip=chip, t=t):
+            def _run(args, timeout=None):
+                for c in t["checks"]:
+                    if args and args[1] == "read" and args[2] == c["chip_attr"]:
+                        chip.value = c["at_value"] if c["parse"] == "int" \
+                            else (c["at_value"] != 0)
+                # The setup list read (supported-modes, installed-chime-sounds)
+                # is not one of the check's own attributes: it carries the
+                # named entries the carries row filters on, served whole.
+                if t.get("setup") and args and args[1] == "read" \
+                        and args[2] == t["setup"][2][1]:
+                    return (0, chip.read_body)
+                return super(_SetupChip, chip).run(args, timeout=timeout)
+            return _run
+        saved_run = chip.run
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        chip.run = _value_for()
+        try:
+            P.prove_endpoint(link, chip, s, "0x4845", ep, t)
+        finally:
+            H._threaded_chip_call = saved
+            chip.run = saved_run
+        return t, s
+
+    def test_modeselect_setup_lines_sent_once_in_order(self):
+        link = _VerdictLink()
+        chip = _SetupChip(link=link, ep=6, devtype="0x0027", revision=1,
+                          read_body="CHIP:TOO:   SupportedModes: 3\n"
+                                    "CHIP:TOO:     Quiet\n"
+                                    "CHIP:TOO:     Normal\n"
+                                    "CHIP:TOO:     Boost\n")
+        t, s = self._run(link, chip, 6, "0x0027")
+        sent = [x for x in link.sent if x.startswith("AT+MTMODES=")]
+        self.assertEqual(sent, ['AT+MTMODES=6,0,"Quiet",1,"Normal",2,"Boost"'])
+        # The setup AT line is on the wire before the setup read (chip.run
+        # for supported-modes), which is the ordering the row pair proves.
+        got = {n: ok for n, ok in s.results}
+        self.assertTrue(got["0x0027 mode select ep6 setup"
+                          ' AT+MTMODES=6,0,"Quiet",1,"Normal",2,"Boost" -> OK'])
+        self.assertTrue(got["0x0027 mode select ep6 setup supported-modes"
+                          " read carries Quiet and Normal and Boost"])
+
+    def test_modeselect_read_missing_a_named_entry_fails(self):
+        # The list read drops Boost: the carries row fails, the AT write row
+        # is unaffected.
+        link = _VerdictLink()
+        chip = _SetupChip(link=link, ep=6, devtype="0x0027", revision=1,
+                          read_body="CHIP:TOO:   SupportedModes: 2\n"
+                                    "CHIP:TOO:     Quiet\n"
+                                    "CHIP:TOO:     Normal\n")
+        t, s = self._run(link, chip, 6, "0x0027")
+        got = {n: ok for n, ok in s.results}
+        self.assertTrue(got["0x0027 mode select ep6 setup"
+                          ' AT+MTMODES=6,0,"Quiet",1,"Normal",2,"Boost" -> OK'])
+        self.assertFalse(got["0x0027 mode select ep6 setup supported-modes"
+                             " read carries Quiet and Normal and Boost"])
+
+    def test_chime_setup_lines_sent_once_in_order(self):
+        link = _VerdictLink()
+        chip = _SetupChip(link=link, ep=7, devtype="0x0146", revision=1,
+                          read_body='CHIP:TOO:   InstalledChimeSounds: "Ding"\n')
+        t, s = self._run(link, chip, 7, "0x0146")
+        sent = [x for x in link.sent if x.startswith("AT+MTCHIMESOUNDS=")]
+        self.assertEqual(sent, ['AT+MTCHIMESOUNDS=7,7,"Ding"'])
+        got = {n: ok for n, ok in s.results}
+        self.assertTrue(got["0x0146 chime ep7 setup AT+MTCHIMESOUNDS=7,7,\"Ding\" -> OK"])
+        self.assertTrue(got["0x0146 chime ep7 setup installed-chime-sounds"
+                          " read carries Ding"])
+
+    def test_chime_read_missing_a_named_entry_fails(self):
+        # The list read drops the Ding entry: the carries row fails.
+        link = _VerdictLink()
+        chip = _SetupChip(link=link, ep=7, devtype="0x0146", revision=1,
+                          read_body='CHIP:TOO:   InstalledChimeSounds: 0\n')
+        t, s = self._run(link, chip, 7, "0x0146")
+        got = {n: ok for n, ok in s.results}
+        self.assertFalse(got["0x0146 chime ep7 setup installed-chime-sounds"
+                             " read carries Ding"])
+
+
+class TestNoForwardKind(unittest.TestCase):
+    """The no_forward kind: nothing for the cluster's command range may be
+    forwarded within the window (NO_FORWARD_COMMANDS names the full range
+    so a forward the row itself does not send cannot slip past). No
+    AT+MTCMDRESP is ever sent; the want dict carries rc0 and the
+    optional ErrorStateID."""
+
+    def _pause_no_forward_check(self):
+        t = [x for x in P.BATCHES["mg24-batch4"] if x["devtype"] == "0x0073"][0]
+        c = [c for c in t["checks"]
+             if c["controller"] and c["controller"][0] == "no_forward"][0]
+        return t, c
+
+    def _run(self, ep=2, **chipkw):
+        link = _VerdictLink()
+        chip = _Batch4Chip(link=link, ep=ep, **chipkw)
+        s = _FakeSuite()
+        t, c = self._pause_no_forward_check()
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            P.prove_check(link, chip, s, "0x4845", ep, t, c,
+                          "laundry washer ep2 operational-state pause no-forward")
+        finally:
+            H._threaded_chip_call = saved
+        return link, s
+
+    def test_nothing_forwarded_in_the_window_passes(self):
+        # The SDK short-circuits (Pause from Stopped): no +MTCMD at all,
+        # ErrorStateID: 3, rc 0: the row passes and nothing is answered.
+        # The chip's cluster is 96 (the row's own cluster) so the fail
+        # variant's forward is in-cluster and the pass variant's absence
+        # proves nothing is enqueued at all.
+        link, s = self._run(ep=2, cluster=96, command=0, seq=7, forward=False,
+                            rc=0, error_state=3)
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         [])
+        self.assertEqual(link.urcs, [])
+        self.assertTrue(got["laundry washer ep2 operational-state pause no-forward"
+                          " no +MTCMD within 3s"])
+        self.assertTrue(got["laundry washer ep2 operational-state pause no-forward"
+                          " chip-tool exits 0"])
+        self.assertTrue(got["laundry washer ep2 operational-state pause no-forward"
+                          " ErrorStateID 3"])
+
+    def test_a_forward_for_the_cluster_fails(self):
+        # A +MTCMD for the cluster's own command 0 (Pause) arrives within
+        # the window: the no-forward row fails, and no AT+MTCMDRESP is sent
+        # (the kind never answers).
+        link, s = self._run(ep=2, cluster=96, command=0, seq=7, forward=True,
+                            rc=0, error_state=3)
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         [])
+        self.assertFalse(got["laundry washer ep2 operational-state pause no-forward"
+                          " no +MTCMD within 3s"])
+
+
+class TestBatch4RowNames(unittest.TestCase):
+    def _fake_run_names(self):
+        # Running prove_endpoint over all seven batch 4 types with the
+        # fakes: the verdict rows enqueue their payload-carrying +MTCMD
+        # forwards, the notify row its seq-0 forward, the no_forward and
+        # at_refused rows nothing. One link per endpoint (as the batch 3
+        # name test uses one link per endpoint's run shape) keeps each
+        # endpoint's queue clean, and the chip's forward follows the
+        # endpoint. Returns the row names, results first, N/A after.
+        comp = P.composition_for("mg24-batch4")
+        names = []
+        for (ep, dev), t in zip(comp[1:], P.rows_for("mg24-batch4")):
+            link = _VerdictLink()
+            chip = _Batch4Chip(link=link, ep=ep, devtype=t["devtype"],
+                               revision=t["revision"])
+            chip.payload = [2] if t["devtype"] in ("0x0073", "0x0075", "0x007C") \
+                else ([7] if t["devtype"] == "0x0146" else None)
+            # The write step's own read rows read the attribute back: print
+            # the table's value per read (the chime's enabled in its bool
+            # shape) so those rows pass on the value, not on a fixed 1.
+            def _value_for(chip=chip, t=t):
+                def _run(args, timeout=None):
+                    for c in t["checks"]:
+                        if args and args[1] == "read" and args[2] == c["chip_attr"]:
+                            chip.value = c["at_value"] if c["parse"] == "int" \
+                                else (c["at_value"] != 0)
+                    return super(_Batch4Chip, chip).run(args, timeout=timeout)
+                return _run
+            saved_run = chip.run
+            saved = H._threaded_chip_call
+            H._threaded_chip_call = chip.chip_call
+            chip.run = _value_for()
+            try:
+                s = _FakeSuite()
+                P.prove_endpoint(link, chip, s, "0x4845", ep, t)
+            finally:
+                H._threaded_chip_call = saved
+                chip.run = saved_run
+            names += [n for n, _ in s.results]
+            names += [n for n, _ in s.na]
+        return names
+
+    def test_fake_run_yields_no_duplicate_name(self):
+        # The trio's three types share one check table (same attribute,
+        # same commands, same payloads) and the chime's two enabled checks
+        # share one attribute: the per-type tag and the kind's suffixes
+        # must disambiguate every row.
+        names = self._fake_run_names()
+        self.assertGreater(len(names), 0)
+        self.assertEqual(len(names), len(set(names)))
 
 
 if __name__ == "__main__":
