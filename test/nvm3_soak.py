@@ -305,10 +305,6 @@ def main(argv=None):
             print("cycle %d: free %s B after %s writes (erase %s), "
                   "paired %s" % (i, free, writes, erase,
                                  "yes" if cyc["paired"] else "no"))
-            if c and c["reached"]:
-                print("threshold %d B reached in cycle %d, stopping"
-                      % (args.threshold, i))
-                break
     finally:
         _restore(link)
         console.close()
