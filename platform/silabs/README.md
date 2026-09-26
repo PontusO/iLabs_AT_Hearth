@@ -2438,9 +2438,12 @@ claims to be.
 
 The batch image, built 2026-09-26 from the committed tree at `3ba055b` in
 `~/silabs/work/hearth-matter-b4`, a fresh `slc generate` with a `make clean`
-inside it, **0 warnings**. The later commits touch only `test/`, the result
-files and this README, so the result files' `fw_repo_head` (`54fab27`) is
-later than the image, the way batch 2's record explains.
+inside it, **0 warnings**. The final review's fix wave (`8b4a05f`) changed
+only comments and one `static_assert` in the firmware (the chime pair pinned
+at 56 B, so that figure is this port's measurement, not the nRF's); the image
+rebuilt the same way at `8b4a05f` has every loadable section the same size
+as `3ba055b`'s, and it is the image on the module. The proof was re-run on it
+(below); Phase 1 and 2 ran on `3ba055b`'s image.
 
 #### The proof: 142 passed, 0 failed, 6 not applicable
 
@@ -2453,7 +2456,10 @@ $ python3 test/mt_catalogue_proof.py \
 ```
 
 Committed run, 2026-09-26: 142 passed, 0 failed, 6 not applicable, the same
-as the trial run before it. The first trial on the same image (114 passed, 34
+as the trial run before it, and again on `8b4a05f`'s image with the
+`no_forward` rows watching a single 3 s window for any command of their
+cluster (the final review's I1: the first shape awaited each command id for
+0.75 s in turn). The first trial on the same image (114 passed, 34
 failed) failed only on proof-script defects, fixed in `54fab27` before the
 committed run: OperationalState is attribute 4 and its forwards carry no
 payload, the refusal row sends no write before the refused one, the setup
