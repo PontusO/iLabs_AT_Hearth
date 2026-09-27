@@ -32,7 +32,13 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "doorlock", "valveconfigurationandcontrol",
                  "powersource", "smokecoalarm", "operationalstate",
                  "modeselect", "chime",
-                 "switch", "pumpconfigurationandcontrol"}
+                 "switch", "pumpconfigurationandcontrol",
+                 "rvcrunmode", "rvccleanmode", "rvcoperationalstate"}
+
+# The MG24 Hearth build's product id. Two Hearth boards on the bench share
+# discriminator 0xF00, so chip-tool's BLE scan can pair the other one
+# (graph B573, finding F579); a proof on the wrong board proves nothing.
+EXPECTED_PRODUCT_ID = "productId=0x8010"
 
 def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
            echo=False, null_read=False, chip_cluster=None, urc_chip_attr=None,
@@ -325,6 +331,43 @@ BATCHES = {
                                (0x0201, 0x0012, 2100))),
         ], extra_reads=[("read", "feature-map", 2)]),
     ],
+    # Batch 5b (catalogue batch 5b design spec section 4): the robotic
+    # vacuum cleaner, endpoint 2 behind the anchor. ModeBase CurrentMode is
+    # Instance-served, so its rows are mode_verdict (no write step);
+    # RvcOperationalState uses the batch 4 kinds.
+    "mg24-batch5b": [
+        _multi("0x0074", "robotic vacuum cleaner", 4, "rvcrunmode", [
+            _check(84, 1, "current-mode", 1,
+                   controller=("mode_verdict", ["change-to-mode", "1"], (84, 0), 1,
+                               {"mode_status": 0, "current_mode": 1}, 1)),
+            _check(84, 1, "current-mode", 1,
+                   controller=("mode_verdict", ["change-to-mode", "0"], (84, 0), 0,
+                               {"mode_status": 2, "current_mode": 1}, 0)),
+            _check(84, 1, "current-mode", 1,
+                   controller=("mode_verdict", ["change-to-mode", "5"], (84, 0), "none",
+                               {"mode_status": 1, "current_mode": 1}, None)),
+            _check(85, 1, "current-mode", 1, chip_cluster="rvccleanmode",
+                   controller=("mode_verdict", ["change-to-mode", "1"], (85, 0), 1,
+                               {"mode_status": 0, "current_mode": 1}, 1)),
+            _check(97, 4, "operational-state", 1, chip_cluster="rvcoperationalstate",
+                   at_cmd="AT+MTOPSTATE=%(ep)d,1",
+                   controller=("verdict", ["pause"], (97, 0), 1,
+                               {"rc0": True, "error_state": 0})),
+            _check(97, 4, "operational-state", 2, chip_cluster="rvcoperationalstate",
+                   at_cmd="AT+MTOPSTATE=%(ep)d,2",
+                   controller=("verdict", ["resume"], (97, 3), 0,
+                               {"rc0": True, "error_state": 2})),
+            _check(97, 4, "operational-state", 66, chip_cluster="rvcoperationalstate",
+                   at_cmd="AT+MTOPSTATE=%(ep)d,0x42",
+                   controller=("no_forward", ["go-home"],
+                               {"rc0": True, "error_state": 3})),
+            _check(97, 4, "operational-state", 0, chip_cluster="rvcoperationalstate",
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,97,4,1"], 11)),
+        ], setup=("setup", ["AT+MTMODES=%(ep)d,84,0,16384,\"Idle\",1,0,\"Cleaning\"",
+                            "AT+MTMODES=%(ep)d,85,0,0,\"Vacuum\",1,0,\"Mop\""],
+                  [("rvcrunmode", "supported-modes", ["Idle", "Cleaning"]),
+                   ("rvccleanmode", "supported-modes", ["Vacuum", "Mop"])])),
+    ],
 }
 
 def composition_for(batch):
@@ -403,14 +446,21 @@ def print_plan(batch):
     for (ep, dt), t in zip(comp[1:], rows_for(batch)):
         setup = t.get("setup")
         if setup:
-            _kind, atlines, (scc, sattr, substrs) = setup
+            _kind, atlines, reads = setup
+            # Batch 4's form is one (cluster, attr, names) read; batch 5b's
+            # is a list of them. Both print one line per read; the listed
+            # form names the chip cluster in each row (both of the RVC's
+            # reads are supported-modes).
+            if not isinstance(reads, list):
+                reads = [reads]
             for line in atlines:
                 print("  ep %2d %s %s rev %d: setup %s -> OK"
                       % (ep, dt, t["name"], t["revision"], line % {"ep": ep}))
-            print("  ep %2d %s %s rev %d: setup chip-tool %s read %s "
-                  "carries %s"
-                  % (ep, dt, t["name"], t["revision"], scc, sattr,
-                     " and ".join(substrs)))
+            for scc, sattr, substrs in reads:
+                what = ("%s %s" % (scc, sattr)) if isinstance(setup[2], list) else sattr
+                print("  ep %2d %s %s rev %d: setup chip-tool %s read %s carries %s"
+                      % (ep, dt, t["name"], t["revision"], what, sattr,
+                         " and ".join(substrs)))
         for i, c in enumerate(t["checks"]):
             urc = "n/a (no controller action, read-only attribute)"
             if c["controller"] is not None:
@@ -439,6 +489,14 @@ def print_plan(batch):
                     kind, atlines, err = c["controller"]
                     urc = "host write %s -> +MTERR:%d (refused, no forward)" % (
                         atlines[0] % {"ep": ep}, err)
+                elif c["controller"][0] == "mode_verdict":
+                    _kind, args, (fcl, fcmd), answer, want, _payload = c["controller"]
+                    cmd = " ".join(str(a) for a in args)
+                    ans = "allow" if answer == 1 else "deny" if answer == 0 else "unlisted"
+                    urc = "%s -> ChangeToMode status %d (%s; %s)" % (
+                        cmd, want["mode_status"], ans,
+                        "no +MTCMD within 3s" if answer == "none"
+                        else "+MTCMD:%d,%d answered %s" % (fcl, fcmd, ans))
                 else:
                     kind, args, (u_cluster, u_attr, u_val) = c["controller"]
                     # The write's args already carry the "write" kind word
@@ -476,15 +534,23 @@ def prove_endpoint(link, chip, s, node, ep, t):
     # 1's and batch 2's row names stay byte-for-byte (neither carries a
     # verdict kind).
     if t.get("setup"):
-        _kind, atlines, (scc, sattr, substrs) = t["setup"]
+        _kind, atlines, reads = t["setup"]
+        # Batch 4's form is one (cluster, attr, names) read; batch 5b's is a
+        # list of them (the RVC's two mode lists). The list form names the
+        # chip cluster in each row, because both reads are supported-modes.
+        listed = isinstance(reads, list)
+        if not listed:
+            reads = [reads]
         for line in atlines:
             wcmd = line % {"ep": ep}
             res, wlines = link.command(wcmd)
             s.check("%s ep%d setup %s -> OK" % (tag, ep, wcmd), res == 0)
-        rc, out = chip.run([scc, "read", sattr, node, str(ep)], timeout=30)
-        s.check("%s ep%d setup %s read carries %s"
-                % (tag, ep, sattr, " and ".join(substrs)),
-                rc == 0 and all(x in out for x in substrs))
+        for scc, sattr, substrs in reads:
+            rc, out = chip.run([scc, "read", sattr, node, str(ep)], timeout=30)
+            what = ("%s %s" % (scc, sattr)) if listed else sattr
+            s.check("%s ep%d setup %s read carries %s"
+                    % (tag, ep, what, " and ".join(substrs)),
+                    rc == 0 and all(x in out for x in substrs))
     multi = len(t["checks"]) > 1
     for c in t["checks"]:
         prefix = "%s ep%d" % (tag, ep) + (" %s" % c["chip_attr"] if multi else "")
@@ -505,6 +571,11 @@ def prove_endpoint(link, chip, s, node, ep, t):
                 prefix += " %s no-forward" % c["controller"][1][0]
             elif c["controller"][0] == "at_refused":
                 prefix += " AT write refused"
+            elif c["controller"][0] == "mode_verdict":
+                _kind, args, _fwd, answer, _want = c["controller"][:5]
+                prefix += " %s %s %s %s" % (
+                    c["chip_cluster"] or t["chip_cluster"], args[0], args[1],
+                    "allow" if answer == 1 else "deny" if answer == 0 else "unlisted")
         prove_check(link, chip, s, node, ep, t, c, prefix)
     for extra in t["extra_reads"]:
         if extra[0] == "read-event":
@@ -538,6 +609,36 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         wcmd = atlines[0] % {"ep": ep}
         res, wlines = link.command(wcmd)
         s.check("%s %s -> +MTERR:%d" % (prefix, wcmd, err), res == err)
+        return
+    if c["controller"] is not None and c["controller"][0] == "mode_verdict":
+        # ModeBase CurrentMode is Instance-served (an AT write is refused
+        # +MTERR:11), so there is no write step: the controller's
+        # ChangeToMode is the only way the mode moves (AT_MT_SPEC 3.20.1).
+        # The SDK answers an unlisted mode itself (Status 1) before any
+        # forward; a listed one forwards the mode as payload and the host's
+        # verdict lands in the ChangeToModeResponse Status (0 allow, 2 deny).
+        _kind, args, (fcl, fcmd), answer, want, payload = c["controller"]
+        cc = c["chip_cluster"] or t["chip_cluster"]
+        link.drain(0.2)
+        ctx = types.SimpleNamespace(chip=chip, chip_call=None)
+        handle = H.invoke_chip(ctx, [cc] + args[:1] + [node, str(ep)] + args[1:], timeout=30)
+        if answer == "none":
+            fwd = link.await_urc(r"^\+MTCMD:\d+,%d,%d,\d+(,|$)" % (ep, fcl), 3.0)
+            s.check("%s no +MTCMD within 3s" % prefix, fwd is None)
+        else:
+            responder = H.CmdResponder(link)
+            fwd = responder.expect(cluster=fcl, command=fcmd, verdict=answer,
+                                   payload=payload, timeout=5.0)
+            s.check("%s forward %d/%d answered %s" % (prefix, fcl, fcmd,
+                                                     "allow" if answer else "deny"),
+                    fwd is not None)
+        rc, out = handle.join(30)
+        s.check("%s ChangeToMode status %d" % (prefix, want["mode_status"]),
+                rc == 0 and H.parse_change_to_mode_status(out) == want["mode_status"])
+        if "current_mode" in want:
+            rc, out = chip.run([cc, "read", "current-mode", node, str(ep)], timeout=30)
+            s.check("%s current-mode = %d after" % (prefix, want["current_mode"]),
+                    rc == 0 and H.parse_int_attr(out) == want["current_mode"])
         return
     if c["null_read"]:
         # AT_MT_SPEC 3.8's null rule: reading an attribute that has never
@@ -778,6 +879,12 @@ def main(argv=None):
         ctx.opts = args  # pairing_argv's WIFI branch reads ctx.opts.ssid/.psk
         rc, out = chip.run(H.pairing_argv(ctx), timeout=120)
         paired = s.check("commission: chip-tool pairing exits 0", rc == 0)
+        if paired:
+            paired = s.check("commission: paired the board under test (%s)" % EXPECTED_PRODUCT_ID,
+                             EXPECTED_PRODUCT_ID in out)
+            if not paired:
+                print("ABORT: chip-tool paired another board (no %s in its output)"
+                      % EXPECTED_PRODUCT_ID)
         if not paired:
             print(H._pairing_tail(out, getattr(args, "psk", None)))
     else:
