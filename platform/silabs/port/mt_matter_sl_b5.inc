@@ -323,8 +323,8 @@ private:
  * Pool sizing, this port's own (the nRF port's DE404 arithmetic did not
  * copy over, because this port's composition was the RVC alone): 20 slots,
  * which was 2 x 9 plus headroom when nine RVCs were admitted (graph DE566)
- * and is exactly 2 x 10 since the object arena grew and ten are (DE603). On the nRF the
- * number was argued from its 8,112 usable block heap and a 864 B RVC
+ * and is exactly 2 x 10 since the object arena grew and ten are (DE603),
+ * asserted below. On the nRF the number was argued from its 8,112 usable block heap and a 864 B RVC
  * block, against four or more ModeBase consumers; none of that applies
  * here, where the endpoint arena is 9,728 usable bytes against a 936 B
  * RVC block. Since catalogue batch 7a-2 device energy management's DEMMode
@@ -355,6 +355,9 @@ private:
  * standing allocate-only policy.
  */
 constexpr size_t kModeBasePoolSlots = 20;
+static_assert(kModeBasePoolSlots >= 2 * 10,
+              "the ModeBase pool no longer holds ten RVCs' two ModeBase pairs each: it "
+              "would silently lower the RVC's admission maximum below DE603's ten");
 
 /* Memory reclaim round A: a table of pointers into the cluster-object
  * heap, each block holding the delegate with the raw storage for its
@@ -845,8 +848,8 @@ private:
 };
 
 /* One RvcOperationalState per RVC endpoint, so this pool is
- * kServiceableEndpoints deep like the trio's (the heap admits only nine
- * RVC endpoints, but a slot here is 260-odd bytes against the ModeBase
+ * kServiceableEndpoints deep like the trio's (the object arena admits only
+ * ten RVC endpoints since DE603, but a slot here is 260-odd bytes against the ModeBase
  * pool's DE404 argument for departing from 16; not worth a second special
  * sizing). Memory reclaim round A: the pool is a table of POINTERS into
  * the cluster-object heap, and the raw storage for the

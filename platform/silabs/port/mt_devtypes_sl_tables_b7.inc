@@ -309,7 +309,7 @@ constexpr EmberAfDeviceType kSolarPowerTypes[] = { { 0x0017, 1 }, { 0x0011, 1 },
  * MeterIdentification (0x0B06), the cheapest type in the batch: Instance
  * only, NO delegate of any kind (the Instance owns its own attribute
  * storage, three 64-byte string buffers included: 304 B measured in the
- * step-0 build), pool MT_METER_MAX (2, core/include/mt_matter.h:1302, the
+ * step-0 build), pool MT_METER_MAX (2, core/include/mt_matter.h:1303, the
  * C6 depth).
  *
  *   Code-driven? No; CHI-only? Not listed, harmless (no commands). Both
@@ -562,7 +562,7 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  * check, no VerifyOrDie), constructed by the port's own
  * mt_matter_whm_register() below a successful emberAfSetDynamicEndpoint(),
  * the DEM handout's shape, pool MT_WHM_MAX (4, core/include/
- * mt_matter.h:951, the C6 depth per DE407).
+ * mt_matter.h:952, the C6 depth per DE407).
  *
  * THE ONE INERT REVISION SEED IN THE ENERGY FAMILY: Instance::Read()
  * serves ClusterRevision ITSELF (water-heater-management-server.cpp:
@@ -589,8 +589,8 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  * kInactive = 0, WaterHeaterManagement/Enums.h:32-36).
  *
  * THE FEATUREMAP IS THE CATALOGUE'S SECOND VARIANT-DEPENDENT BOOT VALUE
- * (the DEM special case's exact problem: both variants share devtype
- * 0x050F, so an s_seeds row cannot split them). Variant 0 is
+ * (like the DEM's: both variants share devtype 0x050F, so a devtype-keyed
+ * seed row alone cannot split them; the seed table's variant column does). Variant 0 is
  * EnergyManagement|TankPercent = 0x3 (Enums.h:44-48; the value the C6
  * hand-sets because BOTH esp-matter feature helpers are broken,
  * mt_devtypes.cpp:1594-1607: energy_management::add() as declared does
@@ -601,7 +601,8 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  * permits: EM and TP are both optionalConform, cluster XML :57-64).
  * On this port the seed table's variant column carries it (the two
  * variant-qualified 0x050F FeatureMap rows in mt_devtypes_sl_seeds.inc),
- * where the nRF has a seed_slots() special case; the create path hands
+ * as on the nRF (whose seed_slots() keeps a special case only for
+ * AirQuality); the create path hands
  * the same variant predicate to mt_matter_whm_register(),
  * whose Instance mask is what Read() actually answers for FeatureMap
  * (server.cpp:144-145 encodes mFeature, snapshotted at construction):
@@ -756,7 +757,7 @@ constexpr EmberAfDeviceType kWaterHeaterBareTypes[] = { { 0x050F, 1 } };
  * PowerSource attribute list, on the C6's mk_battery_storage()
  * (mt_devtypes.cpp:2182-2264, class comment :2137-2181). Only the
  * registry rows, the spans and this note are new; every create-path arm,
- * seed special case and carve-out row is keyed on cluster ids these lists
+ * seed row and carve-out row is keyed on cluster ids these lists
  * already carry.
  *
  * THE RECHG CONFORMANCE FIX, the reason the battery-shaped

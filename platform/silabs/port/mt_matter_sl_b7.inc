@@ -804,7 +804,7 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
  * attribute storage (three 64-byte string buffers plus five Nullables,
  * meter-identification-server.h:60-78; 304 B, pinned for this port
  * below the pool), so the pool is raw aligned storage plus placement-new, the
- * ModeBase Instance shape, MT_METER_MAX (2, core/include/mt_matter.h:1302,
+ * ModeBase Instance shape, MT_METER_MAX (2, core/include/mt_matter.h:1303,
  * the C6 depth per DE407) deep.
  *
  * Reservation versus construction, two different times on purpose (the
@@ -1502,7 +1502,7 @@ private:
 };
 
 /*
- * The pool, MT_DEM_MAX (4, core/include/mt_matter.h:1033, the C6 depth per
+ * The pool, MT_DEM_MAX (4, core/include/mt_matter.h:1034, the C6 depth per
  * DE407) delegates plus raw aligned Instance storage: unlike the C6, where
  * esp-matter's DeviceEnergyManagementDelegateInitCB news the Instance at
  * endpoint enable from a FeatureMap snapshot, this port constructs it in
@@ -1519,8 +1519,8 @@ static size_t            s_dem_next;
  * DEM admission maximum with its DEMMode ModeBase pair (80 B, pinned in
  * mt_matter_sl_b5.inc), and the energy families at their caps together
  * (four since catalogue batch 7b and DE603's 4,256 B arena: the water
- * heater's 168 B outside the measurement caps), so any composition inside
- * the caps fits the object arena. */
+ * heater's 168 B outside the measurement caps), so any composition of
+ * those families inside their caps fits the object arena. */
 static_assert(hearth_arena_cost(obj_pair_bytes<HearthDemDelegate,
                                                 chip::app::Clusters::DeviceEnergyManagement::Instance>()) == 280,
               "the DEM pair changed size; redo the DEM admission arithmetic");
@@ -1985,7 +1985,7 @@ public:
      * the two bools' VALUES when present (a present bool needs no appended
      * field), then ONLY the present numeric optionals appended in
      * canonical order, temporarySetpoint / targetPercentage / targetReheat
-     * (core/include/mt_matter.h:985-991; worked example: duration 3600,
+     * (core/include/mt_matter.h:986-992; worked example: duration 3600,
      * oneShot true, targetPercentage 80 forwards as "3600,265,80"). The
      * Instance has already range-checked targetPercentage/targetReheat and
      * their feature conformance before calling this
@@ -2116,7 +2116,7 @@ private:
 };
 
 /*
- * The pool, MT_WHM_MAX (4, core/include/mt_matter.h:951, the C6 depth per
+ * The pool, MT_WHM_MAX (4, core/include/mt_matter.h:952, the C6 depth per
  * DE407) delegates plus raw aligned Instance storage, the DEM pool's exact
  * shape: this port constructs the Instance in mt_matter_whm_register()
  * with the variant's own mask, where the C6 lets esp-matter's
@@ -2124,7 +2124,7 @@ private:
  * endpoint enable. Endpoint id stamped in the SUCCESS-ONLY second half by
  * the Instance constructor (water-heater-management-server.h:142-149),
  * never at handout: the alloc takes the id per the header's contract
- * (mt_matter.h:993-1015) and discards it, fix round M1, the full reasoning at
+ * (mt_matter.h:994-1016) and discards it, fix round M1, the full reasoning at
  * the alloc below. Exhaustion aborts the create before anything is spent;
  * never destroyed (~Instance() would Shutdown() cleanly, but this
  * platform has no teardown path, the standing allocate-only policy).

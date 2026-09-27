@@ -134,8 +134,10 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * DE603 (catalogue batch 7b, 2026-09-27, the user's ruling): 4,096 grew to
  * 4,256 (+160 B of .bss) so the four energy families at their caps fit
  * together, exactly: 8 x 192 + 4 x 360 + 2 x 304 + 4 x 168 = 4,256, a
- * static_assert beside the WHM pool in mt_matter_sl_b7.inc. Any composition
- * inside every cap therefore fits. The same growth lets a tenth RVC fit
+ * static_assert beside the DEM pool in mt_matter_sl_b7.inc. Any composition
+ * of the capped energy families inside their caps therefore fits; a mix that
+ * adds uncapped object-drawing types can still reach the arena's end and is
+ * refused at that claim. The same growth lets a tenth RVC fit
  * (10 x 424 = 4,240), so the RVC's maximum rose from nine to ten.
  *
  * DE541: batch 3's minimal form, 128 B of valve delegates only.

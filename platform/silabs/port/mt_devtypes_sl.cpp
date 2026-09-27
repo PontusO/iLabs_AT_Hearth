@@ -993,7 +993,7 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         rvc_opstate_delegate = mt_matter_rvc_opstate_delegate_alloc();
         if (rvc_opstate_delegate == nullptr) {
             HEARTH_LOGE("devtypes", "devtype 0x%04X: rvc opstate delegate unavailable: the cluster-object "
-                    "arena is full (the RVC is admitted up to nine, DE566)",
+                    "arena is full (the RVC is admitted up to ten, DE603)",
                     (unsigned)devtype_id);
             if (chime_delegate != nullptr) {
                 mt_matter_chime_delegate_unclaim(chime_delegate);
@@ -1129,7 +1129,7 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     /* Catalogue batch 7b: the water heater handout's first half, the DEM
      * pair's discipline verbatim: the WHM alloc takes the endpoint id per
-     * the header's alloc(ep) contract (core/include/mt_matter.h:993-1015) and
+     * the header's alloc(ep) contract (core/include/mt_matter.h:994-1016) and
      * discards it until the success-only second half (fix round M1, the
      * DEM claim's note above and the pool's own comment), the
      * WaterHeaterMode ModeBase claim is one more slot from the shared pool
