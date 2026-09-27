@@ -45,7 +45,7 @@
  *   water valve (0x0042)               nRF 1358-1484  whole
  *   the parenting policy               nRF 3325-3428  whole (predicate + shape struct)
  *   the registry                       nRF 4402-4641  all 52 rows' identity,
- *                                                     thirty-five rows' cluster
+ *                                                     forty-four rows' cluster
  *                                                     sets
  *   the external attribute store       nRF 4642-4658  whole
  *   the endpoint block arena           nRF 4659-5272  on a bump arena
@@ -58,7 +58,7 @@
  *   mt_dyn_mode_store() and
  *     mt_dyn_chime_store()             nRF 7084-7116  whole
  *   mt_dyn_mb_store()                  nRF 7118-7159  whole
- *   the mt_devtypes.h quartet          nRF 7189-8413  the thirty-five ported
+ *   the mt_devtypes.h quartet          nRF 7189-8413  the forty-four ported
  *                                                     types
  *   the ember external-attribute hooks nRF 8415-8451  whole
  *
@@ -1320,9 +1320,10 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * single source both the FeatureMap seed and the Instance mask derive
      * from (the variant-qualified seed rows on this port). */
     /* THE PA PREDICATE IS READ FROM THE DECLARED LIST, not from the variant,
-     * since the nRF's EVSE round (the EVSE and battery storage named here
-     * reach this port with the EVSE round and batch 7b). It used to be
-     * `variant == 0`, which was exactly right while the only DEM-bearing types were the standalone DEM and
+     * since the nRF's EVSE round (the EVSE named here reaches this port with
+     * the EVSE round; battery storage came with batch 7b). It used to be
+     * `variant == 0`, which was exactly right while the only DEM-bearing
+     * types were the standalone DEM and
      * battery storage, whose variant 0 carries PowerAdjustment and whose
      * variant 1 does not. The EVSE breaks that: its variant axis is SOC, and
      * it carries the over-delivered DEM with NO PowerAdjustment on either

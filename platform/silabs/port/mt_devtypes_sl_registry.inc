@@ -104,8 +104,8 @@ struct hearth_shape {
  * span REPLACES the ep_type/ep_type_v1 selection entirely.
  *
  * In THIS build every one of those four members is null or empty on every
- * row but the thirty-five ported ones, which carry ep_type and device_types
- * alone.
+ * row but the forty-four ported ones, which carry ep_type and device_types
+ * and, on the variant rows, ep_type_v1 and device_types_v1.
  */
 struct hearth_devtype {
     uint32_t id;
@@ -203,7 +203,8 @@ constexpr hearth_devtype s_registry[] = {
      * its 0x0510 id together. */
     { 0x050F, 1, &waterHeaterEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterTypes),
       &waterHeaterBareEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterBareTypes) },
-    { 0x0018, 1 },                                                      /* batch 7b: battery storage */
+    { 0x0018, 1, &batteryStorageEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageTypes),
+      &batteryStorageNoDemEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageNoDemTypes) },
     /* Catalogue batch 8: the composed appliances. The first three carry no
      * shapes even on the nRF: the policy is permissive for all of them, and
      * a cooktop's or an oven's own cluster set does not change when a child
@@ -248,7 +249,7 @@ static_assert(sizeof(s_registry) / sizeof(s_registry[0]) == 52,
  * unserved, and mt_devtype_create() refuses it before the parent is even
  * looked at. So the per-row body is skipped for those, and what the
  * assertion now proves is the same property over the rows that can be
- * created. It does NOT weaken into vacuity: the thirty-five ported rows are
+ * created. It does NOT weaken into vacuity: the forty-four ported rows are
  * checked in full, the parent universe is still the whole 52-row registry (so a
  * future restricted row is enumerated against every catalogue id from the
  * moment it gains a cluster set), and the day a batch gives the cabinet or

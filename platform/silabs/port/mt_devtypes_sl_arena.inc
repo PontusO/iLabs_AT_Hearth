@@ -137,11 +137,11 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * can build) by raising HEARTH_EP_ARENA_BYTES from 5,376 to 9,600 rather
  * than lowering the floor to the nRF's eight (the ruling of 2026-09-24), and
  * catalogue batch 4 raised it from 9,600 to 9,728 when the mode select
- * became the widest (the ruling of 2026-09-26). The RVC (batch 5b) is the
- * one admitted type below that sixteen: up to nine, because its 424 B of
- * cluster objects per endpoint is what the cluster-object arena caps (DE566)
- * rather than this arena, which would hold ten RVC blocks (10 x 936 = 9,360
- * of 9,728). It is still a stronger
+ * became the widest (the ruling of 2026-09-26). The RVC (batch 5b) and
+ * the water heater and battery storage (batch 7b) are the admitted types
+ * below that sixteen: the RVC up to ten (DE566, DE603; ten blocks are
+ * 9,360 of 9,728), the water heater up to four (MT_WHM_MAX; four blocks
+ * 3,200) and battery storage up to eight (MT_MEAS_MAX; eight blocks 6,784). It is still a stronger
  * promise than the nRF's, whose 8,112 usable bytes hold only 13 of the same
  * extended colour light. The floor below asserts the strong form
  * deliberately: the batch that adds a wider type will fail this build and
@@ -441,13 +441,15 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * does), and the candidates for the types this build does not declare yet
  * (the non-RVC ModeBase families, the temperature-level labels, and the other
  * store-bearing types) come with their batches; the chime (batch 4), the
- * RVC (batch 5b) and the DEM (batch 7a-2) candidates live below. And the
+ * RVC (batch 5b), the DEM (batch 7a-2) and the water heater and battery
+ * storage (batch 7b, counted exactly, the nRF's convention) candidates
+ * live below. And the
  * nRF's floor carries a capped half (kFloorDemand, kEvseEndpointCap and its
  * two non-vacuity assertions) that this one does not: it exists because the
  * EVSE's own MT_EVSE_MAX of 2 makes "room for eight of it" a demand no
  * composition can make. The caps this build does carry (the RVC's
- * nine, the measurement family's eight, the DEM's four, the meter's two:
- * DE566, DE584) are admission limits on the cluster-object arena, not floor
+ * ten, the measurement family's eight, the DEM's and the water heater's
+ * four, the meter's two: DE566, DE584, DE603) are admission limits on the cluster-object arena, not floor
  * demands, so every candidate is uncapped and the floor is
  * the single inequality the nRF had before the EVSE round. The capped half
  * comes back with the EVSE.
@@ -456,8 +458,9 @@ attr_slot *block_slots(const dyn_endpoint &d)
 
 constexpr size_t kMax2(size_t a, size_t b) { return a > b ? a : b; }
 
-/* Identify rides on all thirty-five device types; Descriptor contributes
- * nothing.
+/* Identify rides on the device types that declare it (the kIdentifySlots
+ * terms below; the power source and the energy types do not); Descriptor
+ * contributes nothing.
  * MT_COUNT over an attr list counts DECLARED entries plus the LIST_END
  * ClusterRevision, which over-counts a list whose metadata-only members get
  * no slot; batch 4's mode select and chime lists have one (their
@@ -539,8 +542,9 @@ constexpr size_t kChimeBlockBytes =
     block_bytes(MT_COUNT(chimeClusters), MT_COUNT(chimeAttrs)) + sizeof(mt_chime_store_t);
 
 /* Catalogue batch 5b, the robotic vacuum cleaner, under admission limits
- * (graph DE566): its block is wider than the 608 B every other type is
- * sixteen-of, so it is NOT folded into kWidestEndpointSlots or
+ * (graph DE566): its block is wider than the 608 B the other types are
+ * sixteen-of (as are the water heater's and battery storage's since batch
+ * 7b), so it is NOT folded into kWidestEndpointSlots or
  * kWidestClusterList. It gets its own candidate (Identify, the two ModeBase
  * lists, the operational state list and the two trailing ModeBase stores,
  * the MT_COUNT over-count as everywhere here) and a documented maximum of
@@ -640,6 +644,36 @@ static_assert(hearth_arena_cost(kWaterHeaterBlockBytes) == 800,
 static_assert(MT_WHM_MAX * hearth_arena_cost(kWaterHeaterBlockBytes) <= kEpArenaBytes,
               "MT_WHM_MAX water heater blocks no longer fit the endpoint arena (DE584)");
 
+/* More metadata-only counts for the battery candidate: the rechargeable
+ * PowerSource list has four (Description, EndpointList and the two fault
+ * arrays), demAttrs three (PowerAdjustmentCapability and the two power_mw
+ * scalars). */
+constexpr size_t kRechargeablePsNoSlot = 4;
+constexpr size_t kDemNoSlot            = 3;
+
+/* Battery storage v0, the wider variant list (v1 drops the DEM pair
+ * whole): 7 clusters, 15 + 2 + 4 + 2 + 6 + 3 = 32 slots, one ModeBase
+ * store. The catalogue's second-widest block: 846 B payload (848 of
+ * arena) against the RVC's real 856 (936 by this port's over-count). */
+constexpr size_t kBatteryStorageBlockBytes =
+    block_bytes(MT_COUNT(batteryStorageClusters),
+                (MT_COUNT(rechargeableBatteryPowerSourceAttrs) - kRechargeablePsNoSlot) +
+                    MT_COUNT(ptopAttrs) + (MT_COUNT(epmAttrs) - kEpmNoSlot) +
+                    (MT_COUNT(eemAttrs) - kEemNoSlot) + (MT_COUNT(demAttrs) - kDemNoSlot) +
+                    (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot)) +
+    sizeof(mt_mb_store_t);
+/* 846 B payload, its arena cost (848) and admission pinned below. The
+ * nRF audit's
+ * 3.6 estimate (830/832) under-counted this list by one slot and
+ * mis-rounded, re-derived per the batch brief (the section comment). */
+static_assert(kBatteryStorageBlockBytes == 846,
+              "the battery storage block changed size; redo the sizing table rows and the "
+              "batch 7b capacity arithmetic");
+static_assert(hearth_arena_cost(kBatteryStorageBlockBytes) == 848,
+              "the battery storage block's arena cost moved off the 848 B this batch was sized with");
+static_assert(MT_MEAS_MAX * hearth_arena_cost(kBatteryStorageBlockBytes) <= kEpArenaBytes,
+              "MT_MEAS_MAX battery storage blocks no longer fit the endpoint arena (DE584)");
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
           kMax2(kModeSelectBlockBytes, kMax2(kChimeBlockBytes, kDemBlockBytes)));
@@ -676,10 +710,10 @@ constexpr size_t kArenaUsableBytes = kEpArenaBytes;
  * the choice and keep the same strong form by raising it from 5,376 to
  * 9,600 (the ruling of 2026-09-24); catalogue batch 4's store-bearing mode
  * select revisits the choice and keeps the same strong form by raising it
- * from 9,600 to 9,728 (the ruling of 2026-09-26). The RVC (batch 5b) stays
- * below this floor by design: its admission limit is up to nine (DE566),
- * capped by the cluster-object arena, not by this endpoint floor, which
- * would hold ten of its 936-byte blocks.
+ * from 9,600 to 9,728 (the ruling of 2026-09-26). The RVC (batch 5b) and
+ * the water heater and battery storage (batch 7b) stay below this floor
+ * by design: their admission limits (the RVC's ten, DE603; MT_WHM_MAX;
+ * MT_MEAS_MAX) are asserted beside their candidates against this arena.
  *
  * That is deliberate rather than incidental. The next batch that adds a
  * wider device type fails THIS assertion and has to choose, with the numbers

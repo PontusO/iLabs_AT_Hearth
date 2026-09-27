@@ -95,8 +95,10 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * 192 for the on/off light and the on/off plug-in unit, 176 for the fan,
  * 160 for the temperature, humidity, pressure, light, flow and occupancy
  * sensors, 128 for the air quality sensor and the four boolean-state
- * sensors. So every composition this image accepts, it can build, which is
- * a stronger promise than the nRF arm makes (its 8,112 usable bytes hold
+ * sensors. So every composition of those types this image accepts, it can
+ * build (the wider types since carry admission limits, DE566, DE584,
+ * DE603, and a mix of them with many 608 B types can still stop at this
+ * arena), which is a stronger promise than the nRF arm makes (its 8,112 usable bytes hold
  * thirteen of the same extended colour light, not sixteen).
  *
  * Catalogue batch 1 kept that promise by raising this number from 3,072
