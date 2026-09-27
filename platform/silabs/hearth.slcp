@@ -344,6 +344,11 @@ component:
   - id: matter_administrator_commissioning
   - id: matter_basic_information
   - id: matter_descriptor
+  # Catalogue batch 7a-1 (2026-09-27): the measurement family. No SDK patch:
+  # none of the three is code-driven (the EEM instance-pool patch is already
+  # applied).
+  - id: matter_electrical_energy_measurement
+  - id: matter_electrical_power_measurement
   # Catalogue batch 4 (2026-09-26): the smoke/CO and power-source clusters.
   # No SDK patch: none code-driven (F554).
   - id: matter_chime
@@ -366,6 +371,7 @@ component:
   - id: matter_identify
   - id: matter_network_commissioning
   - id: matter_on_off
+  - id: matter_power_topology
   # Catalogue batch 5a (2026-09-26): the pump and the switch.
   # No SDK patch: neither cluster is code-driven.
   - id: matter_pump_configuration_and_control

@@ -9535,7 +9535,7 @@
           "mfgCode": null,
           "define": "ELECTRICAL_POWER_MEASUREMENT_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "PowerMode",
@@ -9785,7 +9785,7 @@
           "mfgCode": null,
           "define": "ELECTRICAL_ENERGY_MEASUREMENT_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "Accuracy",
@@ -9923,7 +9923,7 @@
           "mfgCode": null,
           "define": "POWER_TOPOLOGY_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "GeneratedCommandList",

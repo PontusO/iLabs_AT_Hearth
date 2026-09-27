@@ -37,6 +37,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::DoorLock::Id:
         emberAfDoorLockClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::ElectricalEnergyMeasurement::Id:
+        emberAfElectricalEnergyMeasurementClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::ElectricalPowerMeasurement::Id:
+        emberAfElectricalPowerMeasurementClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::FanControl::Id:
         emberAfFanControlClusterInitCallback(endpoint);
         break;
@@ -84,6 +90,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
         break;
      case  app::Clusters::PowerSource::Id:
         emberAfPowerSourceClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::PowerTopology::Id:
+        emberAfPowerTopologyClusterInitCallback(endpoint);
         break;
      case  app::Clusters::PressureMeasurement::Id:
         emberAfPressureMeasurementClusterInitCallback(endpoint);
