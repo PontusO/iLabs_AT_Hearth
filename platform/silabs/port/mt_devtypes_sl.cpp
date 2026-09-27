@@ -83,10 +83,10 @@
  *
  * The DE407 quiet table (nRF 4924-4988, kQuietNoSlot and
  * attr_quiet_no_slot) arrived with catalogue batch 7a-1 in
- * mt_devtypes_sl_tables_b7.inc, its seven ElectricalPowerMeasurement rows
- * only: the table admits one proven pair at a time, so the nRF's
- * DeviceEnergyManagement, WaterHeaterManagement and EnergyEvse rows arrive
- * with their batches.
+ * mt_devtypes_sl_tables_b7.inc, its seven ElectricalPowerMeasurement rows,
+ * and 7a-2 added the two DeviceEnergyManagement rows: the table admits one
+ * proven pair at a time, so the nRF's WaterHeaterManagement and EnergyEvse
+ * rows arrive with their batches.
  * The type-conditional trailing stores (nRF 5032-5197, kStoreWalk,
  * store_walk, store_offset and the four sizeof/alignof assertions) arrived
  * with catalogue batch 4, when the first store-bearing type, the mode

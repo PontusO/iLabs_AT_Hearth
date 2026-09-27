@@ -194,8 +194,9 @@ constexpr hearth_devtype s_registry[] = {
     { 0x0309, 0, &wiredElectricalSensorEndpoint, Span<const EmberAfDeviceType>(kHeatPumpTypes) },
     { 0x0017, 1, &wiredElectricalSensorEndpoint, Span<const EmberAfDeviceType>(kSolarPowerTypes),
       &wiredElectricalSensorPowerOnlyEndpoint },
-    { 0x0511, 0 },                                                      /* batch 7a: electrical utility meter */
-    { 0x050D, 1 },                                                      /* batch 7a: device energy management */
+    { 0x0511, 0, &utilityMeterEndpoint,
+      Span<const EmberAfDeviceType>(kElectricalUtilityMeterTypes) },
+    { 0x050D, 1, &demEndpoint, Span<const EmberAfDeviceType>(kDemTypes), &demReportOnlyEndpoint },
     /* Catalogue batch 7b: the delegate-served energy pair, the first rows
      * with a variant-dependent device-type span. */
     { 0x050F, 1 },                                                      /* batch 7b: water heater */

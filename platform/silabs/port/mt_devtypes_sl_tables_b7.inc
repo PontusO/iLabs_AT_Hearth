@@ -4,7 +4,10 @@
  * Holds device tables: catalogue batch 7a-1 (nRF 2437-2723): the
  * measurement family, the electrical sensor (0x0510) and electrical meter
  * (0x0514) with their power-only variants, and the heat pump (0x0309) and
- * solar power (0x0017) on the wired electrical sensor lists.
+ * solar power (0x0017) on the wired electrical sensor lists; and
+ * catalogue batch 7a-2 (nRF 2725-2954): the electrical utility meter
+ * (0x0511) and device energy management (0x050D) with its report-only
+ * variant.
  * mt_devtypes_sl.cpp #includes it inside its anonymous namespace, in
  * order with the other fragments, after mt_devtypes_sl_tables_b5.inc
  * and before mt_devtypes_sl_registry.inc, so the whole is still one
@@ -299,6 +302,237 @@ HEARTH_DECLARE_CONST_ENDPOINT(wiredElectricalSensorPowerOnlyEndpoint,
 constexpr EmberAfDeviceType kHeatPumpTypes[] = { { 0x0309, 1 }, { 0x0011, 1 }, { 0x0510, 1 } };
 constexpr EmberAfDeviceType kSolarPowerTypes[] = { { 0x0017, 1 }, { 0x0011, 1 }, { 0x0510, 1 } };
 
+/* ---- electrical utility meter (0x0511) --------------------------------
+ *
+ * Catalogue batch 7a audit section 3.9. One new cluster,
+ * MeterIdentification (0x0B06), the cheapest type in the batch: Instance
+ * only, NO delegate of any kind (the Instance owns its own attribute
+ * storage, three 64-byte string buffers included: 304 B measured in the
+ * step-0 build), pool MT_METER_MAX (2, core/include/mt_matter.h:1302, the
+ * C6 depth).
+ *
+ *   Code-driven? No; CHI-only? Not listed, harmless (no commands). Both
+ *   confirmed empirically by the batch's one zap regeneration
+ *   (byte-identical trio, the epmAttrs note).
+ *
+ *   AAI? YES, per endpoint, and NOTHING IN THE SDK EVER CONSTRUCTS IT:
+ *   Instance::Init() (meter-identification-server.cpp:59-68, soft: nulls
+ *   the five attributes and registers the AAI) has no SDK caller anywhere
+ *   in the pinned tree, the chime/EEM disease in the organ the C6's
+ *   mt_meter.cpp documents at length. The port's fix is the same shape:
+ *   mt_meter_register_all() (mt_matter_sl_b7.inc), a registration scan
+ *   over the live composition run once from main.cpp after
+ *   rebuild_composition() and before mt_at_start(), so every meter
+ *   endpoint answers before +MTREADY lets the host ask. Forget the scan
+ *   and the endpoint advertises five attributes and answers none of them,
+ *   the exact failure mode the C6 round found on the bench (the audit's
+ *   risk line).
+ *
+ *   Capacity is claimed at CREATE time, not registration time:
+ *   mt_meter_reserve() below runs with the other pre-create pool claims,
+ *   because only a create failure can abort the composition rebuild; a
+ *   shortfall discovered in the later scan could not un-create the
+ *   cluster already on the wire (the C6's fix-round-2 lesson,
+ *   mt_meter.cpp's s_meter_reserved comment).
+ *
+ * Slots: MeterType (ENUM8, nullable, k_instance_served live-read; its
+ * inert shadow seeds the null sentinel), FeatureMap (inert shadow of the
+ * Instance's construction mask, mt_meter_feature_mask() = kPowerThreshold
+ * 0x1) and ClusterRevision (LIVE: Instance::Read() serves the five
+ * attributes and FeatureMap only, meter-identification-server.cpp:
+ * 215-245; MeterIdentification/Metadata.h:20 kRevision = 1). The three
+ * char_strings (64 bytes each, so 65 ember bytes, under the 66-byte IO
+ * buffer) and the PowerThresholdStruct are metadata-only, no slot, quiet
+ * by type; an AT+MTATTR read of any of the four answers +MTERR:5. On the
+ * C6 those four +MTERR:5 answers come from two different mechanisms (the
+ * strings reach the Instance and fail conversion, the struct is refused
+ * before dispatch by an esp-matter ARRAY refusal, AT_MT_SPEC.md 3.9:
+ * 808-822); on this port all four come from attr_type_info()'s one
+ * refusal, same wire, different plumbing, the spec's platform-note gap
+ * the batch report flags.
+ *
+ * Identify IS composed, a conformance requirement, not decoration:
+ * ElectricalUtilityMeter.xml declares superset="Meter Reference Point"
+ * and MeterReferencePoint.xml's own body mandates Identify; a superset
+ * conformance is transitive (the C6's mk_electrical_utility_meter()
+ * reasoning, mt_devtypes.cpp:2547-2557).
+ *
+ * TimeSyncCond is DISCLOSED, NOT FIXED, on both platforms: this
+ * firmware's root endpoint carries no Time Synchronization cluster on any
+ * image, so no meter endpoint is conformant against that condition
+ * (AT_MT_SPEC.md 3.9:800-806; adding the cluster to endpoint 0 is a
+ * whole-composition decision out of this batch's scope).
+ *
+ * The five attributes are set in ONE call, AT+MTMETERID
+ * (mt_matter_meter_set_identity, mt_matter_sl_b7.inc), all-or-nothing;
+ * there is no other write path and deliberately no read-back verb
+ * (AT_MT_SPEC.md 3.29). One variant. Device revision 1 per
+ * data_model/1.5/device_types/ElectricalUtilityMeter.xml. */
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(meterIdAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::MeterType::Id, ENUM8, 1,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::PointOfDelivery::Id, CHAR_STRING,
+                              65, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::MeterSerialNumber::Id, CHAR_STRING,
+                              65, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::ProtocolVersion::Id, CHAR_STRING,
+                              65, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::PowerThreshold::Id, STRUCT, 0,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(MeterIdentification::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(utilityMeterClusters)
+DECLARE_DYNAMIC_CLUSTER(MeterIdentification::Id, meterIdAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                        nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(utilityMeterEndpoint, utilityMeterClusters);
+
+constexpr EmberAfDeviceType kElectricalUtilityMeterTypes[] = { { 0x0511, 1 } };
+
+/* ---- device energy management (0x050D) --------------------------------
+ *
+ * Catalogue batch 7a audit section 3.7. DeviceEnergyManagement (0x0098)
+ * plus DeviceEnergyManagementMode (0x009F, a ModeBase alias riding the
+ * batch 5 mode-base-server frame: no new translation unit, one more
+ * kStoreWalk row, one more pool consumer) plus Descriptor. No Identify and
+ * no tag_list, SDK parity (the C6's mk_dem(), mt_devtypes.cpp:2287-2304).
+ * The XML classifies it a utility device type stackable on any endpoint;
+ * this row is the standalone declaration.
+ *
+ * DeviceEnergyManagement's three answers: code-driven no, CHI-only YES
+ * (config-data.yaml:41: its eight commands have no generated dispatch;
+ * the byte-identical IMClusterCommandHandler check covered it), AAI YES
+ * per endpoint (Instance derives from both AttributeAccessInterface and
+ * CommandHandlerInterface, device-energy-management-server.h:207-217;
+ * Init() registers CHI then AAI, SOFT on both,
+ * device-energy-management-server.cpp:40-47). Instance::Read() serves the
+ * six delegate scalars, the two structs and FeatureMap and falls through
+ * to ember for the rest (:60-105), so only ClusterRevision's seed is
+ * live.
+ *
+ * THE IRON RULE, INVERTED (the C6's mt_add_dem_triple() comment,
+ * mt_devtypes.cpp:1974-2025, and ARCHITECTURE.md 8.12, restated verbatim
+ * in reasoning as the batch brief directs). On the C6, DEM feature bits
+ * are set ONLY via feature::power_adjustment::add(), never by writing
+ * FeatureMap, because that one call is what creates
+ * PowerAdjustmentCapability and OptOutState, both PA commands and both PA
+ * events alongside the bit; a hand-set bit would advertise conformance
+ * with no ember entry behind it, and a missing entry means an invoke
+ * returns NO status at all on that platform. On this port there is no
+ * feature::add(): FeatureMap seeds and command lists are written by hand,
+ * so the rule inverts into a declaration obligation. SEEDING THE
+ * POWERADJUSTMENT BIT ON VARIANT 0 OBLIGES, all four together:
+ *   - declaring PowerAdjustmentCapability (STRUCT, metadata-only,
+ *     Instance-served, feature-gated in Read());
+ *   - declaring OptOutState (enum8; its slot is an inert shadow, the
+ *     Instance serves it, the carve-out reads it live);
+ *   - both PA commands in the INCOMING list (kDemIncoming below; the
+ *     Instance's CHI handles the invokes and its
+ *     RetrieveAcceptedCommands derives the advertised list from its own
+ *     feature mask, device-energy-management-server.cpp:110-127, so the
+ *     declared list and the mask must agree);
+ *   - NOTHING in the outgoing list: neither PA command has a response
+ *     (the cluster XML), the DE399 truthfulness discipline.
+ * Getting it half right advertises commands with no capability behind
+ * them and turns every AT+MTDEMCAP into +MTERR:4, with no build check to
+ * catch it: the variant-0 list below is the four together, the variant-1
+ * list is NONE of them (report-only ESA, FeatureMap 0, conformant: the
+ * XML's five-feature min-1 choice applies only under the ControllableESA
+ * condition, which variant 1 does not declare).
+ *
+ * The FeatureMap seed itself is the one variant-dependent boot value in
+ * the catalogue; on this port the seed table's variant column carries it
+ * (the two variant-qualified 0x050D FeatureMap rows in
+ * mt_devtypes_sl_seeds.inc) where the nRF has a seed_slots() special case; the same
+ * variant predicate feeds mt_matter_dem_register()'s Instance mask, so
+ * shadow and Instance agree by construction.
+ *
+ * DEMMode reuses modeBaseAttrs and kModeBaseIncoming/kModeBaseOutgoing
+ * verbatim: every ModeBase alias numbers SupportedModes 0, CurrentMode 1,
+ * ChangeToMode 0 and ChangeToModeResponse 1 identically (the generated
+ * per-cluster headers), and the batch 5 audit notes on modeBaseAttrs
+ * apply unchanged, the sharp one included: ModeBase Instance::Init()
+ * VerifyOrDies on ordering (mode-base-server.cpp:77) and reads the
+ * delegate's index 0 first (:74), so the DEMMode store construction below
+ * and the strictly-after-create set_endpoint are both load-bearing.
+ * ClusterRevision 2 (DeviceEnergyManagementMode/Metadata.h:20, LIVE, the
+ * ModeBase no-default-arm rule); tag-0 default kNoOptimization
+ * (AT_MT_SPEC.md 3.20's table row).
+ *
+ * Slots: v0 = ESAType, ESACanGenerate, ESAState, OptOutState, FeatureMap,
+ * ClusterRevision (6) + DEMMode 3; v1 drops OptOutState (5 + 3). The two
+ * power_mw attributes are DE407 metadata-only declarations (quiet-table
+ * rows), Instance-served, carve-out read. Block: v0 3 clusters, 9 slots,
+ * 306 B store = 462 B payload, 472 B heap (roundup(462 + 4, 8)); v1 446
+ * B payload, 456 B heap. Far under the RVC's 864 B widest.
+ *
+ * ESAState's shadow seeds kOnline (1), the delegate's default and the
+ * spec's pre-first-push answer (3.25); ESAType/ESACanGenerate/OptOutState
+ * zero-fill to match the delegate defaults. ClusterRevision 4 is
+ * DeviceEnergyManagement/Metadata.h:20 in THIS tree.
+ *
+ * Device revision 3 per data_model/1.5/device_types/
+ * DeviceEnergyManagement.xml. */
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(demAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESACanGenerate::Id, BOOLEAN, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMinPower::Id, POWER_MW, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMaxPower::Id, POWER_MW, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::PowerAdjustmentCapability::Id,
+                              STRUCT, 0, ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::OptOutState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+/* Variant 1, the report-only ESA: no PA-gated attributes (the iron rule's
+ * other half: FeatureMap 0 may not advertise what is not declared). */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(demReportOnlyAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAType::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESACanGenerate::Id, BOOLEAN, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::ESAState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMinPower::Id, POWER_MW, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::AbsMaxPower::Id, POWER_MW, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(DeviceEnergyManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kDemIncoming[] = { DeviceEnergyManagement::Commands::PowerAdjustRequest::Id,
+                                       DeviceEnergyManagement::Commands::CancelPowerAdjustRequest::Id,
+                                       kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(demClusters)
+DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kDemIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(demReportOnlyClusters)
+DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demReportOnlyAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(demEndpoint, demClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(demReportOnlyEndpoint, demReportOnlyClusters);
+
+constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
+
 /*
  * The DE407 quiet table (nRF mt_devtypes_zephyr.cpp 4924-4988): the
  * specific (cluster, attribute) pairs whose over-wide scalar declarations
@@ -308,9 +542,9 @@ constexpr EmberAfDeviceType kSolarPowerTypes[] = { { 0x0017, 1 }, { 0x0011, 1 },
  * (declared but slotless, it would answer a bare ERROR over AT). The
  * declarations are refused a slot by attr_gets_slot()'s size clause; this
  * table only silences the boot shout for the proven pairs. Catalogue batch
- * 7a-1 brings the seven ElectricalPowerMeasurement rows; the nRF's
- * DeviceEnergyManagement (7a-2), WaterHeaterManagement (7b) and EnergyEvse
- * (the EVSE round) rows arrive with their batches.
+ * 7a-1 brought the seven ElectricalPowerMeasurement rows and 7a-2 the two
+ * DeviceEnergyManagement rows; the nRF's WaterHeaterManagement (7b) and
+ * EnergyEvse (the EVSE round) rows arrive with their batches.
  */
 struct quiet_no_slot_attr {
     ClusterId cluster;
@@ -329,6 +563,12 @@ constexpr quiet_no_slot_attr kQuietNoSlot[] = {
     { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::RMSCurrent::Id },
     { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Frequency::Id },
     { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::PowerFactor::Id },
+    /* DeviceEnergyManagement: the two power_mw scalars, served by
+     * Instance::Read()'s own cases from the HearthDemDelegate cache
+     * (device-energy-management-server.cpp:70-73; the carve-out serves
+     * the AT side). */
+    { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::AbsMinPower::Id },
+    { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::AbsMaxPower::Id },
 };
 
 bool attr_quiet_no_slot(ClusterId cluster, AttributeId attr)

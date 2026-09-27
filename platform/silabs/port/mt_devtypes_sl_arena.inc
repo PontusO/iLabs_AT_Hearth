@@ -439,12 +439,14 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * exact-counting convention (metadata-only members excluded, as count_slots()
  * does), and the candidates for the types this build does not declare yet
  * (the non-RVC ModeBase families, the temperature-level labels, and the other
- * store-bearing types) come with their batches; the chime (batch 4) and the
- * RVC (batch 5b) candidates already live above. And the nRF's floor carries a capped half (kFloorDemand,
+ * store-bearing types) come with their batches; the chime (batch 4), the
+ * RVC (batch 5b) and the DEM (batch 7a-2) candidates already live above. And the nRF's floor carries a capped half (kFloorDemand,
  * kEvseEndpointCap and its two non-vacuity assertions) that this one does not:
  * it exists because the EVSE's own MT_EVSE_MAX of 2 makes "room for eight of
- * it" a demand no composition can make. No device type in this build carries a
- * capacity cap of its own, so every candidate is uncapped and the floor is
+ * it" a demand no composition can make. The caps this build does carry (the RVC's
+ * nine, the measurement family's eight, the DEM's four, the meter's two:
+ * DE566, DE584) are admission limits on the cluster-object arena, not floor
+ * demands, so every candidate is uncapped and the floor is
  * the single inequality the nRF had before the EVSE round. The capped half
  * comes back with the EVSE.
  */
@@ -484,11 +486,13 @@ constexpr size_t kOnOffApplianceSlots =
  * conditioner), both far narrower than the extended colour light. Catalogue
  * batch 7a-1 adds the wired electrical sensor (the heat pump and solar
  * power), the widest of the measurement family, still narrower than the
- * extended colour light. */
+ * extended colour light. Catalogue batch 7a-2 adds the utility meter
+ * (Identify and MeterIdentification), far narrower again; the DEM is a
+ * store-bearing candidate of its own below. */
 constexpr size_t kWidestEndpointSlots =
-    kMax2(MT_COUNT(wiredPowerSourceAttrs) + MT_COUNT(ptopAttrs) + MT_COUNT(epmAttrs) + MT_COUNT(eemAttrs), kMax2(kMax2(kIdentifySlots + kOnOffApplianceSlots,
+    kMax2(kIdentifySlots + MT_COUNT(meterIdAttrs), kMax2(MT_COUNT(wiredPowerSourceAttrs) + MT_COUNT(ptopAttrs) + MT_COUNT(epmAttrs) + MT_COUNT(eemAttrs), kMax2(kMax2(kIdentifySlots + kOnOffApplianceSlots,
                 kIdentifySlots + MT_COUNT(switchAttrs)),
-          kMax2(kIdentifySlots + MT_COUNT(modeSelectAttrs), kMax2(kIdentifySlots + kMax2(kMax2(kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(colorTempAttrs), MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(extendedColorAttrs)), kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs), kMax2(kMax2(kMax2(MT_COUNT(tempAttrs), MT_COUNT(booleanStateAttrs)), kMax2(MT_COUNT(occupancyAttrs), MT_COUNT(humidityAttrs))), kMax2(MT_COUNT(pressureAttrs), kMax2(MT_COUNT(illuminanceAttrs), MT_COUNT(flowAttrs)))))), kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)), kMax2(kMax2(MT_COUNT(windowCoveringAttrs), MT_COUNT(airQualityAttrs)), kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)))), kMax2(kIdentifySlots + MT_COUNT(smokeCoAlarmAttrs), kIdentifySlots + MT_COUNT(opStateAttrs)))), kNoIdentifySlots))));
+          kMax2(kIdentifySlots + MT_COUNT(modeSelectAttrs), kMax2(kIdentifySlots + kMax2(kMax2(kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(colorTempAttrs), MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(extendedColorAttrs)), kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs), kMax2(kMax2(kMax2(MT_COUNT(tempAttrs), MT_COUNT(booleanStateAttrs)), kMax2(MT_COUNT(occupancyAttrs), MT_COUNT(humidityAttrs))), kMax2(MT_COUNT(pressureAttrs), kMax2(MT_COUNT(illuminanceAttrs), MT_COUNT(flowAttrs)))))), kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)), kMax2(kMax2(MT_COUNT(windowCoveringAttrs), MT_COUNT(airQualityAttrs)), kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)))), kMax2(kIdentifySlots + MT_COUNT(smokeCoAlarmAttrs), kIdentifySlots + MT_COUNT(opStateAttrs)))), kNoIdentifySlots)))));
 /* The widest cluster list is a max over every declared cluster list, not
  * just the dimmable light's: a future device type with a wider list must
  * fail the floor's static_assert below at build time, not surface later as a
@@ -498,8 +502,9 @@ constexpr size_t kWidestEndpointSlots =
  * plug); the two five-cluster colour light lists are the max. Batch 5a's
  * switch (three clusters) and pump and room air conditioner (four) join it.
  * Batch 7a-1's six measurement lists (the wired sensor's five clusters the
- * widest) join it. */
-constexpr size_t kWidestClusterList = kMax2(kMax2(kMax2(MT_COUNT(electricalSensorClusters), MT_COUNT(electricalSensorPowerOnlyClusters)), kMax2(MT_COUNT(electricalMeterClusters), MT_COUNT(electricalMeterPowerOnlyClusters))), kMax2(kMax2(MT_COUNT(wiredElectricalSensorClusters), MT_COUNT(wiredElectricalSensorPowerOnlyClusters)), kMax2(
+ * widest) join it, and batch 7a-2's utility meter and two DEM lists (three
+ * clusters each). */
+constexpr size_t kWidestClusterList = kMax2(kMax2(MT_COUNT(utilityMeterClusters), kMax2(MT_COUNT(demClusters), MT_COUNT(demReportOnlyClusters))), kMax2(kMax2(kMax2(MT_COUNT(electricalSensorClusters), MT_COUNT(electricalSensorPowerOnlyClusters)), kMax2(MT_COUNT(electricalMeterClusters), MT_COUNT(electricalMeterPowerOnlyClusters))), kMax2(kMax2(MT_COUNT(wiredElectricalSensorClusters), MT_COUNT(wiredElectricalSensorPowerOnlyClusters)), kMax2(
     kMax2(MT_COUNT(genericSwitchClusters),
           kMax2(MT_COUNT(pumpClusters), MT_COUNT(roomAirConditionerClusters))),
     kMax2(MT_COUNT(modeSelectClusters), kMax2(
@@ -518,7 +523,7 @@ constexpr size_t kWidestClusterList = kMax2(kMax2(kMax2(MT_COUNT(electricalSenso
                               kMax2(MT_COUNT(pressureSensorClusters),
                                     kMax2(MT_COUNT(lightSensorClusters), MT_COUNT(flowSensorClusters))))))),
             kMax2(kMax2(MT_COUNT(powerSourceClusters), MT_COUNT(smokeCoAlarmClusters)),
-                  kMax2(MT_COUNT(applianceOpStateClusters), MT_COUNT(chimeClusters)))))))));
+                  kMax2(MT_COUNT(applianceOpStateClusters), MT_COUNT(chimeClusters))))))))));
 
 constexpr size_t kModeSelectBlockBytes =
     block_bytes(MT_COUNT(modeSelectClusters), kIdentifySlots + MT_COUNT(modeSelectAttrs)) +
@@ -553,9 +558,26 @@ static_assert(hearth_arena_cost(kRvcBlockBytes) == 936,
 static_assert(kRvcMaxEndpoints * hearth_arena_cost(kRvcBlockBytes) <= kEpArenaBytes,
               "nine RVC blocks no longer fit the endpoint arena");
 
+/* Catalogue batch 7a-2 (nRF 5446-5459, its batch 7a fix round, review
+ * B7A-3): the DEM device type is the fourth store-bearing block shape, so it is a candidate like the other
+ * three, not a silent bystander: the whole point of deriving the floor
+ * from the declarations is that a grown store or attribute list cannot
+ * out-size the guarded widest type unnoticed. The variant-0 list is the
+ * wider one (demAttrs strictly contains demReportOnlyAttrs); MT_COUNT
+ * over-counts the metadata-only members as ever, only pushing the
+ * asserted floor higher than the real 462 B payload. On this port it is
+ * 526 B, 528 of arena, and loses to the mode select's 608, so the widest
+ * block below does not move; batch 7b's EVSE (two stores, eight clusters)
+ * is the candidate expected to take the title. */
+constexpr size_t kDemBlockBytes =
+    block_bytes(MT_COUNT(demClusters), MT_COUNT(demAttrs) + MT_COUNT(modeBaseAttrs)) +
+    sizeof(mt_mb_store_t);
+static_assert(hearth_arena_cost(kDemBlockBytes) == 528,
+              "the DEM block moved off the 528 B this batch was sized with");
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
-          kMax2(kModeSelectBlockBytes, kChimeBlockBytes));
+          kMax2(kModeSelectBlockBytes, kMax2(kChimeBlockBytes, kDemBlockBytes)));
 
 /* Pinned, so the sizing table above cannot go stale without the build
  * noticing: the mode select is the widest type this build declares, at 608
