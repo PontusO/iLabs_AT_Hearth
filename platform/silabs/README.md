@@ -1039,7 +1039,7 @@ Its static data (tables, registry, arena and seeds) lives in eight `port/` fragm
 batch 1), `mt_devtypes_sl_tables_b2.inc` (batch 2),
 `mt_devtypes_sl_tables_b3.inc` (batch 3),
 `mt_devtypes_sl_tables_b4.inc` (batch 4),
-`mt_devtypes_sl_tables_b5.inc` (batch 5a),
+`mt_devtypes_sl_tables_b5.inc` (batches 5a and 5b),
 `mt_devtypes_sl_registry.inc` (the parenting policy and the registry),
 `mt_devtypes_sl_arena.inc` (the external attribute store, the endpoint arena,
 its sizing and floor) and `mt_devtypes_sl_seeds.inc` (the seed table and
@@ -1072,6 +1072,8 @@ index, and a round that changes one arm finds the other through it.
 | the cluster-object arena's pair and Instance helpers | `mt_matter_zephyr.cpp` 290-384 | `port/mt_matter_sl.cpp` | catalogue batch 4 |
 | the smoke/CO, OperationalState, mode select and chime bridge | `mt_matter_zephyr.cpp` 1894-3121, without the refrigerator alarm arm and the oven cavity and RVC branches | `port/mt_matter_sl_b4.inc` | catalogue batch 4 |
 | the `AT+MTSWITCH` bridge | `mt_matter_zephyr.cpp` 3130-3167 | `port/mt_matter_sl_b5.inc` | catalogue batch 5a |
+| the RVC's two ModeBase clusters (`AT+MTMODES`, the live CurrentMode) | `mt_matter_zephyr.cpp` 3314-4005 | `port/mt_matter_sl_b5.inc` | catalogue batch 5b |
+| the RVC's RvcOperationalState (and `mt_matter_opstate_set`'s RVC branch restored in `port/mt_matter_sl_b4.inc`) | `mt_matter_zephyr.cpp` 4367-4579, 2485-2496 | `port/mt_matter_sl_b5.inc` | catalogue batch 5b |
 | shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
@@ -1099,6 +1101,9 @@ index, and a round that changes one arm finds the other through it.
 | air purifier (0x002D), mounted on/off control (0x010F), mounted dimmable load control (0x0110): registry rows reusing the fan, on/off plug and dimmable plug endpoints | `mt_devtypes_zephyr.cpp` 1101-1123, 671-698, 722-743 (the type arrays) | `port/mt_devtypes_sl_tables_b5.inc` | catalogue batch 5a |
 | generic switch (0x000F) | `mt_devtypes_zephyr.cpp` 2008-2104 | `port/mt_devtypes_sl_tables_b5.inc` | catalogue batch 5a |
 | the featureless OnOff list, pump (0x0303) and room air conditioner (0x0072) | `mt_devtypes_zephyr.cpp` 2106-2281 | `port/mt_devtypes_sl_tables_b5.inc` | catalogue batch 5a |
+| robotic vacuum cleaner (0x0074) | `mt_devtypes_zephyr.cpp` 2283-2435 | `port/mt_devtypes_sl_tables_b5.inc` | catalogue batch 5b |
+| `mt_dyn_mb_store()` | `mt_devtypes_zephyr.cpp` 7118-7159 | `port/mt_devtypes_sl.cpp` | catalogue batch 5b |
+| the RVC's create path (three claims, two ModeBase stores, the second halves) | `mt_devtypes_zephyr.cpp` 7497-7557, 7966-7978, 8258-8283 | `port/mt_devtypes_sl.cpp` | catalogue batch 5b |
 | the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl_arena.inc` | round 2 task 5 |
@@ -2439,6 +2444,65 @@ differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
 
+### Catalogue batch 5b: the robotic vacuum cleaner under admission limits
+
+The second of batch 5's two rounds: the robotic vacuum cleaner (0x0074) with
+its two ModeBase clusters (RvcRunMode, RvcCleanMode) and its
+RvcOperationalState, the first type ported under **admission limits** (graph
+DE566, see "The cluster-object arena"). The batch image, built 2026-09-27
+from the committed tree at `1ee54fa` (the final review's fix wave; its
+only firmware changes over `55be05d` are log text and one
+`static_assert`) in `~/silabs/work/hearth-matter-b5b`, a fresh `slc
+generate` with a `make clean` inside it, **0 warnings**.
+
+#### The proof: 52 passed, 0 failed, 0 not applicable
+
+```
+$ python3 test/mt_catalogue_proof.py \
+      --port /dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00 \
+      --bridge cpico --batch mg24-batch5b \
+      --openocd-config platform/silabs/mg24-swd.cfg \
+      --baseline platform/silabs/core-batch5b.json
+```
+
+2026-09-27, the committed run on `1ee54fa`'s image with the script at
+`a266fe6`. New mechanics: a `mode_verdict` kind (ModeBase CurrentMode is
+Instance-served, so the controller's ChangeToMode is the only writer: allowed
+answers Status 0 and CurrentMode moves, denied Status 2, an unlisted mode
+Status 1 from the SDK with no forward); a setup that sets and reads both mode
+lists; and a **product-id guard**: the run aborts unless chip-tool paired
+product id 0x8010, because a second bench board shares discriminator 0xF00
+(graph B573, finding F579). The RvcOperationalState rows: Pause allowed
+(ErrorStateID 0), Resume denied (2), GoHome from Docked answered by the SDK
+with no forward (3), a host write of OperationalState refused `+MTERR:11`.
+
+#### Admission: nine RVCs, the tenth refused
+
+On the bench (image `55be05d`, repeated on `1ee54fa`): the anchor and nine
+RVCs compose, objects 3,816 of 4,096 B; a tenth is refused at its
+RvcOperationalState claim ("cluster-object arena exhausted: 264 B wanted,
+3976 of 4096 B used", then "endpoint 10 (0x0074) failed, aborting rebuild");
+the anchor and nine keep running (endpoint arena 7,896 of 9,728 B), no
+crash. The tenth's two ModeBase claims (160 B) stay stranded until the next
+boot, the nRF's documented bound.
+
+#### Phase 1 and 2 on the batch image
+
+Phase 1: 292 passed, 4 failed, the same four rows. Phase 2: 98 passed, 2
+failed (B512's two rows), 1 n/a, row-identical; both pairings were product
+id 0x8010 (this board). Both on `55be05d`'s image.
+
+#### The batch's memory record
+
+`arm-none-eabi-size` at `1ee54fa`, against batch 5a's `62818af`: text
+933,276 (925,576: +7,700, the ModeBase server and the RVC's bridge); `.bss`
+137,400 (+192); `.memory_manager_heap` 116,220 (-212). Free heap at
+`+MTREADY` (measured on `55be05d`): 75,536 B fresh, 75,488 B commissioned,
+216 B below batch 5a. One RVC: block 856 B (the arena's exact count; the
+floor prices it at 936 B), objects 424 B (two ModeBase pairs at 80 B, the
+RvcOperationalState pair at 264 B, all pinned). NVM3 in the Phase 2 session:
+7,356 down to 4,324 B free (erase count 26).
+
 ### Catalogue batch 5a: the fabric proof, Phase 1 and 2 and the batch's memory record
 
 The registry's batch 5 is two rounds (the user's ruling, 2026-09-26): 5a, the
@@ -2658,6 +2722,18 @@ back on any later failure. The boot line reads "cluster-object arena: N of
 sixteen washers 4,096 of 4,096 B, nothing refused; `.bss` +3,968 B over
 batch 3's arena. History: batch 3 (2026-09-25, DE541) built it minimal, 128
 B with `obj_new` only, sixteen valves exactly.
+
+**Admission limits since catalogue batch 5b (2026-09-27, graph DE566).** The
+robotic vacuum draws three objects (two ModeBase pairs at 80 B and an
+RvcOperationalState pair at 264 B, 424 B) and a 936 B block (the floor's
+count), wider than the sixteen-of-the-widest promise can carry, so the RVC is
+**admitted up to nine** instead: 9 x 424 = 3,816 B of objects, 9 x 936 = 8,424
+B of blocks, both asserted. The arenas did not grow. Every other type is
+still sixteen-of (the 608 B block pin, the 256 B pair). The cluster-object
+arena is what refuses the tenth (the endpoint arena would hold ten), and a
+`static_assert` fails the build if a tenth ever fits, so the ceiling cannot
+drift silently. A composition past a limit is refused at create and the
+rebuild stops there, the nRF's model.
 
 ### Catalogue batch 2: the fabric proof, Phase 1 and 2 and the batch's memory record
 
@@ -5166,8 +5242,9 @@ are marked there.
 ### The catalogue
 
 The registry carries all 52 rows and the gate predicates; this build constructs
-thirty-five of them (round 2's two milestone types, catalogue batch 1's twelve,
-batch 2's six, batch 3's two, batch 4's seven and batch 5a's six). The rest
+thirty-six of them (round 2's two milestone types, catalogue batch 1's twelve,
+batch 2's six, batch 3's two, batch 4's seven, batch 5a's six and batch 5b's
+robotic vacuum cleaner). The rest
 arrive in the nRF
 arm's own order, batch by batch, each
 copying its sections out of `platform/nrf54l15/port/mt_devtypes_zephyr.cpp` at
@@ -5181,7 +5258,7 @@ the heap and the arenas.
 | 2 | server-interaction, 6 types | nothing structural: **built 2026-09-24**, six types, no delegate and no object arena (F528). Proof file `core-batch2.json`; see "Catalogue batch 2" under "Measured" |
 | 3 | command-verdict, 2 types | **built 2026-09-25**, two types, the `+MTCMD` verdict path's first run on this port, the cluster-object arena (minimal, DE541) and the first delegate (the valve). Proof file `core-batch3.json`; see "Catalogue batch 3" under "Measured" |
 | 4 | appliance, 7 types | **built 2026-09-26**, seven types: the OperationalState and Chime Instance-served rows, `obj_pair_new` and `obj_inst_new` with the object arena at 4,096 B (DE555), and the endpoint block's mode select and chime stores. Proof file `core-batch4.json`; see "Catalogue batch 4" under "Measured" |
-| 5 | standalone, 7 types | **5a built 2026-09-26**, six types (air purifier, mounted on/off control, mounted dimmable load control, generic switch, pump, room air conditioner), ember-only, no object and no store. Proof file `core-batch5a.json`; see "Catalogue batch 5a" under "Measured". **5b**: the robotic vacuum cleaner, the Rvc mode rows, ModeBase and the RvcOperationalState pair, under admission limits (DE566) |
+| 5 | standalone, 7 types | **5a built 2026-09-26**, six types (air purifier, mounted on/off control, mounted dimmable load control, generic switch, pump, room air conditioner), ember-only, no object and no store. Proof file `core-batch5a.json`; see "Catalogue batch 5a" under "Measured". **5b built 2026-09-27**: the robotic vacuum cleaner with its two ModeBase clusters and RvcOperationalState pair, admitted up to nine (DE566). Proof file `core-batch5b.json`; see "Catalogue batch 5b" under "Measured" |
 | 7a | energy foundation, 6 types | the meter Instance pool, ElectricalPowerMeasurement, DEM |
 | 7b | delegate-served pair, 2 types | WaterHeaterManagement |
 | 8 | composed appliances, 7 types | the oven and refrigerator mode rows |
