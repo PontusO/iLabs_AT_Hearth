@@ -450,9 +450,10 @@ constexpr EmberAfDeviceType kElectricalUtilityMeterTypes[] = { { 0x0511, 1 } };
  * The FeatureMap seed itself is the one variant-dependent boot value in
  * the catalogue; on this port the seed table's variant column carries it
  * (the two variant-qualified 0x050D FeatureMap rows in
- * mt_devtypes_sl_seeds.inc) where the nRF has a seed_slots() special case; the same
- * variant predicate feeds mt_matter_dem_register()'s Instance mask, so
- * shadow and Instance agree by construction.
+ * mt_devtypes_sl_seeds.inc) where the nRF has a seed_slots() special
+ * case; the create path's PowerAdjustment predicate, which answers the
+ * same split for the two variants, feeds mt_matter_dem_register()'s
+ * Instance mask, so shadow and Instance agree by construction.
  *
  * DEMMode reuses modeBaseAttrs and kModeBaseIncoming/kModeBaseOutgoing
  * verbatim: every ModeBase alias numbers SupportedModes 0, CurrentMode 1,
@@ -470,8 +471,10 @@ constexpr EmberAfDeviceType kElectricalUtilityMeterTypes[] = { { 0x0511, 1 } };
  * ClusterRevision (6) + DEMMode 3; v1 drops OptOutState (5 + 3). The two
  * power_mw attributes are DE407 metadata-only declarations (quiet-table
  * rows), Instance-served, carve-out read. Block: v0 3 clusters, 9 slots,
- * 306 B store = 462 B payload, 472 B heap (roundup(462 + 4, 8)); v1 446
- * B payload, 456 B heap. Far under the RVC's 864 B widest.
+ * 306 B store = 462 B payload (the nRF's heap charges 472 B,
+ * roundup(462 + 4, 8)); v1 446 B payload (456 B there). This port's
+ * floor prices the block with its over-count (kDemBlockBytes, 528 B of
+ * arena), under the mode select's 608 B widest.
  *
  * ESAState's shadow seeds kOnline (1), the delegate's default and the
  * spec's pre-first-push answer (3.25); ESAType/ESACanGenerate/OptOutState

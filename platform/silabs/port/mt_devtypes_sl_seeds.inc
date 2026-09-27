@@ -714,9 +714,10 @@ const attr_seed s_seeds[] = {
      * Until batch 8 it had no row here at all and was written by a special
      * case in seed_slots(); the variant column retired that (the s_seeds
      * header comment). Variant 0 is Feature::kPowerAdjustment (0x1) and
-     * variant 1 is 0, the same two values, and the create path still hands
-     * the identical `variant == 0` predicate to mt_matter_dem_register() so
-     * the seeded shadow and the Instance's own mask agree by construction.
+     * variant 1 is 0, the same two values the create path's PowerAdjustment
+     * predicate (type_has_attr on PowerAdjustmentCapability) hands
+     * mt_matter_dem_register(), so the seeded shadow and the Instance's own
+     * mask agree by construction.
      * Both variants share device type 0x050D, which is why the devtype
      * column could never have split them. */
     { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::ESAState::Id, 1, { 0x01 } },

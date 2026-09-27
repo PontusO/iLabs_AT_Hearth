@@ -1321,8 +1321,8 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * from (the variant-qualified seed rows on this port). */
     /* THE PA PREDICATE IS READ FROM THE DECLARED LIST, not from the variant,
      * since the nRF's EVSE round (the EVSE and battery storage named here
-     * reach this port with the EVSE round and batch 7b). It used to be `variant == 0`, which was exactly
-     * right while the only DEM-bearing types were the standalone DEM and
+     * reach this port with the EVSE round and batch 7b). It used to be
+     * `variant == 0`, which was exactly right while the only DEM-bearing types were the standalone DEM and
      * battery storage, whose variant 0 carries PowerAdjustment and whose
      * variant 1 does not. The EVSE breaks that: its variant axis is SOC, and
      * it carries the over-delivered DEM with NO PowerAdjustment on either

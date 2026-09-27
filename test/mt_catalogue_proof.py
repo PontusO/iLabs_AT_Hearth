@@ -973,8 +973,10 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         # a locked door's LockState to Locked), and the host, not the
         # controller, reports actuation. The "second AT read agrees" row
         # runs BEFORE the controller action, and the attribute after the
-        # action is deliberately not asserted: nothing here reads it back,
-        # and the host, not this proof, owns what the actuation became.
+        # action is not asserted by default: the host, not this proof, owns
+        # what an actuation became. A want's "after" list (batch 7a-2) is
+        # the exception, for state the FIRMWARE owns (DEM's ESAState moving
+        # to PowerAdjustActive on an allowed PowerAdjustRequest).
         _second_at_read(link, s, prefix, at, own)
         kind, args, (fcl, fcmd), answer, want = c["controller"][:5]
         # The 6th tuple element (batch 4) is the forwarded payload the

@@ -327,7 +327,12 @@ private:
  * number was argued from its 8,112 usable block heap and a 864 B RVC
  * block, against four or more ModeBase consumers; none of that applies
  * here, where the endpoint arena is 9,728 usable bytes against a 936 B
- * RVC block and the RVC is the ONLY ModeBase consumer in this build. The
+ * RVC block. Since catalogue batch 7a-2 device energy management's DEMMode
+ * is the second ModeBase consumer (one slot per DEM endpoint, at most
+ * four), and the cluster-object arena still binds before this pool: nine
+ * RVCs take 18 slots and leave no room for a DEM, and any mix with DEMs
+ * stops at 17 slots (8 RVCs and 1 DEM, or 7 and 3) before the 4,096 B
+ * overflows, so the 20 slots are never the wall. The
  * tenth RVC is refused by the cluster-object arena, not by this pool:
  * nine RVCs draw nine x (264 + 2 x 80) = 3,816 B of it and the tenth's
  * 4,240 B total would not fit the 4,096 B arena, while the pool still has

@@ -819,8 +819,8 @@ namespace {
 
 /* The raw Instance storage is not a .bss array (the nRF's memory reclaim
  * round A). mt_meter_reserve() takes it from the cluster-object arena at
- * CLAIM time and parks the pointer here, so an arena shortfall fails the claim and
- * aborts the create like an exhausted pool, rather than surfacing in
+ * CLAIM time and parks the pointer here, so an arena shortfall fails the
+ * claim and aborts the create like an exhausted pool, rather than surfacing in
  * mt_meter_register_all()'s post-rebuild scan where nothing could abort
  * anything. */
 struct mt_meter_entry {
@@ -1498,8 +1498,9 @@ private:
  * DE407) delegates plus raw aligned Instance storage: unlike the C6, where
  * esp-matter's DeviceEnergyManagementDelegateInitCB news the Instance at
  * endpoint enable from a FeatureMap snapshot, this port constructs it in
- * mt_matter_dem_register() with the variant's own mask (the pair pinned below). Endpoint id stamped in the SUCCESS-ONLY
- * second half by the Instance constructor, never at handout (the nRF's batch 7b
+ * mt_matter_dem_register() with the variant's own mask (the pair pinned
+ * below). Endpoint id stamped in the SUCCESS-ONLY second half by the
+ * Instance constructor, never at handout (the nRF's batch 7b
  * fix round M1, the reasoning at the alloc below). Exhaustion aborts the
  * create before anything is spent.
  */

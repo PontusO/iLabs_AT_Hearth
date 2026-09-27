@@ -238,9 +238,10 @@ struct store_desc {
     size_t align;
 };
 
-/* Does this device type declare `attr` on `cluster`? Only asked by the store
- * walk, and only of metadata-only attributes so far, so it walks the
- * declared list rather than consulting the block. */
+/* Does this device type declare `attr` on `cluster`? Asked by the store
+ * walk and, since catalogue batch 7a-2, by the create path's DEM
+ * PowerAdjustment predicate; it walks the declared list rather than
+ * consulting the block. */
 bool type_has_attr(const EmberAfEndpointType *t, ClusterId cluster, AttributeId attr)
 {
     for (uint8_t c = 0; c < t->clusterCount; c++) {
@@ -440,10 +441,11 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * does), and the candidates for the types this build does not declare yet
  * (the non-RVC ModeBase families, the temperature-level labels, and the other
  * store-bearing types) come with their batches; the chime (batch 4), the
- * RVC (batch 5b) and the DEM (batch 7a-2) candidates already live above. And the nRF's floor carries a capped half (kFloorDemand,
- * kEvseEndpointCap and its two non-vacuity assertions) that this one does not:
- * it exists because the EVSE's own MT_EVSE_MAX of 2 makes "room for eight of
- * it" a demand no composition can make. The caps this build does carry (the RVC's
+ * RVC (batch 5b) and the DEM (batch 7a-2) candidates live below. And the
+ * nRF's floor carries a capped half (kFloorDemand, kEvseEndpointCap and its
+ * two non-vacuity assertions) that this one does not: it exists because the
+ * EVSE's own MT_EVSE_MAX of 2 makes "room for eight of it" a demand no
+ * composition can make. The caps this build does carry (the RVC's
  * nine, the measurement family's eight, the DEM's four, the meter's two:
  * DE566, DE584) are admission limits on the cluster-object arena, not floor
  * demands, so every candidate is uncapped and the floor is
@@ -559,16 +561,16 @@ static_assert(kRvcMaxEndpoints * hearth_arena_cost(kRvcBlockBytes) <= kEpArenaBy
               "nine RVC blocks no longer fit the endpoint arena");
 
 /* Catalogue batch 7a-2 (nRF 5446-5459, its batch 7a fix round, review
- * B7A-3): the DEM device type is the fourth store-bearing block shape, so it is a candidate like the other
- * three, not a silent bystander: the whole point of deriving the floor
+ * B7A-3): the DEM device type is the fourth store-bearing block shape, so
+ * it is a candidate like the other three, not a silent bystander: the whole point of deriving the floor
  * from the declarations is that a grown store or attribute list cannot
  * out-size the guarded widest type unnoticed. The variant-0 list is the
  * wider one (demAttrs strictly contains demReportOnlyAttrs); MT_COUNT
  * over-counts the metadata-only members as ever, only pushing the
  * asserted floor higher than the real 462 B payload. On this port it is
  * 526 B, 528 of arena, and loses to the mode select's 608, so the widest
- * block below does not move; batch 7b's EVSE (two stores, eight clusters)
- * is the candidate expected to take the title. */
+ * block below does not move; the EVSE round's EVSE (two stores, eight
+ * clusters) is the candidate expected to take the title. */
 constexpr size_t kDemBlockBytes =
     block_bytes(MT_COUNT(demClusters), MT_COUNT(demAttrs) + MT_COUNT(modeBaseAttrs)) +
     sizeof(mt_mb_store_t);
