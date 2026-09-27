@@ -472,3 +472,300 @@ static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
     return MT_ATTR_OK;
 }
 
+
+/*
+ * The EEM measurement-table capacity gate, the split-reserve shape every
+ * other pool in this port uses (the EPM and PowerTopology blocks in
+ * mt_devtypes_zephyr.cpp, and the C6's mt_matter_evse_reserve()).
+ *
+ * It exists because the SDK patch in ../sdk-patches replaced
+ * ElectricalEnergyMeasurement's gMeasurements, which used to be as long as
+ * the whole dynamic endpoint space and so had a slot for every endpoint
+ * this port could possibly create, with a pool of
+ * CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES. A pool has a
+ * bottom, and reaching it inside the SDK is SILENT on the AT wire:
+ * SetMeasurementAccuracy() answers CHIP_ERROR_INVALID_ARGUMENT,
+ * mt_matter_eem_register() logs and continues, the composition applies OK,
+ * and a controller then gets a Failure reading the MANDATORY Accuracy
+ * attribute of a cluster the endpoint declares. A device that says yes and
+ * then serves a broken endpoint is exactly what this port refuses to do
+ * everywhere else, so the count is checked HERE, before anything is built,
+ * and the rebuild stops with the constant to raise named in the log.
+ *
+ * Unreachable today, and deliberately kept anyway. Every one of the six
+ * device types whose cluster list carries ElectricalEnergyMeasurement also
+ * carries ElectricalPowerMeasurement (mt_devtypes_zephyr.cpp:2564/2566,
+ * 2582/2584, 2682/2684, 3120/3122, 3269/3271, 3287/3289), so the
+ * MT_MEAS_MAX EPM delegate pool is exhausted first and the static_assert
+ * below keeps the EEM pool at least as deep. A seventh EEM-bearing type
+ * declared WITHOUT EPM would break that coupling silently; this gate is
+ * what makes it break loudly instead.
+ */
+static_assert(CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES >= MT_MEAS_MAX,
+              "the EEM measurement pool must be at least as deep as the EPM delegate pool, "
+              "or an endpoint this port accepts cannot serve its Accuracy attribute; raise "
+              "CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES in "
+              "src/chip_project_config.h");
+
+static uint8_t s_eem_reserved;
+
+extern "C" bool mt_matter_eem_reserve(void)
+{
+    if (s_eem_reserved >= CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES) {
+        return false;
+    }
+    s_eem_reserved++;
+    return true;
+}
+
+extern "C" void mt_matter_eem_register(uint16_t ep)
+{
+    using namespace chip::app::Clusters::ElectricalEnergyMeasurement;
+
+    alignas(ElectricalEnergyMeasurementAttrAccess) static uint8_t
+        s_eem_attr_access_storage[sizeof(ElectricalEnergyMeasurementAttrAccess)];
+    static bool s_eem_registered;
+
+    if (!s_eem_registered) {
+        auto *aai = new (s_eem_attr_access_storage) ElectricalEnergyMeasurementAttrAccess(
+            chip::BitMask<Feature, uint32_t>(Feature::kImportedEnergy, Feature::kExportedEnergy,
+                                             Feature::kCumulativeEnergy),
+            chip::BitMask<OptionalAttributes, uint32_t>());
+        CHIP_ERROR err = aai->Init();
+        if (err != CHIP_NO_ERROR) {
+            HEARTH_LOGE("matter", "EEM AttrAccess registration failed: %" CHIP_ERROR_FORMAT
+                    "; every ElectricalEnergyMeasurement read will fail",
+                    err.Format());
+        }
+        s_eem_registered = true;
+    }
+
+    CHIP_ERROR err = SetMeasurementAccuracy(ep, s_meas_eem_accuracy);
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "EEM SetMeasurementAccuracy failed on endpoint %u: %" CHIP_ERROR_FORMAT,
+                (unsigned)ep, err.Format());
+    }
+}
+
+
+/*
+ * The AT+MTMEAS bridge (AT_MT_SPEC.md 3.25). Grammar (pair count bounds,
+ * per-field signedness at parse) is core's business (cmd_mtmeas and
+ * mt_meas_field_signed(), mt_at.c); this bridge owns everything that needs
+ * the data model: endpoint and cluster lookup, per-field range validation
+ * against the cluster XML bounds, and the atomic apply. Two passes, the
+ * family's hard contract: every pair is validated before any pair is
+ * applied, so a bad third pair leaves the first two unapplied.
+ *
+ * Cluster admission WAS a batch boundary and is not one any more: all five
+ * push-served ids the spec names are served here, 0x0090, 0x0091 and 0x0098
+ * (batch 7a), 0x0094 (batch 7b) and 0x0099 (the EVSE round), so the list
+ * below is now the spec's own set rather than a subset of it. An id outside
+ * it still answers MT_ATTR_ERR_CLUSTER.
+ */
+extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
+                                  const int64_t *values, uint8_t count)
+{
+    using namespace chip::app::Clusters;
+    chip::DeviceLayer::StackLock lock;
+
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    /* Catalogue batch 7a-1 on this port: the measurement family only. The
+     * nRF also routes DeviceEnergyManagement (0x0098, back in batch 7a-2),
+     * WaterHeaterManagement (0x0094, batch 7b) and EnergyEvse (0x0099, the
+     * EVSE round) here; until their batches those answer "no such cluster". */
+    if (cluster != ElectricalPowerMeasurement::Id && cluster != ElectricalEnergyMeasurement::Id) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (!emberAfContainsServer(ep, cluster)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    if (count < 1) {
+        /* Defensive; mt_at.c never passes an empty list. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    if (cluster == ElectricalPowerMeasurement::Id) {
+        HearthEpmDelegate *d = meas_epm_for(ep);
+        if (d == nullptr) {
+            /* Cluster present but no pool slot serves this endpoint: cannot
+             * happen once the boot rebuild has run; defensive, the pool
+             * bridges' standing answer. */
+            return MT_ATTR_ERR_FAILED;
+        }
+
+        /* Pass 1: validate everything. */
+        for (uint8_t i = 0; i < count; i++) {
+            switch (fields[i]) {
+            case MT_MEAS_F_VOLTAGE:
+            case MT_MEAS_F_ACTIVE_CURRENT:
+            case MT_MEAS_F_ACTIVE_POWER:
+            case MT_MEAS_F_RMS_VOLTAGE:
+            case MT_MEAS_F_RMS_CURRENT:
+                if (values[i] < -kMeasValueAbsMax || values[i] > kMeasValueAbsMax) {
+                    return MT_ATTR_ERR_VALUE;
+                }
+                break;
+            case MT_MEAS_F_FREQUENCY:
+                if (values[i] < 0 || values[i] > kMeasFreqMax) {
+                    return MT_ATTR_ERR_VALUE;
+                }
+                break;
+            case MT_MEAS_F_POWER_FACTOR:
+                if (values[i] < -kMeasPfAbsMax || values[i] > kMeasPfAbsMax) {
+                    return MT_ATTR_ERR_VALUE;
+                }
+                break;
+            default:
+                return MT_ATTR_ERR_VALUE;
+            }
+        }
+
+        /* Pass 2: apply, one subscription report per applied field. */
+        for (uint8_t i = 0; i < count; i++) {
+            chip::app::DataModel::Nullable<int64_t> v =
+                chip::app::DataModel::MakeNullable(values[i]);
+            uint32_t attr_id;
+            switch (fields[i]) {
+            case MT_MEAS_F_VOLTAGE:
+                d->m_voltage = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::Voltage::Id;
+                break;
+            case MT_MEAS_F_ACTIVE_CURRENT:
+                d->m_active_current = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id;
+                break;
+            case MT_MEAS_F_ACTIVE_POWER:
+                d->m_active_power = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::ActivePower::Id;
+                break;
+            case MT_MEAS_F_FREQUENCY:
+                d->m_frequency = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::Frequency::Id;
+                break;
+            case MT_MEAS_F_POWER_FACTOR:
+                d->m_power_factor = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::PowerFactor::Id;
+                break;
+            case MT_MEAS_F_RMS_VOLTAGE:
+                d->m_rms_voltage = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::RMSVoltage::Id;
+                break;
+            default: /* MT_MEAS_F_RMS_CURRENT, pass 1 admits nothing else */
+                d->m_rms_current = v;
+                attr_id = ElectricalPowerMeasurement::Attributes::RMSCurrent::Id;
+                break;
+            }
+            MatterReportingAttributeChangeCallback(ep, ElectricalPowerMeasurement::Id, attr_id);
+        }
+        return MT_ATTR_OK;
+    }
+
+    /* ---- ElectricalEnergyMeasurement ---- */
+
+    /* Pass 1: validate everything. Values are cumulative mWh counters,
+     * unsigned on the wire; anything negative here is either a negative
+     * input or a u64 pattern above INT64_MAX, both outside the XML's
+     * 0..2^62. */
+    for (uint8_t i = 0; i < count; i++) {
+        if (fields[i] != MT_ENERGY_F_IMPORTED && fields[i] != MT_ENERGY_F_EXPORTED) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        if (values[i] < 0 || values[i] > kMeasValueAbsMax) {
+            return MT_ATTR_ERR_VALUE;
+        }
+    }
+
+    ElectricalEnergyMeasurement::MeasurementData *data =
+        ElectricalEnergyMeasurement::MeasurementDataForEndpoint(ep);
+    if (data == nullptr) {
+        /* Cannot happen once the endpoint is enabled: gMeasurements covers
+         * every dynamic endpoint (the section comment above); defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    bool    have_imp = false, have_exp = false;
+    int64_t imp_val = 0, exp_val = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        if (fields[i] == MT_ENERGY_F_IMPORTED) {
+            have_imp = true;
+            imp_val  = values[i]; /* duplicate fields: last one wins */
+        } else {
+            have_exp = true;
+            exp_val  = values[i];
+        }
+    }
+
+    /* Timestamp policy (AT_MT_SPEC.md 3.25:2713-2730, binding): end is
+     * taken by the firmware at push time, Matter epoch seconds when wall
+     * time is synced, milliseconds since boot otherwise; each push's start
+     * is the previous push's end, carried per endpoint by the server's own
+     * stored structs, so consecutive pushes chain into contiguous
+     * measurement periods without the host supplying any time at all. */
+    uint32_t now_ts = 0;
+    bool     wall   = (chip::System::Clock::GetClock_MatterEpochS(now_ts) == CHIP_NO_ERROR);
+    uint64_t now_ms = static_cast<uint64_t>(
+        chip::System::SystemClock().GetMonotonicMilliseconds64().count());
+
+    auto build = [&](int64_t energy,
+                     const chip::Optional<ElectricalEnergyMeasurement::Structs::EnergyMeasurementStruct::Type> &prev) {
+        ElectricalEnergyMeasurement::Structs::EnergyMeasurementStruct::Type s;
+        s.energy = energy;
+        if (prev.HasValue()) {
+            s.startTimestamp = prev.Value().endTimestamp;
+            s.startSystime   = prev.Value().endSystime;
+        }
+        if (wall) {
+            s.endTimestamp.SetValue(now_ts);
+        } else {
+            s.endSystime.SetValue(now_ms);
+        }
+        return s;
+    };
+
+    /* A side this call does not mention is carried forward unchanged:
+     * NotifyCumulativeEnergyMeasured() REPLACES both stored sides
+     * (ElectricalEnergyMeasurementCluster.cpp:197-198), so passing Missing
+     * for the un-pushed one would null its attribute out from under any
+     * subscriber. The cost is that the event restates the carried side's
+     * previous reading, which the spec's "imported, exported, or both"
+     * event wording tolerates (the C6's identical note). */
+    chip::Optional<ElectricalEnergyMeasurement::Structs::EnergyMeasurementStruct::Type> imported =
+        data->cumulativeImported;
+    chip::Optional<ElectricalEnergyMeasurement::Structs::EnergyMeasurementStruct::Type> exported =
+        data->cumulativeExported;
+    if (have_imp) {
+        imported.SetValue(build(imp_val, data->cumulativeImported));
+    }
+    if (have_exp) {
+        exported.SetValue(build(exp_val, data->cumulativeExported));
+    }
+
+    if (!ElectricalEnergyMeasurement::NotifyCumulativeEnergyMeasured(ep, imported, exported)) {
+        /* The one narrow post-validation failure the spec discloses: the
+         * store may already hold the new values when the event emission
+         * fails, so "error answered" does not imply "attributes unchanged"
+         * on this path (3.25's event-buffer-exhaustion note). */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    /* Notify writes the store and emits the event but reports no attribute
+     * change (ElectricalEnergyMeasurementCluster.cpp:191-218 has no
+     * MatterReportingAttributeChangeCallback), so subscriptions on the
+     * attributes themselves are fired here, one per pushed side, the same
+     * one-report-per-applied-field contract as the EPM branch. */
+    if (have_imp) {
+        MatterReportingAttributeChangeCallback(
+            ep, ElectricalEnergyMeasurement::Id,
+            ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported::Id);
+    }
+    if (have_exp) {
+        MatterReportingAttributeChangeCallback(
+            ep, ElectricalEnergyMeasurement::Id,
+            ElectricalEnergyMeasurement::Attributes::CumulativeEnergyExported::Id);
+    }
+    return MT_ATTR_OK;
+}
+
