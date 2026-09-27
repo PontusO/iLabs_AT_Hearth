@@ -3,11 +3,11 @@
     "batch": "mg24-batch7a1",
     "cgmr": "1.2.0",
     "chip_tool": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool",
-    "fw_repo_head": "d0206596647681cb6052d28b92b3a638bf769366",
+    "fw_repo_head": "cfc8f77ef182fb17d80b805cd8265e5ce97c1f35",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "ssid": null,
-    "timestamp": "2026-09-27T14:37:01+00:00"
+    "timestamp": "2026-09-27T15:10:25+00:00"
   },
   "results": {
     "0x0017 solar power ep7 device-type-list carries (1296, 1)": "PASS",
@@ -46,6 +46,7 @@
     "0x0510 electrical sensor ep2 voltage pushed AT+MTMEAS=2,144,0,230000 raises no +MTATTR": "PASS",
     "0x0510 electrical sensor ep2 voltage pushed chip-tool electricalpowermeasurement read voltage = 230000": "PASS",
     "0x0510 electrical sensor power-only ep3 active-power pushed AT read = 99590": "PASS",
+    "0x0510 electrical sensor power-only ep3 active-power pushed AT read before the push -> +MTERR:5": "PASS",
     "0x0510 electrical sensor power-only ep3 active-power pushed AT+MTMEAS=3,144,2,99590 -> OK": "PASS",
     "0x0510 electrical sensor power-only ep3 active-power pushed AT+MTMEAS=3,144,2,99590 raises no +MTATTR": "PASS",
     "0x0510 electrical sensor power-only ep3 active-power pushed chip-tool electricalpowermeasurement read active-power = 99590": "PASS",
