@@ -73,8 +73,7 @@ static bool stub_endpoint_live(uint16_t ep)
     return false;
 }
 
-/* The two shapes the step-1b stubs answer with. The meter-identity stub
- * spells its own out, because its code is neither of these. */
+/* The two shapes the step-1b stubs answer with. */
 #define STUB_ATTR_MISS(ep) (stub_endpoint_live(ep) ? MT_ATTR_ERR_CLUSTER : MT_ATTR_ERR_ENDPOINT)
 #define STUB_ROW_MISS(ep)  (stub_endpoint_live(ep) ? MT_ROW_ERR_NO_PAYLOAD : MT_ROW_ERR_ENDPOINT)
 
@@ -200,25 +199,6 @@ int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
     (void)kind;
     if (total != NULL) *total = 0;
     return STUB_ROW_MISS(ep);
-}
-
-/* ---- Meter Identification Instance pool (energy round C2) -------------------------- */
-
-uint32_t mt_meter_feature_mask(void) { return 0; }
-
-bool mt_meter_reserve(void) { return false; }
-
-void mt_meter_register_all(void) {}
-
-int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity_t *id)
-{
-    (void)id;
-    /* This family's live-endpoint answer is MT_ATTR_ERR_ATTRIBUTE, not
-     * MT_ATTR_ERR_CLUSTER: mt_matter.h:1436-1440 says "deliberately not
-     * MT_ATTR_ERR_CLUSTER" because cmd_mtmeterid needs to tell an endpoint
-     * carrying no MeterIdentification Instance apart from the cluster-level
-     * refusals its own grammar raises. +MTERR:4. */
-    return stub_endpoint_live(ep) ? MT_ATTR_ERR_ATTRIBUTE : MT_ATTR_ERR_ENDPOINT;
 }
 
 /* ---- Energy EVSE delegate and targets store (energy round C2) --------------------- */

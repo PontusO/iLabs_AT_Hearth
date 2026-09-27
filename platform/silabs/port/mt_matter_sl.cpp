@@ -54,6 +54,17 @@
 #include <app/clusters/electrical-energy-measurement-server/electrical-energy-measurement-server.h>
 #include <app/clusters/electrical-power-measurement-server/electrical-power-measurement-server.h>
 #include <app/clusters/power-topology-server/power-topology-server.h>
+/* Catalogue batch 7a: MeterIdentification, Instance-only (no delegate; the
+ * Instance owns the attribute storage), constructed by
+ * mt_meter_register_all()'s post-rebuild scan below because nothing in the
+ * SDK ever calls its Init(). */
+#include <app/clusters/meter-identification-server/meter-identification-server.h>
+/* Catalogue batch 7a: DeviceEnergyManagement (Instance is both AAI and
+ * CommandHandlerInterface; the two PA commands reach HearthDemDelegate
+ * below through the Instance's CHI after the server's own pre-validation),
+ * and EventLogging for the firmware-emitted PowerAdjustStart/End pair. */
+#include <app/clusters/device-energy-management-server/device-energy-management-server.h>
+#include <app/EventLogging.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>
 #include <app/util/attribute-storage.h>
@@ -630,6 +641,17 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::ElectricalPowerMeasurement::Attributes::Frequency::Id },
     { chip::app::Clusters::ElectricalPowerMeasurement::Id,
       chip::app::Clusters::ElectricalPowerMeasurement::Attributes::PowerFactor::Id },
+    /* MeterIdentification MeterType (batch 7a): the one integer the AT
+     * read reaches on this cluster (AT_MT_SPEC.md 3.9's 0x0511 row),
+     * served live from the Instance's own storage (null until
+     * AT+MTMETERID: +MTERR:5). The strings and the struct need no rows:
+     * CHAR_STRING/STRUCT fall out of attr_type_info() and answer
+     * +MTERR:5 on the generic path, the C6's wire for all four. Writes
+     * answer +MTERR:11 (MANAGED_INTERNALLY without WRITABLE on the C6,
+     * esp_matter_attribute.cpp:5296-5300); AT+MTMETERID is the write
+     * path. */
+    { chip::app::Clusters::MeterIdentification::Id,
+      chip::app::Clusters::MeterIdentification::Attributes::MeterType::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -792,6 +814,7 @@ static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, boo
 static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out,
                                          bool *is_unsigned);
 static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_meter_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
 /* The RVC opstate pool's Instance lookup (defined beside the pool below),
  * shared by mt_matter_opstate_set()'s RVC branch and the live reader. */
@@ -829,6 +852,8 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_chime_attr_read_live(ep, attr, out, is_unsigned);
         case chip::app::Clusters::ElectricalPowerMeasurement::Id:
             return mt_epm_attr_read_live(ep, attr, out, is_unsigned);
+        case chip::app::Clusters::MeterIdentification::Id:
+            return mt_meter_attr_read_live(ep, attr, out, is_unsigned);
         default:
             return MT_ATTR_ERR_FAILED;
         }
@@ -1260,8 +1285,8 @@ uint8_t *obj_inst_storage(D *d)
 }
 
 /* Raw zeroed storage for an Instance with no Delegate beside it (nRF
- * 379-384). No caller in batch 4; kept because the helper set is one unit
- * and batch 7's MeterIdentification uses it. */
+ * 379-384). Its caller is the MeterIdentification pool (catalogue batch
+ * 7a-2, mt_meter_reserve() in mt_matter_sl_b7.inc). */
 template <typename I>
 uint8_t *obj_inst_new()
 {

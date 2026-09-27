@@ -4,7 +4,10 @@
  * Holds bridge code: catalogue batch 7a-1 (nRF mt_matter_zephyr.cpp
  * 4581-5104 and 5106-5346: the measurement family's ElectricalPowerMeasurement
  * and PowerTopology delegates and pools, the ElectricalEnergyMeasurement
- * reserve and register, the EPM live read and the AT+MTMEAS bridge),
+ * reserve and register, the EPM live read and the AT+MTMEAS bridge), and
+ * catalogue batch 7a-2 (5347-5639, 5641-6049 and 6051-6324: the utility
+ * meter's MeterIdentification pool, HearthDemDelegate, the DEM pool and
+ * register, its AT+MTMEAS and AT+MTDEMCAP bridges and its live read),
  * included at the end of mt_matter_sl.cpp after mt_matter_sl_b5.inc, so the
  * whole is still one translation unit. Do not add it to hearth.slcp.
  */
@@ -769,3 +772,304 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
     return MT_ATTR_OK;
 }
 
+/*
+ * ---- electrical utility meter: the MeterIdentification pool (batch 7a) ----
+ *
+ * The gap this section fills, the audit's third organ of the
+ * declared-but-never-called disease: nothing in the SDK ever constructs a
+ * MeterIdentification::Instance (Init() has no caller anywhere in the
+ * pinned tree), so without this scan the cluster's five attributes would
+ * advertise in the metadata and answer nothing. The C6 fixed it with its
+ * own mt_meter.cpp; this is that file's pool rendered in this port's
+ * idiom.
+ *
+ * The Instance is AttributeAccessInterface only, NO delegate, and OWNS its
+ * attribute storage (three 64-byte string buffers plus five Nullables,
+ * meter-identification-server.h:60-78; 304 B, pinned for this port
+ * below the pool), so the pool is raw aligned storage plus placement-new, the
+ * ModeBase Instance shape, MT_METER_MAX (2, core/include/mt_matter.h:1302,
+ * the C6 depth per DE407) deep.
+ *
+ * Reservation versus construction, two different times on purpose (the
+ * C6's fix-round-2 lesson, mt_meter.cpp): capacity is claimed at CREATE
+ * time by mt_meter_reserve() from mt_devtype_create()'s pre-create claim
+ * block, because only a thunk failure can abort the composition rebuild;
+ * construction waits for mt_meter_register_all()'s one scan, run by
+ * main.cpp after rebuild_composition() and before mt_at_start(). On this
+ * platform the CHIP server is already running during the rebuild, so
+ * "pre-start" means before +MTREADY lets the host ask, and the scan takes
+ * the StackLock; Instance::Init() is SOFT (nulls the five attributes,
+ * registers the AAI, meter-identification-server.cpp:59-68).
+ *
+ * s_meter_reserved counts attempts ADMITTED, not completions: a claim
+ * stranded by a later create failure expires with the boot (any create
+ * failure aborts the whole rebuild; nothing retries within one boot), the
+ * same monotonic-claim reasoning as every pool in this file.
+ */
+namespace {
+
+/* The raw Instance storage is not a .bss array (the nRF's memory reclaim
+ * round A). mt_meter_reserve() takes it from the cluster-object arena at
+ * CLAIM time and parks the pointer here, so an arena shortfall fails the claim and
+ * aborts the create like an exhausted pool, rather than surfacing in
+ * mt_meter_register_all()'s post-rebuild scan where nothing could abort
+ * anything. */
+struct mt_meter_entry {
+    bool used;
+    uint16_t ep;
+    chip::app::Clusters::MeterIdentification::Instance *instance;
+    uint8_t *storage;
+};
+
+mt_meter_entry s_meter[MT_METER_MAX];
+uint16_t s_meter_reserved;
+
+chip::app::Clusters::MeterIdentification::Instance *mt_meter_find(uint16_t ep)
+{
+    for (uint16_t i = 0; i < MT_METER_MAX; i++) {
+        if (s_meter[i].used && s_meter[i].ep == ep) {
+            return s_meter[i].instance;
+        }
+    }
+    return nullptr;
+}
+
+} /* namespace */
+
+/* Pinned (catalogue batch 7a-2, DE584): the Instance's arena cost and the
+ * meter admission maximum, so a grown Instance stops the build instead
+ * of a meter composition at runtime. */
+static_assert(hearth_arena_cost(sizeof(chip::app::Clusters::MeterIdentification::Instance)) == 304,
+              "the MeterIdentification Instance changed size; redo the meter admission arithmetic");
+static_assert(MT_METER_MAX * 304 <= HEARTH_OBJ_ARENA_BYTES,
+              "MT_METER_MAX meters' Instances no longer fit the cluster-object arena (DE584)");
+
+/* The one value both the thunk's FeatureMap seed and this pool's Instance
+ * construction read (mt_matter.h's one-accessor-two-callers contract), so
+ * the ember shadow and the Instance's own BitMask cannot drift. Neither
+ * caller snapshots the other's output, so their order is immaterial:
+ * Instance::Read() answers FeatureMap from the BitMask given at
+ * construction, never from ember. */
+extern "C" uint32_t mt_meter_feature_mask(void)
+{
+    return chip::to_underlying(chip::app::Clusters::MeterIdentification::Feature::kPowerThreshold);
+}
+
+extern "C" bool mt_meter_reserve(void)
+{
+    if (s_meter_reserved >= MT_METER_MAX) {
+        return false;
+    }
+    uint8_t *raw = obj_inst_new<chip::app::Clusters::MeterIdentification::Instance>();
+    if (raw == nullptr) {
+        return false;
+    }
+    s_meter[s_meter_reserved].storage = raw;
+    s_meter_reserved++;
+    return true;
+}
+
+extern "C" void mt_meter_register_all(void)
+{
+    using namespace chip::app::Clusters::MeterIdentification;
+    chip::DeviceLayer::StackLock lock;
+
+    chip::BitMask<Feature> features(mt_meter_feature_mask());
+    uint16_t slot = 0;
+
+    /* slot < MT_METER_MAX is a defensive backstop, not the primary gate:
+     * mt_meter_reserve() already bounded how many meter endpoints the
+     * rebuild could create, and a composition that exceeded it aborted
+     * before this function runs. The walk is the live endpoint table (the
+     * C6's own scan shape), filtered by the real ember composition. */
+    for (uint16_t i = 0; i < mt_matter_endpoint_count() && slot < MT_METER_MAX; i++) {
+        uint32_t devtype;
+        uint16_t ep;
+        uint8_t variant, parent_idx;
+        if (mt_matter_endpoint_info(i, &devtype, &ep, &variant, &parent_idx) != 0) {
+            continue;
+        }
+        if (!emberAfContainsServer(ep, chip::app::Clusters::MeterIdentification::Id)) {
+            continue;
+        }
+        /* Memory reclaim round A: every meter-bearing endpoint in this walk
+         * passed mt_meter_reserve(), which allocated this slot's storage,
+         * so a null here is an internal invariant violation rather than a
+         * capacity outcome. Stop rather than fault. */
+        if (s_meter[slot].storage == nullptr) {
+            HEARTH_LOGE("matter", "MeterIdentification slot %u has no storage: reserve/scan disagree; "
+                    "endpoint %u will serve nothing",
+                    (unsigned)slot, (unsigned)ep);
+            break;
+        }
+        auto *inst = new (s_meter[slot].storage) Instance(ep, features);
+        CHIP_ERROR err = inst->Init();
+        if (err != CHIP_NO_ERROR) {
+            /* Logged, not aborted: Init() refusing an (endpoint, cluster)
+             * pair this same boot's rebuild just created is an internal
+             * invariant violation no host action can trigger, the
+             * mt_meter.cpp reasoning. The slot is not consumed. */
+            HEARTH_LOGE("matter", "MeterIdentification Instance::Init failed for endpoint %u: "
+                    "%" CHIP_ERROR_FORMAT "; its five attributes will answer nothing",
+                    (unsigned)ep, err.Format());
+            continue;
+        }
+        s_meter[slot].used = true;
+        s_meter[slot].ep = ep;
+        s_meter[slot].instance = inst;
+        slot++;
+    }
+}
+
+/*
+ * DE397 live read for MeterType, dispatched from mt_matter_attr_read()
+ * under its StackLock: unsigned enum8, null until the host's first
+ * AT+MTMETERID (+MTERR:5, the no-null-literal rule).
+ */
+static int mt_meter_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned)
+{
+    using namespace chip::app::Clusters::MeterIdentification;
+    if (is_unsigned) {
+        *is_unsigned = true;
+    }
+    if (attr != Attributes::MeterType::Id) {
+        /* Unreachable: MeterType is the cluster's only carve-out row. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    Instance *inst = mt_meter_find(ep);
+    if (inst == nullptr) {
+        /* Cannot happen once mt_meter_register_all() has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (inst->GetMeterType().IsNull()) {
+        return MT_ATTR_ERR_TYPE;
+    }
+    *out = chip::to_underlying(inst->GetMeterType().Value());
+    return MT_ATTR_OK;
+}
+
+/*
+ * AT+MTMETERID (AT_MT_SPEC.md 3.29): push the full MeterIdentification
+ * identity in one call, the only write path any of the five attributes
+ * has, all-or-nothing (every field validated before any SetXxx() runs).
+ * Grammar (the hand-parse, quoting, printability, the 64-byte scan bound)
+ * is cmd_mtmeterid's business in mt_at.c; this bridge owns the lookups and
+ * the semantic checks. The C6 splits this across main.cpp (lock, lookups)
+ * and mt_meter.cpp (validate, apply) only because ChipStackLock lives in
+ * its main.cpp; here one function owns the whole path.
+ *
+ * The cluster lookup answers MT_ATTR_ERR_ATTRIBUTE, not the generic
+ * MT_ATTR_ERR_CLUSTER: this command's own error table maps "endpoint
+ * exists but carries no MeterIdentification" to +MTERR:4, the AT+MTROW
+ * family's no-payload-of-this-kind code (3.29's lookup-errors paragraph),
+ * and attr_err_to_mterr() renders MT_ATTR_ERR_ATTRIBUTE as exactly that.
+ *
+ * There is deliberately no read-back verb: the identity is
+ * host-originated and re-pushed on reconcile, and a full identity line
+ * (worst case 265 B) exceeds the host library's 255-byte usable receive
+ * line, so a read-back would be silently discarded by the host's own line
+ * reader rather than fail loudly (the C6's measured arithmetic,
+ * mt_meter.cpp, restated in 3.29).
+ */
+extern "C" int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity_t *id)
+{
+    using namespace chip::app::Clusters::MeterIdentification;
+    using chip::app::Clusters::Globals::PowerThresholdSourceEnum;
+    /* PowerThresholdStruct is a namespace (the payload type is
+     * PowerThresholdStruct::Type), so a namespace alias rather than a
+     * using-declaration. */
+    namespace PowerThresholdStruct = chip::app::Clusters::Globals::Structs::PowerThresholdStruct;
+    using chip::app::DataModel::MakeNullable;
+
+    chip::DeviceLayer::StackLock lock;
+
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::MeterIdentification::Id)) {
+        return MT_ATTR_ERR_ATTRIBUTE;
+    }
+    Instance *inst = mt_meter_find(ep);
+    if (inst == nullptr) {
+        /* Cluster present but no pool slot: cannot happen once
+         * mt_meter_register_all() has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    /* ---- validate everything before applying anything ---- */
+
+    if (id->meter_type > static_cast<uint8_t>(MeterTypeEnum::kGeneric)) {
+        return MT_ATTR_ERR_VALUE;
+    }
+    if (!id->pwr_present && !id->apparent_present) {
+        /* PowerThresholdStruct's "choice b": at least one of the two power
+         * optionals. cmd_mtmeterid already rejects this at parse; the
+         * double gate is the demcap precedent. */
+        return MT_ATTR_ERR_VALUE;
+    }
+    if (id->src_present && id->src > static_cast<uint8_t>(PowerThresholdSourceEnum::kEquipment)) {
+        return MT_ATTR_ERR_VALUE;
+    }
+    size_t pod_len      = strlen(id->pod);
+    size_t serial_len   = strlen(id->serial);
+    size_t protocol_len = strlen(id->protocol);
+    if (pod_len > MT_METERID_MAX_STR || serial_len > MT_METERID_MAX_STR ||
+        protocol_len > MT_METERID_MAX_STR) {
+        /* Defensive: cmd_mtmeterid enforces the length while scanning the
+         * quoted string; re-checked as the last point before any SetXxx()
+         * call, the all-or-nothing contract's whole purpose. */
+        return MT_ATTR_ERR_VALUE;
+    }
+
+    /* ---- apply ---- */
+
+    PowerThresholdStruct::Type pt;
+    if (id->pwr_present) {
+        pt.powerThreshold.SetValue(id->pwr);
+    }
+    if (id->apparent_present) {
+        pt.apparentPowerThreshold.SetValue(id->apparent);
+    }
+    if (id->src_present) {
+        pt.powerThresholdSource.SetNonNull(static_cast<PowerThresholdSourceEnum>(id->src));
+    } else {
+        pt.powerThresholdSource.SetNull();
+    }
+
+    /* Every call below is expected to return CHIP_NO_ERROR: the block
+     * above already checked everything each SetXxx() would reject. A
+     * failure here is an internal SDK invariant violation, logged rather
+     * than propagated so one unexpected failure does not also abandon the
+     * fields that would have applied cleanly after it (the C6's identical
+     * disposition; the Instance copies every span into its own fixed
+     * buffers before returning, so the caller's stack strings are not
+     * held). */
+    CHIP_ERROR err;
+    err = inst->SetMeterType(MakeNullable(static_cast<MeterTypeEnum>(id->meter_type)));
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "SetMeterType failed for endpoint %u: %" CHIP_ERROR_FORMAT, (unsigned)ep,
+                err.Format());
+    }
+    err = inst->SetPointOfDelivery(MakeNullable(chip::CharSpan(id->pod, pod_len)));
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "SetPointOfDelivery failed for endpoint %u: %" CHIP_ERROR_FORMAT, (unsigned)ep,
+                err.Format());
+    }
+    err = inst->SetMeterSerialNumber(MakeNullable(chip::CharSpan(id->serial, serial_len)));
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "SetMeterSerialNumber failed for endpoint %u: %" CHIP_ERROR_FORMAT, (unsigned)ep,
+                err.Format());
+    }
+    err = inst->SetProtocolVersion(MakeNullable(chip::CharSpan(id->protocol, protocol_len)));
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "SetProtocolVersion failed for endpoint %u: %" CHIP_ERROR_FORMAT, (unsigned)ep,
+                err.Format());
+    }
+    err = inst->SetPowerThreshold(MakeNullable(pt));
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "SetPowerThreshold failed for endpoint %u: %" CHIP_ERROR_FORMAT, (unsigned)ep,
+                err.Format());
+    }
+
+    return MT_ATTR_OK;
+}

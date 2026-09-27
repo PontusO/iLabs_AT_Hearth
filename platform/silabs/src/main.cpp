@@ -159,6 +159,19 @@ void hearth_boot_task(void *arg)
     }
 
     rebuild_composition();
+
+    /* Catalogue batch 7a: construct and register the MeterIdentification
+     * Instances for every live meter endpoint. Nothing in the SDK ever
+     * calls their Init() (the mt_meter_register_all() doc comment in
+     * mt_matter_sl_b7.inc), and it cannot run inside
+     * mt_devtype_create()'s own second halves by the C6's precedent
+     * shape, so the scan runs here: after the rebuild (the clusters
+     * exist), before mt_at_start() (every meter endpoint answers before
+     * +MTREADY lets the host ask). The server is already running at this
+     * point on this platform; the scan takes the stack lock internally,
+     * the same timing every create-path Init() above already has. */
+    mt_meter_register_all();
+
     mt_at_start();          /* emits +MTREADY once the parser task is up */
     /* The boot replay of +MTEVT:0, after the marker and with no lock held:
      * it reads mt_matter_state(), which takes the stack lock itself. */
