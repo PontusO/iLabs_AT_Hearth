@@ -33,7 +33,9 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "powersource", "smokecoalarm", "operationalstate",
                  "modeselect", "chime",
                  "switch", "pumpconfigurationandcontrol",
-                 "rvcrunmode", "rvccleanmode", "rvcoperationalstate"}
+                 "rvcrunmode", "rvccleanmode", "rvcoperationalstate",
+                 "electricalpowermeasurement", "electricalenergymeasurement",
+                 "powertopology"}
 
 # The MG24 Hearth build's product id. Two Hearth boards on the bench share
 # discriminator 0xF00, so chip-tool's BLE scan can pair the other one
@@ -76,15 +78,19 @@ def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
             "urc_chip_attr": urc_chip_attr, "at_cmd": at_cmd}
 
 def _multi(devtype, name, revision, chip_cluster, checks, extra_reads=(),
-           setup=()):
+           setup=(), variant=None, extra_types=()):
     """The batch 2+ row shape; setup (batch 4) is a
     ("setup", [at_cmd format strings], (cluster_arg, attr_arg, [substrings]))
     tuple, or None: run once before the type's checks, each AT line must
     answer OK, and the following controller list read must name every
-    substring (AT_MT_SPEC 3.20/3.23's set-only list stores)."""
+    substring (AT_MT_SPEC 3.20/3.23's set-only list stores). variant (batch
+    7a-1) stages "<devtype>,<variant>"; extra_types is a list of (devtype_hex,
+    revision) pairs the endpoint's DeviceTypeList must also carry (the heat
+    pump's and solar power's 0x0011 and 0x0510)."""
     return {"devtype": devtype, "name": name, "revision": revision,
             "chip_cluster": chip_cluster, "checks": list(checks),
-            "extra_reads": list(extra_reads), "setup": setup}
+            "extra_reads": list(extra_reads), "setup": setup,
+            "variant": variant, "extra_types": list(extra_types)}
 
 def _type(devtype, name, revision, chip_cluster, cluster, attr, chip_attr,
           at_value, parse="int", controller=None, extra_reads=()):
@@ -368,11 +374,67 @@ BATCHES = {
                   [("rvcrunmode", "supported-modes", ["Idle", "Cleaning"]),
                    ("rvccleanmode", "supported-modes", ["Vacuum", "Mop"])])),
     ],
+    # Batch 7a-1 (catalogue batch 7a-1 design spec section 4): the measurement
+    # family, one endpoint per type and variant (seven, under the admission
+    # maximum of eight). EPM values are null until pushed; AT+MTMEAS raises no
+    # URC; energy is a struct read. A check's (cluster, attr) is the AT read's
+    # attribute id (EPM Voltage 0x0004, ActivePower 0x0008), not the push's
+    # field number (AT_MT_SPEC 3.25's field 0 and 2).
+    "mg24-batch7a1": [
+        _multi("0x0510", "electrical sensor", 1, "electricalpowermeasurement", [
+            _check(144, 4, "voltage", 230000, null_read=True,
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,0,230000", "int")),
+            _check(145, 1, "cumulative-energy-imported", 1500000,
+                   chip_cluster="electricalenergymeasurement",
+                   controller=("push", "AT+MTMEAS=%(ep)d,145,0,1500000", "energy")),
+            _check(144, 4, "voltage", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,144,4,5"], 11)),
+        ]),
+        _multi("0x0510", "electrical sensor power-only", 1, "electricalpowermeasurement", [
+            _check(144, 8, "active-power", 99590,
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,2,99590", "int")),
+            _check(145, 1, "cumulative-energy-imported", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,145,0,1500000"], 3)),
+        ], variant=1),
+        _multi("0x0514", "electrical meter", 1, "electricalpowermeasurement", [
+            _check(144, 4, "voltage", 231000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,0,231000", "int")),
+            _check(145, 1, "cumulative-energy-imported", 1600000,
+                   chip_cluster="electricalenergymeasurement",
+                   controller=("push", "AT+MTMEAS=%(ep)d,145,0,1600000", "energy")),
+        ]),
+        _multi("0x0514", "electrical meter power-only", 1, "electricalpowermeasurement", [
+            _check(144, 8, "active-power", 50000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,2,50000", "int")),
+        ], variant=1),
+        _multi("0x0309", "heat pump", 1, "electricalpowermeasurement", [
+            _check(144, 8, "active-power", 1200000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,2,1200000", "int")),
+            _check(145, 1, "cumulative-energy-imported", 2500000,
+                   chip_cluster="electricalenergymeasurement",
+                   controller=("push", "AT+MTMEAS=%(ep)d,145,0,2500000", "energy")),
+        ], extra_types=[("0x0011", 1), ("0x0510", 1)]),
+        _multi("0x0017", "solar power", 1, "electricalpowermeasurement", [
+            _check(144, 8, "active-power", -3000000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,2,-3000000", "int")),
+        ], extra_types=[("0x0011", 1), ("0x0510", 1)]),
+        _multi("0x0017", "solar power power-only", 1, "electricalpowermeasurement", [
+            _check(144, 8, "active-power", -1500000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,2,-1500000", "int")),
+            _check(145, 1, "cumulative-energy-imported", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,145,0,1500000"], 3)),
+        ], variant=1, extra_types=[("0x0011", 1), ("0x0510", 1)]),
+    ],
 }
 
 def composition_for(batch):
-    return [(1, ANCHOR_DEVTYPE)] + [(i + 2, t["devtype"])
-                                     for i, t in enumerate(BATCHES[batch])]
+    # A row's variant (batch 7a-1) is AT+MTEP's second parameter
+    # (AT_MT_SPEC 3.9); AT+MTEP? prints it back the same way, so staging
+    # and the readback both carry "<devtype>,<variant>".
+    return [(1, ANCHOR_DEVTYPE)] + [
+        (i + 2, t["devtype"] if t.get("variant") is None
+         else "%s,%d" % (t["devtype"], t["variant"]))
+        for i, t in enumerate(BATCHES[batch])]
 
 def rows_for(batch):
     return BATCHES[batch]
@@ -468,7 +530,19 @@ def print_plan(batch):
                 print("  ep %2d %s %s rev %d: setup chip-tool %s read %s carries %s"
                       % (ep, dt, t["name"], t["revision"], what, sattr,
                          " and ".join(substrs)))
+        for xdt, xrev in t.get("extra_types", ()):
+            print("  ep %2d %s %s rev %d: device-type-list also carries (%s, %d)"
+                  % (ep, dt, t["name"], t["revision"], xdt, xrev))
         for i, c in enumerate(t["checks"]):
+            if c["controller"] is not None and c["controller"][0] == "push":
+                _kind, fmt, parser = c["controller"]
+                print("  ep %2d %s %s rev %d: %s%s -> OK, no +MTATTR; chip-tool %s read %s = %s%s"
+                      % (ep, dt, t["name"], t["revision"], fmt % {"ep": ep},
+                         " (null-read first)" if c["null_read"] else "",
+                         c["chip_cluster"] or t["chip_cluster"], c["chip_attr"],
+                         c["at_value"], " and the AT read agrees" if parser == "int"
+                         else " (energy struct)"))
+                continue
             urc = "n/a (no controller action, read-only attribute)"
             if c["controller"] is not None:
                 if c["controller"][0] == "verdict":
@@ -530,6 +604,12 @@ def prove_endpoint(link, chip, s, node, ep, t):
     s.check("%s ep%d device-type-list carries (%d, %d)"
             % (tag, ep, int(t["devtype"], 16), t["revision"]),
             rc == 0 and (int(t["devtype"], 16), t["revision"]) in parse_device_types(out))
+    # The heat pump and solar power advertise their superset's types too
+    # (batch 7a-1): one row per extra pair, named like the row above.
+    for xdt, xrev in t.get("extra_types", ()):
+        s.check("%s ep%d device-type-list carries (%d, %d)"
+                % (tag, ep, int(xdt, 16), xrev),
+                rc == 0 and (int(xdt, 16), xrev) in parse_device_types(out))
     # The per-attribute row name gains " <chip_attr>" only when a type has
     # more than one check: batch 1's single-check rows keep their existing
     # names byte-for-byte (including the N/A row's literal "controller write"),
@@ -583,6 +663,8 @@ def prove_endpoint(link, chip, s, node, ep, t):
                 prefix += " %s %s %s %s" % (
                     c["chip_cluster"] or t["chip_cluster"], args[0], args[1],
                     "allow" if answer == 1 else "deny" if answer == 0 else "unlisted")
+            elif c["controller"][0] == "push":
+                prefix += " pushed"
         prove_check(link, chip, s, node, ep, t, c, prefix)
     for extra in t["extra_reads"]:
         if extra[0] == "read-event":
@@ -616,6 +698,33 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         wcmd = atlines[0] % {"ep": ep}
         res, wlines = link.command(wcmd)
         s.check("%s %s -> +MTERR:%d" % (prefix, wcmd, err), res == err)
+        return
+    if c["controller"] is not None and c["controller"][0] == "push":
+        # AT+MTMEAS (AT_MT_SPEC 3.25): the host pushes a value the cluster's
+        # own Instance serves (the EPM and EEM of batch 7a-1). The push
+        # answers OK with no lines and raises no +MTATTR URC; the controller
+        # reads the value (an integer, or inside the energy struct), and an
+        # integer is also read live over AT.
+        _kind, fmt, parser = c["controller"]
+        if c["null_read"]:
+            res, lines = link.command("AT+MTATTR=" + at)
+            s.check("%s AT read before the push -> +MTERR:5" % prefix, res == 5)
+        link.drain(0.2)
+        pcmd = fmt % {"ep": ep}
+        res, plines = link.command(pcmd)
+        s.check("%s %s -> OK" % (prefix, pcmd), res == 0 and plines == [])
+        s.check("%s %s raises no +MTATTR" % (prefix, pcmd),
+                link.assert_no_urc(r"\+MTATTR:%d," % ep, 1.5))
+        rc, out = chip.run([cc, "read", c["chip_attr"], node, str(ep)], timeout=30)
+        if parser == "energy":
+            ok = rc == 0 and c["at_value"] in H.parse_energy_values(out)
+        else:
+            ok = rc == 0 and H.parse_int_attr(out) == c["at_value"]
+        s.check("%s chip-tool %s read %s = %s" % (prefix, cc, c["chip_attr"], c["at_value"]), ok)
+        if parser == "int":
+            res, lines = link.command("AT+MTATTR=" + at)
+            s.check("%s AT read = %s" % (prefix, c["at_value"]),
+                    res == 0 and lines == ["+MTATTR:%s,%s" % (at, c["at_value"])])
         return
     if c["controller"] is not None and c["controller"][0] == "mode_verdict":
         # ModeBase CurrentMode is Instance-served (an AT write is refused
