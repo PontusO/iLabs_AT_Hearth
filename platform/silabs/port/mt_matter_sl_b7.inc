@@ -1073,3 +1073,413 @@ extern "C" int mt_matter_meter_set_identity(uint16_t ep, const mt_meter_identity
 
     return MT_ATTR_OK;
 }
+
+/*
+ * ---- device energy management: HearthDemDelegate and its pool (batch 7a) ----
+ *
+ * The C6's HearthDemDelegate (main.cpp:4865-5266) ported whole: the cached
+ * attribute store the Instance's AAI reads, the owned
+ * PowerAdjustmentCapability list AT+MTDEMCAP replaces, the two PA command
+ * forwards, and the firmware-owned event policy. The policy, binding per
+ * AT_MT_SPEC.md 3.17:1487-1533 and 3.25:2755-2768:
+ *
+ *   - An ALLOWED PowerAdjustRequest sets ESAState kPowerAdjustActive
+ *     itself, arms the duration clock and emits the fieldless
+ *     PowerAdjustStart (the host does NOT push the entry transition, the
+ *     contrast to the water heater's Boost where the host pushes
+ *     BoostState).
+ *   - Re-adjust rule: a second accept while already PowerAdjustActive
+ *     emits NO second Start and does not re-arm the clock (certification
+ *     behaviour: TC_DEM_2_2 step 14 requires "SUCCESS and no event sent"
+ *     and asserts the eventual End's duration against the FIRST accept).
+ *     The forward still reaches the host either way.
+ *   - A host ESAState push LEAVING kPowerAdjustActive emits
+ *     PowerAdjustEnd(NormalCompletion, measured duration, cached field-6
+ *     energyUse, cache consumed); a same-state push emits nothing and
+ *     reports nothing (ESAState reports on change only, unlike the WHM's
+ *     per-sample BoostState).
+ *   - An accepted CancelPowerAdjustRequest emits
+ *     PowerAdjustEnd(Cancelled) and resets to Online through the RAW
+ *     setter, never SetESAState(): the derivation there would emit a
+ *     second End with the wrong cause for a session already ended.
+ *
+ * The server pre-validates EVERY PowerAdjustRequest against the pushed
+ * capability and the OptOutState x cause matrix BEFORE the delegate runs
+ * (device-energy-management-server.cpp:254-359: a null capability answers
+ * ConstraintError, an out-of-range request likewise, and
+ * CancelPowerAdjustRequest has a server-side in-state guard answering
+ * InvalidInState, :371-390), so a null capability never wakes the host and
+ * no +MTCMD is ever raised for a cancel in the wrong state: AT+MTDEMCAP's
+ * whole reason for existing.
+ *
+ * Cause tracking (the C6's task-review F2 contract): the capability
+ * struct's LIVE cause is firmware-owned while an adjustment runs (stamped
+ * on accept with the request's adjustment reason, reported dirty); the
+ * BASELINE member is the host-pushed resting value every PowerAdjustEnd
+ * restores.
+ *
+ * Lock discipline, the file's standing rule: the two command forwards run
+ * on the CHIP task from the Instance's CHI invoke path, NO StackLock
+ * taken; the push-path derivation (SetESAState) runs from
+ * mt_matter_meas_set()/mt_matter_demcap_set(), which already hold it.
+ */
+class HearthDemDelegate : public chip::app::Clusters::DeviceEnergyManagement::Delegate
+{
+public:
+    /* Host-pushed cached state, written only by mt_meas_dem_apply(). The
+     * defaults are the spec's pre-first-push answers (3.25): ESAType 0
+     * (kEvse), canGenerate false, ESAState Online, powers 0, OptOutState
+     * NoOptOut. */
+    uint8_t m_esa_type     = 0;
+    bool    m_can_generate = false;
+    chip::app::Clusters::DeviceEnergyManagement::ESAStateEnum m_esa_state =
+        chip::app::Clusters::DeviceEnergyManagement::ESAStateEnum::kOnline;
+    int64_t m_abs_min_power = 0;
+    int64_t m_abs_max_power = 0;
+    chip::app::Clusters::DeviceEnergyManagement::OptOutStateEnum m_opt_out =
+        chip::app::Clusters::DeviceEnergyManagement::OptOutStateEnum::kNoOptOut;
+
+    /* The session's approximate energy use (mWh), the PowerAdjustEnd
+     * event's energyUse field: MT_DEM_F_ADJ_ENERGY_USE, an event carrier
+     * and not an attribute (mt_matter.h). Host-pushed while an adjustment
+     * runs, consumed and reset by every PowerAdjustEnd emission. */
+    int64_t m_energy_use = 0;
+
+    /* The owned PowerAdjustmentCapability store, AT+MTDEMCAP's surface:
+     * fixed backing array, entry count, the Nullable the getter hands
+     * out (null until the host installs entries), and the baseline cause
+     * (the F2 contract in the section comment). */
+    chip::app::Clusters::DeviceEnergyManagement::Structs::PowerAdjustStruct::Type
+        m_pa_entries[MT_DEM_CAP_MAX_ENTRIES];
+    uint8_t m_pa_count = 0;
+    chip::app::DataModel::Nullable<
+        chip::app::Clusters::DeviceEnergyManagement::Structs::PowerAdjustCapabilityStruct::Type>
+        m_pa_capability;
+    chip::app::Clusters::DeviceEnergyManagement::PowerAdjustReasonEnum m_pa_cause_baseline =
+        chip::app::Clusters::DeviceEnergyManagement::PowerAdjustReasonEnum::kNoAdjustment;
+
+    chip::EndpointId endpoint() const { return mEndpointId; }
+
+    /* Whether this endpoint's variant seeded the PowerAdjustment bit:
+     * stamped by mt_matter_dem_register() from the create path's variant
+     * predicate, the single source the FeatureMap seed shares. The
+     * AT+MTDEMCAP feature gate reads it here (the C6 reads its
+     * esp-matter FeatureMap attribute back for the same answer; this
+     * port's ember shadow is a seed, so the port record is the honest
+     * source). */
+    void set_with_pa(bool pa) { m_with_pa = pa; }
+    bool with_pa() const { return m_with_pa; }
+
+    void SetAdjEnergyUse(int64_t mwh) { m_energy_use = mwh; }
+
+    chip::Protocols::InteractionModel::Status PowerAdjustRequest(
+        const int64_t power, const uint32_t duration,
+        chip::app::Clusters::DeviceEnergyManagement::AdjustmentCauseEnum cause) override
+    {
+        using namespace chip::app::Clusters::DeviceEnergyManagement;
+        using chip::Protocols::InteractionModel::Status;
+
+        char fields[48];
+        snprintf(fields, sizeof(fields), "%lld,%lu,%u", (long long)power, (unsigned long)duration,
+                 (unsigned)chip::to_underlying(cause));
+
+        bool allow = mt_cmd_forward_fields(mEndpointId, Id, Commands::PowerAdjustRequest::Id,
+                                           fields);
+        if (!allow) {
+            return Status::Failure;
+        }
+
+        /* Whether this accept STARTS an adjustment or RE-ADJUSTS a
+         * running one, decided before the state write (the section
+         * comment's re-adjust rule). */
+        bool in_progress = (m_esa_state == ESAStateEnum::kPowerAdjustActive);
+
+        /* Stamp the capability's live cause with the accepted request's
+         * adjustment reason (F2). The server has already rejected
+         * kUnknownEnumValue; the default arm is defensive. */
+        switch (cause) {
+        case AdjustmentCauseEnum::kLocalOptimization:
+            SetCapabilityCause(PowerAdjustReasonEnum::kLocalOptimizationAdjustment);
+            break;
+        case AdjustmentCauseEnum::kGridOptimization:
+            SetCapabilityCause(PowerAdjustReasonEnum::kGridOptimizationAdjustment);
+            break;
+        default:
+            break;
+        }
+
+        SetStateRaw(ESAStateEnum::kPowerAdjustActive);
+        if (!in_progress) {
+            m_pa_start_ms = static_cast<uint64_t>(
+                chip::System::SystemClock().GetMonotonicMilliseconds64().count());
+
+            /* Emission discipline: COMMAND PATH, CHIP task, no StackLock
+             * (the section comment). A LogEvent failure is logged and
+             * deliberately does not fail the command: the host has
+             * already accepted and the state is applied and served. */
+            Events::PowerAdjustStart::Type event;
+            chip::EventNumber n;
+            CHIP_ERROR err = chip::app::LogEvent(event, mEndpointId, n);
+            if (err != CHIP_NO_ERROR) {
+                HEARTH_LOGE("matter", "DEM ep %u: PowerAdjustStart event failed: %" CHIP_ERROR_FORMAT,
+                        (unsigned)mEndpointId, err.Format());
+            }
+        }
+        /* else: re-adjust while active, no second Start, the clock keeps
+         * measuring from the first accept. */
+        return Status::Success;
+    }
+
+    chip::Protocols::InteractionModel::Status CancelPowerAdjustRequest() override
+    {
+        using namespace chip::app::Clusters::DeviceEnergyManagement;
+        using chip::Protocols::InteractionModel::Status;
+
+        /* Payload-less forward (NULL fields reproduces mt_cmd_forward()'s
+         * exact four-field +MTCMD line). No firmware in-state guard: the
+         * server refused the command with InvalidInState unless ESAState
+         * was kPowerAdjustActive before this ran (the section comment). */
+        bool allow = mt_cmd_forward_fields(mEndpointId, Id, Commands::CancelPowerAdjustRequest::Id,
+                                           NULL);
+        if (!allow) {
+            return Status::Failure;
+        }
+
+        EmitPowerAdjustEnd(CauseEnum::kCancelled);
+        SetStateRaw(ESAStateEnum::kOnline);
+        return Status::Success;
+    }
+
+    /* The six non-PowerAdjustment command handlers. Unreachable while
+     * this firmware is PA-only: the server's InvokeCommand dispatch
+     * answers UnsupportedCommand for every one of them unless the
+     * matching feature bit is in the Instance's mask
+     * (device-energy-management-server.cpp:181-251), and this port only
+     * ever constructs with kPowerAdjustment or nothing. Failure rather
+     * than Success so a future feature bit without a handler is a
+     * visible command failure, not a silent lie (the C6's reasoning,
+     * kept). */
+    chip::Protocols::InteractionModel::Status StartTimeAdjustRequest(
+        const uint32_t requestedStartTime,
+        chip::app::Clusters::DeviceEnergyManagement::AdjustmentCauseEnum cause) override
+    {
+        (void)requestedStartTime;
+        (void)cause;
+        return chip::Protocols::InteractionModel::Status::Failure;
+    }
+    chip::Protocols::InteractionModel::Status PauseRequest(
+        const uint32_t duration,
+        chip::app::Clusters::DeviceEnergyManagement::AdjustmentCauseEnum cause) override
+    {
+        (void)duration;
+        (void)cause;
+        return chip::Protocols::InteractionModel::Status::Failure;
+    }
+    chip::Protocols::InteractionModel::Status ResumeRequest() override
+    {
+        return chip::Protocols::InteractionModel::Status::Failure;
+    }
+    chip::Protocols::InteractionModel::Status ModifyForecastRequest(
+        const uint32_t forecastID,
+        const chip::app::DataModel::DecodableList<
+            chip::app::Clusters::DeviceEnergyManagement::Structs::SlotAdjustmentStruct::Type>
+            &slotAdjustments,
+        chip::app::Clusters::DeviceEnergyManagement::AdjustmentCauseEnum cause) override
+    {
+        (void)forecastID;
+        (void)slotAdjustments;
+        (void)cause;
+        return chip::Protocols::InteractionModel::Status::Failure;
+    }
+    chip::Protocols::InteractionModel::Status RequestConstraintBasedForecast(
+        const chip::app::DataModel::DecodableList<
+            chip::app::Clusters::DeviceEnergyManagement::Structs::ConstraintsStruct::Type>
+            &constraints,
+        chip::app::Clusters::DeviceEnergyManagement::AdjustmentCauseEnum cause) override
+    {
+        (void)constraints;
+        (void)cause;
+        return chip::Protocols::InteractionModel::Status::Failure;
+    }
+    chip::Protocols::InteractionModel::Status CancelRequest() override
+    {
+        return chip::Protocols::InteractionModel::Status::Failure;
+    }
+
+    /* The eight getters, serving the host-pushed cache. */
+    chip::app::Clusters::DeviceEnergyManagement::ESATypeEnum GetESAType() override
+    {
+        return static_cast<chip::app::Clusters::DeviceEnergyManagement::ESATypeEnum>(m_esa_type);
+    }
+    bool GetESACanGenerate() override { return m_can_generate; }
+    chip::app::Clusters::DeviceEnergyManagement::ESAStateEnum GetESAState() override
+    {
+        return m_esa_state;
+    }
+    int64_t GetAbsMinPower() override { return m_abs_min_power; }
+    int64_t GetAbsMaxPower() override { return m_abs_max_power; }
+    chip::app::Clusters::DeviceEnergyManagement::OptOutStateEnum GetOptOutState() override
+    {
+        return m_opt_out;
+    }
+    const chip::app::DataModel::Nullable<
+        chip::app::Clusters::DeviceEnergyManagement::Structs::PowerAdjustCapabilityStruct::Type> &
+    GetPowerAdjustmentCapability() override
+    {
+        return m_pa_capability;
+    }
+    /* Permanently null: PFR/SFR out of this batch's scope. */
+    const chip::app::DataModel::Nullable<
+        chip::app::Clusters::DeviceEnergyManagement::Structs::ForecastStruct::Type> &
+    GetForecast() override
+    {
+        return m_forecast;
+    }
+
+    /*
+     * SetESAState: the push-path transition entry. mt_meas_dem_apply()
+     * calls this for every MT_DEM_F_ESA_STATE pair; the derivation lives
+     * here (the section comment's push rules). Rejects kUnknownEnumValue
+     * and up, reports the attribute dirty ON CHANGE ONLY, so callers do
+     * not report ESAState again themselves. The one SDK caller of this
+     * virtual is the server's Pause path, unreachable while PA-only, so
+     * in practice every call site is a bridge holding the StackLock.
+     */
+    CHIP_ERROR SetESAState(chip::app::Clusters::DeviceEnergyManagement::ESAStateEnum next) override
+    {
+        using namespace chip::app::Clusters::DeviceEnergyManagement;
+
+        if (next >= ESAStateEnum::kUnknownEnumValue) {
+            return CHIP_IM_GLOBAL_STATUS(ConstraintError);
+        }
+        if (next == m_esa_state) {
+            return CHIP_NO_ERROR;
+        }
+        ESAStateEnum prev = m_esa_state;
+        if (prev == ESAStateEnum::kPowerAdjustActive) {
+            /* Emission discipline: PUSH PATH, the bridge already holds
+             * the StackLock (the section comment). */
+            EmitPowerAdjustEnd(CauseEnum::kNormalCompletion);
+        }
+        if (next == ESAStateEnum::kPowerAdjustActive) {
+            /* Entering via a push is off-design (the firmware owns the
+             * entry transition on an accepted PowerAdjustRequest, which
+             * arms this clock itself), but nothing stops a host doing
+             * it; arm the clock here too so a later End measures from
+             * this moment instead of from boot (3.25's rule). */
+            m_pa_start_ms = static_cast<uint64_t>(
+                chip::System::SystemClock().GetMonotonicMilliseconds64().count());
+        }
+        SetStateRaw(next);
+        return CHIP_NO_ERROR;
+    }
+
+    /* AT+MTDEMCAP's apply half needs the private helpers; the bridge is a
+     * free function, so it goes through these two rather than friending. */
+    void demcap_apply(chip::app::Clusters::DeviceEnergyManagement::PowerAdjustReasonEnum baseline,
+                      uint8_t n, const int64_t *quads)
+    {
+        using namespace chip::app::Clusters::DeviceEnergyManagement;
+
+        /* The live cause carried into the rebuilt struct: the pushed
+         * baseline normally, the firmware-stamped value while an
+         * adjustment is running (the F2 contract: replacing the
+         * capability mid-adjustment must not overwrite the stamped cause;
+         * the eventual PowerAdjustEnd restores the NEW baseline). */
+        PowerAdjustReasonEnum live = baseline;
+        if (m_esa_state == ESAStateEnum::kPowerAdjustActive && !m_pa_capability.IsNull()) {
+            live = m_pa_capability.Value().cause;
+        }
+        m_pa_cause_baseline = baseline;
+
+        if (n == 0) {
+            m_pa_count = 0;
+            m_pa_capability.SetNull();
+        } else {
+            for (uint8_t i = 0; i < n; i++) {
+                m_pa_entries[i].minPower    = quads[4 * i];
+                m_pa_entries[i].maxPower    = quads[4 * i + 1];
+                m_pa_entries[i].minDuration = static_cast<uint32_t>(quads[4 * i + 2]);
+                m_pa_entries[i].maxDuration = static_cast<uint32_t>(quads[4 * i + 3]);
+            }
+            m_pa_count = n;
+            Structs::PowerAdjustCapabilityStruct::Type cap;
+            cap.powerAdjustCapability.SetNonNull(
+                chip::app::DataModel::List<const Structs::PowerAdjustStruct::Type>(m_pa_entries,
+                                                                                  n));
+            cap.cause = live;
+            m_pa_capability.SetNonNull(cap);
+        }
+        MatterReportingAttributeChangeCallback(mEndpointId, Id,
+                                               Attributes::PowerAdjustmentCapability::Id);
+    }
+
+private:
+    bool m_with_pa = false;
+
+    /* Forecast: permanently null, never written. */
+    chip::app::DataModel::Nullable<
+        chip::app::Clusters::DeviceEnergyManagement::Structs::ForecastStruct::Type>
+        m_forecast;
+
+    /* Monotonic ms at the last accepted PowerAdjustRequest, the duration
+     * clock. */
+    uint64_t m_pa_start_ms = 0;
+
+    /* Stamp the owned capability struct's cause and report the attribute
+     * dirty. A null capability (AT+MTDEMCAP never sent) has no cause to
+     * stamp; that state cannot carry a running adjustment anyway (the
+     * server refuses PowerAdjustRequest on a null capability), so
+     * skipping is right on the restore path too. */
+    void SetCapabilityCause(chip::app::Clusters::DeviceEnergyManagement::PowerAdjustReasonEnum r)
+    {
+        using namespace chip::app::Clusters::DeviceEnergyManagement;
+        if (m_pa_capability.IsNull() || m_pa_capability.Value().cause == r) {
+            return;
+        }
+        m_pa_capability.Value().cause = r;
+        MatterReportingAttributeChangeCallback(mEndpointId, Id,
+                                               Attributes::PowerAdjustmentCapability::Id);
+    }
+
+    /* Cache write + dirty report, no event derivation: the command paths
+     * use this directly because they emit their own event (or none)
+     * before transitioning; SetESAState() is the derived-emission entry.
+     * Reports on change only. */
+    void SetStateRaw(chip::app::Clusters::DeviceEnergyManagement::ESAStateEnum next)
+    {
+        using namespace chip::app::Clusters::DeviceEnergyManagement;
+        if (m_esa_state != next) {
+            m_esa_state = next;
+            MatterReportingAttributeChangeCallback(mEndpointId, Id, Attributes::ESAState::Id);
+        }
+    }
+
+    /* Fill and log PowerAdjustEnd: cause per caller, duration measured
+     * against the accept timestamp, energyUse from the host-pushed
+     * field-6 cache, consumed (reset to 0) by the emission; the
+     * capability cause restored to the host-pushed baseline (F2). Lock
+     * discipline is the CALLER's, commented at each call site; a
+     * LogEvent failure is logged and does not propagate (the transition
+     * the event describes has already been decided). */
+    void EmitPowerAdjustEnd(chip::app::Clusters::DeviceEnergyManagement::CauseEnum cause)
+    {
+        using namespace chip::app::Clusters::DeviceEnergyManagement;
+
+        uint64_t now_ms = static_cast<uint64_t>(
+            chip::System::SystemClock().GetMonotonicMilliseconds64().count());
+        Events::PowerAdjustEnd::Type event;
+        event.cause     = cause;
+        event.duration  = static_cast<uint32_t>((now_ms - m_pa_start_ms) / 1000);
+        event.energyUse = m_energy_use;
+
+        chip::EventNumber n;
+        CHIP_ERROR err = chip::app::LogEvent(event, mEndpointId, n);
+        if (err != CHIP_NO_ERROR) {
+            HEARTH_LOGE("matter", "DEM ep %u: PowerAdjustEnd event failed: %" CHIP_ERROR_FORMAT,
+                    (unsigned)mEndpointId, err.Format());
+        }
+        m_energy_use = 0;
+        SetCapabilityCause(m_pa_cause_baseline);
+    }
+};
