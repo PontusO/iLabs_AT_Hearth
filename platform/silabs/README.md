@@ -1041,7 +1041,7 @@ batch 1), `mt_devtypes_sl_tables_b2.inc` (batch 2),
 `mt_devtypes_sl_tables_b3.inc` (batch 3),
 `mt_devtypes_sl_tables_b4.inc` (batch 4),
 `mt_devtypes_sl_tables_b5.inc` (batches 5a and 5b),
-`mt_devtypes_sl_tables_b7.inc` (batches 7a-1 and 7a-2, and the DE407 quiet table),
+`mt_devtypes_sl_tables_b7.inc` (batches 7a-1, 7a-2 and 7b, and the DE407 quiet table),
 `mt_devtypes_sl_registry.inc` (the parenting policy and the registry),
 `mt_devtypes_sl_arena.inc` (the external attribute store, the endpoint arena,
 its sizing and floor) and `mt_devtypes_sl_seeds.inc` (the seed table and
@@ -1080,6 +1080,7 @@ index, and a round that changes one arm finds the other through it.
 | the EEM reserve and register, and the `AT+MTMEAS` bridge (its DEM, water heater and EVSE branches until their batches answer `+MTERR:3`) | `mt_matter_zephyr.cpp` 4991-5064, 5105-5346 | `port/mt_matter_sl_b7.inc` | catalogue batch 7a-1 |
 | the utility meter's MeterIdentification pool (reserved at create, registered by `main.cpp`'s post-rebuild scan), its live read and `AT+MTMETERID`; the MeterType Instance-served row | `mt_matter_zephyr.cpp` 5347-5639, 906-916; nRF `src/main.cpp` 160-170 | `port/mt_matter_sl_b7.inc`, `port/mt_matter_sl.cpp`, `src/main.cpp` | catalogue batch 7a-2 |
 | `HearthDemDelegate`, the DEM pool and register, `AT+MTMEAS`'s DEM branch restored, `AT+MTDEMCAP`, the DEM live read; the six DEM and the DEMMode Instance-served rows | `mt_matter_zephyr.cpp` 5641-6324, 917-938 | `port/mt_matter_sl_b7.inc`, `port/mt_matter_sl.cpp` | catalogue batch 7a-2 |
+| `HearthWhmDelegate` (the Boost verdict forwards, the guarded CancelBoost), the WHM pool and register, `AT+MTMEAS`'s 0x0094 branch with the BoostStarted/BoostEnded derivation, the WHM live read; the six WHM and the WaterHeaterMode Instance-served rows | `mt_matter_zephyr.cpp` 6326-6936, 939-968 | `port/mt_matter_sl_b7.inc`, `port/mt_matter_sl.cpp` | catalogue batch 7b |
 | shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
@@ -1116,6 +1117,9 @@ index, and a round that changes one arm finds the other through it.
 | electrical utility meter (0x0511) and device energy management (0x050D, with its report-only variant) | `mt_devtypes_zephyr.cpp` 2725-2954 | `port/mt_devtypes_sl_tables_b7.inc` | catalogue batch 7a-2 |
 | the DE407 quiet table's two DEM rows, and `kDemBlockBytes` (528 B, pinned) | `mt_devtypes_zephyr.cpp` 4952-4957, 5446-5459 | `port/mt_devtypes_sl_tables_b7.inc`, `port/mt_devtypes_sl_arena.inc` | catalogue batch 7a-2 |
 | the meter, DEM and DEMMode create path (the claims, the DEMMode store, the DEM second halves) | `mt_devtypes_zephyr.cpp` 75-83, 7620-7684, 7979-7984, 8307-8340 | `port/mt_devtypes_sl.cpp` | catalogue batch 7a-2 |
+| water heater (0x050F) and battery storage (0x0018), each with its variant; the WHM quiet row | `mt_devtypes_zephyr.cpp` 2956-3320, 4958-4962 | `port/mt_devtypes_sl_tables_b7.inc` | catalogue batch 7b |
+| the two exact-count block candidates (water heater 800 B, battery storage 848 B of arena, pinned with admission asserts) | `mt_devtypes_zephyr.cpp` 5461-5544 | `port/mt_devtypes_sl_arena.inc` | catalogue batch 7b |
+| the water heater create path (the WHM and WaterHeaterMode claims, the store, the second halves) | `mt_devtypes_zephyr.cpp` 85-95, 7686-7724, 7985-7989, 8342-8354 | `port/mt_devtypes_sl.cpp` | catalogue batch 7b |
 | the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl_arena.inc` | round 2 task 5 |
@@ -2456,6 +2460,70 @@ differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
 
+### Catalogue batch 7b: the water heater and battery storage
+
+The nRF's batch 7b: the water heater (0x050F: WaterHeaterManagement with its
+Boost verdicts and BoostStarted/BoostEnded events, WaterHeaterMode, a
+heating-only Thermostat, the measurement graft on v0) and battery storage
+(0x0018: a rechargeable PowerSource and the 7a families; no bridge code of its
+own). `AT+MTMEAS`'s 0x0094 branch is back (only EVSE's 0x0099 still answers
+`+MTERR:3`). The user's ruling DE603 came with it: the cluster-object arena
+grew to 4,256 B and the RVC's admission to ten. The firmware is `d5069eb`
+(the fix wave `7e06bbc` changed one log string, one `static_assert` and
+comments; `.text` and `.bss` identical), built in
+`~/silabs/work/hearth-matter-b7b` from a fresh `slc generate` and a `make
+clean`, **0 warnings**, with the development discriminator 0xF02.
+
+#### The proof: 158 passed, 0 failed, 3 not applicable
+
+```
+$ python3 test/mt_catalogue_proof.py \
+      --port /dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00 \
+      --bridge cpico --batch mg24-batch7b \
+      --openocd-config platform/silabs/mg24-swd.cfg \
+      --baseline platform/silabs/core-batch7b.json
+```
+
+2026-09-27, first run. Water heater v0: the six WHM values pushed by
+`AT+MTMEAS` and read by the controller and live (by attribute id: BoostState
+is attribute 5 but field 2), the 64-bit EstimatedHeatRequired exact; the
+guarded CancelBoost answered without a forward; Boost denied (`0x01`) and
+allowed, its BoostInfo JSON positional and its three fields forwarded
+(`3600,265,80`), BoostState still 0 after; the host's Active push raising
+exactly one BoostStarted carrying Duration 3600 and TargetPercentage 80, the
+idle push exactly one BoostEnded; WaterHeaterMode allow, deny, unlisted; the
+heating-only Thermostat's setpoint change reaching the AT link. Water heater
+v1: the absent features' pushes `+MTERR:3`, TankVolume absent `+MTERR:4`.
+Battery storage: the ember-served PowerSource attributes, B264's refused
+write, the fault list `+MTERR:5`, the EPM and DEM pushes, DEMMode; v1's DEM
+refusals. New mechanic: an event-count read (how many times an event fired
+and what it carried).
+
+#### Admission
+
+Four water heaters compose (1,440 B of objects); the fifth is refused ("WHM
+delegate pool (MT_WHM_MAX 4) or the cluster-object arena exhausted"). Four
+battery storage v0 (2,208 B); the fifth refused at its DEM claim. Ten RVCs
+compose (4,240 of 4,256 B); the eleventh is refused at its ModeBase claim.
+The four-family composition (four battery storage, four water heaters, two
+meters) composes all eleven endpoints: 4,256 of 4,256 B. A refused fifth
+leaves its 192 B measurement claim stranded until the next boot, the standing
+one-per-boot policy.
+
+#### Phase 1 and 2 on the batch image
+
+Phase 1: **295 passed, 1 failed**: the staged water heater and the staged
+solar, battery and DEM rows pass now; the EVSE row waits for its round.
+Phase 2: 98 passed, 2 failed (B512's two rows), 1 n/a, row-identical.
+
+#### The batch's memory record
+
+`arm-none-eabi-size` at `d5069eb` against 7a-2's `a47550a`: text 965,316
+(959,796: +5,520, the WHM server and bridge); `.bss` 141,912 (+192: the
+object arena's 160 and the WHM pool's 32). Free heap at `+MTREADY`: 71,024 B
+(-192). Per endpoint: the WHM pair 88 B (pinned); water heater 360 B (v0) /
+168 B (v1), battery storage 552 / 192; blocks 800 / 632 / 848 / 392 of arena.
+
 ### Catalogue batch 7a-2: the utility meter and device energy management
 
 The second of batch 7a's two rounds (graph DE584): the electrical utility
@@ -2845,7 +2913,9 @@ Since catalogue batch 4 (2026-09-26), sized to the strong promise (graph DE555):
 one `hearth_arena` over `HEARTH_OBJ_ARENA_BYTES` = 4,096
 (`port/mt_port_ids.h`), sixteen of the largest per-endpoint object, the
 OperationalState delegate and Instance pair at 256 B (true for every type up
-to 256 B; the wider ones carry admission limits since, below). The helpers live in
+to 256 B; the wider ones carry admission limits since, below). **Since
+catalogue batch 7b the arena is 4,256 B** (DE603, the user's ruling: +160 B of
+`.bss`), so the four energy families at their caps fit together exactly. The helpers live in
 `port/mt_matter_sl.cpp`: `obj_new` (batch 3), and `obj_pair_new`,
 `obj_inst_storage` and `obj_inst_new` (nRF `mt_matter_zephyr.cpp` 290-384,
 over this port's bump arena, where the cost is the payload rounded to 8 with
@@ -2872,7 +2942,10 @@ still sixteen-of (the 608 B block pin, the 256 B pair). The cluster-object
 arena is what refuses the tenth (the endpoint arena would hold ten), and a
 `static_assert` fails the build if a tenth ever fits, so the ceiling cannot
 drift silently. A composition past a limit is refused at create and the
-rebuild stops there, the nRF's model.
+rebuild stops there, the nRF's model. **Since catalogue batch 7b (DE603) the
+RVC is admitted up to ten**: the object arena grew to 4,256 B, ten RVCs use
+4,240 B of it (bench-proven), the twenty-slot ModeBase pool holds exactly ten
+(asserted) and refuses the eleventh, whose 4,664 B could not fit either.
 
 **The measurement family since catalogue batch 7a-1 (2026-09-27, DE584).**
 Each ElectricalPowerMeasurement endpoint draws a 152 B EPM pair and, where
@@ -2893,6 +2966,20 @@ third meter are refused at their claims; an RVC-heavy composition can refuse
 one earlier (nine RVCs leave 280 B), which is why each refusal log names both
 the pool cap and the arena. The DEM block is 528 B of the endpoint arena,
 under the 608 B pin.
+
+**The water heater and battery storage since catalogue batch 7b (2026-09-27,
+DE584, DE603).** A water heater draws an 88 B WHM pair and an 80 B
+WaterHeaterMode pair (v0 also the 192 B measurement graft: 360 B), **admitted
+up to four** (`MT_WHM_MAX`); battery storage draws the 7a families' pairs
+(552 B on v0, 192 on v1) inside their caps. The four energy families at
+their caps need exactly 1,536 + 1,440 + 608 + 672 = 4,256 B, which is why
+the arena grew (DE603); a joint assert holds it, and the bench composed
+four battery storage, four water heaters and two meters to 4,256 of 4,256 B.
+Both blocks are wider than the 608 B pin (water heater 800, battery storage
+848 of arena, counted exactly, the nRF's convention), so like the RVC they
+are admission candidates asserted against the endpoint arena, not floor
+terms. The fifth water heater and the fifth battery storage v0 are refused
+at their claims.
 
 ### Catalogue batch 2: the fabric proof, Phase 1 and 2 and the batch's memory record
 
@@ -4155,8 +4242,8 @@ The four that remain, each with its cause, and they are one fact four times:
 
 | Row | Cause |
 |---|---|
-| `MTMEAS staged variant-1 water heater` | Stages `0x0100, 0x050F,1` and needs the water heater to rebuild. Catalogue batch 7b. |
-| `MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM` | Stages `0x0100, 0x0017,1, 0x0018,1, 0x050D,1`. Catalogue batch 7a (solar power in 7a-1, DEM in 7a-2) and batch 7b (battery storage, `0x0018`): since 7a-1 the rebuild stops at the battery storage instead of the solar power. |
+| `MTMEAS staged variant-1 water heater` | Stages `0x0100, 0x050F,1` and needs the water heater to rebuild. Catalogue batch 7b. **Passes since catalogue batch 7b.** |
+| `MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM` | Stages `0x0100, 0x0017,1, 0x0018,1, 0x050D,1`. Catalogue batch 7a (solar power in 7a-1, DEM in 7a-2) and batch 7b (battery storage, `0x0018`): since 7a-1 the rebuild stops at the battery storage instead of the solar power. **Passes since catalogue batch 7b.** |
 | `MTROWAPPLY count-0 ... on a real EVSE endpoint` | Stages `0x0100, 0x050C,1, 0x0511`. The EVSE round and batch 7a's meter. |
 | `Utility meter pool exhaustion (MT_METER_MAX=2)` | Stages a light and three meters (`0x0511`) and wants the two-meter prefix back. Batch 7a's meter, plus a meter Instance pool this image has none of. **Passes since catalogue batch 7a-2.** |
 
@@ -5401,10 +5488,11 @@ are marked there.
 ### The catalogue
 
 The registry carries all 52 rows and the gate predicates; this build constructs
-forty-two of them (round 2's two milestone types, catalogue batch 1's
+forty-four of them (round 2's two milestone types, catalogue batch 1's
 twelve, batch 2's six, batch 3's two, batch 4's seven, batch 5a's six, batch
-5b's robotic vacuum cleaner, batch 7a-1's four measurement types and batch
-7a-2's utility meter and device energy management). The rest
+5b's robotic vacuum cleaner, batch 7a-1's four measurement types, batch
+7a-2's utility meter and device energy management, and batch 7b's water
+heater and battery storage). The rest
 arrive in the nRF
 arm's own order, batch by batch, each
 copying its sections out of `platform/nrf54l15/port/mt_devtypes_zephyr.cpp` at
@@ -5420,21 +5508,19 @@ the heap and the arenas.
 | 4 | appliance, 7 types | **built 2026-09-26**, seven types: the OperationalState and Chime Instance-served rows, `obj_pair_new` and `obj_inst_new` with the object arena at 4,096 B (DE555), and the endpoint block's mode select and chime stores. Proof file `core-batch4.json`; see "Catalogue batch 4" under "Measured" |
 | 5 | standalone, 7 types | **5a built 2026-09-26**, six types (air purifier, mounted on/off control, mounted dimmable load control, generic switch, pump, room air conditioner), ember-only, no object and no store. Proof file `core-batch5a.json`; see "Catalogue batch 5a" under "Measured". **5b built 2026-09-27**: the robotic vacuum cleaner with its two ModeBase clusters and RvcOperationalState pair, admitted up to nine (DE566). Proof file `core-batch5b.json`; see "Catalogue batch 5b" under "Measured" |
 | 7a | energy foundation, 6 types | **7a-1 built 2026-09-27**: the measurement family (electrical sensor, electrical meter, heat pump, solar power, with their power-only variants), admitted up to eight (`MT_MEAS_MAX`). Proof file `core-batch7a1.json`; see "Catalogue batch 7a-1" under "Measured". **7a-2 built 2026-09-27**: the utility meter (admitted up to two) and device energy management with its report-only variant (up to four). Proof file `core-batch7a2.json`; see "Catalogue batch 7a-2" under "Measured" |
-| 7b | delegate-served pair, 2 types | WaterHeaterManagement |
+| 7b | delegate-served pair, 2 types | **built 2026-09-27**: the water heater (up to four) and battery storage, each with its variant; the object arena grew to 4,256 B and the RVC's limit to ten (DE603). Proof file `core-batch7b.json`; see "Catalogue batch 7b" under "Measured" |
 | 8 | composed appliances, 7 types | the oven and refrigerator mode rows |
 | EVSE | 1 type | EnergyEvse and its sixteen attributes |
 
-**The three Phase 1 rows this build cannot pass belong to that list** (the
-fourth, the utility meter pool exhaustion row, passes since catalogue batch
-7a-2), and they are one fact three times: each stages a composition whose device types this
+**The one Phase 1 row this build cannot pass belongs to that list** (the
+utility meter pool exhaustion row passes since catalogue batch 7a-2, the
+staged water heater and the staged solar, battery and DEM rows since 7b): each stages a composition whose device types this
 build's registry has no cluster set for, so the rebuild aborts at the first of
 them and `AT+MTEP?` answers the bare light. They are not defects and they are
 not a regression against the nRF arm.
 
 | Parked row | Waits for |
 |---|---|
-| `MTMEAS staged variant-1 water heater` | batch 7b |
-| `MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM` | batches 7a and 7b (the battery storage, `0x0018`, is 7b's) |
 | `MTROWAPPLY count-0 ... on a real EVSE endpoint` | the EVSE round (7a-2's meter is in) |
 
 ### The wire surface
