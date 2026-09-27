@@ -187,10 +187,13 @@ constexpr hearth_devtype s_registry[] = {
     /* Catalogue batch 7a: the energy foundation types, the registry's first
      * variant-carrying rows (variant 0 = power + energy, variant 1 = power
      * only). */
-    { 0x0510, 1 },                                                      /* batch 7a: electrical sensor */
-    { 0x0514, 1 },                                                      /* batch 7a: electrical meter */
-    { 0x0309, 0 },                                                      /* batch 7a: heat pump */
-    { 0x0017, 1 },                                                      /* batch 7a: solar power */
+    { 0x0510, 1, &electricalSensorEndpoint, Span<const EmberAfDeviceType>(kElectricalSensorTypes),
+      &electricalSensorPowerOnlyEndpoint },
+    { 0x0514, 1, &electricalMeterEndpoint, Span<const EmberAfDeviceType>(kElectricalMeterTypes),
+      &electricalMeterPowerOnlyEndpoint },
+    { 0x0309, 0, &wiredElectricalSensorEndpoint, Span<const EmberAfDeviceType>(kHeatPumpTypes) },
+    { 0x0017, 1, &wiredElectricalSensorEndpoint, Span<const EmberAfDeviceType>(kSolarPowerTypes),
+      &wiredElectricalSensorPowerOnlyEndpoint },
     { 0x0511, 0 },                                                      /* batch 7a: electrical utility meter */
     { 0x050D, 1 },                                                      /* batch 7a: device energy management */
     /* Catalogue batch 7b: the delegate-served energy pair, the first rows

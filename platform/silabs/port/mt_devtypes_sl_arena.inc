@@ -481,11 +481,14 @@ constexpr size_t kOnOffApplianceSlots =
  * ClusterRevision; the mode select's Description is metadata-only, so its
  * count over-counts, the conservative direction. Catalogue batch 5a adds
  * the generic switch and the two OnOff appliances (the pump and the room air
- * conditioner), both far narrower than the extended colour light. */
+ * conditioner), both far narrower than the extended colour light. Catalogue
+ * batch 7a-1 adds the wired electrical sensor (the heat pump and solar
+ * power), the widest of the measurement family, still narrower than the
+ * extended colour light. */
 constexpr size_t kWidestEndpointSlots =
-    kMax2(kMax2(kIdentifySlots + kOnOffApplianceSlots,
+    kMax2(MT_COUNT(wiredPowerSourceAttrs) + MT_COUNT(ptopAttrs) + MT_COUNT(epmAttrs) + MT_COUNT(eemAttrs), kMax2(kMax2(kIdentifySlots + kOnOffApplianceSlots,
                 kIdentifySlots + MT_COUNT(switchAttrs)),
-          kMax2(kIdentifySlots + MT_COUNT(modeSelectAttrs), kMax2(kIdentifySlots + kMax2(kMax2(kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(colorTempAttrs), MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(extendedColorAttrs)), kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs), kMax2(kMax2(kMax2(MT_COUNT(tempAttrs), MT_COUNT(booleanStateAttrs)), kMax2(MT_COUNT(occupancyAttrs), MT_COUNT(humidityAttrs))), kMax2(MT_COUNT(pressureAttrs), kMax2(MT_COUNT(illuminanceAttrs), MT_COUNT(flowAttrs)))))), kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)), kMax2(kMax2(MT_COUNT(windowCoveringAttrs), MT_COUNT(airQualityAttrs)), kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)))), kMax2(kIdentifySlots + MT_COUNT(smokeCoAlarmAttrs), kIdentifySlots + MT_COUNT(opStateAttrs)))), kNoIdentifySlots)));
+          kMax2(kIdentifySlots + MT_COUNT(modeSelectAttrs), kMax2(kIdentifySlots + kMax2(kMax2(kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(colorTempAttrs), MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs) + MT_COUNT(extendedColorAttrs)), kMax2(MT_COUNT(onOffAttrs) + MT_COUNT(levelAttrs), kMax2(kMax2(kMax2(MT_COUNT(tempAttrs), MT_COUNT(booleanStateAttrs)), kMax2(MT_COUNT(occupancyAttrs), MT_COUNT(humidityAttrs))), kMax2(MT_COUNT(pressureAttrs), kMax2(MT_COUNT(illuminanceAttrs), MT_COUNT(flowAttrs)))))), kMax2(kMax2(kMax2(MT_COUNT(thermostatAttrs), MT_COUNT(fanControlAttrs)), kMax2(kMax2(MT_COUNT(windowCoveringAttrs), MT_COUNT(airQualityAttrs)), kMax2(MT_COUNT(doorLockAttrs), MT_COUNT(valveAttrs)))), kMax2(kIdentifySlots + MT_COUNT(smokeCoAlarmAttrs), kIdentifySlots + MT_COUNT(opStateAttrs)))), kNoIdentifySlots))));
 /* The widest cluster list is a max over every declared cluster list, not
  * just the dimmable light's: a future device type with a wider list must
  * fail the floor's static_assert below at build time, not surface later as a
@@ -493,8 +496,10 @@ constexpr size_t kWidestEndpointSlots =
  * sizing. Catalogue batch 2's six five- and three-cluster lists join it, as
  * does batch 4's mode select (four, tied with the dimmable light and the
  * plug); the two five-cluster colour light lists are the max. Batch 5a's
- * switch (three clusters) and pump and room air conditioner (four) join it. */
-constexpr size_t kWidestClusterList = kMax2(
+ * switch (three clusters) and pump and room air conditioner (four) join it.
+ * Batch 7a-1's six measurement lists (the wired sensor's five clusters the
+ * widest) join it. */
+constexpr size_t kWidestClusterList = kMax2(kMax2(kMax2(MT_COUNT(electricalSensorClusters), MT_COUNT(electricalSensorPowerOnlyClusters)), kMax2(MT_COUNT(electricalMeterClusters), MT_COUNT(electricalMeterPowerOnlyClusters))), kMax2(kMax2(MT_COUNT(wiredElectricalSensorClusters), MT_COUNT(wiredElectricalSensorPowerOnlyClusters)), kMax2(
     kMax2(MT_COUNT(genericSwitchClusters),
           kMax2(MT_COUNT(pumpClusters), MT_COUNT(roomAirConditionerClusters))),
     kMax2(MT_COUNT(modeSelectClusters), kMax2(
@@ -513,7 +518,7 @@ constexpr size_t kWidestClusterList = kMax2(
                               kMax2(MT_COUNT(pressureSensorClusters),
                                     kMax2(MT_COUNT(lightSensorClusters), MT_COUNT(flowSensorClusters))))))),
             kMax2(kMax2(MT_COUNT(powerSourceClusters), MT_COUNT(smokeCoAlarmClusters)),
-                  kMax2(MT_COUNT(applianceOpStateClusters), MT_COUNT(chimeClusters)))))));
+                  kMax2(MT_COUNT(applianceOpStateClusters), MT_COUNT(chimeClusters)))))))));
 
 constexpr size_t kModeSelectBlockBytes =
     block_bytes(MT_COUNT(modeSelectClusters), kIdentifySlots + MT_COUNT(modeSelectAttrs)) +
