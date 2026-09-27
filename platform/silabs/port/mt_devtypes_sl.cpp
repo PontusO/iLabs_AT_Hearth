@@ -157,6 +157,18 @@ extern "C" bool mt_matter_eem_reserve(void);
  * construction. Defined beside the DEM pool in the mt_matter_sl_b7.inc
  * fragment at the end of mt_matter_sl.cpp. */
 extern "C" void mt_matter_dem_register(void *delegate, uint16_t ep, bool with_pa);
+/* Catalogue batch 7b: the WaterHeaterManagement Instance's second half
+ * (construct + soft Init with the variant's feature mask), the DEM
+ * register's exact shape one cluster over. Port-local for the same reason:
+ * the C6 needs no such name because esp-matter's
+ * WaterHeaterManagementDelegateInitCB news the Instance from the
+ * endpoint's FeatureMap at enable time (esp_matter_delegate_callbacks.cpp:
+ * 487-498); here the create path passes the variant's own with_em_tp, the
+ * same predicate the variant-qualified WHM FeatureMap seed rows mirror,
+ * so the seeded shadow and the Instance mask agree by construction.
+ * Defined beside the WHM pool in the mt_matter_sl_b7.inc fragment at the
+ * end of mt_matter_sl.cpp. */
+extern "C" void mt_matter_whm_register(void *delegate, uint16_t ep, bool with_em_tp);
 
 using namespace chip;
 using namespace chip::app::Clusters;
@@ -1115,6 +1127,44 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
             return -1;
         }
     }
+    /* Catalogue batch 7b: the water heater handout's first half, the DEM
+     * pair's discipline verbatim: the WHM alloc takes the endpoint id per
+     * the header's alloc(ep) contract (core/include/mt_matter.h:993-1015) and
+     * discards it until the success-only second half (fix round M1, the
+     * DEM claim's note above and the pool's own comment), the
+     * WaterHeaterMode ModeBase claim is one more slot from the shared pool
+     * with the cluster id fixed at alloc, and its second half's
+     * Instance::Init() VerifyOrDies on ordering, so the only acceptable
+     * failure is this abort before anything is spent. The established
+     * unwind applies (chime unclaimed; a claim stranded by a LATER failure
+     * is bounded at one create per boot, the standing policy). */
+    void *whm_delegate = nullptr;
+    if (type_has_cluster(ep_type, WaterHeaterManagement::Id)) {
+        whm_delegate = mt_matter_whm_delegate_alloc(s_next_ep_id);
+        if (whm_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: WHM delegate pool (MT_WHM_MAX %u) or the "
+                    "cluster-object arena exhausted; %u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)MT_WHM_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    void *wh_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, WaterHeaterMode::Id)) {
+        wh_mode_delegate = mt_matter_modebase_delegate_alloc(WaterHeaterMode::Id);
+        if (wh_mode_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate unavailable (water heater mode): the "
+                    "cluster-object arena or the ModeBase pool cap (kModeBasePoolSlots) is exhausted",
+                    (unsigned)devtype_id);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
 
     void *block = hearth_arena_alloc(s_ep_arena, want, "endpoint block arena");
     if (block == nullptr) {
@@ -1170,6 +1220,11 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
          * index 0 as its first act). */
         if (type_has_cluster(ep_type, DeviceEnergyManagementMode::Id)) {
             new (region + store_offset(ep_type, DeviceEnergyManagementMode::Id)) mt_mb_store_t();
+        }
+        /* Catalogue batch 7b: the water heater's mode list, same
+         * obligation. */
+        if (type_has_cluster(ep_type, WaterHeaterMode::Id)) {
+            new (region + store_offset(ep_type, WaterHeaterMode::Id)) mt_mb_store_t();
         }
     }
 
@@ -1348,6 +1403,20 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     if (dem_mode_delegate != nullptr) {
         mt_matter_modebase_delegate_set_endpoint(dem_mode_delegate, d.ep_id);
+    }
+
+    /* Catalogue batch 7b: the water heater second halves, the DEM pair's
+     * shape one cluster over. The WHM register is soft (CHI then AAI, no
+     * contains-server check, water-heater-management-server.cpp:94-100)
+     * and takes the variant's EM|TP predicate, the single source both the
+     * FeatureMap seed and the Instance mask derive from (the variant-qualified
+     * seed rows on this port); the ModeBase setter carries the RVC block's panic
+     * warning verbatim. */
+    if (whm_delegate != nullptr) {
+        mt_matter_whm_register(whm_delegate, d.ep_id, variant == 0);
+    }
+    if (wh_mode_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(wh_mode_delegate, d.ep_id);
     }
 
     s_next_ep_id++;
