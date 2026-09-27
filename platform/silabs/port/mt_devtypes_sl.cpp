@@ -911,6 +911,67 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 5, the RVC's three delegates: two ModeBase (one per
+     * (endpoint, cluster) pair, RvcRunMode and RvcCleanMode both on this
+     * one endpoint) and one RvcOperationalState (its own pool: the base
+     * OperationalState Delegate::SetInstance() VerifyOrDies on sharing,
+     * so the trio's pool cannot serve it, and the RVC delegate class
+     * additionally carries the GoHome hook). All claimed HERE, before
+     * anything is spent, the two-halves rule: for the ModeBase pair the
+     * pre-create half matters MORE than for any earlier pool, because the
+     * second half's Instance::Init() VerifyOrDies (panics) rather than
+     * soft-bailing, so the only acceptable failure mode is this abort
+     * before an endpoint id, header entry or block exists. The cluster id
+     * is fixed at alloc time (mt_matter.h's contract: the delegate must
+     * answer GetModeValueByIndex(0, ...) for its OWN cluster the moment
+     * Init() asks, which is before set_endpoint could run a second
+     * setter). Like the opstate and valve claims, and unlike the chime's
+     * (fix round M3 scoped the unclaim to the chime), a claim stranded by
+     * a later failure path is bounded at one create per boot: the rebuild
+     * stops at the failure. */
+    void *mb_run_delegate = nullptr;
+    void *mb_clean_delegate = nullptr;
+    if (type_has_cluster(ep_type, RvcRunMode::Id)) {
+        mb_run_delegate = mt_matter_modebase_delegate_alloc(RvcRunMode::Id);
+        if (mb_run_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate pool exhausted (run mode); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    if (type_has_cluster(ep_type, RvcCleanMode::Id)) {
+        mb_clean_delegate = mt_matter_modebase_delegate_alloc(RvcCleanMode::Id);
+        if (mb_clean_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate pool exhausted (clean mode); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    void *rvc_opstate_delegate = nullptr;
+    if (type_has_cluster(ep_type, RvcOperationalState::Id)) {
+        rvc_opstate_delegate = mt_matter_rvc_opstate_delegate_alloc();
+        if (rvc_opstate_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: rvc opstate delegate pool exhausted (%u slots); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
+                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     void *block = hearth_arena_alloc(s_ep_arena, want, "endpoint block arena");
     if (block == nullptr) {
         /* hearth_arena_alloc() has already said what was wanted and what was
@@ -946,6 +1007,19 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
         if (type_has_cluster(ep_type, Chime::Id)) {
             new (region + store_offset(ep_type, Chime::Id)) mt_chime_store_t();
+        }
+        /* Catalogue batch 5: the RVC's two ModeBase stores, the first
+         * type with more than one trailing store in a block. count 0 is
+         * the pre-feed state the delegate's placeholder-mode-0 policy
+         * answers for; value-initialization is what produces it, and it
+         * MUST be in place before emberAfSetDynamicEndpoint() below,
+         * because the ModeBase Instance::Init() run in the handout's
+         * second half reads the delegate's index 0 as its first act. */
+        if (type_has_cluster(ep_type, RvcRunMode::Id)) {
+            new (region + store_offset(ep_type, RvcRunMode::Id)) mt_mb_store_t();
+        }
+        if (type_has_cluster(ep_type, RvcCleanMode::Id)) {
+            new (region + store_offset(ep_type, RvcCleanMode::Id)) mt_mb_store_t();
         }
     }
 
@@ -1038,6 +1112,33 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * reasoning. */
     if (chime_delegate != nullptr) {
         mt_matter_chime_delegate_set_endpoint(chime_delegate, d.ep_id);
+    }
+
+    /* Catalogue batch 5, the RVC's second halves. THE ORDER OF THIS CALL
+     * RELATIVE TO emberAfSetDynamicEndpoint() IS LOAD-BEARING AND WRONG
+     * ORDER IS A PANIC, not a log line: each ModeBase set_endpoint
+     * placement-constructs its Instance and runs Init(), whose second act
+     * is VerifyOrDie(emberAfContainsServer(ep, cluster))
+     * (mode-base-server.cpp:77). Run above the successful
+     * emberAfSetDynamicEndpoint() and the board aborts; every earlier
+     * pool in this function merely soft-bails on the same mistake. Its
+     * FIRST act is reading the delegate's mode index 0 (:74), which is
+     * why the mt_mb_store_t construction above sits before the endpoint
+     * is served and why the delegate's placeholder-mode-0 policy exists:
+     * a failure there returns early and the Instance silently never
+     * registers, no abort, no diagnostic. Both set_endpoint
+     * implementations check Init()'s return and log loudly
+     * (mt_matter_zephyr.cpp), unlike the C6 whose SDK init-callback path
+     * discards it. The RVC opstate half is the trio's shape verbatim
+     * (soft-bail Init, logged inside). */
+    if (mb_run_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(mb_run_delegate, d.ep_id);
+    }
+    if (mb_clean_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(mb_clean_delegate, d.ep_id);
+    }
+    if (rvc_opstate_delegate != nullptr) {
+        mt_matter_rvc_opstate_delegate_set_endpoint(rvc_opstate_delegate, d.ep_id);
     }
 
     s_next_ep_id++;
