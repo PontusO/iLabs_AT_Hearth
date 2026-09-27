@@ -631,8 +631,8 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         # ChangeToMode's NewMode is a positional command argument, so it
         # precedes the destination, as the harness's own step 3.15 passes it.
         handle = H.invoke_chip(ctx, [cc] + args + [node, str(ep)], timeout=30)
-        rc, out = handle.join(30)
         if answer == "none":
+            rc, out = handle.join(30)
             # The response has landed, so any forward this command raised
             # is already on the link: the check is a short window for a
             # +MTCMD for this endpoint and cluster (the queue is checked
@@ -647,6 +647,9 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
             s.check("%s forward %d/%d answered %s" % (prefix, fcl, fcmd,
                                                      "allow" if answer else "deny"),
                     fwd is not None)
+            # A listed mode blocks chip-tool until the host's verdict lands,
+            # so the forward is answered first and the command joined after.
+            rc, out = handle.join(30)
         s.check("%s ChangeToMode status %d" % (prefix, want["mode_status"]),
                 rc == 0 and H.parse_change_to_mode_status(out) == want["mode_status"])
         if "current_mode" in want:
