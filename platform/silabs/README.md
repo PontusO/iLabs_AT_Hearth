@@ -713,7 +713,8 @@ tree, both patch directories, so an addition to either bumps it.
 The matter_sdk patch caps `ElectricalEnergyMeasurement`'s `gMeasurements` table
 at `CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES` (8, in
 `src/CHIPProjectConfig.h`) instead of the whole dynamic endpoint space. The
-cluster is not in this round's build, so the reclaim is not measured here.
+cluster joined the build with catalogue batch 7a-1: the capped table measured
+3,968 B of `.bss` (8 x 496 B), where the stock one would be 8,432 B (17 x 496).
 
 The extension patch adds the `BooleanState` static cluster configuration
 template that catalogue batch 1's task 2 needed (`sdk-patches/README.md`
@@ -1034,12 +1035,13 @@ which is what `app_init()` creates.
 
 ### Source layout: mt_devtypes_sl.cpp and its fragments
 
-Its static data (tables, registry, arena and seeds) lives in eight `port/` fragments, `#include`d in this order:
+Its static data (tables, registry, arena and seeds) lives in nine `port/` fragments, `#include`d in this order:
 `mt_devtypes_sl_tables_core.inc` (device tables: milestone types and catalogue
 batch 1), `mt_devtypes_sl_tables_b2.inc` (batch 2),
 `mt_devtypes_sl_tables_b3.inc` (batch 3),
 `mt_devtypes_sl_tables_b4.inc` (batch 4),
 `mt_devtypes_sl_tables_b5.inc` (batches 5a and 5b),
+`mt_devtypes_sl_tables_b7.inc` (batch 7a-1, and the DE407 quiet table),
 `mt_devtypes_sl_registry.inc` (the parenting policy and the registry),
 `mt_devtypes_sl_arena.inc` (the external attribute store, the endpoint arena,
 its sizing and floor) and `mt_devtypes_sl_seeds.inc` (the seed table and
@@ -1074,6 +1076,8 @@ index, and a round that changes one arm finds the other through it.
 | the `AT+MTSWITCH` bridge | `mt_matter_zephyr.cpp` 3130-3167 | `port/mt_matter_sl_b5.inc` | catalogue batch 5a |
 | the RVC's two ModeBase clusters (`AT+MTMODES`, the live CurrentMode) | `mt_matter_zephyr.cpp` 3314-4005 | `port/mt_matter_sl_b5.inc` | catalogue batch 5b |
 | the RVC's RvcOperationalState (and `mt_matter_opstate_set`'s RVC branch restored in `port/mt_matter_sl_b4.inc`) | `mt_matter_zephyr.cpp` 4367-4579, 2485-2496 | `port/mt_matter_sl_b5.inc` | catalogue batch 5b |
+| the ElectricalPowerMeasurement and PowerTopology delegates, pools and live reader, the seven EPM Instance-served rows | `mt_matter_zephyr.cpp` 4581-4990, 5065-5104, 873-905 | `port/mt_matter_sl_b7.inc`, `port/mt_matter_sl.cpp` | catalogue batch 7a-1 |
+| the EEM reserve and register, and the `AT+MTMEAS` bridge (its DEM, water heater and EVSE branches until their batches answer `+MTERR:3`) | `mt_matter_zephyr.cpp` 4991-5064, 5105-5346 | `port/mt_matter_sl_b7.inc` | catalogue batch 7a-1 |
 | shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
@@ -1104,6 +1108,9 @@ index, and a round that changes one arm finds the other through it.
 | robotic vacuum cleaner (0x0074) | `mt_devtypes_zephyr.cpp` 2283-2435 | `port/mt_devtypes_sl_tables_b5.inc` | catalogue batch 5b |
 | `mt_dyn_mb_store()` | `mt_devtypes_zephyr.cpp` 7118-7159 | `port/mt_devtypes_sl.cpp` | catalogue batch 5b |
 | the RVC's create path (three claims, two ModeBase stores, the second halves) | `mt_devtypes_zephyr.cpp` 7497-7557, 7966-7978, 8258-8283 | `port/mt_devtypes_sl.cpp` | catalogue batch 5b |
+| electrical sensor (0x0510), electrical meter (0x0514), heat pump (0x0309), solar power (0x0017), with their variants | `mt_devtypes_zephyr.cpp` 2437-2723 | `port/mt_devtypes_sl_tables_b7.inc` | catalogue batch 7a-1 |
+| the DE407 quiet table (its seven EPM rows) | `mt_devtypes_zephyr.cpp` 4924-4988 | `port/mt_devtypes_sl_tables_b7.inc` | catalogue batch 7a-1 |
+| the measurement create path (EPM and PowerTopology claims, the EEM reserve, the second halves) | `mt_devtypes_zephyr.cpp` 7559-7618, 8285-8305 | `port/mt_devtypes_sl.cpp` | catalogue batch 7a-1 |
 | the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl_arena.inc` | round 2 task 5 |
@@ -2444,6 +2451,72 @@ differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
 
+### Catalogue batch 7a-1: the measurement family
+
+The first of batch 7a's two rounds (graph DE584): the electrical sensor
+(0x0510) and electrical meter (0x0514), each with a power-only variant 1, the
+heat pump (0x0309) and solar power (0x0017, variant 1 without energy), whose
+endpoints also advertise 0x0011 and 0x0510. ElectricalPowerMeasurement is
+served by its Instance from a delegate cache (pull), ElectricalEnergyMeasurement
+by the SDK's cumulative-energy call (push, with its event), PowerTopology by
+its Instance; all three are fed by `AT+MTMEAS`. The batch image is the final
+review's fix wave, `cfc8f77`, built incrementally 2026-09-27 in
+`~/silabs/work/hearth-matter-b7a1` (generated at Task 1 after the ZAP change),
+**0 warnings**, flashed with the development discriminator 0xF02 (see the
+top-level README's "Development bench"; the result files' QR payloads are
+that image's).
+
+#### The proof: 72 passed, 0 failed, 0 not applicable
+
+```
+$ python3 test/mt_catalogue_proof.py \
+      --port /dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00 \
+      --bridge cpico --batch mg24-batch7a1 \
+      --openocd-config platform/silabs/mg24-swd.cfg \
+      --baseline platform/silabs/core-batch7a1.json
+```
+
+2026-09-27 on `cfc8f77`'s image (the first run, 71/0/0 on `946b0c4`'s,
+lacked the ActivePower null-read row the final review asked for). New
+mechanics: variant rows (`AT+MTEP=<id>,<variant>`, read back the same way),
+extra device types checked in the DeviceTypeList, and a `push` kind:
+`AT+MTMEAS` answers OK with no lines and raises no `+MTATTR`, then the
+controller reads the value and an integer is read live over AT. Voltage and
+ActivePower answer `+MTERR:5` until first pushed; an energy push to a
+power-only variant answers `+MTERR:3`; a host write of Voltage is refused
+`+MTERR:11`. **An AT read names the attribute id, not `AT+MTMEAS`'s field:**
+Voltage is attribute 4 and ActivePower 8 (fields 0 and 2); attribute 0 is
+PowerMode. The plan had the field numbers; the bench smoke caught it.
+
+#### Admission: eight, the ninth refused
+
+The anchor and eight measurement endpoints compose (objects 1,264 B for the
+proof's seven; the endpoint arena 1,288 B for its eight endpoints); a ninth
+is refused ("EPM delegate pool (MT_MEAS_MAX 8) or the cluster-object arena
+exhausted", then "endpoint 9 (0x0510) failed, aborting rebuild"), the eight
+keep running. The boot log is silent for the seven 8-byte EPM push fields
+(the DE407 quiet table, ported in the fix wave; before it, seven "a slot
+holds 4" errors per EPM endpoint per boot).
+
+#### Phase 1 and 2 on the batch image
+
+Phase 1: 292 passed, 4 failed, the same four rows (the DEMCAP row's rebuild
+now passes the solar power and stops at the battery storage, batch 7b's).
+Phase 2: 98 passed, 2 failed (B512's two rows), 1 n/a, row-identical, on a
+dev-discriminator image, so the pairing can only be this board. Both on
+`946b0c4`'s image (the fix wave changed comments, two log strings, the quiet
+table and the proof script). Step 2.9's power cycle needs the hub watcher
+(TESTING.md's batch 7a-1 note).
+
+#### The batch's memory record
+
+`arm-none-eabi-size` at `cfc8f77`, against batch 5b's `1ee54fa`: text
+945,236 (933,276: +11,960, the three cluster servers, the bridge and the
+quiet table); `.bss` 141,656 (+4,256: the energy measurement pool's 3,968 B,
+8 x 496, and 288 B of the servers' statics). Free heap at `+MTREADY`: 71,280
+B fresh, 4,256 B below batch 5b, the `.bss` growth exactly. Per endpoint:
+EPM pair 152 B, PowerTopology pair 40 B (pinned).
+
 ### Catalogue batch 5b: the robotic vacuum cleaner under admission limits
 
 The second of batch 5's two rounds: the robotic vacuum cleaner (0x0074) with
@@ -2734,6 +2807,14 @@ arena is what refuses the tenth (the endpoint arena would hold ten), and a
 `static_assert` fails the build if a tenth ever fits, so the ceiling cannot
 drift silently. A composition past a limit is refused at create and the
 rebuild stops there, the nRF's model.
+
+**The measurement family since catalogue batch 7a-1 (2026-09-27, DE584).**
+Each ElectricalPowerMeasurement endpoint draws a 152 B EPM pair and, where
+the type carries PowerTopology, a 40 B pair (both pinned; the nRF measures
+148 and 36); the family is **admitted up to eight**, `MT_MEAS_MAX`, the
+nRF's pool depth (8 x 192 = 1,536 B, asserted). The ninth is refused at its
+EPM claim before anything is spent. The energy measurement state is not in
+the arena: it is the SDK patch's static pool, 8 x 496 = 3,968 B of `.bss`.
 
 ### Catalogue batch 2: the fabric proof, Phase 1 and 2 and the batch's memory record
 
@@ -3997,7 +4078,7 @@ The four that remain, each with its cause, and they are one fact four times:
 | Row | Cause |
 |---|---|
 | `MTMEAS staged variant-1 water heater` | Stages `0x0100, 0x050F,1` and needs the water heater to rebuild. Catalogue batch 7b. |
-| `MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM` | Stages `0x0100, 0x0017,1, 0x0018,1, 0x050D,1`. Catalogue batch 7a. |
+| `MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM` | Stages `0x0100, 0x0017,1, 0x0018,1, 0x050D,1`. Catalogue batch 7a (solar power in 7a-1, DEM in 7a-2) and batch 7b (battery storage, `0x0018`): since 7a-1 the rebuild stops at the battery storage instead of the solar power. |
 | `MTROWAPPLY count-0 ... on a real EVSE endpoint` | Stages `0x0100, 0x050C,1, 0x0511`. The EVSE round and batch 7a's meter. |
 | `Utility meter pool exhaustion (MT_METER_MAX=2)` | Stages a light and three meters (`0x0511`) and wants the two-meter prefix back. Batch 7a's meter, plus a meter Instance pool this image has none of. |
 
@@ -5242,9 +5323,9 @@ are marked there.
 ### The catalogue
 
 The registry carries all 52 rows and the gate predicates; this build constructs
-thirty-six of them (round 2's two milestone types, catalogue batch 1's twelve,
-batch 2's six, batch 3's two, batch 4's seven, batch 5a's six and batch 5b's
-robotic vacuum cleaner). The rest
+forty of them (round 2's two milestone types, catalogue batch 1's twelve,
+batch 2's six, batch 3's two, batch 4's seven, batch 5a's six, batch 5b's
+robotic vacuum cleaner and batch 7a-1's four measurement types). The rest
 arrive in the nRF
 arm's own order, batch by batch, each
 copying its sections out of `platform/nrf54l15/port/mt_devtypes_zephyr.cpp` at
@@ -5259,7 +5340,7 @@ the heap and the arenas.
 | 3 | command-verdict, 2 types | **built 2026-09-25**, two types, the `+MTCMD` verdict path's first run on this port, the cluster-object arena (minimal, DE541) and the first delegate (the valve). Proof file `core-batch3.json`; see "Catalogue batch 3" under "Measured" |
 | 4 | appliance, 7 types | **built 2026-09-26**, seven types: the OperationalState and Chime Instance-served rows, `obj_pair_new` and `obj_inst_new` with the object arena at 4,096 B (DE555), and the endpoint block's mode select and chime stores. Proof file `core-batch4.json`; see "Catalogue batch 4" under "Measured" |
 | 5 | standalone, 7 types | **5a built 2026-09-26**, six types (air purifier, mounted on/off control, mounted dimmable load control, generic switch, pump, room air conditioner), ember-only, no object and no store. Proof file `core-batch5a.json`; see "Catalogue batch 5a" under "Measured". **5b built 2026-09-27**: the robotic vacuum cleaner with its two ModeBase clusters and RvcOperationalState pair, admitted up to nine (DE566). Proof file `core-batch5b.json`; see "Catalogue batch 5b" under "Measured" |
-| 7a | energy foundation, 6 types | the meter Instance pool, ElectricalPowerMeasurement, DEM |
+| 7a | energy foundation, 6 types | **7a-1 built 2026-09-27**: the measurement family (electrical sensor, electrical meter, heat pump, solar power, with their power-only variants), admitted up to eight (`MT_MEAS_MAX`). Proof file `core-batch7a1.json`; see "Catalogue batch 7a-1" under "Measured". **7a-2**: the utility meter (the meter Instance pool) and device energy management |
 | 7b | delegate-served pair, 2 types | WaterHeaterManagement |
 | 8 | composed appliances, 7 types | the oven and refrigerator mode rows |
 | EVSE | 1 type | EnergyEvse and its sixteen attributes |
@@ -5273,7 +5354,7 @@ not a regression against the nRF arm.
 | Parked row | Waits for |
 |---|---|
 | `MTMEAS staged variant-1 water heater` | batch 7b |
-| `MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM` | batch 7a |
+| `MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM` | batches 7a and 7b (the battery storage, `0x0018`, is 7b's) |
 | `MTROWAPPLY count-0 ... on a real EVSE endpoint` | the EVSE round plus 7a's meter |
 | `Utility meter pool exhaustion (MT_METER_MAX=2)` | 7a's meter, plus a meter Instance pool this image has none of |
 
