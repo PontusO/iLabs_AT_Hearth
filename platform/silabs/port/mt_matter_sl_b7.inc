@@ -505,7 +505,7 @@ static_assert(CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES >= MT_MEAS
               "the EEM measurement pool must be at least as deep as the EPM delegate pool, "
               "or an endpoint this port accepts cannot serve its Accuracy attribute; raise "
               "CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES in "
-              "src/chip_project_config.h");
+              "src/CHIPProjectConfig.h");
 
 static uint8_t s_eem_reserved;
 

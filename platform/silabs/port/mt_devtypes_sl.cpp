@@ -138,6 +138,21 @@ extern "C" {
  * contract. */
 extern "C" void mt_matter_chime_delegate_unclaim(void *delegate);
 
+/* Catalogue batch 7a: the per-EEM-endpoint registration (the one-time
+ * wildcard AttributeAccessInterface plus SetMeasurementAccuracy), the
+ * port's HearthEemInitCB equivalent. Port-local like the chime unclaim
+ * above (core/include/mt_matter.h is read-only and names no such function
+ * because the C6 wires its equivalent through esp-matter's init-callback
+ * machinery); this file is the only caller, defined beside the
+ * measurement pools in the mt_matter_sl_b7.inc fragment at the end of
+ * mt_matter_sl.cpp. */
+extern "C" void mt_matter_eem_register(uint16_t ep);
+/* Capacity gate for the SDK's measurement table, claimed before create()
+ * and consumed by the register above; see its definition in the
+ * mt_matter_sl_b7.inc fragment at the end of mt_matter_sl.cpp for why the
+ * count lives in this port. */
+extern "C" bool mt_matter_eem_reserve(void);
+
 using namespace chip;
 using namespace chip::app::Clusters;
 
@@ -970,6 +985,67 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 7a: the measurement handout's first half. One EPM
+     * delegate for any type carrying ElectricalPowerMeasurement, one
+     * PowerTopology delegate for any carrying PowerTopology, both from the
+     * MT_MEAS_MAX (8) pools in mt_matter_sl_b7.inc, the C6's exact pool
+     * depths (DE407). Exhaustion aborts HERE, before an endpoint id, a
+     * header entry or a heap block is spent, the two-halves rule; the
+     * established unwind applies (chime unclaimed; a claim stranded by a
+     * LATER failure is bounded at one create per boot, the rebuild stops
+     * at the failure, the modebase claims' standing policy). */
+    void *epm_delegate = nullptr;
+    if (type_has_cluster(ep_type, ElectricalPowerMeasurement::Id)) {
+        epm_delegate = mt_matter_epm_delegate_alloc();
+        if (epm_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: EPM delegate pool exhausted (MT_MEAS_MAX %u); %u of %u "
+                    "serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)MT_MEAS_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    void *ptop_delegate = nullptr;
+    if (type_has_cluster(ep_type, PowerTopology::Id)) {
+        ptop_delegate = mt_matter_ptop_delegate_alloc();
+        if (ptop_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: PowerTopology delegate pool exhausted (MT_MEAS_MAX %u); "
+                    "%u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)MT_MEAS_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    /* The EEM measurement table's capacity, claimed here for the same
+     * two-halves reason as the two above: mt_matter_eem_register() below
+     * cannot be the gate, because it needs an endpoint id that only a
+     * successful create() produces, so a pool-exhausted endpoint would
+     * already be live, and answering Failure on the MANDATORY Accuracy
+     * attribute of a cluster it advertises, by the time anyone could
+     * notice. The pool itself is inside the SDK (../sdk-patches), which is
+     * why this port has to hold the count; mt_matter_eem_reserve()'s
+     * comment carries the reasoning and why this is unreachable today. */
+    if (type_has_cluster(ep_type, ElectricalEnergyMeasurement::Id)) {
+        if (!mt_matter_eem_reserve()) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: EEM measurement pool exhausted "
+                    "(CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES %u, "
+                    "src/CHIPProjectConfig.h); %u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id,
+                    (unsigned)CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES,
+                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     void *block = hearth_arena_alloc(s_ep_arena, want, "endpoint block arena");
     if (block == nullptr) {
         /* hearth_arena_alloc() has already said what was wanted and what was
@@ -1137,6 +1213,28 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     if (rvc_opstate_delegate != nullptr) {
         mt_matter_rvc_opstate_delegate_set_endpoint(rvc_opstate_delegate, d.ep_id);
+    }
+
+    /* Catalogue batch 7a: the measurement second halves. Each setter
+     * placement-constructs its cluster Instance and runs Init(), which is
+     * SOFT for both (AAI registration only, no VerifyOrDie: electrical-
+     * power-measurement-server.cpp:43-47, power-topology-server.cpp:42-46),
+     * so ordering mistakes here cannot panic, unlike the ModeBase block
+     * above; below the successful create so the registration serves a live
+     * endpoint. mt_matter_eem_register() is the EEM equivalent for a
+     * cluster that has no delegate at all: the one-time wildcard AAI (its
+     * mask is load-bearing for FeatureMap truth on every EEM endpoint, the
+     * eemAttrs audit note) plus this endpoint's SetMeasurementAccuracy(),
+     * which resolves through emberAfGetClusterServerEndpointIndex() and so
+     * REQUIRES the endpoint configured and enabled first. */
+    if (epm_delegate != nullptr) {
+        mt_matter_meas_delegate_set_endpoint(epm_delegate, d.ep_id);
+    }
+    if (ptop_delegate != nullptr) {
+        mt_matter_meas_delegate_set_endpoint(ptop_delegate, d.ep_id);
+    }
+    if (type_has_cluster(ep_type, ElectricalEnergyMeasurement::Id)) {
+        mt_matter_eem_register(d.ep_id);
     }
 
     s_next_ep_id++;
