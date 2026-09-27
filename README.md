@@ -130,6 +130,31 @@ raises a Switch cluster event. See `AT_MT_SPEC.md` sections 3.17-3.24.
 Platform-specific implementation notes (what rides an SDK quirk, measured
 endpoint capacity, image variants) live in the platform READMEs.
 
+## Development bench: one discriminator per board
+
+Every port ships the Matter test discriminator `0xF00`. With more than one
+Hearth board powered on the same bench, `chip-tool pairing ble-thread` pairs
+the first board it finds advertising that discriminator, not necessarily the
+one under test, and the run then fails in ways that look like a firmware
+fault (on the MG24 bench this cost a long investigation). On a development
+bench, give each board its own discriminator:
+
+| Board | Discriminator | How |
+|---|---|---|
+| ESP32-C6 | `0xF00` | the shipped default: nothing to change |
+| nRF54L15 | `0xF01` | `west build ... -- -DCONFIG_CHIP_DEVICE_DISCRIMINATOR=0xF01` (the build has no factory data, so the Kconfig value is the one advertised) |
+| Silicon Labs MG24 | `0xF02` | after `slc generate` into the build directory, append `C_DEFS += -DCHIP_DEVICE_CONFIG_USE_TEST_SETUP_DISCRIMINATOR=0xF02` to the generated `hearth.project.mak` there, then build (the define wins over `src/CHIPProjectConfig.h`'s `#ifndef` default; the provision storage falls back to it while no discriminator is provisioned) |
+
+These are development settings only. They live on the build command line or
+in a generated build directory outside the repository, never in a committed
+configuration, and release images keep `0xF00`. Nothing else changes: the
+regression harness and the catalogue proof script read each board's setup
+code from the board itself (`AT+MTCODES?`), so they follow whatever it
+advertises. Check the result with `chip-tool payload parse-setup-payload` on
+the board's QR code: it prints `Long discriminator`. The catalogue proof
+script additionally refuses a pairing whose product id is not the MG24's
+(`0x8010`).
+
 ## Documentation
 
 The specifications, architecture decision record, testing plan and design
