@@ -1,13 +1,13 @@
 {
   "header": {
     "cgmr": "1.2.0",
-    "fw_repo_head": "bf417dcbf01f0c2630e1dc058162babfbacbafd9",
+    "fw_repo_head": "2bfc63e675ea9ac1c84b07a0f71ce5099a4693cf",
     "manual_code": "34970112332",
     "net": "+MTNET:THREAD,0,0,0",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "qr_payload": "MT:SAGA4KQS02KA0648G00",
     "ssid": null,
-    "timestamp": "2026-09-27T16:28:06+00:00",
+    "timestamp": "2026-09-27T20:13:12+00:00",
     "transport": "THREAD"
   },
   "results": {
@@ -83,7 +83,7 @@
     "MTCOMMISSION? -> ERROR": "PASS",
     "MTDEMCAP n=5 -> +MTERR:1 (a well-formed count above the 4-entry bound: the range check outranks the arity check)": "PASS",
     "MTDEMCAP no args -> ERROR (exec form)": "PASS",
-    "MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM: the cluster-missing and attribute-missing rows with their OK controls, then restore": "FAIL",
+    "MTDEMCAP/MTMEAS staged variant-1 solar, battery and DEM: the cluster-missing and attribute-missing rows with their OK controls, then restore": "PASS",
     "MTDEMCAP=1 -> ERROR (fewer than the three mandatory parameters)": "PASS",
     "MTDEMCAP=1,1,0,1000 -> ERROR (n=0 declares exactly 3 parameters, a fourth is junk)": "PASS",
     "MTDEMCAP=1,1,1,-2,5000,zz,60 -> +MTERR:1 (minDuration not numeric; the minus on minPower is fine, powers are signed)": "PASS",
@@ -124,7 +124,7 @@
     "MTLOCK? -> ERROR (query form)": "PASS",
     "MTMEAS eight pairs -> +MTERR:1 (18 tokens overflow at_split_args' 2 + 2 * MT_MEAS_MAX_PAIRS bound)": "PASS",
     "MTMEAS no args -> ERROR (exec form)": "PASS",
-    "MTMEAS staged variant-1 water heater: gate rows (+MTERR:3, gate outranks range), unknown field, then restore": "FAIL",
+    "MTMEAS staged variant-1 water heater: gate rows (+MTERR:3, gate outranks range), unknown field, then restore": "PASS",
     "MTMEAS=1,144 -> +MTERR:1 (no pairs: fewer than 4 parameters)": "PASS",
     "MTMEAS=1,144,0 -> +MTERR:1 (odd tail: field 0 has no value)": "PASS",
     "MTMEAS=1,144,0,zz -> +MTERR:1 (value not numeric)": "PASS",
