@@ -2620,7 +2620,7 @@ class TestBatch7a1Table(unittest.TestCase):
 
     def test_earlier_batches_stage_plain_ids(self):
         for b in P.BATCHES:
-            if b in ("mg24-batch7a1", "mg24-batch7a2"):
+            if b in ("mg24-batch7a1", "mg24-batch7a2", "mg24-batch7b"):
                 continue
             for _ep, d in P.composition_for(b):
                 self.assertNotIn(",", d, b)

@@ -37,7 +37,8 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "electricalpowermeasurement", "electricalenergymeasurement",
                  "powertopology",
                  "meteridentification", "deviceenergymanagement",
-                 "deviceenergymanagementmode"}
+                 "deviceenergymanagementmode",
+                 "waterheatermanagement", "waterheatermode"}
 
 # The MG24 Hearth build's product id. Two Hearth boards on the bench share
 # discriminator 0xF00, so chip-tool's BLE scan can pair the other one
@@ -139,6 +140,11 @@ ANCHOR_NAME = "on/off light (anchor)"
 #    exits 0 and the row sees a silent no-op). A freshly composed dimmable
 #    light is off, so the "with On/Off" variant is the command a real dimmer
 #    sends and the only one that can prove the URC path here.
+# The water heater's BoostInfo (batch 7b), one positional JSON argument
+# before the destination on chip-tool's command line; it forwards as
+# 3600,265,80 (AT_MT_SPEC 3.17's worked example).
+BOOST = '{"duration": 3600, "oneShot": true, "targetPercentage": 80}'
+
 BATCHES = {
     "mg24-batch1": [
         _type("0x0101", "dimmable light", 3, "levelcontrol", 8, 0, "current-level", 100,
@@ -517,6 +523,125 @@ BATCHES = {
                   [("deviceenergymanagementmode", "supported-modes", ["NoOptimization", "GridOpt"])]),
            extra_reads=[("read", "feature-map", 0)]),
     ],
+    # Batch 7b (catalogue batch 7b design spec section 4): the water heater
+    # v0 and v1 and battery storage v0 and v1. AT+MTMEAS 0x94 raises no URC;
+    # reads by attribute id, and the 0x94 field numbers differ from field 2 on
+    # (BoostState field 2 is attribute 5; TankVolume 3/2, EstimatedHeatRequired
+    # 4/3, TankPercentage 5/4). Boost's BoostInfo is one positional argument
+    # before the destination. Row order matters: the guarded CancelBoost and
+    # the deny run before the allowed Boost (the guard consumes the cached
+    # parameters), the Active push after it.
+    "mg24-batch7b": [
+        _multi("0x050F", "water heater", 1, "waterheatermanagement", [
+            _check(148, 0, "heater-types", 4,
+                   controller=("push", "AT+MTMEAS=%(ep)d,148,0,4", "int")),
+            _check(148, 1, "heat-demand", 4,
+                   controller=("push", "AT+MTMEAS=%(ep)d,148,1,4", "int")),
+            _check(148, 2, "tank-volume", 300,
+                   controller=("push", "AT+MTMEAS=%(ep)d,148,3,300", "int")),
+            _check(148, 3, "estimated-heat-required", 4294967297,
+                   controller=("push", "AT+MTMEAS=%(ep)d,148,4,4294967297", "int")),
+            _check(148, 4, "tank-percentage", 60,
+                   controller=("push", "AT+MTMEAS=%(ep)d,148,5,60", "int")),
+            _check(148, 0, "heater-types", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,148,9,1"], 1)),
+            _check(148, 3, "estimated-heat-required", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,148,4,-5"], 1)),
+            _check(148, 5, "boost-state", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,148,5,1"], 11)),
+            _check(148, 5, "boost-state", 0, at_cmd="AT+MTMEAS=%(ep)d,148,1,4",
+                   controller=("no_forward", ["cancel-boost"], {"rc0": True})),
+            _check(148, 5, "boost-state", 0, at_cmd="AT+MTMEAS=%(ep)d,148,1,4",
+                   controller=("verdict", ["boost", BOOST], (148, 0), 0,
+                               {"rc0": False, "status": 0x1, "positional": True},
+                               [3600, 265, 80])),
+            _check(148, 5, "boost-state", 0, at_cmd="AT+MTMEAS=%(ep)d,148,1,4",
+                   controller=("verdict", ["boost", BOOST], (148, 0), 1,
+                               {"rc0": True, "positional": True, "after": [("boost-state", 0)]},
+                               [3600, 265, 80])),
+            _check(148, 5, "boost-state", 1,
+                   controller=("push", "AT+MTMEAS=%(ep)d,148,2,1", "int")),
+            # The same-state repeat: BoostState stays Active (no second
+            # BoostStarted, the event count below), the heater types it
+            # carries move to 8.
+            _check(148, 0, "heater-types", 8,
+                   controller=("push", "AT+MTMEAS=%(ep)d,148,2,1,0,8", "int")),
+            _check(148, 5, "boost-state", 1, at_cmd="AT+MTMEAS=%(ep)d,148,1,4",
+                   controller=("verdict", ["cancel-boost"], (148, 1), 1, {"rc0": True})),
+            _check(148, 5, "boost-state", 0,
+                   controller=("push", "AT+MTMEAS=%(ep)d,148,2,0", "int")),
+            _check(158, 1, "current-mode", 1, chip_cluster="waterheatermode",
+                   controller=("mode_verdict", ["change-to-mode", "1"], (158, 0), 1,
+                               {"mode_status": 0, "current_mode": 1}, 1)),
+            _check(158, 1, "current-mode", 1, chip_cluster="waterheatermode",
+                   controller=("mode_verdict", ["change-to-mode", "0"], (158, 0), 0,
+                               {"mode_status": 2, "current_mode": 1}, 0)),
+            _check(158, 1, "current-mode", 1, chip_cluster="waterheatermode",
+                   controller=("mode_verdict", ["change-to-mode", "5"], (158, 0), "none",
+                               {"mode_status": 1, "current_mode": 1}, None)),
+            _check(0x0201, 0x0012, "occupied-heating-setpoint", 2000, chip_cluster="thermostat",
+                   controller=("command", ["setpoint-raise-lower", "0", "10"],
+                               (0x0201, 0x0012, 2100))),
+            _check(144, 8, "active-power", 2400000, chip_cluster="electricalpowermeasurement",
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,2,2400000", "int")),
+        ], setup=("setup", ['AT+MTMODES=%(ep)d,158,0,0,"Manual",1,16386,"Timed"'],
+                  [("waterheatermode", "supported-modes", ["Manual", "Timed"])]),
+           extra_types=[("0x0510", 1)],
+           extra_reads=[("read", "feature-map", 3),
+                        ("event-count", "boost-started", 1,
+                         [("Duration", 3600), ("TargetPercentage", 80)]),
+                        ("event-count", "boost-ended", 1)]),
+        _multi("0x050F", "water heater bare", 1, "waterheatermanagement", [
+            _check(148, 0, "heater-types", 1,
+                   controller=("push", "AT+MTMEAS=%(ep)d,148,0,1", "int")),
+            _check(148, 2, "tank-volume", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,148,3,200"], 3)),
+            _check(148, 3, "estimated-heat-required", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,148,4,-5"], 3)),
+            _check(148, 4, "tank-percentage", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,148,5,50"], 3)),
+            _check(148, 2, "tank-volume", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,148,2"], 4)),
+            _check(144, 8, "active-power", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,144,2,1000"], 3)),
+            _check(158, 1, "current-mode", 1, chip_cluster="waterheatermode",
+                   controller=("mode_verdict", ["change-to-mode", "1"], (158, 0), 1,
+                               {"mode_status": 0, "current_mode": 1}, 1)),
+        ], variant=1,
+           setup=("setup", ['AT+MTMODES=%(ep)d,158,0,0,"Manual",1,16386,"Timed"'],
+                  [("waterheatermode", "supported-modes", ["Manual", "Timed"])]),
+           extra_reads=[("read", "feature-map", 0)]),
+        _multi("0x0018", "battery storage", 2, "powersource", [
+            _check(47, 26, "bat-charge-state", 1),
+            _check(47, 24, "bat-capacity", 13500000),
+            _check(47, 12, "bat-percent-remaining", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,47,12,201"], 1)),
+            _check(47, 18, "active-bat-faults", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,47,18"], 5)),
+            _check(144, 8, "active-power", -2200000, chip_cluster="electricalpowermeasurement",
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,2,-2200000", "int")),
+            _check(152, 0, "esatype", 5, chip_cluster="deviceenergymanagement",
+                   controller=("push", "AT+MTMEAS=%(ep)d,152,0,5", "int")),
+            _check(159, 1, "current-mode", 1, chip_cluster="deviceenergymanagementmode",
+                   controller=("mode_verdict", ["change-to-mode", "1"], (159, 0), 1,
+                               {"mode_status": 0, "current_mode": 1}, 1)),
+        ], setup=("setup", ['AT+MTMODES=%(ep)d,159,0,0,"NoOptimization",1,16385,"DeviceOpt"',
+                            "AT+MTDEMCAP=%(ep)d,2,1,1000000,5000000,60,1800"],
+                  [("deviceenergymanagementmode", "supported-modes", ["NoOptimization", "DeviceOpt"]),
+                   ("deviceenergymanagement", "power-adjustment-capability", ["5000000", "1800"])]),
+           extra_types=[("0x0011", 1), ("0x0510", 1), ("0x050D", 3)],
+           extra_reads=[("read", "feature-map", 6)]),
+        _multi("0x0018", "battery storage without DEM", 2, "powersource", [
+            _check(47, 11, "bat-voltage", 12600),
+            _check(152, 0, "esatype", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,152,0,5"], 3)),
+            _check(152, 5, "power-adjustment-capability", 0,
+                   controller=("at_refused", ["AT+MTDEMCAP=%(ep)d,1,0"], 3)),
+            _check(144, 8, "active-power", 1500000, chip_cluster="electricalpowermeasurement",
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,2,1500000", "int")),
+        ], variant=1, extra_types=[("0x0011", 1), ("0x0510", 1)],
+           extra_reads=[("read", "feature-map", 6)]),
+    ],
 }
 
 def composition_for(batch):
@@ -771,6 +896,21 @@ def prove_endpoint(link, chip, s, node, ep, t):
             # constant.
             s.check("%s ep%d %s event present" % (tag, ep, extra[1]),
                     rc == 0 and extra[1].replace("-", " ").title().replace(" ", "") in out)
+        elif extra[0] == "event-count":
+            # Batch 7b: how many times the event was reported (exactly one
+            # BoostStarted after the host's Active push, one BoostEnded
+            # although a guarded CancelBoost ran first), and the labels it
+            # must carry (BoostStarted's cached Duration and
+            # TargetPercentage), read with the harness's own counter and
+            # label regex.
+            name = extra[1].replace("-", " ").title().replace(" ", "")
+            rc, out = chip.run([t["chip_cluster"], "read-event", extra[1], node, str(ep)], timeout=30)
+            s.check("%s ep%d %s event count %d" % (tag, ep, extra[1], extra[2]),
+                    rc == 0 and H.parse_event_count(out, name) == extra[2])
+            for label, value in (extra[3] if len(extra) > 3 else ()):
+                s.check("%s ep%d %s carries %s %s" % (tag, ep, extra[1], label, value),
+                        rc == 0 and re.search(r"\b%s:\s*%s\b" % (re.escape(label), re.escape(str(value))),
+                                              out) is not None)
         else:
             rc, out = chip.run([t["chip_cluster"], "read", extra[1], node, str(ep)], timeout=30)
             s.check("%s ep%d %s = %s" % (tag, ep, extra[1], extra[2]), rc == 0 and H.parse_int_attr(out) == extra[2])
