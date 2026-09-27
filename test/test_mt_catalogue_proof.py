@@ -1859,5 +1859,634 @@ class TestBatch5aRowNames(unittest.TestCase):
             self.assertIn(name, names)
 
 
+class _ModeChip(_VerdictChip):
+    """_VerdictChip widened to the ModeBase ChangeToMode shapes.
+
+    The kind under test has no write step, so _VerdictChip's forward
+    enqueuing is exactly what a change-to-mode run raises (nothing when
+    the table answers "none"), and its out carries the chip-tool line
+    the two status rows read. The ChangeToMode rows read the ModeBase
+    status from the `status: <int>` line parse_change_to_mode_status
+    parses (the interaction-model `status = 0x..` branch parse_status
+    uses is not here: a denied ChangeToMode is still a StatusIB
+    Success), and the current-mode row reads CurrentMode in the
+    parse_int_attr shape, so out must carry both: a bare "status: N"
+    line would also fail the current-mode row (and a `status = 0x..`
+    line would also fail the ChangeToMode row)."""
+
+    def __init__(self, *a, change_status=0, current_mode=1, forward=True,
+                 **kw):
+        kw.setdefault("status", "0x00")
+        super().__init__(*a, **kw)
+        self.change_status = change_status
+        self.current_mode = current_mode
+        self.forward = forward
+
+    def run(self, args, timeout=None):
+        if len(args) >= 4 and args[1] in ("read", "read-event"):
+            if args[2].replace("-", "").lower() == "currentmode":
+                body = str(self.current_mode)
+            else:
+                body = "1"
+            return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: %s\n"
+                       % (args[2].replace("-", ""), body))
+        if not self.forward and args[1] == "change-to-mode":
+            # The unlisted mode: the SDK answers the ChangeToMode itself
+            # and nothing reaches the link, so the forward is not
+            # enqueued (a no-forward row must pass on an empty queue).
+            return (self.rc, "CHIP:TOO:   status: %d\n"
+                             % self.change_status)
+        # The ChangeToMode forward is the five-field wire form: the
+        # command carries the mode as a payload field (spec 3.17's
+        # ChangeToMode newMode), so +MTCMD:<seq>,<ep>,<cluster>,<cmd>,
+        # <mode>. Enqueuing the bare four-field shape would leave the
+        # tail empty and the responder's payload check (the check's
+        # answer, 1 or 0) could never match: expect() would return None
+        # and the AT+MTCMDRESP the row asserts would never be sent.
+        if self.link is not None:
+            self.link.urcs.append("+MTCMD:%d,%d,%d,%d,%d"
+                                  % (self.seq, self.ep, self.cluster,
+                                     self.command,
+                                     int(args[2]) if args[2].isdigit()
+                                     else 1))
+        out = "CHIP:TOO:   status: %d\n" % self.change_status
+        out += ("[1786148467.112] [3186308:3186310] [TOO]   "
+                "CurrentMode: %d\n" % self.current_mode)
+        return (0, out)
+
+
+class TestModeVerdictKind(unittest.TestCase):
+    """The mode_verdict kind against the same fakes the verdict tests
+    use: a _VerdictLink (recorded commands, urcs queue) and the
+    _ModeChip chip_call double, which enqueues the ChangeToMode
+    forward and returns the (rc, out) the status rows read. The kind
+    has no write step: the chip-tool call is the whole interaction,
+    and its argv is [cluster, change-to-mode, <mode>, node, ep]."""
+
+    def _patch_chip_call(self, chip):
+        self._saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        self.addCleanup(self._unpatch_chip_call)
+
+    def _unpatch_chip_call(self):
+        if getattr(self, "_saved", None) is not None:
+            H._threaded_chip_call = self._saved
+        self._saved = None
+
+    def _check_for_mode(self, mode, fcl=84):
+        # The check the fake drives, by the mode it requests and the
+        # cluster its ChangeToMode forward lands on: the table asks for
+        # mode "1" twice (run-mode allow, forward 84; clean-mode allow,
+        # forward 85), and for "0" (run-mode deny) and "5" (run-mode
+        # unlisted) once each.
+        t = [x for x in P.BATCHES["mg24-batch5b"] if x["devtype"] == "0x0074"][0]
+        return [c for c in t["checks"]
+                if c["controller"] and c["controller"][0] == "mode_verdict"
+                and c["controller"][1][1] == mode
+                and c["controller"][2][0] == fcl]
+
+    def _run(self, link, chip, mode, prefix, fcl=84, answer=None):
+        # (mode, fcl) picks the check the fake is to drive; fcl also
+        # overrides the chip's forward cluster, so the forward the chip
+        # enqueues is the check's own (the clean-mode check's lands on
+        # cluster 85, not the run-mode 84 the chip defaults to). answer
+        # overrides the table's adjudication word (the unlisted-fails
+        # test drives an allow check through the none branch).
+        checks = self._check_for_mode(mode, fcl)
+        self.assertEqual(len(checks), 1, (mode, fcl))
+        c = dict(checks[0])
+        if answer is not None:
+            ctrl = list(c["controller"])
+            ctrl[3] = answer
+            c["controller"] = tuple(ctrl)
+        if fcl != chip.cluster:
+            chip.cluster = fcl
+        t = [x for x in P.BATCHES["mg24-batch5b"]
+             if x["devtype"] == "0x0074"][0]
+        s = _FakeSuite()
+        self._patch_chip_call(chip)
+        try:
+            P.prove_check(link, chip, s, "0x4845", 2, t, c, prefix)
+        finally:
+            self._unpatch_chip_call()
+        return t, s
+
+    def test_allow_passes_and_answers_the_forward(self):
+        link = _VerdictLink()
+        chip = _ModeChip(link=link, ep=2, cluster=84, command=0, seq=7,
+                         rc=0, change_status=0, current_mode=1)
+        t, s = self._run(link, chip, "1",
+                         "rvcrunmode ep2 change-to-mode 1 allow")
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual(
+            [x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+            ["AT+MTCMDRESP=7,1"])
+        self.assertEqual(
+            [n for n, ok in s.results if not ok], [],
+            "every row passes: %s"
+            % [n for n, ok in s.results if not ok])
+        self.assertIn(
+            "rvcrunmode ep2 change-to-mode 1 allow forward 84/0 answered"
+            " allow", got)
+        self.assertIn(
+            "rvcrunmode ep2 change-to-mode 1 allow ChangeToMode status 0",
+            got)
+        self.assertIn(
+            "rvcrunmode ep2 change-to-mode 1 allow current-mode = 1 after",
+            got)
+
+    def test_change_to_mode_argv_is_positional_before_the_destination(self):
+        # chip-tool's ChangeToMode takes the mode as a positional command
+        # argument: [cluster, change-to-mode, <mode>, node, ep]. A
+        # regression to a flag shape (a --mode or --value word) must fail
+        # this test: the mode is argv[2], and the destination (node, ep)
+        # is the tail.
+        t = [x for x in P.BATCHES["mg24-batch5b"] if x["devtype"] == "0x0074"][0]
+        c = [c for c in t["checks"]
+             if c["controller"] and c["controller"][0] == "mode_verdict"
+             and c["controller"][1][1] == "1"][0]
+        argv = []
+        def _record(chip, args, timeout=60):
+            argv.append(list(args))
+            return super(_ModeChip, chip).chip_call(chip, args, timeout)
+        link = _VerdictLink()
+        chip = _ModeChip(link=link, ep=2, cluster=84, command=0, seq=7,
+                         rc=0, change_status=0, current_mode=1)
+        s = _FakeSuite()
+        chip.chip_call = _record
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            P.prove_check(link, chip, s, "0x4845", 2, t, c,
+                          "rvcrunmode ep2 change-to-mode 1 allow")
+        finally:
+            H._threaded_chip_call = saved
+        self.assertEqual(len(argv), 1)
+        self.assertEqual(argv[0], ["rvcrunmode", "change-to-mode", "1",
+                                   "0x4845", "2"])
+
+    def test_deny_passes_and_answers_zero(self):
+        link = _VerdictLink()
+        chip = _ModeChip(link=link, ep=2, cluster=84, command=0, seq=7,
+                         rc=0, change_status=2, current_mode=1)
+        t, s = self._run(link, chip, "0",
+                         "rvcrunmode ep2 change-to-mode 1 deny")
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual(
+            [x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+            ["AT+MTCMDRESP=7,0"])
+        self.assertEqual([n for n, ok in s.results if not ok], [],
+                         "every row passes: %s"
+                         % [n for n, ok in s.results if not ok])
+        self.assertIn(
+            "rvcrunmode ep2 change-to-mode 1 deny forward 84/0 answered"
+            " deny", got)
+        self.assertIn(
+            "rvcrunmode ep2 change-to-mode 1 deny ChangeToMode status 2",
+            got)
+        self.assertIn(
+            "rvcrunmode ep2 change-to-mode 1 deny current-mode = 1 after",
+            got)
+
+    def test_unexpected_status_fails_only_the_status_row(self):
+        # The allow is answered (the firmware accepts the change) but the
+        # response's status says 2 (kGenericFailure): the status row is
+        # the one that fails; the forward and the current-mode rows still
+        # pass.
+        link = _VerdictLink()
+        chip = _ModeChip(link=link, ep=2, cluster=84, command=0, seq=7,
+                         rc=0, change_status=2, current_mode=1)
+        t, s = self._run(link, chip, "1",
+                         "rvcrunmode ep2 change-to-mode 1 allow")
+        got = {n: ok for n, ok in s.results}
+        self.assertFalse(got["rvcrunmode ep2 change-to-mode 1 allow"
+                             " ChangeToMode status 0"])
+        self.assertTrue(got["rvcrunmode ep2 change-to-mode 1 allow"
+                            " forward 84/0 answered allow"])
+        self.assertTrue(got["rvcrunmode ep2 change-to-mode 1 allow"
+                            " current-mode = 1 after"])
+        self.assertEqual(
+            [n for n, ok in s.results if not ok],
+            ["rvcrunmode ep2 change-to-mode 1 allow ChangeToMode status 0"])
+
+    def test_unlisted_passes_and_answers_nothing(self):
+        # No +MTCMD arrives in the window and the response says
+        # kUnsupportedMode: the no-forward row passes and the link is
+        # never answered.
+        link = _VerdictLink()
+        chip = _ModeChip(link=link, ep=2, cluster=84, command=0, seq=7,
+                         rc=0, change_status=1, current_mode=1,
+                         forward=False)
+        t, s = self._run(link, chip, "5",
+                         "rvcrunmode ep2 change-to-mode 5 unlisted")
+        got = {n: ok for n, ok in s.results}
+        self.assertEqual([x for x in link.sent
+                          if x.startswith("AT+MTCMDRESP=")], [])
+        self.assertEqual(link.urcs, [])
+        self.assertEqual([n for n, ok in s.results if not ok], [],
+                         "every row passes: %s"
+                         % [n for n, ok in s.results if not ok])
+        self.assertIn(
+            "rvcrunmode ep2 change-to-mode 5 unlisted"
+            " no +MTCMD within 3s", got)
+        self.assertIn(
+            "rvcrunmode ep2 change-to-mode 5 unlisted ChangeToMode status 1",
+            got)
+        self.assertIn(
+            "rvcrunmode ep2 change-to-mode 5 unlisted current-mode = 1 after",
+            got)
+
+    def test_unlisted_fails_when_a_forward_does_arrive(self):
+        # A ChangeToMode forward lands on the link within the 3 s window
+        # while the unlisted check runs: the no-forward row awaits the
+        # check's own forward cluster (84, run-mode), so a forward on
+        # that cluster is the arrival that fails the row, and the kind
+        # still answers nothing (the adjudication for an unlisted mode
+        # is the no-forward row, not a response). The chip stays
+        # forward-less, so the window sees only the arrival.
+        link = _VerdictLink()
+        chip = _ModeChip(link=link, ep=2, cluster=84, command=0, seq=7,
+                         rc=0, change_status=1, current_mode=1,
+                         forward=False)
+        # A run-mode ChangeToMode forward (cluster 84) already on the
+        # link when the check's window opens: the no-forward row awaits
+        # exactly cluster 84, so it is the arrival.
+        link.urcs.append("+MTCMD:7,2,84,0,1")
+        # The unlisted check (mode "5", forward cluster 84, want status
+        # 1): its no-forward row sees the arrival and fails; the status
+        # and current-mode rows still pass on the response.
+        t, s = self._run(link, chip, "5",
+                         "rvcrunmode ep2 change-to-mode 5 unlisted")
+        got = {n: ok for n, ok in s.results}
+        self.assertFalse(got["rvcrunmode ep2 change-to-mode 5 unlisted"
+                             " no +MTCMD within 3s"])
+        self.assertEqual([x for x in link.sent
+                          if x.startswith("AT+MTCMDRESP=")], [])
+        # The arrival is consumed by the await (ATLink's pop semantics):
+        # the row saw it, so it is off the queue; the status and
+        # current-mode rows still pass on the response.
+        self.assertEqual(link.urcs, [])
+        self.assertTrue(got["rvcrunmode ep2 change-to-mode 5 unlisted"
+                              " ChangeToMode status 1"])
+        self.assertTrue(got["rvcrunmode ep2 change-to-mode 5 unlisted"
+                              " current-mode = 1 after"])
+
+
+class TestSetupListForm(unittest.TestCase):
+    """The setup's list form (batch 5b): a setup whose third element is a
+    LIST of (cluster, attr, names) reads sends every AT line once, reads
+    every named cluster, and names each read row with its chip cluster
+    (both of the RVC's reads are supported-modes, so the cluster word is
+    the only thing that tells the rows apart). Batch 4's single-tuple
+    form still names its row without the cluster word, byte for byte."""
+
+    def test_rvc_setup_sends_each_at_line_once_and_reads_both_clusters(self):
+        link = _VerdictLink()
+        chip = _SetupChip(link=link, ep=2, devtype="0x0074", revision=4,
+                          read_body="CHIP:TOO:   SupportedModes: 4\n"
+                                    "CHIP:TOO:     Idle\n"
+                                    "CHIP:TOO:     Cleaning\n"
+                                    "CHIP:TOO:     Vacuum\n"
+                                    "CHIP:TOO:     Mop\n")
+        t = [x for x in P.BATCHES["mg24-batch5b"]
+             if x["devtype"] == "0x0074"][0]
+        self.assertTrue(isinstance(t["setup"][2], list))
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            s = _FakeSuite()
+            P.prove_endpoint(link, chip, s, "0x4845", 2, t)
+        finally:
+            H._threaded_chip_call = saved
+        self.assertEqual(
+            [x for x in link.sent if x.startswith("AT+MTMODES=")],
+            ["AT+MTMODES=2,84,0,16384,\"Idle\",1,0,\"Cleaning\"",
+             "AT+MTMODES=2,85,0,0,\"Vacuum\",1,0,\"Mop\""])
+        got = {n: ok for n, ok in s.results}
+        self.assertIn(
+            '0x0074 robotic vacuum cleaner ep2 setup AT+MTMODES=2,84,0,'
+            '16384,"Idle",1,0,"Cleaning" -> OK', got)
+        self.assertIn(
+            '0x0074 robotic vacuum cleaner ep2 setup AT+MTMODES=2,85,0,0,'
+            '"Vacuum",1,0,"Mop" -> OK', got)
+        self.assertIn(
+            "0x0074 robotic vacuum cleaner ep2 setup rvcrunmode"
+            " supported-modes read carries Idle and Cleaning", got)
+        self.assertIn(
+            "0x0074 robotic vacuum cleaner ep2 setup rvccleanmode"
+            " supported-modes read carries Vacuum and Mop", got)
+        # Both rows pass: the fake's read carries all four entries, and
+        # the rows filter on their own pair.
+        self.assertTrue(
+            got["0x0074 robotic vacuum cleaner ep2 setup rvcrunmode"
+                 " supported-modes read carries Idle and Cleaning"])
+        self.assertTrue(
+            got["0x0074 robotic vacuum cleaner ep2 setup rvccleanmode"
+                 " supported-modes read carries Vacuum and Mop"])
+
+    def test_rvc_setup_read_missing_a_name_fails_its_row_only(self):
+        # The list read drops Cleaning: the rvcrunmode carries row
+        # fails, the rvccleanmode row (Vacuum and Mop still there)
+        # passes, and the AT write rows are unaffected.
+        link = _VerdictLink()
+        chip = _SetupChip(link=link, ep=2, devtype="0x0074", revision=4,
+                          read_body="CHIP:TOO:   SupportedModes: 3\n"
+                                    "CHIP:TOO:     Idle\n"
+                                    "CHIP:TOO:     Vacuum\n"
+                                    "CHIP:TOO:     Mop\n")
+        t = [x for x in P.BATCHES["mg24-batch5b"]
+             if x["devtype"] == "0x0074"][0]
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            s = _FakeSuite()
+            P.prove_endpoint(link, chip, s, "0x4845", 2, t)
+        finally:
+            H._threaded_chip_call = saved
+        got = {n: ok for n, ok in s.results}
+        self.assertFalse(
+            got["0x0074 robotic vacuum cleaner ep2 setup rvcrunmode"
+                 " supported-modes read carries Idle and Cleaning"])
+        self.assertTrue(
+            got["0x0074 robotic vacuum cleaner ep2 setup rvccleanmode"
+                 " supported-modes read carries Vacuum and Mop"])
+        self.assertTrue(
+            got['0x0074 robotic vacuum cleaner ep2 setup AT+MTMODES=2,84,0,'
+                '16384,"Idle",1,0,"Cleaning" -> OK'])
+        self.assertTrue(
+            got['0x0074 robotic vacuum cleaner ep2 setup AT+MTMODES=2,85,0,0,'
+                '"Vacuum",1,0,"Mop" -> OK'])
+
+    def test_batch4_single_tuple_setup_keeps_its_old_row_name(self):
+        # The mode select's setup third element is one (cluster, attr,
+        # names) tuple, not a list: its row keeps batch 4's name, with
+        # no cluster word in it.
+        link = _VerdictLink()
+        chip = _SetupChip(link=link, ep=6, devtype="0x0027", revision=1,
+                          read_body="CHIP:TOO:   SupportedModes: 3\n"
+                                    "CHIP:TOO:     Quiet\n"
+                                    "CHIP:TOO:     Normal\n"
+                                    "CHIP:TOO:     Boost\n")
+        t = [x for x in P.BATCHES["mg24-batch4"]
+             if x["devtype"] == "0x0027"][0]
+        self.assertFalse(isinstance(t["setup"][2], list))
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            s = _FakeSuite()
+            P.prove_endpoint(link, chip, s, "0x4845", 6, t)
+        finally:
+            H._threaded_chip_call = saved
+        names = [n for n, _ in s.results]
+        self.assertIn(
+            "0x0027 mode select ep6 setup supported-modes read carries"
+            " Quiet and Normal and Boost", names)
+        # No list-form row name for the same read: the cluster word
+        # (modebase) must NOT be in the row.
+        self.assertNotIn(
+            "0x0027 mode select ep6 setup modebase supported-modes read"
+            " carries Quiet and Normal and Boost", names)
+
+
+class TestProductIdGuard(unittest.TestCase):
+    """main's pairing guard: the paired output must name the expected
+    product id, or the guard row fails and the endpoint proofs are
+    skipped (a proof on the wrong board proves nothing). The guard
+    logic lives inline in main, so the tests exercise it exactly as
+    main writes it: the s.check call, the in-test guard, and the
+    pairing-tail print that follows a failed pairing."""
+
+    def _pairing_row(self, out):
+        # The guard as written in main: the row name, the check, and the
+        # skip decision the rest of main makes on it.
+        s = _FakeSuite()
+        paired = s.check("commission: paired the board under test (%s)"
+                         % P.EXPECTED_PRODUCT_ID, P.EXPECTED_PRODUCT_ID in out)
+        return s, paired
+
+    def test_expected_product_id_passes_the_guard_row(self):
+        out = ("PairingComplete: Success\n"
+               "Discriminator: 0xF00\n"
+               "productId=0x8010\n")
+        s, paired = self._pairing_row(out)
+        self.assertTrue(paired)
+        self.assertEqual(
+            [n for n, ok in s.results],
+            ["commission: paired the board under test (productId=0x8010)"])
+        self.assertTrue(s.results[0][1])
+
+    def test_a_wrong_product_id_fails_the_guard_and_skips_the_proofs(self):
+        # The other Hearth board shares the discriminator; its product
+        # id is 0x8000: the guard row fails and main skips the endpoint
+        # proofs (and prints the pairing tail, as main does on a failed
+        # pairing).
+        out = ("PairingComplete: Success\n"
+               "Discriminator: 0xF00\n"
+               "productId=0x8000\n")
+        s, paired = self._pairing_row(out)
+        self.assertFalse(paired)
+        self.assertEqual(
+            [n for n, ok in s.results],
+            ["commission: paired the board under test (productId=0x8010)"])
+        self.assertFalse(s.results[0][1])
+        # The guard's row name is the one main records for this check:
+        # the skip is the decision main makes on the failed row.
+        self.assertIn("commission:", s.results[0][0])
+        # main prints the pairing tail (scrubbed of the psk) when the
+        # pairing output fails the guard.
+        tail = H._pairing_tail(out)
+        self.assertIn("productId=0x8000", tail)
+
+    def test_main_carries_the_guard_row_name(self):
+        # The guard's row name is main's: the check name, the expected
+        # id, and the skip print that follows a failed pairing must all
+        # be in main, or the pinned bench rows and the abort message
+        # would change. (main's guard spans two lines, so the check is
+        # on the two parts, not the joined string.)
+        src = open(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "mt_catalogue_proof.py")).read()
+        self.assertIn('s.check("commission: paired the board under test (%s)"', src)
+        self.assertIn("% EXPECTED_PRODUCT_ID,", src)
+        self.assertIn("EXPECTED_PRODUCT_ID in out", src)
+        self.assertIn('EXPECTED_PRODUCT_ID = "productId=0x8010"', src)
+        self.assertIn("ABORT: chip-tool paired another board (no %s in its output)", src)
+        self.assertIn("ABORT: pairing failed, skipping the endpoint proofs", src)
+
+
+class TestBatch5bTable(unittest.TestCase):
+    def test_batch5b_lists_the_type_once_after_the_anchor(self):
+        comp = P.composition_for("mg24-batch5b")
+        self.assertEqual(comp, [(1, "0x0100"), (2, "0x0074")])
+
+    def test_revisions_match_the_registry(self):
+        self.assertEqual([t["revision"] for t in P.BATCHES["mg24-batch5b"]],
+                         [4])
+
+    def test_checks_carry_the_expected_cluster_and_attr_pairs(self):
+        t = [x for x in P.BATCHES["mg24-batch5b"]
+             if x["devtype"] == "0x0074"][0]
+        self.assertEqual([(c["cluster"], c["attr"]) for c in t["checks"]],
+                         [(84, 1), (84, 1), (84, 1), (85, 1),
+                          (97, 4), (97, 4), (97, 4), (97, 4)])
+
+    def test_mode_verdict_tuples(self):
+        t = [x for x in P.BATCHES["mg24-batch5b"]
+             if x["devtype"] == "0x0074"][0]
+        mv = [c for c in t["checks"]
+              if c["controller"] and c["controller"][0] == "mode_verdict"]
+        self.assertEqual(len(mv), 4)
+        # The answer, the response status, and the current mode each mode
+        # change proves: allow/deny/unlisted/allow, 0/2/1/0, 1/1/1/1.
+        self.assertEqual([c["controller"][3] for c in mv],
+                         [1, 0, "none", 1])
+        self.assertEqual([c["controller"][4]["mode_status"] for c in mv],
+                         [0, 2, 1, 0])
+        self.assertEqual([c["controller"][4]["current_mode"] for c in mv],
+                         [1, 1, 1, 1])
+        # The mode requested, in order: 1 (Idle), 0, 5 (not in the list),
+        # 1 (Vacuum on the clean-mode cluster).
+        self.assertEqual([c["controller"][1][1] for c in mv],
+                         ["1", "0", "5", "1"])
+        self.assertEqual([c["controller"][2] for c in mv],
+                         [(84, 0), (84, 0), (84, 0), (85, 0)])
+        self.assertEqual([c["controller"][5] for c in mv],
+                         [1, 0, None, 1])
+
+    def test_setup_carrying_the_two_at_lines_and_two_reads(self):
+        t = [x for x in P.BATCHES["mg24-batch5b"]
+             if x["devtype"] == "0x0074"][0]
+        self.assertEqual(t["setup"][0], "setup")
+        self.assertEqual(
+            t["setup"][1],
+            ["AT+MTMODES=%(ep)d,84,0,16384,\"Idle\",1,0,\"Cleaning\"",
+             "AT+MTMODES=%(ep)d,85,0,0,\"Vacuum\",1,0,\"Mop\""])
+        self.assertEqual(
+            t["setup"][2],
+            [("rvcrunmode", "supported-modes", ["Idle", "Cleaning"]),
+             ("rvccleanmode", "supported-modes", ["Vacuum", "Mop"])])
+
+    def test_chip_clusters_gain_the_batch5b_names(self):
+        self.assertIn("rvcrunmode", P.CHIP_CLUSTERS)
+        self.assertIn("rvccleanmode", P.CHIP_CLUSTERS)
+        self.assertIn("rvcoperationalstate", P.CHIP_CLUSTERS)
+
+
+class _Batch5bChip(_ModeChip):
+    """_ModeChip widened to the batch 5b row-name run: the reads pass on
+    the table's values (the current-mode reads print 1, the supported-
+    modes reads carry every named entry, the operational-state read-
+    backs print the check's at value) and the response shapes pass on
+    the check the chip-tool call is for, so every row of the fake run
+    passes and the row names come from the table, not from the answers
+    (the pinned-name test needs every pinned name among the fake
+    run's, pass or fail). The ChangeToMode responses carry the check's
+    own mode_status (0, 2, 1, 0) and the operational-state responses
+    carry their own ErrorStateID (0, 2, 3); the mode's own ChangeToMode
+    forward is never enqueued, because the unlisted check's no-forward
+    row must pass on the fake run."""
+
+    def run(self, args, timeout=None):
+        if len(args) >= 4 and args[1] in ("read", "read-event"):
+            attr = args[2]
+            if attr.replace("-", "").lower() == "currentmode":
+                body = "1"
+            elif attr == "supported-modes":
+                body = ("CHIP:TOO:   SupportedModes: 4\n"
+                        "CHIP:TOO:     Idle\n"
+                        "CHIP:TOO:     Cleaning\n"
+                        "CHIP:TOO:     Vacuum\n"
+                        "CHIP:TOO:     Mop\n")
+            else:
+                body = str(self._at_value_for(attr))
+            return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: %s\n"
+                       % (attr.replace("-", ""), body))
+        t = P.BATCHES["mg24-batch5b"][0]
+        if len(args) >= 2 and args[1] == "change-to-mode":
+            for c in t["checks"]:
+                if (c["controller"] is not None
+                        and c["controller"][0] == "mode_verdict"
+                        and c["controller"][1][1] == args[2]):
+                    # The mode is the discriminator for the three
+                    # run-mode checks but the clean-mode allow shares
+                    # it, so the row is matched by its cluster too.
+                    if c["cluster"] != self.cluster:
+                        continue
+                    return (0, "CHIP:TOO:   status: %d\n"
+                               % c["controller"][4]["mode_status"])
+        if len(args) >= 2 and args[1] in ("pause", "resume", "go-home"):
+            for c in t["checks"]:
+                if c["controller"] is not None \
+                        and c["controller"][1][0] == args[1]:
+                    # The ErrorStateID the response carries is the want
+                    # field of the check: index 4 in the verdict tuple
+                    # (kind, args, (fcl, fcmd), answer, want), index 2
+                    # in the no_forward tuple (kind, args, want).
+                    want = c["controller"][4] \
+                        if c["controller"][0] == "verdict" \
+                        else c["controller"][2]
+                    return (0, "CHIP:TOO:   ErrorStateID: %d\n"
+                               % want["error_state"])
+        return super().run(args, timeout=timeout)
+
+    def _at_value_for(self, attr):
+        # The check that owns the read: the one whose chip_attr matches.
+        t = P.BATCHES["mg24-batch5b"][0]
+        for c in t["checks"]:
+            if c["chip_attr"] == attr:
+                return c["at_value"]
+        return 1
+
+
+class TestBatch5bRowNames(unittest.TestCase):
+    def _fake_run_names(self):
+        # Running prove_endpoint over the batch 5b type with the fakes:
+        # the mode_verdict rows answer their ChangeToMode forwards (the
+        # unlisted one raises nothing), the verdict rows their forwards,
+        # the no_forward row nothing. The chip's forward follows the
+        # endpoint's cluster. Returns the row names, results first, N/A
+        # after.
+        comp = P.composition_for("mg24-batch5b")
+        names = []
+        for (ep, dev), t in zip(comp[1:], P.rows_for("mg24-batch5b")):
+            link = _VerdictLink()
+            chip = _Batch5bChip(link=link, ep=ep, devtype=t["devtype"],
+                                revision=t["revision"])
+            saved = H._threaded_chip_call
+            H._threaded_chip_call = chip.chip_call
+            try:
+                s = _FakeSuite()
+                P.prove_endpoint(link, chip, s, "0x4845", ep, t)
+            finally:
+                H._threaded_chip_call = saved
+            names += [n for n, _ in s.results]
+            names += [n for n, _ in s.na]
+        return names
+
+    def test_fake_run_yields_no_duplicate_name(self):
+        # The three run-mode checks share one attribute (current-mode on
+        # cluster 84) and the four operational-state checks share theirs
+        # (cluster 97, attr 4): the mode_verdict suffix (cluster, command,
+        # mode, adjudication) and the verdict suffix (command,
+        # adjudication) must disambiguate every row.
+        names = self._fake_run_names()
+        self.assertGreater(len(names), 0)
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_the_pinned_bench_names_occur(self):
+        # Every row name the bench recorded (b5b-pinned-names.txt), the
+        # commission: row excepted (main records it, not prove_endpoint),
+        # must occur among the fake run's names.
+        pin = os.path.join(
+            "/mnt/f86c891c-33c6-4bb7-afe1-2c8846257177/src/git/iLabs_Hearth_docs/.superpowers/sdd/2026-09-27-mg24-catalogue-batch-5b",
+            "b5b-pinned-names.txt")
+        names = set(self._fake_run_names())
+        for name in open(pin).read().splitlines():
+            name = name.strip()
+            if not name or name.startswith("commission:"):
+                continue
+            self.assertIn(name, names, "missing pinned bench row: %s" % name)
+
+
 if __name__ == "__main__":
     unittest.main()
