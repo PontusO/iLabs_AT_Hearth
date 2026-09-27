@@ -2515,5 +2515,271 @@ class TestBatch5bRowNames(unittest.TestCase):
             self.assertIn(name, names, "missing pinned bench row: %s" % name)
 
 
+# Batch 7a-1 (catalogue batch 7a-1 design spec section 4): variant rows,
+# extra device types and the push kind (AT+MTMEAS, AT_MT_SPEC 3.25).
+
+class _MeasLink(_VerdictLink):
+    """_VerdictLink widened to AT+MTMEAS: a push answers OK with no lines
+    and stores its value where the AT read serves it (cluster 144's field
+    0 is Voltage, attribute 4, and field 2 ActivePower, attribute 8; cluster 145's field 0 is the CumulativeEnergyImported
+    struct, attribute 1). refuse maps an exact command to its +MTERR code
+    (ATLink._collect returns the code, never the line); null holds the
+    (ep, cluster, attr) triples that read +MTERR:5 until pushed; stray,
+    when set, is a +MTATTR line every push queues, the URC a push must
+    never raise."""
+
+    def __init__(self, refuse=None, null=(), stray=None):
+        super().__init__()
+        self._refuse = dict(refuse or {})
+        self._null = set(null)
+        self._stray = stray
+
+    def command(self, cmd, *a, **k):
+        if cmd in self._refuse:
+            self.sent.append(cmd)
+            return (self._refuse[cmd], [])
+        m = re.fullmatch(r"AT\+MTMEAS=(\d+),(\d+),(\d+),(-?\d+)", cmd)
+        if m:
+            self.sent.append(cmd)
+            ep, cl, field, value = (int(x) for x in m.groups())
+            attr = 1 if cl == 145 else {0: 4, 2: 8}[field]
+            self.state[(ep, cl, attr)] = str(value)
+            self._null.discard((ep, cl, attr))
+            if self._stray is not None:
+                self.urcs.append(self._stray)
+            return (0, [])
+        m = re.fullmatch(r"AT\+MTATTR=(\d+),(\d+),(\d+)", cmd)
+        if m and tuple(int(x) for x in m.groups()) in self._null:
+            self.sent.append(cmd)
+            return (5, [])
+        return super().command(cmd, *a, **k)
+
+    def assert_no_urc(self, pattern, window):
+        return self.await_urc(pattern, window) is None
+
+
+class _MeasChip:
+    """chip-tool for the batch 7a-1 rows. A device-type-list read prints
+    every (id, revision) in types; an attribute read prints what the link
+    holds for (ep, cluster, attr), or override when set: an integer in the
+    parse_int_attr shape, the energy attribute as an
+    EnergyMeasurementStruct whose Energy line parse_energy_values reads."""
+
+    ATTRS = {"voltage": (144, 4), "active-power": (144, 8),
+             "cumulative-energy-imported": (145, 1)}
+
+    def __init__(self, link, types=(), override=None):
+        self.link = link
+        self.types = list(types)
+        self.override = override
+
+    def run(self, args, timeout=None):
+        if args[:3] == ["descriptor", "read", "device-type-list"]:
+            out = "CHIP:TOO:   DeviceTypeList: %d entries\n" % len(self.types)
+            for i, (d, r) in enumerate(self.types, 1):
+                out += ("CHIP:TOO:     [%d]: {\n"
+                        "CHIP:TOO:       DeviceType: %d (0x%04X)\n"
+                        "CHIP:TOO:       Revision: %d\n"
+                        "CHIP:TOO:     }\n" % (i, d, d, r))
+            return (0, out)
+        cl, attr = self.ATTRS[args[2]]
+        value = self.link.state.get((int(args[4]), cl, attr), "0")
+        if self.override is not None:
+            value = self.override
+        if cl == 145:
+            return (0, "CHIP:TOO:   CumulativeEnergyImported: {\n"
+                       "CHIP:TOO:     Energy: %s\n"
+                       "CHIP:TOO:   }\n" % value)
+        return (0, "[1786148467.112] [3186308:3186310] [TOO]   %s: %s\n"
+                   % (args[2].replace("-", ""), value))
+
+
+def _b7_row(devtype, variant=None):
+    return [t for t in P.BATCHES["mg24-batch7a1"]
+            if t["devtype"] == devtype and t.get("variant") == variant][0]
+
+
+def _b7_types(t):
+    return [(int(t["devtype"], 16), t["revision"])] + \
+        [(int(d, 16), r) for d, r in t["extra_types"]]
+
+
+class TestBatch7a1Table(unittest.TestCase):
+    def test_composition_carries_the_variant_suffixes(self):
+        self.assertEqual(P.composition_for("mg24-batch7a1"),
+                         [(1, "0x0100"), (2, "0x0510"), (3, "0x0510,1"),
+                          (4, "0x0514"), (5, "0x0514,1"), (6, "0x0309"),
+                          (7, "0x0017"), (8, "0x0017,1")])
+
+    def test_earlier_batches_stage_plain_ids(self):
+        for b in P.BATCHES:
+            if b == "mg24-batch7a1":
+                continue
+            for _ep, d in P.composition_for(b):
+                self.assertNotIn(",", d, b)
+
+    def test_seven_rows_all_revision_1(self):
+        rows = P.BATCHES["mg24-batch7a1"]
+        self.assertEqual(len(rows), 7)
+        self.assertEqual([t["revision"] for t in rows], [1] * 7)
+        for t in rows:
+            self.assertIn(t["chip_cluster"], P.CHIP_CLUSTERS)
+
+    def test_extra_types_name_power_source_and_electrical_sensor(self):
+        for t in P.BATCHES["mg24-batch7a1"]:
+            want = [("0x0011", 1), ("0x0510", 1)] \
+                if t["devtype"] in ("0x0309", "0x0017") else []
+            self.assertEqual(t["extra_types"], want, t["name"])
+
+    def test_push_and_refusal_counts(self):
+        kinds = [c["controller"][0] for t in P.BATCHES["mg24-batch7a1"]
+                 for c in t["checks"]]
+        self.assertEqual(kinds.count("push"), 10)
+        self.assertEqual(kinds.count("at_refused"), 3)
+        self.assertEqual(len(kinds), 13)
+
+    def test_chip_clusters_gain_the_batch7a1_names(self):
+        for name in ("electricalpowermeasurement",
+                     "electricalenergymeasurement", "powertopology"):
+            self.assertIn(name, P.CHIP_CLUSTERS)
+
+
+class TestPushKind(unittest.TestCase):
+    V = "0x0510 electrical sensor ep2 voltage pushed"
+    E = "0x0510 electrical sensor ep2 cumulative-energy-imported pushed"
+
+    def _run(self, c, link, chip, prefix):
+        s = _FakeSuite()
+        P.prove_check(link, chip, s, "0x4845", 2, _b7_row("0x0510"), c, prefix)
+        return s
+
+    def _voltage(self):
+        return _b7_row("0x0510")["checks"][0]
+
+    def _energy(self):
+        return _b7_row("0x0510")["checks"][1]
+
+    def test_int_push_passes_every_row(self):
+        link = _MeasLink(null={(2, 144, 4)})
+        s = self._run(self._voltage(), link, _MeasChip(link), self.V)
+        self.assertEqual(s.results, [
+            (self.V + " AT read before the push -> +MTERR:5", True),
+            (self.V + " AT+MTMEAS=2,144,0,230000 -> OK", True),
+            (self.V + " AT+MTMEAS=2,144,0,230000 raises no +MTATTR", True),
+            (self.V + " chip-tool electricalpowermeasurement read voltage = 230000", True),
+            (self.V + " AT read = 230000", True)])
+        self.assertEqual(link.sent, ["AT+MTATTR=2,144,4",
+                                     "AT+MTMEAS=2,144,0,230000",
+                                     "AT+MTATTR=2,144,4"])
+
+    def test_a_seeded_value_fails_only_the_null_row(self):
+        link = _MeasLink()
+        s = self._run(self._voltage(), link, _MeasChip(link), self.V)
+        self.assertEqual([n for n, ok in s.results if not ok],
+                         [self.V + " AT read before the push -> +MTERR:5"])
+
+    def test_a_urc_fails_only_the_no_urc_row(self):
+        link = _MeasLink(null={(2, 144, 4)}, stray="+MTATTR:2,144,4,230000")
+        s = self._run(self._voltage(), link, _MeasChip(link), self.V)
+        self.assertEqual([n for n, ok in s.results if not ok],
+                         [self.V + " AT+MTMEAS=2,144,0,230000 raises no +MTATTR"])
+
+    def test_a_wrong_controller_value_fails_only_the_read_row(self):
+        link = _MeasLink(null={(2, 144, 4)})
+        s = self._run(self._voltage(), link, _MeasChip(link, override="1"), self.V)
+        self.assertEqual([n for n, ok in s.results if not ok],
+                         [self.V + " chip-tool electricalpowermeasurement read voltage = 230000"])
+
+    def test_energy_push_reads_the_struct_and_skips_the_at_read(self):
+        link = _MeasLink()
+        s = self._run(self._energy(), link, _MeasChip(link), self.E)
+        self.assertEqual(s.results, [
+            (self.E + " AT+MTMEAS=2,145,0,1500000 -> OK", True),
+            (self.E + " AT+MTMEAS=2,145,0,1500000 raises no +MTATTR", True),
+            (self.E + " chip-tool electricalenergymeasurement read"
+                      " cumulative-energy-imported = 1500000", True)])
+        self.assertEqual(link.sent, ["AT+MTMEAS=2,145,0,1500000"])
+
+    def test_an_energy_struct_without_the_value_fails_the_read_row(self):
+        link = _MeasLink()
+        s = self._run(self._energy(), link, _MeasChip(link, override="7"), self.E)
+        self.assertEqual([n for n, ok in s.results if not ok],
+                         [self.E + " chip-tool electricalenergymeasurement read"
+                                   " cumulative-energy-imported = 1500000"])
+
+
+class TestExtraTypes(unittest.TestCase):
+    H6 = "0x0309 heat pump ep6 device-type-list carries "
+
+    def _dt_rows(self, types):
+        link = _MeasLink()
+        s = _FakeSuite()
+        P.prove_endpoint(link, _MeasChip(link, types=types), s, "0x4845", 6,
+                         _b7_row("0x0309"))
+        return [(n, ok) for n, ok in s.results if "device-type-list" in n]
+
+    def test_all_three_pairs_pass(self):
+        self.assertEqual(self._dt_rows([(0x0309, 1), (0x0011, 1), (0x0510, 1)]),
+                         [(self.H6 + "(777, 1)", True),
+                          (self.H6 + "(17, 1)", True),
+                          (self.H6 + "(1296, 1)", True)])
+
+    def test_a_missing_pair_fails_only_its_row(self):
+        self.assertEqual(self._dt_rows([(0x0309, 1), (0x0510, 1)]),
+                         [(self.H6 + "(777, 1)", True),
+                          (self.H6 + "(17, 1)", False),
+                          (self.H6 + "(1296, 1)", True)])
+
+
+class TestBatch7a1RowNames(unittest.TestCase):
+    REFUSE = {"AT+MTATTR=2,144,4,5": 11, "AT+MTMEAS=3,145,0,1500000": 3,
+              "AT+MTMEAS=8,145,0,1500000": 3}
+
+    def _fake_run(self):
+        # Every endpoint of the table against the fakes: its own link (the
+        # voltage on ep2 null until pushed, the three refusals answered
+        # with their codes) and a chip whose device-type list carries the
+        # row's own type and its extra types.
+        comp = P.composition_for("mg24-batch7a1")
+        results = []
+        for (ep, _), t in zip(comp[1:], P.rows_for("mg24-batch7a1")):
+            link = _MeasLink(refuse=self.REFUSE, null={(2, 144, 4)})
+            s = _FakeSuite()
+            P.prove_endpoint(link, _MeasChip(link, types=_b7_types(t)), s,
+                             "0x4845", ep, t)
+            results += s.results
+        return results
+
+    def test_every_row_passes_on_the_fakes(self):
+        results = self._fake_run()
+        self.assertEqual(len(results), 54)
+        self.assertEqual([n for n, ok in results if not ok], [])
+
+    def test_no_duplicate_name(self):
+        names = [n for n, _ in self._fake_run()]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_the_pinned_names_occur(self):
+        pinned = [
+            "0x0510 electrical sensor ep2 voltage pushed AT read before the push -> +MTERR:5",
+            "0x0510 electrical sensor ep2 voltage AT write refused"
+            " AT+MTATTR=2,144,4,5 -> +MTERR:11",
+            "0x0510 electrical sensor power-only ep3 cumulative-energy-imported"
+            " AT write refused AT+MTMEAS=3,145,0,1500000 -> +MTERR:3",
+            "0x0514 electrical meter power-only ep5 pushed AT read = 50000",
+            "0x0309 heat pump ep6 device-type-list carries (17, 1)",
+            "0x0309 heat pump ep6 cumulative-energy-imported pushed chip-tool"
+            " electricalenergymeasurement read cumulative-energy-imported = 2500000",
+            "0x0017 solar power ep7 pushed chip-tool electricalpowermeasurement"
+            " read active-power = -3000000",
+            "0x0017 solar power power-only ep8 device-type-list carries (1296, 1)",
+            "0x0017 solar power power-only ep8 active-power pushed"
+            " AT+MTMEAS=8,144,2,-1500000 raises no +MTATTR",
+        ]
+        names = set(n for n, _ in self._fake_run())
+        for name in pinned:
+            self.assertIn(name, names, "missing pinned row: %s" % name)
+
+
 if __name__ == "__main__":
     unittest.main()
