@@ -521,6 +521,23 @@ constexpr size_t kModeSelectBlockBytes =
 constexpr size_t kChimeBlockBytes =
     block_bytes(MT_COUNT(chimeClusters), MT_COUNT(chimeAttrs)) + sizeof(mt_chime_store_t);
 
+/* Catalogue batch 5b, the robotic vacuum cleaner, under admission limits
+ * (graph DE566): its block is wider than the 608 B every other type is
+ * sixteen-of, so it is NOT folded into kWidestEndpointSlots or
+ * kWidestClusterList. It gets its own candidate (Identify, the two ModeBase
+ * lists, the operational state list and the two trailing ModeBase stores,
+ * the MT_COUNT over-count as everywhere here) and a documented maximum of
+ * nine per composition; a composition past that is refused at create. */
+constexpr size_t kRvcMaxEndpoints = 9;
+constexpr size_t kRvcBlockBytes =
+    block_bytes(MT_COUNT(rvcClusters),
+                kIdentifySlots + 2 * MT_COUNT(modeBaseAttrs) + MT_COUNT(opStateAttrs)) +
+    2 * sizeof(mt_mb_store_t);
+static_assert(hearth_arena_cost(kRvcBlockBytes) == 936,
+              "the RVC block moved off the 936 B the admission limit was sized with");
+static_assert(kRvcMaxEndpoints * hearth_arena_cost(kRvcBlockBytes) <= kEpArenaBytes,
+              "nine RVC blocks no longer fit the endpoint arena");
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
           kMax2(kModeSelectBlockBytes, kChimeBlockBytes));

@@ -183,7 +183,7 @@ constexpr hearth_devtype s_registry[] = {
     { 0x0303, 0, &pumpEndpoint, Span<const EmberAfDeviceType>(kPumpTypes) },
     { 0x0072, 0, &roomAirConditionerEndpoint,
       Span<const EmberAfDeviceType>(kRoomAirConditionerTypes) },
-    { 0x0074, 0 },                                                      /* batch 5: robotic vacuum cleaner */
+    { 0x0074, 0, &rvcEndpoint, Span<const EmberAfDeviceType>(kRvcTypes) },
     /* Catalogue batch 7a: the energy foundation types, the registry's first
      * variant-carrying rows (variant 0 = power + energy, variant 1 = power
      * only). */

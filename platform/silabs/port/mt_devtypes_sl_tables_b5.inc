@@ -3,7 +3,8 @@
  *
  * Holds device tables: catalogue batch 5a (nRF 671-698, 722-743, 1101-1123,
  * 2008-2281): the three registry rows that reuse an endpoint (their type
- * arrays only) and the generic switch, pump and room air conditioner.
+ * arrays only) and the generic switch, pump and room air conditioner; and
+ * catalogue batch 5b (nRF 2283-2435): the robotic vacuum cleaner.
  * mt_devtypes_sl.cpp #includes it inside its anonymous namespace, in
  * order with the other fragments, after mt_devtypes_sl_tables_b4.inc
  * and before mt_devtypes_sl_registry.inc, so the whole is still one
@@ -364,3 +365,157 @@ HEARTH_DECLARE_CONST_ENDPOINT(roomAirConditionerEndpoint, roomAirConditionerClus
 /* Revision 3 per data_model/1.5/device_types/RoomAirConditioner.xml. */
 constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
 
+
+/* ---- robotic vacuum cleaner (0x0074) ----------------------------------
+ *
+ * Catalogue batch 5's weight: RvcRunMode 0x0054 + RvcCleanMode 0x0055
+ * (one server, mode-base-server) and RvcOperationalState 0x0061, plus
+ * Identify and Descriptor. Five clusters, fourteen slots, and the two
+ * host-fed ModeBase stores that make this the widest block in the
+ * catalogue (see the sizing table below).
+ *
+ * The C6 composes the same five: robotic_vacuum_cleaner::add()
+ * (esp_matter_endpoint.cpp:1389-1400) creates Identify, RvcRunMode and
+ * RvcOperationalState (plus its OperationCompletion event), and the thunk
+ * hand-adds RvcCleanMode after create() (mk_rvc(), mt_devtypes.cpp:
+ * 846-852). RvcCleanMode is optional in the device library
+ * (Device-Library-Specification.md:4780) and STAYS composed here, ruled
+ * DE404: parity with the C6's deliberate hand-add beats the one design
+ * lever that would have bought capacity (dropping it would cost a real
+ * cross-platform data-model divergence to fit 16 endpoints instead of 9).
+ *
+ * ---- the two ModeBase clusters (RvcRunMode, RvcCleanMode) -------------
+ *
+ *   Code-driven? No for both (config-data.yaml:144-168; this batch's
+ *   regeneration left CodeDrivenInitShutdown.cpp byte-identical). Both
+ *   ARE CommandHandlerInterface-only ("RVC Clean Mode" config-data.yaml:
+ *   67, "RVC Run Mode" :69): ChangeToMode reaches the per-(endpoint,
+ *   cluster) ModeBase::Instance's own handler and IMClusterCommandHandler
+ *   stayed byte-identical too.
+ *
+ *   Delegate or plain ember? ModeBase::Instance PLUS ModeBase::Delegate,
+ *   one PAIR per (endpoint, cluster): both interfaces are scoped
+ *   Optional<EndpointId>(aEndpointId) with the cluster id
+ *   (mode-base-server.cpp:44-53), so the one RVC endpoint carries TWO
+ *   pairs. The pools and the Init() ordering rules live in
+ *   mt_matter_zephyr.cpp beside the delegate; the create-path handout is
+ *   below in mt_devtype_create(). The ordering is this batch's sharpest
+ *   constraint and is documented at both ends: Instance::Init()
+ *   VerifyOrDies on emberAfContainsServer (mode-base-server.cpp:77), a
+ *   PANIC where the opstate trio's same check soft-bails, so construction
+ *   and Init() run strictly below a successful emberAfSetDynamicEndpoint().
+ *
+ *   Which attributes the Instance's AAI answers: CurrentMode, StartUpMode,
+ *   OnMode, FeatureMap and SupportedModes (Instance::Read(),
+ *   mode-base-server.cpp:325-347), and the switch has NO default arm, so
+ *   ClusterRevision falls through to ember and its seeds are LIVE:
+ *   RvcRunMode 4 and RvcCleanMode 5 per this tree's Metadata.h:20, per
+ *   cluster in s_seeds. The CurrentMode and FeatureMap slots are inert
+ *   shadows (the opstate split), carved out for AT+MTATTR by
+ *   k_instance_served in mt_matter_zephyr.cpp. StartUpMode and OnMode are
+ *   optional and deliberately not declared, the ModeSelect precedent.
+ *
+ *   Neither joins B388: MatterRvcRunMode/RvcCleanModePluginServerInit
+ *   Callback are empty bodies (src/app/util/util.cpp:126-127), no
+ *   emberAf...InitCallback exists, and the real init is Instance::Init(),
+ *   the create path's job.
+ *
+ *   The one metadata list serves BOTH clusters: the ModeBase aliases share
+ *   attribute ids (SupportedModes 0x0000, CurrentMode 0x0001) and command
+ *   ids (ChangeToMode 0x00 / ChangeToModeResponse 0x01, verified against
+ *   both clusters' generated CommandIds.h), so modeBaseAttrs and the two
+ *   command lists below are declared once, the shared-metadata principle
+ *   at the top of this file. The response command is declared in the
+ *   outgoing list for the same two reasons the opstate trio's is
+ *   (DE399 truthfulness AND, here, C6 parity: esp-matter's
+ *   rvc_run_mode/rvc_clean_mode::create() add ChangeToModeResponse
+ *   unconditionally).
+ *
+ * ---- RvcOperationalState ----------------------------------------------
+ *
+ *   Costs no new translation unit: zap_cluster_list.json maps
+ *   OPERATIONAL_STATE_RVC_CLUSTER to operational-state-server, already in
+ *   this build, and RvcOperationalState::Instance lives in the same
+ *   operational-state-server.cpp (:520-570). CHI-only (config-data.yaml:
+ *   68), no generated dispatch. The Instance derives from
+ *   OperationalState::Instance, constructed Instance(Delegate*, ep)
+ *   forwarding Id as the cluster id (operational-state-server.h:421-423);
+ *   the delegate is a NEW subclass (HearthRvcOpStateDelegate,
+ *   mt_matter_zephyr.cpp) because the base HearthOpStateDelegate has no
+ *   GoHome hook, and it takes its own pool: the base
+ *   Delegate::SetInstance() VerifyOrDies on sharing
+ *   (operational-state-server.h:349-353), so handing an RVC Instance a
+ *   pooled trio delegate would abort the device.
+ *
+ *   The incoming command list is EXACTLY {Pause 0x00, Resume 0x03, GoHome
+ *   0x80}, and declaring Start/Stop would be a real defect, not just
+ *   noise: Instance::InvokeCommand() switches on Pause/Resume/Start/Stop
+ *   unconditionally before InvokeDerivedClusterCommand()
+ *   (operational-state-server.cpp:296-334), so a declared Start would
+ *   route a controller invoke into the base handler and out to the
+ *   derived delegate's kUnknownEnumValue stub, where the RVC cluster XML
+ *   declares no Start/Stop at all. The outgoing list carries
+ *   OperationalCommandResponse 0x04, the DE399 discipline (kOpStateOutgoing
+ *   reused: same numeric id on the derived cluster's CommandIds.h).
+ *
+ *   Server-side guards that run BEFORE the delegate, so the +MTCMD
+ *   forwards only ever carry legitimate adjudication requests: Pause is
+ *   additionally compatible with kSeekingCharger (:522-525), Resume with
+ *   kCharging/kDocked (:527-531); GoHome from kCharging/kDocked answers
+ *   kCommandInvalidInState WITHOUT calling the delegate (:556-559) and
+ *   from kSeekingCharger answers success without calling it either
+ *   (:561).
+ *
+ *   Attribute split: Instance::Read() (operational-state-server.cpp:
+ *   335-408) serves everything except FeatureMap, which falls through to
+ *   ember (live seed 0); ClusterRevision is answered by the AAI as the
+ *   BASE cluster's kRevision constant (:408-409), so unlike the ModeBase pair
+ *   the revision seed here is INERT; both constants are 1 in this tree
+ *   (OperationalState/Metadata.h:20, RvcOperationalState/Metadata.h:20)
+ *   and the seed is written 1 anyway for truthful arena metadata. The
+ *   opStateAttrs list above is reused verbatim: the derived cluster
+ *   shares the base's attribute ids and this composition declares the
+ *   same subset (CountdownTime stays optional-absent on both platforms).
+ *
+ *   Events: OperationalError and OperationCompletion are declared in the
+ *   XML (the former optional="false"); this firmware emits neither, the
+ *   C6 emits neither, and the dynamic endpoint's empty eventList makes
+ *   EventList read empty without blocking emission (the generic switch
+ *   note above). The C6's rvc create() has its own conformance gap here
+ *   (no OperationalError event metadata where the base cluster creates
+ *   one); nothing for this port to mirror since dynamic eventList is
+ *   empty regardless.
+ *
+ * Revision 4 per data_model/1.5/device_types/RoboticVacuumCleaner.xml. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(modeBaseAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(RvcRunMode::Attributes::SupportedModes::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(RvcRunMode::Attributes::CurrentMode::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(RvcRunMode::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kModeBaseIncoming[] = { RvcRunMode::Commands::ChangeToMode::Id,
+                                            kInvalidCommandId };
+constexpr CommandId kModeBaseOutgoing[] = { RvcRunMode::Commands::ChangeToModeResponse::Id,
+                                            kInvalidCommandId };
+
+constexpr CommandId kRvcOpStateIncoming[] = { RvcOperationalState::Commands::Pause::Id,
+                                              RvcOperationalState::Commands::Resume::Id,
+                                              RvcOperationalState::Commands::GoHome::Id,
+                                              kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(rvcClusters)
+DECLARE_DYNAMIC_CLUSTER(RvcRunMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming,
+                        kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(RvcCleanMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(RvcOperationalState::Id, opStateAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kRvcOpStateIncoming, kOpStateOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Identify::Id, identifyAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(rvcEndpoint, rvcClusters);
+
+constexpr EmberAfDeviceType kRvcTypes[] = { { 0x0074, 4 } };
