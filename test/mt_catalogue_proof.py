@@ -35,7 +35,9 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "switch", "pumpconfigurationandcontrol",
                  "rvcrunmode", "rvccleanmode", "rvcoperationalstate",
                  "electricalpowermeasurement", "electricalenergymeasurement",
-                 "powertopology"}
+                 "powertopology",
+                 "meteridentification", "deviceenergymanagement",
+                 "deviceenergymanagementmode"}
 
 # The MG24 Hearth build's product id. Two Hearth boards on the bench share
 # discriminator 0xF00, so chip-tool's BLE scan can pair the other one
@@ -54,7 +56,11 @@ def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
     want dict {"rc0": bool, "status": int (optional), "error_state":
     int (optional: the chip-tool response's ErrorStateID, read by
     H.parse_status, which answers it for every response shape since the
-    trio's allow/deny/refusal all exit 0)} and an optional payload (batch
+    trio's allow/deny/refusal all exit 0), "positional": bool (optional,
+    batch 7a-2: the command's arguments precede the destination, the
+    PowerAdjustRequest fields' shape), "after": [(chip_attr, value)]
+    (optional, batch 7a-2: controller reads once the verdict landed)}
+    and an optional payload (batch
     4) passed to CmdResponder.expect(payload=) (the chime's PlayChimeSound
     7); kind "notify" is (args, (fwd_cluster, fwd_command),
     payload or None, [follow-up at_cmd format strings],
@@ -425,6 +431,92 @@ BATCHES = {
                    controller=("at_refused", ["AT+MTMEAS=%(ep)d,145,0,1500000"], 3)),
         ], variant=1, extra_types=[("0x0011", 1), ("0x0510", 1)]),
     ],
+    # Batch 7a-2 (catalogue batch 7a-2 design spec section 4): the utility
+    # meter (two, the admission maximum) and device energy management v0 and
+    # v1. AT+MTMETERID and AT+MTMEAS raise no URC; reads by attribute id
+    # (DEM OptOutState is attribute 7, AT+MTMEAS field 5). PowerAdjustRequest's
+    # fields are positional and precede the destination.
+    "mg24-batch7a2": [
+        _multi("0x0511", "electrical utility meter", 1, "meteridentification", [
+            _check(2822, 0, "meter-type", 1, null_read=True,
+                   controller=("push", 'AT+MTMETERID=%(ep)d,1,"POD-1","SN-123","V1.0",1500000,2000000,1', "int")),
+            _check(2822, 0, "meter-type", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,2822,0,2"], 11)),
+            _check(2822, 1, "point-of-delivery", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,2822,1"], 5)),
+        ], extra_reads=[("read", "feature-map", 1)]),
+        _multi("0x0511", "electrical utility meter second", 1, "meteridentification", [
+            _check(2822, 0, "meter-type", 2,
+                   controller=("push", 'AT+MTMETERID=%(ep)d,2,"SE-POD-42","SN-9","DLMS-1",2500000,,', "int")),
+            _check(2822, 0, "meter-type", 0,
+                   controller=("at_refused", ['AT+MTMETERID=%(ep)d,0,"A","B","C",,,'], 1)),
+        ], setup=("setup", ['AT+MTMETERID=%(ep)d,0,"SE-POD-42","SN-9","DLMS-1",2500000,,'],
+                  [("meteridentification", "point-of-delivery", ["SE-POD-42"]),
+                   ("meteridentification", "meter-serial-number", ["SN-9"]),
+                   ("meteridentification", "protocol-version", ["DLMS-1"]),
+                   ("meteridentification", "power-threshold", ["2500000"])])),
+        _multi("0x050D", "device energy management", 3, "deviceenergymanagement", [
+            _check(152, 0, "esatype", 255,
+                   controller=("push", "AT+MTMEAS=%(ep)d,152,0,255", "int")),
+            _check(152, 3, "abs-min-power", -5000000000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,152,3,-5000000000", "int")),
+            _check(152, 2, "esastate", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,152,2,1"], 11)),
+            _check(152, 2, "esastate", 0,
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,152,2,9"], 1)),
+            _check(152, 5, "power-adjustment-capability", 0,
+                   controller=("at_refused", ["AT+MTDEMCAP=%(ep)d,3,0"], 1)),
+            _check(2822, 0, "meter-type", 0,
+                   controller=("at_refused", ['AT+MTMETERID=%(ep)d,0,"A","B","C",100,,'], 4)),
+            _check(152, 2, "esastate", 1, at_cmd="AT+MTMEAS=%(ep)d,152,2,1",
+                   controller=("no_forward", ["cancel-power-adjust-request"],
+                               {"rc0": False, "status": 0xCB})),
+            _check(152, 2, "esastate", 1,
+                   at_cmd="AT+MTDEMCAP=%(ep)d,1,2,1000000000,10000000000,30,3600,500,2000,30,600",
+                   controller=("verdict", ["power-adjust-request", "5000000000", "60", "0"], (152, 0), 0,
+                               {"rc0": False, "status": 0x1, "positional": True}, [5000000000, 60, 0])),
+            _check(152, 2, "esastate", 1,
+                   at_cmd="AT+MTDEMCAP=%(ep)d,1,2,1000000000,10000000000,30,3600,500,2000,30,600",
+                   controller=("verdict", ["power-adjust-request", "5000000000", "60", "0"], (152, 0), 1,
+                               {"rc0": True, "positional": True, "after": [("esastate", 3)]},
+                               [5000000000, 60, 0])),
+            _check(152, 2, "esastate", 1,
+                   controller=("push", "AT+MTMEAS=%(ep)d,152,2,1", "int")),
+            _check(152, 7, "opt-out-state", 2,
+                   controller=("push", "AT+MTMEAS=%(ep)d,152,5,2", "int")),
+            _check(159, 1, "current-mode", 1, chip_cluster="deviceenergymanagementmode",
+                   controller=("mode_verdict", ["change-to-mode", "1"], (159, 0), 1,
+                               {"mode_status": 0, "current_mode": 1}, 1)),
+            _check(159, 1, "current-mode", 1, chip_cluster="deviceenergymanagementmode",
+                   controller=("mode_verdict", ["change-to-mode", "0"], (159, 0), 0,
+                               {"mode_status": 2, "current_mode": 1}, 0)),
+            _check(159, 1, "current-mode", 1, chip_cluster="deviceenergymanagementmode",
+                   controller=("mode_verdict", ["change-to-mode", "5"], (159, 0), "none",
+                               {"mode_status": 1, "current_mode": 1}, None)),
+        ], setup=("setup", ['AT+MTMODES=%(ep)d,159,0,0,"NoOptimization",1,16387,"GridOpt"',
+                            "AT+MTDEMCAP=%(ep)d,1,2,1000000000,10000000000,30,3600,500,2000,30,600"],
+                  [("deviceenergymanagementmode", "supported-modes", ["NoOptimization", "GridOpt"]),
+                   ("deviceenergymanagement", "power-adjustment-capability", ["10000000000", "3600"])]),
+           extra_reads=[("read-event", "power-adjust-start"), ("read-event", "power-adjust-end"),
+                        ("read", "feature-map", 1)]),
+        _multi("0x050D", "device energy management report-only", 3, "deviceenergymanagement", [
+            _check(152, 4, "abs-max-power", 5000000000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,152,4,5000000000", "int")),
+            _check(152, 5, "power-adjustment-capability", 0,
+                   controller=("at_refused", ["AT+MTDEMCAP=%(ep)d,1,0"], 4)),
+            _check(152, 7, "opt-out-state", 0,
+                   controller=("at_refused", ["AT+MTATTR=%(ep)d,152,7"], 4)),
+            _check(152, 2, "esastate", 1, at_cmd="AT+MTMEAS=%(ep)d,152,2,1",
+                   controller=("no_forward", ["cancel-power-adjust-request"],
+                               {"rc0": False, "status": 0x81})),
+            _check(159, 1, "current-mode", 1, chip_cluster="deviceenergymanagementmode",
+                   controller=("mode_verdict", ["change-to-mode", "1"], (159, 0), 1,
+                               {"mode_status": 0, "current_mode": 1}, 1)),
+        ], variant=1,
+           setup=("setup", ['AT+MTMODES=%(ep)d,159,0,0,"NoOptimization",1,16387,"GridOpt"'],
+                  [("deviceenergymanagementmode", "supported-modes", ["NoOptimization", "GridOpt"])]),
+           extra_reads=[("read", "feature-map", 0)]),
+    ],
 }
 
 def composition_for(batch):
@@ -554,6 +646,10 @@ def print_plan(batch):
                     # URC triple: command, forward, answer or "unanswered".
                     cmd = " ".join(str(a) for a in args)
                     urc = f"{cmd} -> +MTCMD:{fcl},{fcmd} answer {answer if answer is not None else 'unanswered'}"
+                    if want.get("positional"):
+                        urc += " (fields before the destination)"
+                    for aattr, aval in want.get("after", ()):
+                        urc += f" then {aattr} = {aval}"
                     if payload is not None:
                         urc += f" payload {payload}"
                 elif c["controller"][0] == "notify":
@@ -889,7 +985,14 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         # The argv shape puts the command name first, then node and
         # endpoint, then the flags: chip-tool's --help usage lines read
         # "<cluster> <command> destination-id endpoint-id ... [flags]".
-        handle = H.invoke_chip(ctx, [cc] + args[:1] + [node, str(ep)] + args[1:], timeout=30)
+        # A command with positional fields (batch 7a-2's PowerAdjustRequest:
+        # Power, Duration, Cause) takes them BEFORE the destination, the
+        # mode_verdict order; want["positional"] says so.
+        if want.get("positional"):
+            argv = [cc] + args + [node, str(ep)]
+        else:
+            argv = [cc] + args[:1] + [node, str(ep)] + args[1:]
+        handle = H.invoke_chip(ctx, argv, timeout=30)
         responder = H.CmdResponder(link)
         if answer is None:
             # Seen, deliberately not answered: the firmware must time out
@@ -918,6 +1021,14 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         if "error_state" in want:
             s.check("%s ErrorStateID %d" % (prefix, want["error_state"]),
                     H.parse_status(out) == want["error_state"])
+        # want["after"] (batch 7a-2): what the firmware owns once the verdict
+        # has landed, read by the controller (DEM's ESAState moving to
+        # PowerAdjustActive, 3, on an allowed PowerAdjustRequest, with no
+        # host push).
+        for aattr, aval in want.get("after", ()):
+            rc, out = chip.run([cc, "read", aattr, node, str(ep)], timeout=30)
+            s.check("%s %s = %s after" % (prefix, aattr, aval),
+                    rc == 0 and H.parse_int_attr(out) == aval)
     else:
         kind, args, (ucl, uat, uval) = c["controller"]
         link.drain(0.2)
