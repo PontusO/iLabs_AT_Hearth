@@ -153,10 +153,6 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
 void *mt_matter_mwoc_delegate_alloc(void) { return NULL; }
 void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)delegate; (void)ep; }
 
-/* ---- water heater management (energy round B) ------------------------------------ */
-
-void *mt_matter_whm_delegate_alloc(uint16_t ep) { (void)ep; return NULL; }
-
 /* ---- nested row payloads (AT+MTROW family, energy round C2) ------------------------ */
 
 /* The MT_ROW_* family's "the endpoint exists but no cluster stores this row

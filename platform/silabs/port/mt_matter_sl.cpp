@@ -516,8 +516,9 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * Every row of the nRF's table, and the batch that ports the device type it
  * belongs to (nRF README batch roster); the batch 4, batch 5, batch 7a-1
  * (ElectricalPowerMeasurement) and batch 7a-2 (MeterIdentification,
- * DeviceEnergyManagement, DeviceEnergyManagementMode) rows are present
- * here, the rest arrive with their batches:
+ * DeviceEnergyManagement, DeviceEnergyManagementMode) and batch 7b
+ * (WaterHeaterManagement, WaterHeaterMode) rows are present here, the
+ * rest arrive with their batches:
  *
  *   OperationalState OperationalState, CurrentPhase           batch 4
  *   Chime SelectedChime, Enabled                              batch 4
@@ -566,11 +567,15 @@ struct instance_served_attr {
 };
 
 /*
- * Twelve rows: Basic Information's four integer attributes on the root node
- * (ruling F500), the per-endpoint OperationalState pair, and the per-endpoint
- * Chime pair (both brought in by catalogue batch 4 with the trio and the
- * chime), and the RVC's two ModeBase CurrentMode attributes and its
- * RvcOperationalState pair (catalogue batch 5b).
+ * Thirty-four rows: Basic Information's four integer attributes on the
+ * root node (ruling F500), the per-endpoint OperationalState pair, and the
+ * per-endpoint Chime pair (both brought in by catalogue batch 4 with the
+ * trio and the chime), the RVC's two ModeBase CurrentMode attributes and
+ * its RvcOperationalState pair (catalogue batch 5b), the seven
+ * ElectricalPowerMeasurement push fields (7a-1), MeterIdentification
+ * MeterType and the six DeviceEnergyManagement scalars with DEMMode's
+ * CurrentMode (7a-2), and the six WaterHeaterManagement values with
+ * WaterHeaterMode's CurrentMode (7b).
  *
  * The Basic Information strings (VendorName, ProductName, NodeLabel,
  * Location and the rest) and CapabilityMinima are deliberately NOT here:
@@ -678,6 +683,36 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::DeviceEnergyManagement::Attributes::OptOutState::Id },
     { chip::app::Clusters::DeviceEnergyManagementMode::Id,
       chip::app::Clusters::DeviceEnergyManagementMode::Attributes::CurrentMode::Id },
+    /* WaterHeaterManagement (batch 7b): all six delegate-served values,
+     * the five narrow ones with inert shadows plus the DE407 metadata-only
+     * energy_mwh declaration (EstimatedHeatRequired). Reads answer the
+     * HearthWhmDelegate cache below; writes +MTERR:11 (MANAGED_INTERNALLY
+     * without WRITABLE on the C6 for all six,
+     * esp_matter_attribute.cpp:4485-4519); AT+MTMEAS 0x94 is the write
+     * path. The three feature-gated rows are declared on variant 0 only;
+     * on a variant-1 endpoint attr_locate()'s metadata miss answers
+     * +MTERR:4 before this table is ever consulted, so the rows are
+     * harmless there. The WaterHeaterMode CurrentMode row is the RVC
+     * ModeBase pair's rule on the fourth alias; its ClusterRevision stays
+     * out (LIVE seed, the ModeBase no-default-arm note above), while
+     * WHM's ClusterRevision stays out for the OPPOSITE reason: its seed
+     * is an inert shadow kept equal to the value Instance::Read() serves
+     * itself (water-heater-management-server.cpp:146-147), so the generic
+     * arena read answers the same 2 either way and needs no carve-out. */
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::HeaterTypes::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::HeatDemand::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::TankVolume::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::EstimatedHeatRequired::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::TankPercentage::Id },
+    { chip::app::Clusters::WaterHeaterManagement::Id,
+      chip::app::Clusters::WaterHeaterManagement::Attributes::BoostState::Id },
+    { chip::app::Clusters::WaterHeaterMode::Id,
+      chip::app::Clusters::WaterHeaterMode::Attributes::CurrentMode::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -842,6 +877,7 @@ static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *ou
 static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_meter_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
 /* The RVC opstate pool's Instance lookup (defined beside the pool below),
  * shared by mt_matter_opstate_set()'s RVC branch and the live reader. */
@@ -873,6 +909,7 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         case chip::app::Clusters::RvcRunMode::Id:
         case chip::app::Clusters::RvcCleanMode::Id:
         case chip::app::Clusters::DeviceEnergyManagementMode::Id:
+        case chip::app::Clusters::WaterHeaterMode::Id:
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::RvcOperationalState::Id:
             return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
@@ -884,6 +921,8 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_meter_attr_read_live(ep, attr, out, is_unsigned);
         case chip::app::Clusters::DeviceEnergyManagement::Id:
             return mt_dem_attr_read_live(ep, attr, out, is_unsigned);
+        case chip::app::Clusters::WaterHeaterManagement::Id:
+            return mt_whm_attr_read_live(ep, attr, out, is_unsigned);
         default:
             return MT_ATTR_ERR_FAILED;
         }
