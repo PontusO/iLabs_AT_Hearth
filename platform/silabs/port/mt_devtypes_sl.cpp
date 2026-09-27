@@ -147,6 +147,16 @@ extern "C" void mt_matter_eem_register(uint16_t ep);
  * mt_matter_sl_b7.inc fragment at the end of mt_matter_sl.cpp for why the
  * count lives in this port. */
 extern "C" bool mt_matter_eem_reserve(void);
+/* Catalogue batch 7a: the DEM Instance's second half (construct + soft
+ * Init with the variant's feature mask). Port-local for the same reason
+ * as the two above: the C6 needs no such name because esp-matter's
+ * DeviceEnergyManagementDelegateInitCB news the Instance from the
+ * endpoint's FeatureMap at enable time; here the create path passes the
+ * variant's own with_pa, the same predicate the variant-qualified DEM FeatureMap
+ * seed rows mirror, so the seeded shadow and the Instance mask agree by
+ * construction. Defined beside the DEM pool in the mt_matter_sl_b7.inc
+ * fragment at the end of mt_matter_sl.cpp. */
+extern "C" void mt_matter_dem_register(void *delegate, uint16_t ep, bool with_pa);
 
 using namespace chip;
 using namespace chip::app::Clusters;
@@ -1041,6 +1051,71 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 7a: the meter capacity claim, the C6's
+     * reserve-before-create fix rendered in this port's claim block. Only
+     * a count is claimed here (MT_METER_MAX, the pool in
+     * mt_matter_sl_b7.inc); the Instance itself is constructed later by
+     * mt_meter_register_all()'s post-rebuild scan, because its Init()
+     * wants the endpoint's cluster to exist first and because a scan
+     * discovered shortfall could not abort this create retroactively (the
+     * meterIdAttrs audit note). A claim stranded by a later failure in
+     * this function is bounded at one per boot, the modebase claims'
+     * standing policy. */
+    if (type_has_cluster(ep_type, MeterIdentification::Id)) {
+        if (!mt_meter_reserve()) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: MeterIdentification instance pool (MT_METER_MAX %u) "
+                    "or the cluster-object arena exhausted; %u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)MT_METER_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
+    /* Catalogue batch 7a: the DEM handout's first half. The alloc takes
+     * the endpoint id per core/include/mt_matter.h's alloc(ep) contract,
+     * and since the nRF's batch 7b fix round (review M1) the pool DISCARDS it
+     * until the success-only second half: s_next_ep_id is only the id
+     * this create assigns IF IT SUCCEEDS, and a stamp on a claim
+     * stranded by a later failure would alias the NEXT successful
+     * create's id into the dead delegate (the stranded claim itself
+     * stays bounded at one per boot, the standing policy; the full
+     * reasoning is at the pool). The DEMMode ModeBase claim is the RVC
+     * pair's
+     * discipline verbatim, one slot from the shared pool with the cluster
+     * id fixed at alloc; its second half's Instance::Init() VerifyOrDies
+     * on ordering, so the only acceptable failure is this abort before
+     * anything is spent. */
+    void *dem_delegate = nullptr;
+    if (type_has_cluster(ep_type, DeviceEnergyManagement::Id)) {
+        dem_delegate = mt_matter_dem_delegate_alloc(s_next_ep_id);
+        if (dem_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: DEM delegate pool (MT_DEM_MAX %u) or the "
+                    "cluster-object arena exhausted; %u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)MT_DEM_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    void *dem_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, DeviceEnergyManagementMode::Id)) {
+        dem_mode_delegate = mt_matter_modebase_delegate_alloc(DeviceEnergyManagementMode::Id);
+        if (dem_mode_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate unavailable (DEM mode): the "
+                    "cluster-object arena or the ModeBase pool cap (kModeBasePoolSlots) is exhausted",
+                    (unsigned)devtype_id);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     void *block = hearth_arena_alloc(s_ep_arena, want, "endpoint block arena");
     if (block == nullptr) {
         /* hearth_arena_alloc() has already said what was wanted and what was
@@ -1089,6 +1164,12 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
         if (type_has_cluster(ep_type, RvcCleanMode::Id)) {
             new (region + store_offset(ep_type, RvcCleanMode::Id)) mt_mb_store_t();
+        }
+        /* Catalogue batch 7a: the DEM mode list, same before-the-endpoint
+         * ordering obligation as the RVC pair (the ModeBase Init reads
+         * index 0 as its first act). */
+        if (type_has_cluster(ep_type, DeviceEnergyManagementMode::Id)) {
+            new (region + store_offset(ep_type, DeviceEnergyManagementMode::Id)) mt_mb_store_t();
         }
     }
 
@@ -1230,6 +1311,42 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     if (type_has_cluster(ep_type, ElectricalEnergyMeasurement::Id)) {
         mt_matter_eem_register(d.ep_id);
+    }
+
+    /* Catalogue batch 7a: the DEM second halves. The ModeBase setter
+     * carries the RVC block's panic warning verbatim (Init() VerifyOrDies
+     * above a successful create); the DEM register is soft (CHI then AAI,
+     * no contains-server check) and takes the variant's PA predicate, the
+     * single source both the FeatureMap seed and the Instance mask derive
+     * from (the variant-qualified seed rows on this port). */
+    /* THE PA PREDICATE IS READ FROM THE DECLARED LIST, not from the variant,
+     * since the nRF's EVSE round (the EVSE and battery storage named here
+     * reach this port with the EVSE round and batch 7b). It used to be `variant == 0`, which was exactly
+     * right while the only DEM-bearing types were the standalone DEM and
+     * battery storage, whose variant 0 carries PowerAdjustment and whose
+     * variant 1 does not. The EVSE breaks that: its variant axis is SOC, and
+     * it carries the over-delivered DEM with NO PowerAdjustment on either
+     * variant, so `variant == 0` would have handed a variant-0 EVSE's
+     * Instance a PA mask over a list declaring none of PA's four obligations.
+     * type_has_attr() asks the list itself, which is the honest source and
+     * cannot disagree with what the endpoint advertises.
+     *
+     * PURELY ADDITIVE ON THE EXISTING TYPES, and checkable by reading three
+     * declarations: demAttrs (0x050D variant 0) declares
+     * PowerAdjustmentCapability, demReportOnlyAttrs (0x050D variant 1) does
+     * not, batteryStorageClusters (0x0018 variant 0) uses demAttrs and
+     * batteryStorageNoDemClusters (variant 1) has no DEM cluster at all. So
+     * the new predicate answers exactly what `variant == 0` answered for
+     * every row that existed before this one. The seeded FeatureMap follows
+     * the same split through its own devtype-qualified row. */
+    if (dem_delegate != nullptr) {
+        mt_matter_dem_register(dem_delegate, d.ep_id,
+                               type_has_attr(ep_type, DeviceEnergyManagement::Id,
+                                             DeviceEnergyManagement::Attributes::
+                                                 PowerAdjustmentCapability::Id));
+    }
+    if (dem_mode_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(dem_mode_delegate, d.ep_id);
     }
 
     s_next_ep_id++;

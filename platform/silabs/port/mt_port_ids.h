@@ -119,12 +119,14 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * The second half of the nRF's two-heap model, in this port's bump-arena
  * form (port/mt_dyn_store.h owns the cost story for both halves).
  *
- * DE555 (2026-09-26): sixteen of the largest per-endpoint object, the
- * OperationalState Delegate + Instance pair (256 B on the nRF's
- * measurement; its exact size here is pinned by a static_assert beside
- * HearthOpStateDelegate in mt_matter_sl_b4.inc); the valve delegate
- * (8 B) and the chime pair (56 B) fit within;
- * +3,968 B of .bss over batch 3.
+ * DE555 (2026-09-26): sized as sixteen of the OperationalState Delegate +
+ * Instance pair (256 B, pinned beside HearthOpStateDelegate in
+ * mt_matter_sl_b4.inc); +3,968 B of .bss over batch 3. That promise holds
+ * for every type whose objects come to at most 256 B. The wider ones since
+ * carry admission limits instead of a bigger arena (DE566, DE584): the RVC
+ * up to nine (424 B each), the measurement family up to eight (192 B),
+ * device energy management up to four (360 B) and the utility meter up to
+ * two (304 B), each pinned beside its pool.
  *
  * DE541: batch 3's minimal form, 128 B of valve delegates only.
  */
