@@ -321,24 +321,22 @@ private:
 
 /*
  * Pool sizing, this port's own (the nRF port's DE404 arithmetic did not
- * copy over, because this port's composition is the RVC alone): 20 slots,
- * which is 2 x 9 plus headroom, two ModeBase pairs per RVC endpoint times
- * the NINE RVC endpoints this build admits (graph DE566). On the nRF the
+ * copy over, because this port's composition was the RVC alone): 20 slots,
+ * which was 2 x 9 plus headroom when nine RVCs were admitted (graph DE566)
+ * and is exactly 2 x 10 since the object arena grew and ten are (DE603). On the nRF the
  * number was argued from its 8,112 usable block heap and a 864 B RVC
  * block, against four or more ModeBase consumers; none of that applies
  * here, where the endpoint arena is 9,728 usable bytes against a 936 B
  * RVC block. Since catalogue batch 7a-2 device energy management's DEMMode
  * is the second ModeBase consumer (one slot per DEM endpoint, at most
- * four), and the cluster-object arena still binds before this pool: nine
- * RVCs take 18 slots and leave no room for a DEM, and any mix with DEMs
- * stops at 17 slots (8 RVCs and 1 DEM, or 7 and 3) before the 4,096 B
- * overflows, so the 20 slots are never the wall. The
- * tenth RVC is refused by the cluster-object arena, not by this pool:
- * nine RVCs draw nine x (264 + 2 x 80) = 3,816 B of it and the tenth's
- * 4,240 B total would not fit the 4,096 B arena, while the pool still has
- * two slots of its own left (the assert beside the RvcOperationalState
- * pair below pins both walls). 20 = 18 + 2, the two being headroom the
- * nRF's batch 7a ruling added, kept as is. The pool is checked first in
+ * four), and catalogue batch 7b's WaterHeaterMode the third (at most
+ * four). Since the object arena is 4,256 B (DE603) this pool can be the
+ * first wall: ten RVCs take all twenty slots (4,240 B of objects), and
+ * nine RVCs with two bare water heaters take twenty in 4,152 B. The
+ * eleventh RVC is refused at its first ModeBase claim by this pool, and
+ * its 4,664 B total would not fit the arena either (the asserts beside the
+ * RvcOperationalState pair below pin both). Every refusal log names both
+ * walls. The pool is checked first in
  * mt_matter_modebase_delegate_alloc() and exhaustion aborts the create
  * before anything is spent, loudly either way. MT_MB_MAX_LISTS is gone
  * from core/include/mt_matter.h (pay-per-composition round, task 7): the
@@ -859,15 +857,17 @@ static HearthRvcOpStateDelegate *s_rvc_opstate_delegates[kServiceableEndpoints];
 static size_t s_rvc_opstate_delegate_next;
 /* The RvcOperationalState Delegate + Instance pair, 264 B on the nRF's
  * measurement; this pins the MG24's. It is wider than the 256 B pair the
- * object arena is sixteen-of, so the RVC is admitted up to nine (graph
- * DE566): nine RVCs draw this pair and two ModeBase pairs (80 B each). */
+ * object arena is sixteen-of, so the RVC is admitted up to ten (graph
+ * DE566, ten since DE603): ten RVCs draw this pair and two ModeBase pairs
+ * (80 B each). */
 static_assert(hearth_arena_cost(obj_pair_bytes<HearthRvcOpStateDelegate,
                                                 chip::app::Clusters::RvcOperationalState::Instance>()) == 264,
               "the RvcOperationalState pair changed size; redo the RVC's admission arithmetic");
-static_assert(9 * (264 + 2 * 80) <= HEARTH_OBJ_ARENA_BYTES,
-              "nine RVCs' objects no longer fit the cluster-object arena (DE566)");
-static_assert(10 * (264 + 2 * 80) > HEARTH_OBJ_ARENA_BYTES,
-              "a tenth RVC now fits the cluster-object arena: nothing else enforces the nine (DE566); add an explicit cap before growing the arena");
+static_assert(10 * (264 + 2 * 80) <= HEARTH_OBJ_ARENA_BYTES,
+              "ten RVCs' objects no longer fit the cluster-object arena (DE603)");
+static_assert(11 * (264 + 2 * 80) > HEARTH_OBJ_ARENA_BYTES,
+              "an eleventh RVC now fits the cluster-object arena: nothing else enforces "
+              "the ten (DE603); add an explicit cap before growing the arena");
 
 extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
 {

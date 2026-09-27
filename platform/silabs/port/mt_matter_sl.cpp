@@ -1259,8 +1259,9 @@ extern "C" uint32_t mt_air_quality_feature_mask(void)
  * stands alone in the arena. Since catalogue batch 4 (2026-09-26, graph
  * DE555) the arena also holds Delegate + Instance pairs through
  * obj_pair_new/obj_inst_storage and raw Instances through obj_inst_new, and
- * its budget is sized as sixteen OperationalState pairs (256 B); the
- * wider types carry admission limits instead (DE566, DE584; the
+ * its budget is sized as sixteen OperationalState pairs (256 B), grown to
+ * 4,256 B so the four energy families at their caps fit together (DE603);
+ * the wider types carry admission limits (DE566, DE584; the
  * HEARTH_OBJ_ARENA_BYTES comment in port/mt_port_ids.h lists them).
  */
 

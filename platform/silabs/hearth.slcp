@@ -411,6 +411,10 @@ component:
   - id: matter_thread_network_diagnostics
   - id: matter_thermostat
   - id: matter_valve_configuration_and_control
+  # Catalogue batch 7b (2026-09-27): the water heater. No SDK patch:
+  # WaterHeaterManagement is not code-driven, WaterHeaterMode rides
+  # matter_mode_base, and battery storage adds no cluster.
+  - id: matter_water_heater_management
   - id: matter_window_covering
   # There is deliberately no matter_temperature_measurement: no such component
   # exists, and none is needed. The same holds for Relative Humidity, Pressure,

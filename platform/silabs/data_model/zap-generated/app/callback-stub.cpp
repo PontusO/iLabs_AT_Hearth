@@ -222,6 +222,16 @@ void __attribute__((weak)) emberAfValveConfigurationAndControlClusterInitCallbac
     // To prevent warning
     (void) endpoint;
 }
+void __attribute__((weak)) emberAfWaterHeaterManagementClusterInitCallback(EndpointId endpoint)
+{
+    // To prevent warning
+    (void) endpoint;
+}
+void __attribute__((weak)) emberAfWaterHeaterModeClusterInitCallback(EndpointId endpoint)
+{
+    // To prevent warning
+    (void) endpoint;
+}
 void __attribute__((weak)) emberAfWindowCoveringClusterInitCallback(EndpointId endpoint)
 {
     // To prevent warning

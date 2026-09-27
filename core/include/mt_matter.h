@@ -946,9 +946,10 @@ void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
  * only by the composition itself (MT_COMP_MAX_ENDPOINTS, mt_composition.h).
  * The nRF port did not get that round's delegate reclaim and still enforces
  * MT_WHM_MAX below as a real family acceptance cap on its own fixed WHM
- * delegate pool (mt_matter_zephyr.cpp).
+ * delegate pool (mt_matter_zephyr.cpp); the Silicon Labs MG24 port adopts the
+ * same cap as its documented admission maximum (catalogue batch 7b).
  */
-#define MT_WHM_MAX 4  /* nRF-only: WaterHeaterManagement endpoints per composition */
+#define MT_WHM_MAX 4  /* nRF and MG24: WaterHeaterManagement endpoints per composition */
 
 /*
  * AT+MTMEAS field ids for the WaterHeaterManagement cluster (0x0094), the

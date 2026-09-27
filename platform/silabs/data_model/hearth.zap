@@ -10543,7 +10543,7 @@
           "mfgCode": null,
           "define": "WATER_HEATER_MANAGEMENT_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "HeaterTypes",
@@ -10747,7 +10747,7 @@
           "mfgCode": null,
           "define": "WATER_HEATER_MODE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "SupportedModes",

@@ -123,11 +123,19 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * Instance pair (256 B, pinned beside HearthOpStateDelegate in
  * mt_matter_sl_b4.inc); +3,968 B of .bss over batch 3. That promise holds
  * for every type whose objects come to at most 256 B. The wider ones since
- * carry admission limits instead of a bigger arena (DE566, DE584): the RVC
- * up to nine (424 B each), the measurement family up to eight (192 B),
- * device energy management up to four (360 B) and the utility meter up to
- * two (304 B), each pinned beside its pool.
+ * carry admission limits (DE566, DE584): the RVC up to ten (424 B each),
+ * the measurement family up to eight (192 B), device energy management up
+ * to four (360 B), the utility meter up to two (304 B) and the water heater
+ * up to four (360 B, of which 168 B outside the measurement caps), each
+ * pinned beside its pool.
+ *
+ * DE603 (catalogue batch 7b, 2026-09-27, the user's ruling): 4,096 grew to
+ * 4,256 (+160 B of .bss) so the four energy families at their caps fit
+ * together, exactly: 8 x 192 + 4 x 360 + 2 x 304 + 4 x 168 = 4,256, a
+ * static_assert beside the WHM pool in mt_matter_sl_b7.inc. Any composition
+ * inside every cap therefore fits. The same growth lets a tenth RVC fit
+ * (10 x 424 = 4,240), so the RVC's maximum rose from nine to ten.
  *
  * DE541: batch 3's minimal form, 128 B of valve delegates only.
  */
-#define HEARTH_OBJ_ARENA_BYTES 4096
+#define HEARTH_OBJ_ARENA_BYTES 4256

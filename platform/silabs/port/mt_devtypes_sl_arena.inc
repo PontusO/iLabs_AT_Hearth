@@ -544,13 +544,14 @@ constexpr size_t kChimeBlockBytes =
  * kWidestClusterList. It gets its own candidate (Identify, the two ModeBase
  * lists, the operational state list and the two trailing ModeBase stores,
  * the MT_COUNT over-count as everywhere here) and a documented maximum of
- * nine per composition; a composition past that is refused at create. Note
- * that this arena would hold ten RVC blocks (10 x 936 = 9,360 of 9,728) and
- * the 20-slot ModeBase pool would serve ten as well; the wall that refuses
- * the tenth is the cluster-object arena, which fits nine x (264 + 2 x 80) =
- * 3,816 of its 4,096 bytes but not the tenth's 4,240 total, pinned by the
- * static_assert beside the nine-fit assert in mt_matter_sl_b5.inc. */
-constexpr size_t kRvcMaxEndpoints = 9;
+ * ten per composition (nine until the object arena grew, DE603); a
+ * composition past that is refused at create. This arena holds ten RVC
+ * blocks (10 x 936 = 9,360 of 9,728), asserted below; the eleventh is
+ * refused by the 20-slot ModeBase pool and could not fit the 4,256 B
+ * cluster-object arena either (11 x 424 = 4,664), pinned by the
+ * static_asserts beside the RvcOperationalState pair in
+ * mt_matter_sl_b5.inc. */
+constexpr size_t kRvcMaxEndpoints = 10;
 constexpr size_t kRvcBlockBytes =
     block_bytes(MT_COUNT(rvcClusters),
                 kIdentifySlots + 2 * MT_COUNT(modeBaseAttrs) + MT_COUNT(opStateAttrs)) +
@@ -558,7 +559,7 @@ constexpr size_t kRvcBlockBytes =
 static_assert(hearth_arena_cost(kRvcBlockBytes) == 936,
               "the RVC block moved off the 936 B the admission limit was sized with");
 static_assert(kRvcMaxEndpoints * hearth_arena_cost(kRvcBlockBytes) <= kEpArenaBytes,
-              "nine RVC blocks no longer fit the endpoint arena");
+              "ten RVC blocks no longer fit the endpoint arena");
 
 /* Catalogue batch 7a-2 (nRF 5446-5459, its batch 7a fix round, review
  * B7A-3): the DEM device type is the fourth store-bearing block shape, so

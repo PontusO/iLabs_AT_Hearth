@@ -142,6 +142,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::ValveConfigurationAndControl::Id:
         emberAfValveConfigurationAndControlClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::WaterHeaterManagement::Id:
+        emberAfWaterHeaterManagementClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::WaterHeaterMode::Id:
+        emberAfWaterHeaterModeClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::WindowCovering::Id:
         emberAfWindowCoveringClusterInitCallback(endpoint);
         break;
