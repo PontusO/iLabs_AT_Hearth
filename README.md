@@ -143,7 +143,7 @@ bench, give each board its own discriminator:
 |---|---|---|
 | ESP32-C6 | `0xF00` | the shipped default: nothing to change |
 | nRF54L15 | `0xF01` | `west build ... -- -DCONFIG_CHIP_DEVICE_DISCRIMINATOR=0xF01` (the build has no factory data, so the Kconfig value is the one advertised) |
-| Silicon Labs MG24 | `0xF02` | after `slc generate` into the build directory, append `C_DEFS += -DCHIP_DEVICE_CONFIG_USE_TEST_SETUP_DISCRIMINATOR=0xF02` to the generated `hearth.project.mak` there, then build (the define wins over `src/CHIPProjectConfig.h`'s `#ifndef` default; the provision storage falls back to it while no discriminator is provisioned) |
+| Silicon Labs MG24 | `0xF02` | after `slc generate` into the build directory, append `C_DEFS += -DCHIP_DEVICE_CONFIG_USE_TEST_SETUP_DISCRIMINATOR=0xF02` on a line of its own to the generated `hearth.project.mak` there (`printf '\nC_DEFS += ...\n' >> hearth.project.mak`: slc writes the file without a trailing newline, so a plain `echo >>` glues the line onto the last comment and the define silently never applies), then `make clean` and build (the build does not rebuild on a changed `hearth.project.mak`). The define wins over `src/CHIPProjectConfig.h`'s `#ifndef` default; the provision storage falls back to it while no discriminator is provisioned |
 
 These are development settings only. They live on the build command line or
 in a generated build directory outside the repository, never in a committed
