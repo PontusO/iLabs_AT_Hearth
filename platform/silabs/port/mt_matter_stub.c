@@ -168,10 +168,6 @@ int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
     return STUB_ATTR_MISS(ep);
 }
 
-void *mt_matter_epm_delegate_alloc(void) { return NULL; }
-void *mt_matter_ptop_delegate_alloc(void) { return NULL; }
-void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)delegate; (void)ep; }
-
 /* ---- water heater management (energy round B) ------------------------------------ */
 
 void *mt_matter_whm_delegate_alloc(uint16_t ep) { (void)ep; return NULL; }

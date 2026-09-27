@@ -48,6 +48,12 @@
 #include <app/clusters/smoke-co-alarm-server/smoke-co-alarm-server.h>
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-cluster.h>
 #include <app/clusters/valve-configuration-and-control-server/valve-configuration-and-control-delegate.h>
+/* Catalogue batch 7a-1: the measurement family's servers (nRF
+ * mt_matter_zephyr.cpp's own includes). */
+#include <app/clusters/electrical-energy-measurement-server/ElectricalEnergyMeasurementCluster.h>
+#include <app/clusters/electrical-energy-measurement-server/electrical-energy-measurement-server.h>
+#include <app/clusters/electrical-power-measurement-server/electrical-power-measurement-server.h>
+#include <app/clusters/power-topology-server/power-topology-server.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>
 #include <app/util/attribute-storage.h>
@@ -494,8 +500,9 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * ones the wire contract actually asks for.
  *
  * Every row of the nRF's table, and the batch that ports the device type it
- * belongs to (nRF README batch roster); the batch 4 rows are present here, the
- * rest arrive with their batches:
+ * belongs to (nRF README batch roster); the batch 4, batch 5 and the
+ * ElectricalPowerMeasurement rows are present here, the rest arrive with
+ * their batches:
  *
  *   OperationalState OperationalState, CurrentPhase           batch 4
  *   Chime SelectedChime, Enabled                              batch 4
@@ -590,6 +597,39 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
     { chip::app::Clusters::RvcOperationalState::Id,
       chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
+    /* Catalogue batch 7a, the DE407 option-C rows: the seven
+     * ElectricalPowerMeasurement push fields are declared with their true
+     * 64-bit ZCL types (the AAI gate at CodegenDataModelProvider_Read.cpp:108-109
+     * requires ember metadata), take no arena slot (attr_gets_slot()'s
+     * md.size <= kSlotDataBytes refusal), and are served by the EPM
+     * Instance from the HearthEpmDelegate cache below, so an AT read
+     * answers the same live value a subscribed controller sees (null until
+     * first pushed: +MTERR:5, the no-null-literal rule). Writes answer
+     * +MTERR:11 through the non-Chime arm below, mirroring the C6, where
+     * all seven are created ATTRIBUTE_FLAG_MANAGED_INTERNALLY without
+     * WRITABLE (esp_matter_attribute.cpp:3918-3960, create_voltage() and
+     * siblings) so its set_val() answers ESP_ERR_NOT_SUPPORTED and the
+     * DE270 mapping renders the identical +MTERR:11; AT+MTMEAS is the
+     * write path. PowerMode and NumberOfMeasurementTypes are deliberately
+     * NOT here: their slots are seeded to the exact constants the delegate
+     * serves (kAc, 1), so the generic arena read answers truthfully, the
+     * FanControl agreement discipline. The EEM struct attributes need no
+     * rows either: STRUCT falls out of attr_type_info() and answers
+     * +MTERR:5 on the generic path, the same code the C6 answers. */
+    { chip::app::Clusters::ElectricalPowerMeasurement::Id,
+      chip::app::Clusters::ElectricalPowerMeasurement::Attributes::Voltage::Id },
+    { chip::app::Clusters::ElectricalPowerMeasurement::Id,
+      chip::app::Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id },
+    { chip::app::Clusters::ElectricalPowerMeasurement::Id,
+      chip::app::Clusters::ElectricalPowerMeasurement::Attributes::ActivePower::Id },
+    { chip::app::Clusters::ElectricalPowerMeasurement::Id,
+      chip::app::Clusters::ElectricalPowerMeasurement::Attributes::RMSVoltage::Id },
+    { chip::app::Clusters::ElectricalPowerMeasurement::Id,
+      chip::app::Clusters::ElectricalPowerMeasurement::Attributes::RMSCurrent::Id },
+    { chip::app::Clusters::ElectricalPowerMeasurement::Id,
+      chip::app::Clusters::ElectricalPowerMeasurement::Attributes::Frequency::Id },
+    { chip::app::Clusters::ElectricalPowerMeasurement::Id,
+      chip::app::Clusters::ElectricalPowerMeasurement::Attributes::PowerFactor::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -751,6 +791,7 @@ static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, boo
 static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, bool *is_unsigned);
 static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out,
                                          bool *is_unsigned);
+static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
 /* The RVC opstate pool's Instance lookup (defined beside the pool below),
  * shared by mt_matter_opstate_set()'s RVC branch and the live reader. */
@@ -786,6 +827,8 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
         case chip::app::Clusters::Chime::Id:
             return mt_chime_attr_read_live(ep, attr, out, is_unsigned);
+        case chip::app::Clusters::ElectricalPowerMeasurement::Id:
+            return mt_epm_attr_read_live(ep, attr, out, is_unsigned);
         default:
             return MT_ATTR_ERR_FAILED;
         }
@@ -1609,3 +1652,4 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
 
 #include "mt_matter_sl_b4.inc"
 #include "mt_matter_sl_b5.inc"
+#include "mt_matter_sl_b7.inc"
