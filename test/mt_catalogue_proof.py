@@ -621,7 +621,9 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         cc = c["chip_cluster"] or t["chip_cluster"]
         link.drain(0.2)
         ctx = types.SimpleNamespace(chip=chip, chip_call=None)
-        handle = H.invoke_chip(ctx, [cc] + args[:1] + [node, str(ep)] + args[1:], timeout=30)
+        # ChangeToMode's NewMode is a positional command argument, so it
+        # precedes the destination, as the harness's own step 3.15 passes it.
+        handle = H.invoke_chip(ctx, [cc] + args + [node, str(ep)], timeout=30)
         if answer == "none":
             fwd = link.await_urc(r"^\+MTCMD:\d+,%d,%d,\d+(,|$)" % (ep, fcl), 3.0)
             s.check("%s no +MTCMD within 3s" % prefix, fwd is None)
