@@ -2803,5 +2803,200 @@ class TestBatch7a1RowNames(unittest.TestCase):
             self.assertIn(name, names, "missing pinned row: %s" % name)
 
 
+# Batch 7a-2 (catalogue batch 7a-2 design spec section 4): the utility meter
+# and device energy management; the verdict kind's positional fields and
+# after reads.
+
+def _b7a2_row(devtype, variant=None, name=None):
+    return [t for t in P.BATCHES["mg24-batch7a2"]
+            if t["devtype"] == devtype and t.get("variant") == variant
+            and (name is None or t["name"] == name)][0]
+
+
+def _pa_verdict(answer):
+    t = _b7a2_row("0x050D")
+    return [c for c in t["checks"] if c["controller"] and c["controller"][0] == "verdict"
+            and c["controller"][3] == answer][0]
+
+
+class _DemLink(_MeasLink):
+    """_MeasLink widened to this batch's pushes: AT+MTMEAS on cluster 152
+    stores the field's attribute (field N is attribute N, but field 5,
+    OptOutState, is attribute 7), and AT+MTMETERID stores MeterType
+    (attribute 0); both answer OK with no lines, like the firmware."""
+
+    def command(self, cmd, *a, **k):
+        m = re.fullmatch(r"AT\+MTMEAS=(\d+),152,(\d+),(-?\d+)", cmd)
+        if m:
+            self.sent.append(cmd)
+            ep, field, value = (int(x) for x in m.groups())
+            self.state[(ep, 152, 7 if field == 5 else field)] = str(value)
+            return (0, [])
+        m = re.fullmatch(r"AT\+MTMETERID=(\d+),(\d+),.*", cmd)
+        if m:
+            self.sent.append(cmd)
+            self.state[(int(m.group(1)), 2822, 0)] = m.group(2)
+            return (0, [])
+        return super().command(cmd, *a, **k)
+
+
+class _RecordingChip(_Batch4Chip):
+    """_Batch4Chip that records every argv its chip_call double runs, so a
+    test can assert the command line the verdict kind built; reads answer
+    `before` until a command has run and `after` from then on (DEM's
+    ESAState moving from 1 to 3 on an allowed PowerAdjustRequest)."""
+
+    def __init__(self, before=1, after=1, **kw):
+        super().__init__(**kw)
+        self.argvs = []
+        self.before = before
+        self.after_value = after
+        self.commanded = False
+
+    def run(self, args, timeout=None):
+        if len(args) >= 4 and args[1] in ("read", "read-event"):
+            self.value = self.after_value if self.commanded else self.before
+            return super().run(args, timeout=timeout)
+        self.commanded = True
+        return super().run(args, timeout=timeout)
+
+    def chip_call(self, chip, argv, timeout=60):
+        self.argvs.append(list(argv))
+        return super().chip_call(chip, argv, timeout)
+
+
+class TestBatch7a2Table(unittest.TestCase):
+    def test_composition(self):
+        self.assertEqual(P.composition_for("mg24-batch7a2"),
+                         [(1, "0x0100"), (2, "0x0511"), (3, "0x0511"),
+                          (4, "0x050D"), (5, "0x050D,1")])
+
+    def test_revisions_and_clusters(self):
+        rows = P.BATCHES["mg24-batch7a2"]
+        self.assertEqual([t["revision"] for t in rows], [1, 1, 3, 3])
+        for t in rows:
+            self.assertIn(t["chip_cluster"], P.CHIP_CLUSTERS)
+            for c in t["checks"]:
+                if c["chip_cluster"]:
+                    self.assertIn(c["chip_cluster"], P.CHIP_CLUSTERS)
+        for name in ("meteridentification", "deviceenergymanagement",
+                     "deviceenergymanagementmode"):
+            self.assertIn(name, P.CHIP_CLUSTERS)
+
+    def test_check_counts(self):
+        self.assertEqual([len(t["checks"]) for t in P.BATCHES["mg24-batch7a2"]],
+                         [3, 2, 14, 5])
+
+    def test_the_two_pa_verdicts_are_positional_and_only_allow_reads_after(self):
+        deny, allow = _pa_verdict(0), _pa_verdict(1)
+        self.assertTrue(deny["controller"][4]["positional"])
+        self.assertTrue(allow["controller"][4]["positional"])
+        self.assertNotIn("after", deny["controller"][4])
+        self.assertEqual(allow["controller"][4]["after"], [("esastate", 3)])
+        self.assertEqual(allow["controller"][5], [5000000000, 60, 0])
+
+
+class TestVerdictPositionalAndAfter(unittest.TestCase):
+    PREFIX = "0x050D device energy management ep4 esastate power-adjust-request allow payload [5000000000, 60, 0]"
+
+    def _run(self, check, t, chip, link, ep, prefix):
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            s = _FakeSuite()
+            P.prove_check(link, chip, s, "0x4845", ep, t, check, prefix)
+        finally:
+            H._threaded_chip_call = saved
+        return s
+
+    def test_positional_fields_precede_the_destination(self):
+        link = _VerdictLink()
+        chip = _RecordingChip(link=link, ep=4, cluster=152, command=0, seq=7,
+                              payload=[5000000000, 60, 0], before=1, after=3)
+        self._run(_pa_verdict(1), _b7a2_row("0x050D"), chip, link, 4, self.PREFIX)
+        self.assertEqual(chip.argvs, [["deviceenergymanagement", "power-adjust-request",
+                                       "5000000000", "60", "0", "0x4845", "4"]])
+
+    def test_a_non_positional_verdict_keeps_its_argv(self):
+        t = [x for x in P.BATCHES["mg24-batch3"] if x["devtype"] == "0x000A"][0]
+        c = [c for c in t["checks"] if c["controller"] and c["controller"][0] == "verdict"
+             and c["controller"][1][0] == "lock-door" and c["controller"][3] == 1][0]
+        link = _VerdictLink()
+        chip = _RecordingChip(link=link, ep=2, cluster=257, command=0, seq=7)
+        self._run(c, t, chip, link, 2, "door lock ep2 lock-state lock-door allow")
+        self.assertEqual(chip.argvs, [["doorlock", "lock-door", "0x4845", "2",
+                                       "--timedInteractionTimeoutMs", "5000"]])
+
+    def test_the_after_read_passes_when_the_value_moved(self):
+        link = _VerdictLink()
+        chip = _RecordingChip(link=link, ep=4, cluster=152, command=0, seq=7,
+                              payload=[5000000000, 60, 0], before=1, after=3)
+        s = self._run(_pa_verdict(1), _b7a2_row("0x050D"), chip, link, 4, self.PREFIX)
+        got = dict(s.results)
+        self.assertTrue(got[self.PREFIX + " esastate = 3 after"])
+        self.assertTrue(got[self.PREFIX + " forward 152/0 answered allow"])
+        self.assertEqual([x for x in link.sent if x.startswith("AT+MTCMDRESP=")],
+                         ["AT+MTCMDRESP=7,1"])
+
+    def test_the_after_read_fails_when_the_value_stayed(self):
+        link = _VerdictLink()
+        chip = _RecordingChip(link=link, ep=4, cluster=152, command=0, seq=7,
+                              payload=[5000000000, 60, 0], before=1, after=1)
+        s = self._run(_pa_verdict(1), _b7a2_row("0x050D"), chip, link, 4, self.PREFIX)
+        got = dict(s.results)
+        self.assertFalse(got[self.PREFIX + " esastate = 3 after"])
+        self.assertTrue(got[self.PREFIX + " forward 152/0 answered allow"])
+
+    def test_a_wrong_payload_fails_the_forward_row(self):
+        link = _VerdictLink()
+        chip = _RecordingChip(link=link, ep=4, cluster=152, command=0, seq=7,
+                              payload=[1, 60, 0], before=1, after=3)
+        s = self._run(_pa_verdict(1), _b7a2_row("0x050D"), chip, link, 4, self.PREFIX)
+        self.assertFalse(dict(s.results)[self.PREFIX + " forward 152/0 answered allow"])
+
+
+class TestBatch7a2RowNames(unittest.TestCase):
+    def _fake_run_names(self):
+        # Every endpoint of the table against permissive fakes: the names
+        # come from the table, not from the answers (rows may fail here).
+        comp = P.composition_for("mg24-batch7a2")
+        names = []
+        for (ep, _), t in zip(comp[1:], P.rows_for("mg24-batch7a2")):
+            link = _DemLink()
+            chip = _RecordingChip(link=link, ep=ep, cluster=152, command=0, seq=7,
+                                  payload=[5000000000, 60, 0],
+                                  devtype=t["devtype"], revision=t["revision"])
+            saved = H._threaded_chip_call
+            H._threaded_chip_call = chip.chip_call
+            try:
+                s = _FakeSuite()
+                P.prove_endpoint(link, chip, s, "0x4845", ep, t)
+            finally:
+                H._threaded_chip_call = saved
+            names += [n for n, _ in s.results] + [n for n, _ in s.na]
+        return names
+
+    def test_no_duplicate_name(self):
+        names = self._fake_run_names()
+        self.assertEqual(len(names), 92)
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_the_pinned_names_occur(self):
+        pinned = [
+            "0x0511 electrical utility meter ep2 meter-type pushed AT read before the push -> +MTERR:5",
+            "0x0511 electrical utility meter ep2 point-of-delivery AT write refused AT+MTATTR=2,2822,1 -> +MTERR:5",
+            "0x0511 electrical utility meter second ep3 setup meteridentification power-threshold read carries 2500000",
+            "0x050D device energy management ep4 abs-min-power pushed AT read = -5000000000",
+            "0x050D device energy management ep4 esastate cancel-power-adjust-request no-forward wire status 0xCB",
+            "0x050D device energy management ep4 esastate power-adjust-request deny payload [5000000000, 60, 0] wire status 0x1",
+            "0x050D device energy management ep4 esastate power-adjust-request allow payload [5000000000, 60, 0] esastate = 3 after",
+            "0x050D device energy management ep4 opt-out-state pushed AT read = 2",
+            "0x050D device energy management ep4 power-adjust-end event present",
+            "0x050D device energy management report-only ep5 esastate cancel-power-adjust-request no-forward wire status 0x81",
+        ]
+        names = set(self._fake_run_names())
+        for name in pinned:
+            self.assertIn(name, names, "missing pinned row: %s" % name)
+
 if __name__ == "__main__":
     unittest.main()
