@@ -511,9 +511,10 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * ones the wire contract actually asks for.
  *
  * Every row of the nRF's table, and the batch that ports the device type it
- * belongs to (nRF README batch roster); the batch 4, batch 5 and the
- * ElectricalPowerMeasurement rows are present here, the rest arrive with
- * their batches:
+ * belongs to (nRF README batch roster); the batch 4, batch 5, batch 7a-1
+ * (ElectricalPowerMeasurement) and batch 7a-2 (MeterIdentification,
+ * DeviceEnergyManagement, DeviceEnergyManagementMode) rows are present
+ * here, the rest arrive with their batches:
  *
  *   OperationalState OperationalState, CurrentPhase           batch 4
  *   Chime SelectedChime, Enabled                              batch 4
@@ -652,6 +653,28 @@ static const instance_served_attr k_instance_served[] = {
      * path. */
     { chip::app::Clusters::MeterIdentification::Id,
       chip::app::Clusters::MeterIdentification::Attributes::MeterType::Id },
+    /* DeviceEnergyManagement (batch 7a): all six delegate-served scalars,
+     * the four enums/bool with inert shadows plus the two DE407
+     * metadata-only power_mw declarations. Reads answer the
+     * HearthDemDelegate cache below; writes +MTERR:11 (MANAGED_INTERNALLY
+     * without WRITABLE on the C6, esp_matter_attribute.cpp:4255-4290);
+     * AT+MTMEAS 0x98 is the write path. The DEMMode CurrentMode row is
+     * the RVC ModeBase pair's rule on the third alias; its ClusterRevision
+     * stays out (LIVE seed, the ModeBase no-default-arm note above). */
+    { chip::app::Clusters::DeviceEnergyManagement::Id,
+      chip::app::Clusters::DeviceEnergyManagement::Attributes::ESAType::Id },
+    { chip::app::Clusters::DeviceEnergyManagement::Id,
+      chip::app::Clusters::DeviceEnergyManagement::Attributes::ESACanGenerate::Id },
+    { chip::app::Clusters::DeviceEnergyManagement::Id,
+      chip::app::Clusters::DeviceEnergyManagement::Attributes::ESAState::Id },
+    { chip::app::Clusters::DeviceEnergyManagement::Id,
+      chip::app::Clusters::DeviceEnergyManagement::Attributes::AbsMinPower::Id },
+    { chip::app::Clusters::DeviceEnergyManagement::Id,
+      chip::app::Clusters::DeviceEnergyManagement::Attributes::AbsMaxPower::Id },
+    { chip::app::Clusters::DeviceEnergyManagement::Id,
+      chip::app::Clusters::DeviceEnergyManagement::Attributes::OptOutState::Id },
+    { chip::app::Clusters::DeviceEnergyManagementMode::Id,
+      chip::app::Clusters::DeviceEnergyManagementMode::Attributes::CurrentMode::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -815,6 +838,7 @@ static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *ou
                                          bool *is_unsigned);
 static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_meter_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
 /* The RVC opstate pool's Instance lookup (defined beside the pool below),
  * shared by mt_matter_opstate_set()'s RVC branch and the live reader. */
@@ -845,6 +869,7 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_opstate_attr_read_live(ep, cluster, attr, out, is_unsigned);
         case chip::app::Clusters::RvcRunMode::Id:
         case chip::app::Clusters::RvcCleanMode::Id:
+        case chip::app::Clusters::DeviceEnergyManagementMode::Id:
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::RvcOperationalState::Id:
             return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
@@ -854,6 +879,8 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_epm_attr_read_live(ep, attr, out, is_unsigned);
         case chip::app::Clusters::MeterIdentification::Id:
             return mt_meter_attr_read_live(ep, attr, out, is_unsigned);
+        case chip::app::Clusters::DeviceEnergyManagement::Id:
+            return mt_dem_attr_read_live(ep, attr, out, is_unsigned);
         default:
             return MT_ATTR_ERR_FAILED;
         }

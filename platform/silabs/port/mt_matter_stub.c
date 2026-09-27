@@ -157,20 +157,6 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)d
 
 void *mt_matter_whm_delegate_alloc(uint16_t ep) { (void)ep; return NULL; }
 
-/* ---- device energy management (energy round C1) ----------------------------------- */
-
-void *mt_matter_dem_delegate_alloc(uint16_t ep) { (void)ep; return NULL; }
-
-int mt_matter_demcap_set(uint16_t ep, uint8_t cause, uint8_t n, const int64_t *quads)
-{
-    (void)cause;
-    (void)n;
-    (void)quads;
-    /* no DeviceEnergyManagement cluster on ep: MT_ATTR_ERR_CLUSTER
-     * (mt_matter.h:1138) */
-    return STUB_ATTR_MISS(ep);
-}
-
 /* ---- nested row payloads (AT+MTROW family, energy round C2) ------------------------ */
 
 /* The MT_ROW_* family's "the endpoint exists but no cluster stores this row
