@@ -2998,5 +2998,174 @@ class TestBatch7a2RowNames(unittest.TestCase):
         for name in pinned:
             self.assertIn(name, names, "missing pinned row: %s" % name)
 
+# Batch 7b (catalogue batch 7b design spec section 4): the water heater and
+# battery storage; the event-count read.
+
+class _WhmLink(_DemLink):
+    """_DemLink widened to the water heater's pushes: AT+MTMEAS on cluster
+    148 stores each (field, value) pair under its attribute id (fields 0
+    and 1 keep theirs; BoostState is field 2 but attribute 5, TankVolume
+    3/2, EstimatedHeatRequired 4/3, TankPercentage 5/4) and answers OK with
+    no lines, like the firmware."""
+
+    FIELD_ATTR = {0: 0, 1: 1, 2: 5, 3: 2, 4: 3, 5: 4}
+
+    def command(self, cmd, *a, **k):
+        m = re.fullmatch(r"AT\+MTMEAS=(\d+),148,(-?\d+(?:,-?\d+)*)", cmd)
+        if m:
+            self.sent.append(cmd)
+            ep = int(m.group(1))
+            nums = [int(x) for x in m.group(2).split(",")]
+            pairs = list(zip(nums[0::2], nums[1::2]))
+            if any(f not in self.FIELD_ATTR for f, _ in pairs):
+                return (1, [])   # an unknown field: +MTERR:1, nothing applied
+            for field, value in pairs:
+                self.state[(ep, 148, self.FIELD_ATTR[field])] = str(value)
+            return (0, [])
+        return super().command(cmd, *a, **k)
+
+
+class _EventChip:
+    """A chip whose every read answers the given text: the event-count
+    rows read chip-tool's read-event capture, printed in the harness's
+    `<Name>: {` block shape parse_event_count counts."""
+
+    def __init__(self, text):
+        self.text = text
+
+    def run(self, args, timeout=None):
+        return (0, self.text)
+
+
+_BOOST_STARTED = ("CHIP:TOO:   BoostStarted: {\n"
+                  "CHIP:TOO:     BoostInfo: {\n"
+                  "CHIP:TOO:       Duration: 3600\n"
+                  "CHIP:TOO:       OneShot: TRUE\n"
+                  "CHIP:TOO:       TargetPercentage: 80\n"
+                  "CHIP:TOO:      }\n"
+                  "CHIP:TOO:    }\n")
+
+
+def _b7b_row(devtype, variant=None):
+    return [t for t in P.BATCHES["mg24-batch7b"]
+            if t["devtype"] == devtype and t.get("variant") == variant][0]
+
+
+class TestEventCount(unittest.TestCase):
+    ROW = "0x050F water heater ep2 boost-started "
+
+    def _rows(self, text):
+        t = P._multi("0x050F", "water heater", 1, "waterheatermanagement", [],
+                     extra_reads=[("event-count", "boost-started", 1,
+                                   [("Duration", 3600), ("TargetPercentage", 80)])])
+        s = _FakeSuite()
+        P.prove_endpoint(_WhmLink(), _EventChip(text), s, "0x4845", 2, t)
+        return {n: ok for n, ok in s.results if "boost-started" in n}
+
+    def test_one_event_carrying_both_labels_passes(self):
+        self.assertEqual(self._rows(_BOOST_STARTED),
+                         {self.ROW + "event count 1": True,
+                          self.ROW + "carries Duration 3600": True,
+                          self.ROW + "carries TargetPercentage 80": True})
+
+    def test_two_events_fail_only_the_count(self):
+        got = self._rows(_BOOST_STARTED * 2)
+        self.assertFalse(got[self.ROW + "event count 1"])
+        self.assertTrue(got[self.ROW + "carries Duration 3600"])
+
+    def test_a_missing_label_fails_only_its_row(self):
+        got = self._rows(_BOOST_STARTED.replace("TargetPercentage: 80", "TargetReheat: 20"))
+        self.assertTrue(got[self.ROW + "event count 1"])
+        self.assertTrue(got[self.ROW + "carries Duration 3600"])
+        self.assertFalse(got[self.ROW + "carries TargetPercentage 80"])
+
+    def test_no_event_fails_the_count(self):
+        self.assertFalse(self._rows("CHIP:TOO:   no events\n")[self.ROW + "event count 1"])
+
+
+class TestBatch7bTable(unittest.TestCase):
+    def test_composition(self):
+        self.assertEqual(P.composition_for("mg24-batch7b"),
+                         [(1, "0x0100"), (2, "0x050F"), (3, "0x050F,1"),
+                          (4, "0x0018"), (5, "0x0018,1")])
+
+    def test_revisions_and_clusters(self):
+        rows = P.BATCHES["mg24-batch7b"]
+        self.assertEqual([t["revision"] for t in rows], [1, 1, 2, 2])
+        for t in rows:
+            self.assertIn(t["chip_cluster"], P.CHIP_CLUSTERS)
+            for c in t["checks"]:
+                if c["chip_cluster"]:
+                    self.assertIn(c["chip_cluster"], P.CHIP_CLUSTERS)
+        for name in ("waterheatermanagement", "waterheatermode"):
+            self.assertIn(name, P.CHIP_CLUSTERS)
+
+    def test_check_counts(self):
+        self.assertEqual([len(t["checks"]) for t in P.BATCHES["mg24-batch7b"]],
+                         [20, 7, 7, 4])
+
+    def test_boost_verdicts_are_positional_with_the_forwarded_fields(self):
+        wh = _b7b_row("0x050F")
+        boosts = [c for c in wh["checks"] if c["controller"] and c["controller"][0] == "verdict"
+                  and c["controller"][1][0] == "boost"]
+        self.assertEqual([c["controller"][3] for c in boosts], [0, 1])
+        for c in boosts:
+            self.assertTrue(c["controller"][4]["positional"])
+            self.assertEqual(c["controller"][5], [3600, 265, 80])
+            self.assertEqual(c["controller"][1][1], P.BOOST)
+        self.assertEqual(boosts[1]["controller"][4]["after"], [("boost-state", 0)])
+
+    def test_the_event_counts_are_read(self):
+        wh = _b7b_row("0x050F")
+        self.assertIn(("event-count", "boost-started", 1,
+                       [("Duration", 3600), ("TargetPercentage", 80)]), wh["extra_reads"])
+        self.assertIn(("event-count", "boost-ended", 1), wh["extra_reads"])
+
+
+_PINNED_7B = [
+    "0x050F water heater ep2 estimated-heat-required pushed AT read = 4294967297",
+    "0x050F water heater ep2 boost-state cancel-boost no-forward no +MTCMD within 3s",
+    "0x050F water heater ep2 boost-state boost deny payload [3600, 265, 80] wire status 0x1",
+    "0x050F water heater ep2 boost-state boost allow payload [3600, 265, 80] boost-state = 0 after",
+    "0x050F water heater ep2 heater-types pushed AT read = 8",
+    "0x050F water heater ep2 boost-started carries TargetPercentage 80",
+    "0x050F water heater ep2 boost-ended event count 1",
+    "0x050F water heater bare ep3 tank-volume AT write refused AT+MTMEAS=3,148,3,200 -> +MTERR:3",
+    "0x0018 battery storage ep4 bat-percent-remaining AT write refused AT+MTATTR=4,47,12,201 -> +MTERR:1",
+    "0x0018 battery storage without DEM ep5 esatype AT write refused AT+MTMEAS=5,152,0,5 -> +MTERR:3",
+]
+
+
+class TestBatch7bRowNames(unittest.TestCase):
+    def _fake_run_names(self):
+        # Every endpoint against permissive fakes: the names come from the
+        # table, not from the answers (rows may fail here).
+        comp = P.composition_for("mg24-batch7b")
+        names = []
+        for (ep, _), t in zip(comp[1:], P.rows_for("mg24-batch7b")):
+            link = _WhmLink()
+            chip = _RecordingChip(link=link, ep=ep, cluster=148, command=0, seq=7,
+                                  payload=[3600, 265, 80],
+                                  devtype=t["devtype"], revision=t["revision"])
+            saved = H._threaded_chip_call
+            H._threaded_chip_call = chip.chip_call
+            try:
+                s = _FakeSuite()
+                P.prove_endpoint(link, chip, s, "0x4845", ep, t)
+            finally:
+                H._threaded_chip_call = saved
+            names += [n for n, _ in s.results] + [n for n, _ in s.na]
+        return names
+
+    def test_no_duplicate_name(self):
+        names = self._fake_run_names()
+        self.assertEqual(len(names), 144)
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_the_pinned_names_occur(self):
+        names = set(self._fake_run_names())
+        for name in _PINNED_7B:
+            self.assertIn(name, names, "missing pinned row: %s" % name)
+
 if __name__ == "__main__":
     unittest.main()
