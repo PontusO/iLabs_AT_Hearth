@@ -91,6 +91,15 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::PumpConfigurationAndControl::Id:
         emberAfPumpConfigurationAndControlClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::RvcCleanMode::Id:
+        emberAfRvcCleanModeClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::RvcOperationalState::Id:
+        emberAfRvcOperationalStateClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::RvcRunMode::Id:
+        emberAfRvcRunModeClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::RelativeHumidityMeasurement::Id:
         emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
         break;

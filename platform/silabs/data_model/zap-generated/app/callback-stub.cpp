@@ -137,6 +137,21 @@ void __attribute__((weak)) emberAfPumpConfigurationAndControlClusterInitCallback
     // To prevent warning
     (void) endpoint;
 }
+void __attribute__((weak)) emberAfRvcCleanModeClusterInitCallback(EndpointId endpoint)
+{
+    // To prevent warning
+    (void) endpoint;
+}
+void __attribute__((weak)) emberAfRvcOperationalStateClusterInitCallback(EndpointId endpoint)
+{
+    // To prevent warning
+    (void) endpoint;
+}
+void __attribute__((weak)) emberAfRvcRunModeClusterInitCallback(EndpointId endpoint)
+{
+    // To prevent warning
+    (void) endpoint;
+}
 void __attribute__((weak)) emberAfRelativeHumidityMeasurementClusterInitCallback(EndpointId endpoint)
 {
     // To prevent warning

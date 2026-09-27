@@ -9035,7 +9035,7 @@
           "mfgCode": null,
           "define": "RVC_RUN_MODE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "SupportedModes",
@@ -9175,7 +9175,7 @@
           "mfgCode": null,
           "define": "RVC_CLEAN_MODE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "SupportedModes",
@@ -9315,7 +9315,7 @@
           "mfgCode": null,
           "define": "OPERATIONAL_STATE_RVC_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "PhaseList",
