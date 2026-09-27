@@ -64,6 +64,9 @@
  * below through the Instance's CHI after the server's own pre-validation),
  * and EventLogging for the firmware-emitted PowerAdjustStart/End pair. */
 #include <app/clusters/device-energy-management-server/device-energy-management-server.h>
+/* Catalogue batch 7b: WaterHeaterManagement::Instance and Delegate, both
+ * interface bases, the DEM shape (batch7-audit.md 2.2). */
+#include <app/clusters/water-heater-management-server/water-heater-management-server.h>
 #include <app/EventLogging.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>

@@ -1781,3 +1781,325 @@ static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
     *out = v;
     return MT_ATTR_OK;
 }
+
+/*
+ * ---- water heater: HearthWhmDelegate and its pool (batch 7b) --------------
+ *
+ * The C6's HearthWhmDelegate (main.cpp:4405-4564) ported whole: the cached
+ * attribute store the Instance's AAI reads, the Boost/CancelBoost command
+ * forwards, and the firmware-derived Boost event pair. The cluster is FULLY
+ * delegate-served (its six values answer from the Delegate getters,
+ * water-heater-management-server.cpp:114-152; the C6 creates all six
+ * MANAGED_INTERNALLY, esp_matter_attribute.cpp:4485-4519); the split
+ * ownership rule is the AT+MTLOCK/AT+MTVALVE one: an ALLOWED Boost does NOT
+ * touch the cached BoostState here, because "the host decided" (the command
+ * verdict) and "the host actually did it" (the AT+MTMEAS BoostState push)
+ * are different moments, and only the second one moves the served state.
+ *
+ * =========================================================================
+ * THE BOOST EVENT DERIVATION STATE MACHINE, exhaustively, because it is
+ * stateful firmware logic with no SDK support and no build check
+ * (AT_MT_SPEC.md 3.25:2734-2749 and core/include/mt_matter.h:874-883,
+ * both binding; the C6's mt_meas_whm_apply() implements it identically).
+ *
+ * State: the delegate's cached BoostState (kInactive/kActive,
+ * WaterHeaterManagement/Enums.h:32-36), written ONLY by the AT+MTMEAS 0x94
+ * push path below. Input: each applied MT_WHM_F_BOOST_STATE pair, IN ORDER
+ * within one command (sequential last-writer semantics, so one push
+ * carrying 2,1,2,0 legitimately emits BoostStarted then BoostEnded).
+ * Transitions, evaluated per applied pair against the cache value it is
+ * about to replace:
+ *
+ *   Inactive -> Active: emit BoostStarted, its boostInfo carrying the
+ *     CACHED PARAMETERS OF THE LAST HOST-ACCEPTED BOOST COMMAND (the
+ *     m_boost lifecycle below), then CONSUME the cache (reset to the
+ *     duration-0/no-optionals default).
+ *   Active -> Inactive: emit BoostEnded (no payload beyond the event).
+ *   Same state -> same state: emit NOTHING. This is also what makes
+ *     HandleCancelBoost()'s in-state guard's "no event sent" claim hold by
+ *     construction: no forward means no host actuation, no BoostState
+ *     push, no transition.
+ *
+ * Attribute reporting is SEPARATE from event derivation and fires per
+ * sample: every applied pair, BoostState included and SAME-STATE pushes
+ * included, is reported dirty (one MatterReportingAttributeChangeCallback
+ * per applied pair, the EPM rule), the deliberate CONTRAST to DEM's
+ * ESAState, which reports on change only. Two clusters, two spec'd
+ * shapes; do not "fix" one to match the other.
+ *
+ * THE PARAMETER-CACHE LIFECYCLE (m_boost), the round's delicate piece:
+ *
+ *   SET: in HandleBoost(), on ALLOW only, after the host's verdict comes
+ *     back positive. A denied Boost never started anything, so there is
+ *     nothing for a later BoostStarted to describe, and caching on deny
+ *     would attribute a stale command's parameters to some future
+ *     host-initiated boost.
+ *   CONSUMED: by the Inactive-to-Active emission, exactly once. The
+ *     parameters describe the boost that just started; a LATER Active
+ *     transition without a fresh accepted Boost in between (a
+ *     host-initiated boost from a physical button, no controller
+ *     involved) must emit duration 0 and no optionals, "parameters
+ *     unknown", rather than restate a finished boost's numbers. That is
+ *     the round B rule mt_matter.h:874-883 fixes, and the reset after
+ *     emission is what implements it.
+ *   ALSO CONSUMED: by the guarded (Inactive-state) CancelBoost, RULED
+ *     this round (ruled at B410; batch 7b review I1). An accepted Boost a
+ *     controller then cancels before the host ever pushes Active is a
+ *     boost that never started, and the spec's own no-cache-on-deny
+ *     rationale ("a denied Boost never started anything") applies to it
+ *     verbatim: without this reset the next genuinely unrelated
+ *     host-initiated boost would emit BoostStarted carrying the
+ *     CANCELLED command's duration and optionals. Introduced here as a
+ *     disclosed C6 divergence while the C6's guard still left its cache
+ *     set (B410); AT_MT_SPEC.md was amended to this
+ *     consume-on-guarded-cancel rule and the C6 caught up in the parity
+ *     round of 2026-09-01, so both ports now consume. Only the guarded
+ *     arm consumes: an ALLOWED
+ *     forwarded CancelBoost (Active state) still touches nothing, since
+ *     the boost it cancels already consumed the cache at its
+ *     BoostStarted.
+ *   REPLACED: a second accepted Boost before any Active push simply
+ *     overwrites the cache; the last accepted command is the one whose
+ *     parameters the eventual BoostStarted carries.
+ *   NEVER cleared by BoostEnded, a forwarded CancelBoost or a deny: only
+ *     an allow writes it, and only the two consumers above (emission,
+ *     the guarded cancel) reset it.
+ *
+ *   ONE DISCLOSED WIRE TENSION rides on the duration-0 emission, spec-
+ *   mandated and deliberately NOT "fixed" here (review M2):
+ *   WaterHeaterBoostInfoStruct declares Duration min="1"
+ *   (water-heater-management-cluster.xml:42), so the "parameters unknown"
+ *   BoostStarted sends a value the struct's own constraint excludes. The
+ *   wire rule stands (AT_MT_SPEC.md 3.25 and mt_matter.h pin duration 0;
+ *   the C6 emits the same 0), but a certification harness or a strict
+ *   controller validating the decoded event against the constraint may
+ *   reject it: a named TH risk for the bench, not a port defect.
+ *
+ * Emission discipline (the DEM section's rule, restated per path): the
+ * derivation runs ONLY from mt_meas_whm_apply(), i.e. under the StackLock
+ * mt_matter_meas_set() already holds, so GenerateBoostStartedEvent()/
+ * GenerateBoostEndedEvent() (Delegate base helpers wrapping LogEvent,
+ * water-heater-management-server.cpp:48-86) run lock-held. A Generate*
+ * failure (event buffer exhaustion) is logged by the helper itself and
+ * deliberately does NOT fail the push: the pushed state is applied and
+ * served either way, so answering an error would tell the host "nothing
+ * changed" about a change that took (the EEM branch's error-after-apply
+ * caveat, without the misleading answer).
+ * =========================================================================
+ *
+ * The CancelBoost in-state guard, and WHERE it lives, traced on both
+ * platforms because the batch brief asks exactly that: the SDK server has
+ * NO guard (Instance::HandleCancelBoost, water-heater-management-server
+ * .cpp:232-241, is a bare delegate call; contrast DEM, where the server
+ * itself answers InvalidInState). The guard is DELEGATE property on both
+ * platforms: the SDK's own reference delegate skips the cancel body and
+ * answers Success when not boosting (WhmDelegateImpl::HandleCancelBoost,
+ * examples/energy-management-app), and the C6's HearthWhmDelegate returns
+ * Status::Success without waking the host when the cached BoostState is
+ * already Inactive, because the cluster test plan requires "status
+ * SUCCESS and no event sent" for exactly that case (TC_EWATERHTR_2_2 step
+ * 26; AT_MT_SPEC.md 3.17:1487-1495). This port mirrors the observable
+ * behaviour (Success, no +MTCMD, no event) and ADDS the ruled
+ * cache consume the lifecycle block above records (the B410 ruling). It
+ * remains a divergence from the SDK reference delegate, which does not
+ * clear its cache there; the C6 carried the same window until the parity
+ * round of 2026-09-01 closed it, and the two ports now agree. The guard
+ * reads the host-pushed BoostState cache, the same value a controller
+ * reads.
+ *
+ * The ALLOWED (Active-state) CancelBoost emits no BoostEnded here, BY
+ * DESIGN (review M4): the split-ownership rule again, the host owns the
+ * state, so the event fires only when the host's BoostState 0 push
+ * reaches the derivation. The SDK's own reference delegate emits
+ * BoostEnded inside HandleCancelBoost instead; a host that actuates the
+ * cancel and never pushes leaves the served BoostState Active with no
+ * event, which is the host library documentation's line to carry, not a
+ * firmware guard's.
+ *
+ * Lock discipline, the file's standing rule: HandleBoost/HandleCancelBoost
+ * run on the CHIP task from the Instance's CHI invoke path, NO StackLock
+ * taken; the push-path derivation runs from mt_meas_whm_apply(), which
+ * inherits mt_matter_meas_set()'s.
+ */
+class HearthWhmDelegate : public chip::app::Clusters::WaterHeaterManagement::Delegate
+{
+public:
+    /* Host-pushed cached state, written only by mt_meas_whm_apply(). The
+     * defaults are the spec's pre-first-push answers (AT_MT_SPEC.md 3.25):
+     * everything 0, BoostState Inactive; they match the zero-filled inert
+     * shadows of whmAttrs (the seed table sets only FeatureMap and
+     * ClusterRevision, mt_devtypes_sl_seeds.inc). */
+    uint8_t  m_heater_types = 0;
+    uint8_t  m_heat_demand  = 0;
+    chip::app::Clusters::WaterHeaterManagement::BoostStateEnum m_boost_state =
+        chip::app::Clusters::WaterHeaterManagement::BoostStateEnum::kInactive;
+    uint16_t m_tank_volume  = 0;
+    int64_t  m_est_heat_req = 0;
+    uint8_t  m_tank_percent = 0;
+
+    /* The parameters of the last host-ACCEPTED Boost command, cached for
+     * the derived BoostStarted event. The full lifecycle contract is the
+     * section comment's PARAMETER-CACHE block; the value-initialized
+     * default (duration 0, every Optional missing) IS the "parameters
+     * unknown" emission, so consuming the cache is one aggregate reset. */
+    struct BoostParams {
+        uint32_t                      duration = 0;
+        chip::Optional<bool>          one_shot;
+        chip::Optional<bool>          emergency;
+        chip::Optional<int16_t>       setpoint;
+        chip::Optional<chip::Percent> target_pct;
+        chip::Optional<chip::Percent> reheat;
+    } m_boost;
+
+    chip::EndpointId endpoint() const { return mEndpointId; }
+
+    /* The endpoint's WHM feature bits, stamped by mt_matter_whm_register()
+     * from the create path's variant predicate, the single source the
+     * FeatureMap seed and the Instance mask share (the DEM with_pa
+     * divergence's reasoning: the C6 reads its live FeatureMap attribute
+     * back, but this port's ember copy is a seed shadow, so the port
+     * record stamped from the same predicate is the honest source). Read
+     * by mt_meas_whm_apply()'s field gates. */
+    void set_features(uint32_t mask) { m_features = mask; }
+    bool has_feature(chip::app::Clusters::WaterHeaterManagement::Feature f) const
+    {
+        return (m_features & chip::to_underlying(f)) != 0;
+    }
+
+    /*
+     * Boost: pack the five Optionals into the wire form
+     * "<duration>,<mask>[,<v1>[,<v2>[,<v3>]]]" (AT_MT_SPEC.md 3.17's
+     * five-field tail, the first five-field +MTCMD consumer):
+     * MT_BOOST_P_* presence bits in canonical order, MT_BOOST_V_* carrying
+     * the two bools' VALUES when present (a present bool needs no appended
+     * field), then ONLY the present numeric optionals appended in
+     * canonical order, temporarySetpoint / targetPercentage / targetReheat
+     * (core/include/mt_matter.h:985-991; worked example: duration 3600,
+     * oneShot true, targetPercentage 80 forwards as "3600,265,80"). The
+     * Instance has already range-checked targetPercentage/targetReheat and
+     * their feature conformance before calling this
+     * (water-heater-management-server.cpp:171-222), so the packing needs
+     * no validation of its own. The verdict is the wire response raw:
+     * HandleBoost's Status lands in AddStatus unmapped (:224-225).
+     * Accepted parameters are cached ON ALLOW ONLY (the lifecycle
+     * contract above).
+     */
+    chip::Protocols::InteractionModel::Status HandleBoost(
+        uint32_t duration, chip::Optional<bool> oneShot, chip::Optional<bool> emergencyBoost,
+        chip::Optional<int16_t> temporarySetpoint, chip::Optional<chip::Percent> targetPercentage,
+        chip::Optional<chip::Percent> targetReheat) override
+    {
+        using chip::Protocols::InteractionModel::Status;
+
+        unsigned mask = 0;
+        if (oneShot.HasValue()) {
+            mask |= MT_BOOST_P_ONESHOT;
+            if (oneShot.Value()) {
+                mask |= MT_BOOST_V_ONESHOT;
+            }
+        }
+        if (emergencyBoost.HasValue()) {
+            mask |= MT_BOOST_P_EMERGENCY;
+            if (emergencyBoost.Value()) {
+                mask |= MT_BOOST_V_EMERGENCY;
+            }
+        }
+        if (temporarySetpoint.HasValue()) {
+            mask |= MT_BOOST_P_SETPOINT;
+        }
+        if (targetPercentage.HasValue()) {
+            mask |= MT_BOOST_P_TARGET_PCT;
+        }
+        if (targetReheat.HasValue()) {
+            mask |= MT_BOOST_P_REHEAT;
+        }
+
+        char fields[48];
+        int n = snprintf(fields, sizeof(fields), "%lu,%u", (unsigned long)duration, mask);
+        if (temporarySetpoint.HasValue()) {
+            n += snprintf(fields + n, sizeof(fields) - n, ",%d", (int)temporarySetpoint.Value());
+        }
+        if (targetPercentage.HasValue()) {
+            n += snprintf(fields + n, sizeof(fields) - n, ",%u",
+                          (unsigned)targetPercentage.Value());
+        }
+        if (targetReheat.HasValue()) {
+            n += snprintf(fields + n, sizeof(fields) - n, ",%u", (unsigned)targetReheat.Value());
+        }
+        (void)n;
+
+        bool allow = mt_cmd_forward_fields(
+            mEndpointId, chip::app::Clusters::WaterHeaterManagement::Id,
+            chip::app::Clusters::WaterHeaterManagement::Commands::Boost::Id, fields);
+        if (!allow) {
+            return Status::Failure;
+        }
+        m_boost.duration   = duration;
+        m_boost.one_shot   = oneShot;
+        m_boost.emergency  = emergencyBoost;
+        m_boost.setpoint   = temporarySetpoint;
+        m_boost.target_pct = targetPercentage;
+        m_boost.reheat     = targetReheat;
+        return Status::Success;
+    }
+
+    /*
+     * CancelBoost: in-state guard FIRST, without waking the host, since
+     * there is nothing for the host to adjudicate (the section comment
+     * traces where the guard lives on each platform; the SDK server has
+     * none). The guarded answer is SUCCESS-and-silence, not a failure,
+     * AND it consumes the parameter cache (B410 ruling, the lifecycle
+     * block's ALSO CONSUMED arm: a cancelled not-yet-started boost is a
+     * boost that never started, so its parameters must not survive to
+     * describe some future unrelated one; the C6 closed its identical
+     * stale window in the 2026-09-01 parity round). The "no event" half
+     * holds by
+     * construction: no forward means no host actuation, no BoostState
+     * push, no Active-to-Inactive transition, so the derivation never
+     * emits BoostEnded. Otherwise forward command 1 payload-less (NULL
+     * fields reproduces mt_cmd_forward()'s exact four-field +MTCMD line)
+     * and pass the verdict through raw, same as Boost above; the
+     * forwarded arm touches no state and emits nothing here, the M4
+     * design note in the section comment.
+     */
+    chip::Protocols::InteractionModel::Status HandleCancelBoost() override
+    {
+        using chip::Protocols::InteractionModel::Status;
+        using chip::app::Clusters::WaterHeaterManagement::BoostStateEnum;
+
+        if (m_boost_state == BoostStateEnum::kInactive) {
+            m_boost = BoostParams{};
+            return Status::Success;
+        }
+        bool allow = mt_cmd_forward_fields(
+            mEndpointId, chip::app::Clusters::WaterHeaterManagement::Id,
+            chip::app::Clusters::WaterHeaterManagement::Commands::CancelBoost::Id, NULL);
+        return allow ? Status::Success : Status::Failure;
+    }
+
+    /* The six getters, serving the host-pushed cache. */
+    chip::BitMask<chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>
+    GetHeaterTypes() override
+    {
+        return chip::BitMask<
+            chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>(
+            m_heater_types);
+    }
+    chip::BitMask<chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>
+    GetHeatDemand() override
+    {
+        return chip::BitMask<
+            chip::app::Clusters::WaterHeaterManagement::WaterHeaterHeatSourceBitmap>(
+            m_heat_demand);
+    }
+    uint16_t GetTankVolume() override { return m_tank_volume; }
+    chip::Energy_mWh GetEstimatedHeatRequired() override { return m_est_heat_req; }
+    chip::Percent GetTankPercentage() override { return m_tank_percent; }
+    chip::app::Clusters::WaterHeaterManagement::BoostStateEnum GetBoostState() override
+    {
+        return m_boost_state;
+    }
+
+private:
+    uint32_t m_features = 0;
+};
