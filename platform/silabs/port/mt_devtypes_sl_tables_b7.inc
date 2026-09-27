@@ -7,7 +7,8 @@
  * solar power (0x0017) on the wired electrical sensor lists; and
  * catalogue batch 7a-2 (nRF 2725-2954): the electrical utility meter
  * (0x0511) and device energy management (0x050D) with its report-only
- * variant.
+ * variant; and catalogue batch 7b (nRF 2956-3320): the water heater
+ * (0x050F) and battery storage (0x0018), each with its variant.
  * mt_devtypes_sl.cpp #includes it inside its anonymous namespace, in
  * order with the other fragments, after mt_devtypes_sl_tables_b5.inc
  * and before mt_devtypes_sl_registry.inc, so the whole is still one
@@ -536,6 +537,217 @@ HEARTH_DECLARE_CONST_ENDPOINT(demReportOnlyEndpoint, demReportOnlyClusters);
 
 constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
 
+/* ---- water heater (0x050F) --------------------------------------------
+ *
+ * Catalogue batch 7b audit (batch7-audit.md section 3.3), every citation
+ * re-verified against the pinned NCS tree while writing. One new cluster,
+ * WaterHeaterManagement (0x0094), plus the fourth ModeBase alias
+ * (WaterHeaterMode 0x009E, mode-base-server per zap_cluster_list.json:367,
+ * no new translation unit), on the C6's mk_water_heater()
+ * (mt_devtypes.cpp:1628-1736, class comment :1531-1627).
+ *
+ * WaterHeaterManagement's three answers: code-driven no, CHI-only YES
+ * (config-data.yaml:81; the batch's zap regeneration (on the nRF build) left
+ * IMClusterCommandHandler.cpp and CodeDrivenInitShutdown.cpp
+ * byte-identical, sha256-checked; access.h did NOT stay byte-identical,
+ * against the audit 5.5 prediction: it gained Boost and CancelBoost with
+ * the manage invoke privilege the cluster XML really declares,
+ * water-heater-management-cluster.xml:94 and :100, a correct delta the
+ * batch 3 empirical check exists to catch). AAI YES per endpoint: the
+ * Instance derives from both AttributeAccessInterface and
+ * CommandHandlerInterface (water-heater-management-server.h:139-149, ctor
+ * Instance(EndpointId, Delegate &, Feature) whose body sets the delegate's
+ * endpoint); Init() registers CHI then AAI, SOFT on both
+ * (water-heater-management-server.cpp:94-100, no emberAfContainsServer
+ * check, no VerifyOrDie), constructed by the port's own
+ * mt_matter_whm_register() below a successful emberAfSetDynamicEndpoint(),
+ * the DEM handout's shape, pool MT_WHM_MAX (4, core/include/
+ * mt_matter.h:951, the C6 depth per DE407).
+ *
+ * THE ONE INERT REVISION SEED IN THE ENERGY FAMILY: Instance::Read()
+ * serves ClusterRevision ITSELF (water-heater-management-server.cpp:
+ * 146-147, encoding kClusterRevision = 2, :40), the only energy cluster
+ * that does; every other case falls through for NOTHING (the switch covers
+ * all six attributes plus FeatureMap). So the WHM ClusterRevision seed
+ * below is an inert shadow kept equal to that served 2
+ * (WaterHeaterManagement/Metadata.h:20 agrees), the Thermostat
+ * seed-agrees-with-AAI discipline, while EPM/EEM/PTOP/DEM revision seeds
+ * stay LIVE.
+ *
+ * Slots, v0: HeaterTypes, HeatDemand, TankVolume, TankPercentage,
+ * BoostState, FeatureMap, ClusterRevision (7). EstimatedHeatRequired is
+ * energy_mwh (water-heater-management-cluster.xml:78, min 0), declared
+ * true-width 8 B for the AAI gate (DE407 option C), no slot, its own
+ * kQuietNoSlot row, k_instance_served live-read row. v1 drops the
+ * feature-gated pair whole per the cluster XML's gates (TankVolume and
+ * EstimatedHeatRequired mandatory under EM only, :73-82; TankPercentage
+ * under TP only, :83-86; HeaterTypes/HeatDemand/BoostState mandatory
+ * unconditionally, :67-71 and :88-90): 5 slots. All six values are
+ * Instance-served from the HearthWhmDelegate cache (AT+MTMEAS 0x94 is the
+ * write path, AT_MT_SPEC.md 3.25); the enum/bitmap/u16 slots are inert
+ * shadows zero-filled to the delegate defaults (everything 0, BoostState
+ * kInactive = 0, WaterHeaterManagement/Enums.h:32-36).
+ *
+ * THE FEATUREMAP IS THE CATALOGUE'S SECOND VARIANT-DEPENDENT BOOT VALUE
+ * (the DEM special case's exact problem: both variants share devtype
+ * 0x050F, so an s_seeds row cannot split them). Variant 0 is
+ * EnergyManagement|TankPercent = 0x3 (Enums.h:44-48; the value the C6
+ * hand-sets because BOTH esp-matter feature helpers are broken,
+ * mt_devtypes.cpp:1594-1607: energy_management::add() as declared does
+ * not link and tank_percent::get_id() returns the kEnergyManagement bit;
+ * neither helper exists on this port, so the obligation reduces to the
+ * bits themselves, read from CHIP's own enum). Variant 1 is 0 (HeaterTypes
+ * /HeatDemand/BoostState only, which the cluster's own feature conformance
+ * permits: EM and TP are both optionalConform, cluster XML :57-64).
+ * On this port the seed table's variant column carries it (the two
+ * variant-qualified 0x050F FeatureMap rows in mt_devtypes_sl_seeds.inc),
+ * where the nRF has a seed_slots() special case; the create path hands
+ * the same variant predicate to mt_matter_whm_register(),
+ * whose Instance mask is what Read() actually answers for FeatureMap
+ * (server.cpp:144-145 encodes mFeature, snapshotted at construction):
+ * seed and Instance agree by construction, single-sourced on the variant.
+ *
+ * Thermostat: REUSES thermostatAttrs whole with a HEATING-ONLY FeatureMap
+ * seed (0x01) keyed to 0x050F below (the seed table's per-devtype keying;
+ * the standalone thermostat and the room air conditioner keep the wildcard
+ * 0x03), per WaterHeater.xml's Thermostat(HEAT) mandate (:75-81; HEAT
+ * alone makes only OccupiedHeatingSetpoint mandatory, the C6 class
+ * comment's own conformance trace). ControlSequenceOfOperation gets a
+ * keyed 0x02 (HeatingOnly) seed: the wildcard 0x04 (CoolingAndHeating)
+ * would advertise cooling this endpoint does not have. DELIBERATE
+ * DIVERGENCE from the C6, which serves esp-matter's inherited config
+ * default 4 on its water heater (esp_matter_cluster.h:415, the thunk does
+ * not override it); the FanModeSequence precedent, noted rather than
+ * copied. DISCLOSED OVER-DECLARATION riding on the reuse (the batch
+ * brief's ruled trade): thermostatAttrs also declares
+ * OccupiedCoolingSetpoint and the four setpoint-limit attributes, three of
+ * which Thermostat.xml gates on COOL; the C6's water heater creates no
+ * cooling attributes at all, so this endpoint's AttributeList is wider
+ * than the C6's and than the letter of HEAT-only conformance. Disclosed
+ * here and in the batch report, not silently inherited. No panic-trap
+ * analogue exists on this port (the C6's VALIDATE_FEATURES_AT_LEAST_ONE
+ * pre-seed, mt_devtypes.cpp:1638-1641, is esp-matter machinery); what
+ * carries over is the conformance conclusion, the 0x01 seed.
+ *
+ * WaterHeaterMode reuses modeBaseAttrs and kModeBaseIncoming/
+ * kModeBaseOutgoing verbatim (every ModeBase alias numbers its elements
+ * identically, the DEMMode note above), one more kStoreWalk row and one
+ * more pool consumer; the batch 5 ModeBase notes apply unchanged,
+ * including the Init() ordering panic and the placeholder-mode-0 policy.
+ * ChangeToMode forwards on cluster 158, already in AT_MT_SPEC.md 3.17's
+ * registration list (the six registrations; only EnergyEvseMode 0x9D is
+ * the list's known gap, and it is out of this batch by ruling DE408).
+ * ClusterRevision 1 LIVE (WaterHeaterMode/Metadata.h:20; the ModeBase AAI
+ * has no revision case). Tag-0 default kManual on every mode
+ * (AT_MT_SPEC.md 3.20's table row; WaterHeaterMode/Enums.h:45).
+ *
+ * Commands: Boost (0x00) and CancelBoost (0x01) in the incoming list; the
+ * server's InvokeCommand dispatches both to the delegate
+ * (water-heater-management-server.cpp:154-169), and access.h carries their
+ * manage privilege (above). NOTHING outgoing: neither command has a
+ * response (the cluster XML), the DE399 truthfulness discipline. The
+ * five-field Boost payload and the CancelBoost in-state guard live in the
+ * delegate (mt_matter_sl_b7.inc, where the guard's SDK-versus-C6 placement
+ * is traced).
+ *
+ * Variant 0 additionally grafts the Electrical Sensor composition on the
+ * SAME endpoint, which WaterHeater.xml:84-95 mandates (composedDeviceTypes:
+ * an Electrical Sensor with EPM and EEM): PTOP + EPM + EEM with the batch
+ * 7a lists verbatim, drawing one EPM and one PTOP slot from the
+ * MT_MEAS_MAX pools, and the span advertises 0x0510 alongside 0x050F, the
+ * C6's exact span (electrical_sensor::add() calls add_device_type(0x0510),
+ * esp_matter_endpoint.cpp:1505-1508, and mk_water_heater() grafts it only
+ * on variant 0, so the C6's variant-1 span is 0x050F ALONE: this port's
+ * first variant-dependent device-type span, carried by the registry's new
+ * device_types_v1 member below). Variant 1 is the SDK-bare build, no
+ * graft, DISCLOSED SUB-CONFORMANT against the mandated composed sensor
+ * (the variant-1 electrical meter precedent; AT_MT_SPEC.md 3.9's 0x050F
+ * row and ARCHITECTURE.md 8.11 carry it on the C6's side).
+ *
+ * No Identify on either variant: WaterHeater.xml marks it optionalConform
+ * (:66-68) and the C6's water_heater::add() creates none.
+ *
+ * Events: BoostStarted and BoostEnded, derived FIRMWARE-SIDE from
+ * BoostState transitions pushed over AT+MTMEAS, with the cached-parameters
+ * lifecycle (core/include/mt_matter.h:874-883, binding); the derivation
+ * state machine and its exhaustive commentary live beside the delegate in
+ * mt_matter_sl_b7.inc. Plus CumulativeEnergyMeasured on v0 (the EEM push
+ * path, batch 7a).
+ *
+ * Block: v0 7 clusters, 29 slots, one 306 B mt_mb_store_t = 798 B payload
+ * (800 of this port's arena; the nRF's heap charges 808); v1 4 clusters,
+ * 19 slots, one store = 626 B payload, 632 of arena. Both wider than the
+ * 608 B the other types are sixteen-of, so an admission candidate like
+ * the RVC's (its 936 over-count, 856 exact), compile-time-derived and
+ * asserted in mt_devtypes_sl_arena.inc.
+ *
+ * Device revision 1 per data_model/1.5/device_types/WaterHeater.xml:60. */
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(whmAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeaterTypes::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeatDemand::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::TankVolume::Id, INT16U, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::EstimatedHeatRequired::Id,
+                              ENERGY_MWH, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::TankPercentage::Id, PERCENT, 1,
+                              0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::BoostState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+/* Variant 1, the bare cluster: the three unconditionally mandatory values
+ * only (the feature-gate trace in the section comment; FeatureMap 0 may
+ * not advertise what is not declared, the DEM report-only list's rule). */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(whmBareAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeaterTypes::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::HeatDemand::Id, BITMAP8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::BoostState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(WaterHeaterManagement::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kWhmIncoming[] = { WaterHeaterManagement::Commands::Boost::Id,
+                                       WaterHeaterManagement::Commands::CancelBoost::Id,
+                                       kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(waterHeaterClusters)
+DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kThermostatIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(WaterHeaterManagement::Id, whmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kWhmIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(WaterHeaterMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+/* Variant 1, the SDK-bare build: no sensor graft (the disclosure in the
+ * section comment). */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(waterHeaterBareClusters)
+DECLARE_DYNAMIC_CLUSTER(Thermostat::Id, thermostatAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kThermostatIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(WaterHeaterManagement::Id, whmBareAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kWhmIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(WaterHeaterMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(waterHeaterEndpoint, waterHeaterClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(waterHeaterBareEndpoint, waterHeaterBareClusters);
+
+/* The variant-0 span grafts 0x0510 on the same endpoint (revision 1,
+ * matching the standalone sensor row); variant 1 has no graft and no
+ * second id, the C6's exact behaviour (the section comment). */
+constexpr EmberAfDeviceType kWaterHeaterTypes[] = { { 0x050F, 1 }, { 0x0510, 1 } };
+constexpr EmberAfDeviceType kWaterHeaterBareTypes[] = { { 0x050F, 1 } };
+
 /*
  * The DE407 quiet table (nRF mt_devtypes_zephyr.cpp 4924-4988): the
  * specific (cluster, attribute) pairs whose over-wide scalar declarations
@@ -545,9 +757,9 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  * (declared but slotless, it would answer a bare ERROR over AT). The
  * declarations are refused a slot by attr_gets_slot()'s size clause; this
  * table only silences the boot shout for the proven pairs. Catalogue batch
- * 7a-1 brought the seven ElectricalPowerMeasurement rows and 7a-2 the two
- * DeviceEnergyManagement rows; the nRF's WaterHeaterManagement (7b) and
- * EnergyEvse (the EVSE round) rows arrive with their batches.
+ * 7a-1 brought the seven ElectricalPowerMeasurement rows, 7a-2 the two
+ * DeviceEnergyManagement rows and 7b the WaterHeaterManagement row; the
+ * nRF's EnergyEvse rows arrive with the EVSE round.
  */
 struct quiet_no_slot_attr {
     ClusterId cluster;
@@ -572,6 +784,11 @@ constexpr quiet_no_slot_attr kQuietNoSlot[] = {
      * the AT side). */
     { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::AbsMinPower::Id },
     { DeviceEnergyManagement::Id, DeviceEnergyManagement::Attributes::AbsMaxPower::Id },
+    /* WaterHeaterManagement (batch 7b): the one energy_mwh scalar, served
+     * by Instance::Read()'s own case from the HearthWhmDelegate cache
+     * (water-heater-management-server.cpp:128-133; the carve-out serves
+     * the AT side). Declared 8 B in whmAttrs, variant 0 only. */
+    { WaterHeaterManagement::Id, WaterHeaterManagement::Attributes::EstimatedHeatRequired::Id },
 };
 
 bool attr_quiet_no_slot(ClusterId cluster, AttributeId attr)

@@ -197,9 +197,12 @@ constexpr hearth_devtype s_registry[] = {
     { 0x0511, 0, &utilityMeterEndpoint,
       Span<const EmberAfDeviceType>(kElectricalUtilityMeterTypes) },
     { 0x050D, 1, &demEndpoint, Span<const EmberAfDeviceType>(kDemTypes), &demReportOnlyEndpoint },
-    /* Catalogue batch 7b: the delegate-served energy pair, the first rows
-     * with a variant-dependent device-type span. */
-    { 0x050F, 1 },                                                      /* batch 7b: water heater */
+    /* Catalogue batch 7b: the delegate-served energy pair. The first rows
+     * with a variant-dependent device-type span (device_types_v1, the
+     * struct comment): the water heater's v1 loses the sensor graft and
+     * its 0x0510 id together. */
+    { 0x050F, 1, &waterHeaterEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterTypes),
+      &waterHeaterBareEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterBareTypes) },
     { 0x0018, 1 },                                                      /* batch 7b: battery storage */
     /* Catalogue batch 8: the composed appliances. The first three carry no
      * shapes even on the nRF: the policy is permissive for all of them, and

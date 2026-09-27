@@ -578,6 +578,68 @@ constexpr size_t kDemBlockBytes =
 static_assert(hearth_arena_cost(kDemBlockBytes) == 528,
               "the DEM block moved off the 528 B this batch was sized with");
 
+/*
+ * Catalogue batch 7b: the MT_COUNT over-count convention STOPS at these two
+ * candidates, deliberately. Every earlier candidate tolerated MT_COUNT's
+ * counting of metadata-only members ("only pushes the asserted floor
+ * higher, never lower") because the over-count was a handful of entries.
+ * The two 7b shapes compose epmAttrs and eemAttrs, whose DE407 option-C
+ * declarations are MOSTLY metadata-only (eight of epmAttrs' twelve entries
+ * and three of eemAttrs' five take no slot), so the naive sums would be
+ * 1,006 B for the water heater and about 1,150 B for battery storage:
+ * both spuriously past the RVC's 936 B candidate. On the nRF the water
+ * heater's over-count would even fail its floor assertion; on this port
+ * both are admission candidates, not floor terms (like the RVC), and an
+ * over-count would overstate their admission arithmetic against the
+ * fixed 9,728 B endpoint arena, the opposite of what the asserts are for.
+ * Catalogue batch 7b, 2026-09-27: the exact count departs from this
+ * port's MT_COUNT convention for these two candidates only.
+ *
+ * So these candidates count EXACTLY: MT_COUNT per list minus a NAMED
+ * constant for that list's metadata-only members, each constant carrying
+ * the members it stands for. (Counting through attr_gets_slot() itself at
+ * compile time would be better still, and does not compile: the lists are
+ * const but not constexpr, and a const object of class type is not usable
+ * in a constant expression, so attr_gets_slot() cannot read one at compile
+ * time. The nRF's memory reclaim round A moved them from .data to .rodata
+ * with HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN, the form this port
+ * declares them in; that does not change this.)
+ * Drift-proofing is the equality assert under each candidate, pinning the
+ * whole derivation to the sizing table's payload row: ANY edit to any
+ * involved list moves the sum off the pinned value and fails the build,
+ * so a stale subtraction constant cannot survive a list change silently,
+ * which is exactly the property the MT_COUNT over-count bought the older
+ * candidates.
+ */
+/* Metadata-only (slotless) members per composed list, from the audit
+ * notes at each declaration: epmAttrs has eight (Accuracy plus the seven
+ * DE407 push fields), eemAttrs three (the three structs), whmAttrs one
+ * (EstimatedHeatRequired), modeBaseAttrs one (SupportedModes);
+ * thermostatAttrs and ptopAttrs have none. */
+constexpr size_t kEpmNoSlot      = 8;
+constexpr size_t kEemNoSlot      = 3;
+constexpr size_t kWhmNoSlot      = 1;
+constexpr size_t kModeBaseNoSlot = 1;
+
+/* Water heater v0, the wider variant list (whmAttrs strictly contains
+ * whmBareAttrs and the v1 list drops three whole clusters): 7 clusters,
+ * 11 + 7 + 3 + 2 + 4 + 2 = 29 slots, one ModeBase store. */
+constexpr size_t kWaterHeaterBlockBytes =
+    block_bytes(MT_COUNT(waterHeaterClusters),
+                MT_COUNT(thermostatAttrs) + (MT_COUNT(whmAttrs) - kWhmNoSlot) +
+                    (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) + MT_COUNT(ptopAttrs) +
+                    (MT_COUNT(epmAttrs) - kEpmNoSlot) + (MT_COUNT(eemAttrs) - kEemNoSlot)) +
+    sizeof(mt_mb_store_t);
+/* The payload is pinned here, and its arena cost (800) and admission
+ * below it, so a formula change cannot stale the tables silently. */
+static_assert(kWaterHeaterBlockBytes == 798,
+              "the water heater block changed size; redo the sizing table rows and the "
+              "batch 7b capacity arithmetic");
+static_assert(hearth_arena_cost(kWaterHeaterBlockBytes) == 800,
+              "the water heater block's arena cost moved off the 800 B this batch was sized with");
+static_assert(MT_WHM_MAX * hearth_arena_cost(kWaterHeaterBlockBytes) <= kEpArenaBytes,
+              "MT_WHM_MAX water heater blocks no longer fit the endpoint arena (DE584)");
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
           kMax2(kModeSelectBlockBytes, kMax2(kChimeBlockBytes, kDemBlockBytes)));
