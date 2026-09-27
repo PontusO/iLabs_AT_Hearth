@@ -3,11 +3,11 @@
     "batch": "mg24-batch5b",
     "cgmr": "1.2.0",
     "chip_tool": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool",
-    "fw_repo_head": "4281146498c672ba016f459ab53274cbde68a8d4",
+    "fw_repo_head": "a266fe6b5cc1635ca13139ff8c4d1eca72649dad",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "ssid": null,
-    "timestamp": "2026-09-27T09:10:40+00:00"
+    "timestamp": "2026-09-27T09:51:40+00:00"
   },
   "results": {
     "0x0074 robotic vacuum cleaner ep2 current-mode rvccleanmode change-to-mode 1 allow ChangeToMode status 0": "PASS",
@@ -21,7 +21,7 @@
     "0x0074 robotic vacuum cleaner ep2 current-mode rvcrunmode change-to-mode 1 allow forward 84/0 answered allow": "PASS",
     "0x0074 robotic vacuum cleaner ep2 current-mode rvcrunmode change-to-mode 5 unlisted ChangeToMode status 1": "PASS",
     "0x0074 robotic vacuum cleaner ep2 current-mode rvcrunmode change-to-mode 5 unlisted current-mode = 1 after": "PASS",
-    "0x0074 robotic vacuum cleaner ep2 current-mode rvcrunmode change-to-mode 5 unlisted no +MTCMD within 3s": "PASS",
+    "0x0074 robotic vacuum cleaner ep2 current-mode rvcrunmode change-to-mode 5 unlisted no +MTCMD for the command": "PASS",
     "0x0074 robotic vacuum cleaner ep2 device-type-list carries (116, 4)": "PASS",
     "0x0074 robotic vacuum cleaner ep2 operational-state AT write refused AT+MTATTR=2,97,4,1 -> +MTERR:11": "PASS",
     "0x0074 robotic vacuum cleaner ep2 operational-state go-home no-forward AT+MTOPSTATE=2,0x42 -> OK": "PASS",
