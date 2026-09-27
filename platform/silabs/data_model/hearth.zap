@@ -10013,7 +10013,7 @@
           "mfgCode": null,
           "define": "DEVICE_ENERGY_MANAGEMENT_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "ESAType",
@@ -10233,7 +10233,7 @@
           "mfgCode": null,
           "define": "DEVICE_ENERGY_MANAGEMENT_MODE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "SupportedModes",
@@ -10373,7 +10373,7 @@
           "mfgCode": null,
           "define": "METER_IDENTIFICATION_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "MeterType",

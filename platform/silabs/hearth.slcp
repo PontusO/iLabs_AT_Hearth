@@ -344,6 +344,10 @@ component:
   - id: matter_administrator_commissioning
   - id: matter_basic_information
   - id: matter_descriptor
+  # Catalogue batch 7a-2 (2026-09-27): the utility meter and device energy
+  # management. No SDK patch: neither is code-driven; DEMMode's server is
+  # mode-base-server.cpp in matter_mode_base.
+  - id: matter_device_energy_management
   # Catalogue batch 7a-1 (2026-09-27): the measurement family. No SDK patch:
   # none of the three is code-driven (the EEM instance-pool patch is already
   # applied).
@@ -397,6 +401,7 @@ component:
   - id: matter_color_control
   - id: matter_fan_control
   - id: matter_level_control
+  - id: matter_meter_identification
   # Catalogue batch 5b (2026-09-27): the robotic vacuum; no SDK patch: none of
   # RvcRunMode, RvcCleanMode, RvcOperationalState is code-driven.
   - id: matter_mode_base
