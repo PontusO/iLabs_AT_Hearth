@@ -745,3 +745,226 @@ static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, boo
     /* Cannot happen once the boot rebuild has run; defensive. */
     return MT_ATTR_ERR_FAILED;
 }
+
+/* ---- robotic vacuum cleaner: RvcOperationalState ----------------------
+ *
+ * The derived opstate cluster needs its own Delegate SUBCLASS
+ * (RvcOperationalState::Delegate adds HandleGoHomeCommandCallback and
+ * stubs Start/Stop to kUnknownEnumValue, operational-state-server.h:
+ * 378-406) and therefore its own pool: the base Delegate::SetInstance()
+ * VerifyOrDies when a second Instance shares a delegate
+ * (operational-state-server.h:349-353), so lending trio delegates to RVC
+ * Instances is fatal, and the trio's HearthOpStateDelegate has no GoHome
+ * hook anyway (mt_matter.h:526-528 states the split rule directly).
+ *
+ * No new translation unit: RvcOperationalState::Instance lives in the
+ * already-compiled operational-state-server.cpp (:520-570), constructed
+ * Instance(Delegate*, ep), which forwards RvcOperationalState::Id to the
+ * protected three-argument base ctor. Init() is the base's, and
+ * soft-bails on emberAfContainsServer (operational-state-server.cpp:
+ * 63-70), so this half of the RVC is the trio's ordering story, NOT the
+ * ModeBase panic above.
+ *
+ * Command routing (the reason the metadata list in mt_devtypes_zephyr.cpp
+ * is exactly {Pause, Resume, GoHome}): the base InvokeCommand() switches
+ * on Pause/Resume/Start/Stop unconditionally and sends everything else to
+ * InvokeDerivedClusterCommand(), where GoHome is handled (:296-334,
+ * :534-546). The server-side guards resolve the state cases before any
+ * delegate call (Pause also compatible with kSeekingCharger, Resume with
+ * kCharging/kDocked; GoHome from kCharging/kDocked answers
+ * kCommandInvalidInState and from kSeekingCharger answers success, both
+ * WITHOUT calling the delegate, :522-531 and :548-567), so the three
+ * forwards below only carry genuine adjudication requests. Allow is
+ * kNoError, deny kUnableToCompleteOperation, copied by the SDK straight
+ * into the OperationalCommandResponse: the verdict IS the wire response,
+ * the trio's contract. GoHome forwards payload-less (the command has no
+ * fields), via mt_cmd_forward like its siblings.
+ *
+ * Instance reachability: the base GetInstance() passthrough, the smaller
+ * change against the C6's typed m_instance member (which exists there
+ * only because the C6 writes its own init callback); the pointer is the
+ * identical one, upcast to OperationalState::Instance, and everything
+ * this file calls on it (SetOperationalState, GetCurrentOperationalState,
+ * GetCurrentPhase) is base API.
+ */
+class HearthRvcOpStateDelegate : public chip::app::Clusters::RvcOperationalState::Delegate
+{
+public:
+    void set_endpoint(chip::EndpointId ep) { m_ep = ep; }
+    chip::EndpointId endpoint() const { return m_ep; }
+
+    chip::app::Clusters::OperationalState::Instance *instance() { return GetInstance(); }
+
+    chip::app::DataModel::Nullable<uint32_t> GetCountdownTime() override
+    {
+        return chip::app::DataModel::NullNullable;
+    }
+
+    /* Seven states in the RVC's own enum: the four base states plus the
+     * three derived-number-space ones AT+MTOPSTATE may set (0x40
+     * kSeekingCharger, 0x41 kCharging, 0x42 kDocked,
+     * RvcOperationalState/Enums.h:67-69), mirroring the C6's list
+     * (main.cpp:3300-3313). kEmptyingDustBin and friends (0x43-0x46)
+     * exist in the enum but are outside the AT contract's union and not
+     * published. kError is listed because the spec requires it even
+     * though AT+MTOPSTATE can never set it directly. */
+    CHIP_ERROR GetOperationalStateAtIndex(
+        size_t index,
+        chip::app::Clusters::OperationalState::GenericOperationalState &operationalState) override
+    {
+        using chip::app::Clusters::RvcOperationalState::OperationalStateEnum;
+        static const OperationalStateEnum states[] = {
+            OperationalStateEnum::kStopped,        OperationalStateEnum::kRunning,
+            OperationalStateEnum::kPaused,         OperationalStateEnum::kError,
+            OperationalStateEnum::kSeekingCharger, OperationalStateEnum::kCharging,
+            OperationalStateEnum::kDocked,
+        };
+        if (index >= (sizeof(states) / sizeof(states[0]))) {
+            return CHIP_ERROR_NOT_FOUND;
+        }
+        operationalState.Set(chip::to_underlying(states[index]));
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR GetOperationalPhaseAtIndex(size_t index,
+                                          chip::MutableCharSpan &operationalPhase) override
+    {
+        /* NOT_FOUND at index 0 makes PhaseList read null, the trio's
+         * convention; this firmware publishes no phases. */
+        (void)index;
+        (void)operationalPhase;
+        return CHIP_ERROR_NOT_FOUND;
+    }
+
+    void HandlePauseStateCallback(
+        chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::RvcOperationalState::Commands::Pause::Id, err);
+    }
+
+    void HandleResumeStateCallback(
+        chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::RvcOperationalState::Commands::Resume::Id, err);
+    }
+
+    void HandleGoHomeCommandCallback(
+        chip::app::Clusters::OperationalState::GenericOperationalError &err) override
+    {
+        forward(chip::app::Clusters::RvcOperationalState::Commands::GoHome::Id, err);
+    }
+
+private:
+    void forward(uint32_t command,
+                 chip::app::Clusters::OperationalState::GenericOperationalError &err)
+    {
+        using chip::app::Clusters::OperationalState::ErrorStateEnum;
+        bool allow = mt_cmd_forward(m_ep, chip::app::Clusters::RvcOperationalState::Id, command);
+        err.Set(chip::to_underlying(allow ? ErrorStateEnum::kNoError
+                                          : ErrorStateEnum::kUnableToCompleteOperation));
+    }
+
+    chip::EndpointId m_ep = chip::kInvalidEndpointId;
+};
+
+/* One RvcOperationalState per RVC endpoint, so this pool is
+ * kServiceableEndpoints deep like the trio's (the heap admits only nine
+ * RVC endpoints, but a slot here is 260-odd bytes against the ModeBase
+ * pool's DE404 argument for departing from 16; not worth a second special
+ * sizing). Memory reclaim round A: the pool is a table of POINTERS into
+ * the cluster-object heap, and the raw storage for the
+ * non-default-constructible Instance sits behind the delegate in the same
+ * block, placement-constructed once and never destroyed: the standing pool
+ * policy. */
+static HearthRvcOpStateDelegate *s_rvc_opstate_delegates[kServiceableEndpoints];
+static size_t s_rvc_opstate_delegate_next;
+/* The RvcOperationalState Delegate + Instance pair, 264 B on the nRF's
+ * measurement; this pins the MG24's. It is wider than the 256 B pair the
+ * object arena is sixteen-of, so the RVC is admitted up to nine (graph
+ * DE566): nine RVCs draw this pair and two ModeBase pairs (80 B each). */
+static_assert(hearth_arena_cost(obj_pair_bytes<HearthRvcOpStateDelegate,
+                                                chip::app::Clusters::RvcOperationalState::Instance>()) == 264,
+              "the RvcOperationalState pair changed size; redo the RVC's admission arithmetic");
+static_assert(9 * (264 + 2 * 80) <= HEARTH_OBJ_ARENA_BYTES,
+              "nine RVCs' objects no longer fit the cluster-object arena (DE566)");
+
+extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
+{
+    if (s_rvc_opstate_delegate_next >= kServiceableEndpoints) {
+        return nullptr;
+    }
+    HearthRvcOpStateDelegate *d =
+        obj_pair_new<HearthRvcOpStateDelegate,
+                     chip::app::Clusters::RvcOperationalState::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_rvc_opstate_delegates[s_rvc_opstate_delegate_next++] = d;
+    return d;
+}
+
+/*
+ * The second half: constructs the RvcOperationalState::Instance in its
+ * slot and runs Init(), the trio's shape verbatim (Init soft-bails on
+ * emberAfContainsServer, so this belongs below the successful
+ * emberAfSetDynamicEndpoint(); a failure is logged loudly and does not
+ * abort, the unreachable-by-ordering argument).
+ */
+extern "C" void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    auto *d = static_cast<HearthRvcOpStateDelegate *>(delegate);
+    d->set_endpoint(ep);
+    auto *inst =
+        new (obj_inst_storage<HearthRvcOpStateDelegate,
+                              chip::app::Clusters::RvcOperationalState::Instance>(d))
+            chip::app::Clusters::RvcOperationalState::Instance(d, ep);
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "RvcOperationalState Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
+                "; commands on it will not reach the host and its attributes will not be served",
+                (unsigned)ep, err.Format());
+    }
+}
+
+/* The pool's Instance lookup, shared by mt_matter_opstate_set()'s RVC
+ * branch and the DE397 live reader below. */
+static chip::app::Clusters::OperationalState::Instance *mt_rvc_opstate_instance(uint16_t ep)
+{
+    for (size_t i = 0; i < s_rvc_opstate_delegate_next; i++) {
+        HearthRvcOpStateDelegate *d = s_rvc_opstate_delegates[i];
+        if (d->endpoint() == ep) {
+            return d->instance();
+        }
+    }
+    return nullptr;
+}
+
+/*
+ * DE397 live read for the RVC opstate pair, the trio's reader against the
+ * RVC pool: OperationalState answers the live enum (including the
+ * derived-number-space values), CurrentPhase answers +MTERR:5 while null,
+ * which is its steady state here since no phases are published.
+ */
+static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out,
+                                         bool *is_unsigned)
+{
+    namespace OpState = chip::app::Clusters::OperationalState;
+    if (is_unsigned) {
+        *is_unsigned = true;
+    }
+    OpState::Instance *inst = mt_rvc_opstate_instance(ep);
+    if (inst == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        return MT_ATTR_ERR_FAILED;
+    }
+    if (attr == OpState::Attributes::OperationalState::Id) {
+        *out = inst->GetCurrentOperationalState();
+        return MT_ATTR_OK;
+    }
+    chip::app::DataModel::Nullable<uint8_t> phase = inst->GetCurrentPhase();
+    if (phase.IsNull()) {
+        return MT_ATTR_ERR_TYPE;
+    }
+    *out = phase.Value();
+    return MT_ATTR_OK;
+}

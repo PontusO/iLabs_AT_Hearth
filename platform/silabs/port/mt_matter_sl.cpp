@@ -583,6 +583,12 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::RvcRunMode::Attributes::CurrentMode::Id },
     { chip::app::Clusters::RvcCleanMode::Id,
       chip::app::Clusters::RvcCleanMode::Attributes::CurrentMode::Id },
+    /* Catalogue batch 5b: the RVC's operational state pair, served live by
+     * its RvcOperationalState Instance (a host write answers +MTERR:11). */
+    { chip::app::Clusters::RvcOperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
+    { chip::app::Clusters::RvcOperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -742,7 +748,12 @@ static int mt_opstate_attr_read_live(uint16_t ep, uint32_t cluster, uint32_t att
  * the opstate reader's above. */
 static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, bool *is_unsigned);
+static int mt_rvc_opstate_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out,
+                                         bool *is_unsigned);
 static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
+/* The RVC opstate pool's Instance lookup (defined beside the pool below),
+ * shared by mt_matter_opstate_set()'s RVC branch and the live reader. */
+static chip::app::Clusters::OperationalState::Instance *mt_rvc_opstate_instance(uint16_t ep);
 
 extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
                                    bool *is_unsigned)
@@ -770,6 +781,8 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         case chip::app::Clusters::RvcRunMode::Id:
         case chip::app::Clusters::RvcCleanMode::Id:
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
+        case chip::app::Clusters::RvcOperationalState::Id:
+            return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
         case chip::app::Clusters::Chime::Id:
             return mt_chime_attr_read_live(ep, attr, out, is_unsigned);
         default:

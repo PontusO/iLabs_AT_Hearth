@@ -562,11 +562,13 @@ extern "C" int mt_matter_opstate_set(uint16_t ep, uint8_t state)
         if (!(state <= 2 || state == 0x40 || state == 0x41 || state == 0x42)) {
             return MT_ATTR_ERR_VALUE;
         }
-        /* Catalogue batch 5 restores this: the RVC's own delegate pool and
-         * mt_rvc_opstate_instance() are not in this batch, so an RVC endpoint
-         * cannot yet be reached through the shared pool. The branch stays (the
-         * RULING keeps the RVC arm) and answers FAILED until then. */
-        return MT_ATTR_ERR_FAILED;
+        OpState::Instance *inst = mt_rvc_opstate_instance(ep);
+        if (inst == nullptr) {
+            /* Cannot happen once the boot rebuild has run; defensive. */
+            return MT_ATTR_ERR_FAILED;
+        }
+        return (inst->SetOperationalState(state) == CHIP_NO_ERROR) ? MT_ATTR_OK
+                                                                   : MT_ATTR_ERR_FAILED;
     }
 
     /* Catalogue batch 8: the third branch this function's own comment has

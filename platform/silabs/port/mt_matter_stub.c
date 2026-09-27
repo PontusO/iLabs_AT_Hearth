@@ -130,11 +130,6 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
  * mt_matter_opstate_delegate_set_endpoint, mt_matter_opstate_set) are the real
  * things now, in mt_matter_sl_b4.inc. */
 
-/* ---- RVC OperationalState ---------------------------------------------------- */
-
-void *mt_matter_rvc_opstate_delegate_alloc(void) { return NULL; }
-void mt_matter_rvc_opstate_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)delegate; (void)ep; }
-
 /* ---- air quality (C1b, bug B139) --------------------------------------------- */
 
 /* mt_air_quality_feature_mask() left this file in catalogue batch 2, when
