@@ -37,6 +37,11 @@
 /* Catalogue batch 5: the stateless Switch event singleton for the generic
  * switch's AT+MTSWITCH bridge. */
 #include <app/clusters/switch-server/switch-server.h>
+/* Catalogue batch 5: the ModeBase Instance-plus-Delegate machinery for the
+ * RVC's two mode clusters (RvcRunMode, RvcCleanMode share one server). The
+ * RvcOperationalState Instance/Delegate come from operational-state-server.h
+ * above, already included for the appliance trio. */
+#include <app/clusters/mode-base-server/mode-base-server.h>
 #include <app/clusters/door-lock-server/door-lock-server.h>
 #include <app/clusters/mode-select-server/supported-modes-manager.h>
 #include <app/clusters/operational-state-server/operational-state-server.h>
@@ -87,6 +92,7 @@ extern "C" {
 using chip::DeviceLayer::ConnectivityMgr;
 using chip::DeviceLayer::ThreadStackMgr;
 using chip::DeviceLayer::ThreadStackMgrImpl;
+using chip::Protocols::InteractionModel::Status;
 
 /* ---- commissioning state, network, Thread (nRF 388-602) ---------------- */
 
@@ -571,6 +577,12 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
     { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::SelectedChime::Id },
     { chip::app::Clusters::Chime::Id, chip::app::Clusters::Chime::Attributes::Enabled::Id },
+    /* Catalogue batch 5b: the RVC's two ModeBase CurrentMode attributes,
+     * served live by their Instances (a host write answers +MTERR:11). */
+    { chip::app::Clusters::RvcRunMode::Id,
+      chip::app::Clusters::RvcRunMode::Attributes::CurrentMode::Id },
+    { chip::app::Clusters::RvcCleanMode::Id,
+      chip::app::Clusters::RvcCleanMode::Attributes::CurrentMode::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -729,6 +741,7 @@ static int mt_opstate_attr_read_live(uint16_t ep, uint32_t cluster, uint32_t att
  * fragment at the END of this file: the same forward-declaration need as
  * the opstate reader's above. */
 static int mt_chime_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_mb_attr_read_live(uint16_t ep, uint32_t cluster, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
 
 extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr, int64_t *out,
@@ -754,6 +767,9 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_basic_info_attr_read_live(attr, out, is_unsigned);
         case chip::app::Clusters::OperationalState::Id:
             return mt_opstate_attr_read_live(ep, cluster, attr, out, is_unsigned);
+        case chip::app::Clusters::RvcRunMode::Id:
+        case chip::app::Clusters::RvcCleanMode::Id:
+            return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::Chime::Id:
             return mt_chime_attr_read_live(ep, attr, out, is_unsigned);
         default:

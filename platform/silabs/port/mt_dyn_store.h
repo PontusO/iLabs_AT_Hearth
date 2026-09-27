@@ -14,12 +14,11 @@
  * platform/silabs/port.
  *
  * WHAT DID NOT COME WITH IT, and why, so the next batch does not go looking:
- * the nRF header's remaining type-conditional store accessors (mt_dyn_mb_store
- * and mt_dyn_temp_levels_store). Each serves a host-fed list belonging to a
- * device type this round does not build (the ModeBase families, the
- * TemperatureLevel cabinet), and every one of them is dead code without its
- * device type. They arrive with the batch that ports the first of those
- * types. The mode select and chime accessors (mt_dyn_mode_store,
+ * the nRF header's remaining type-conditional store accessor,
+ * mt_dyn_temp_levels_store. It serves a host-fed list belonging to a device
+ * type this round does not build (the TemperatureLevel cabinet), and it is
+ * dead code without its device type. It arrives with the batch that ports
+ * that type. The mode select and chime accessors (mt_dyn_mode_store,
  * mt_dyn_chime_store) came with catalogue batch 4's mode select (0x0027),
  * along with the kStoreWalk table mt_devtypes_sl.cpp's store_bytes() walks.
  */
@@ -204,6 +203,7 @@ struct mt_mode_store_t {
  */
 mt_mode_store_t *mt_dyn_mode_store(chip::EndpointId ep);
 mt_chime_store_t *mt_dyn_chime_store(chip::EndpointId ep);
+mt_mb_store_t *mt_dyn_mb_store(chip::EndpointId ep, chip::ClusterId cluster);
 
 /*
  * Log the endpoint arena's occupancy on the console: handed out, capacity,

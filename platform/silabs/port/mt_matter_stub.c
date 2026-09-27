@@ -121,23 +121,10 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
 /* The mode select bridge functions left this file in catalogue batch 4
  * (2026-09-26); they live in mt_matter_sl.cpp. */
 
-/* ---- ModeBase: RVC run/clean mode, microwave mode, and the rest ------------- */
-
-void *mt_matter_modebase_delegate_alloc(uint32_t cluster_id) { (void)cluster_id; return NULL; }
-void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)delegate; (void)ep; }
-
-int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8_t *modes, const uint16_t *tags,
-                            const char *const *labels, uint8_t count)
-{
-    (void)cluster;
-    (void)modes;
-    (void)tags;
-    (void)labels;
-    (void)count;
-    /* cluster is not a ModeBase id, or ep does not carry it:
-     * MT_ATTR_ERR_CLUSTER (mt_matter.h:501) */
-    return STUB_ATTR_MISS(ep);
-}
+/* The RVC's three ModeBase stubs (mt_matter_modebase_delegate_alloc,
+ * mt_matter_modebase_delegate_set_endpoint, mt_matter_modebase_set) left this
+ * file in catalogue batch 5b (2026-09-27): they are the real things now, in
+ * mt_matter_sl_b5.inc. */
 
 /* The OperationalState trio's stubs (mt_matter_opstate_delegate_alloc,
  * mt_matter_opstate_delegate_set_endpoint, mt_matter_opstate_set) are the real
