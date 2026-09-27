@@ -414,6 +414,13 @@ def _onboarding_codes(link):
             return m.group(1), m.group(2)
     return None, None
 
+def paired_board_ok(out):
+    """The commissioning guard's test, factored for the self-tests:
+    chip-tool's pairing output names the device it paired by product id,
+    so the board under test is the one paired only when its own product
+    id is in the output."""
+    return EXPECTED_PRODUCT_ID in out
+
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -495,7 +502,7 @@ def print_plan(batch):
                     ans = "allow" if answer == 1 else "deny" if answer == 0 else "unlisted"
                     urc = "%s -> ChangeToMode status %d (%s; %s)" % (
                         cmd, want["mode_status"], ans,
-                        "no +MTCMD within 3s" if answer == "none"
+                        "no +MTCMD for the command" if answer == "none"
                         else "+MTCMD:%d,%d answered %s" % (fcl, fcmd, ans))
                 else:
                     kind, args, (u_cluster, u_attr, u_val) = c["controller"]
@@ -624,9 +631,15 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         # ChangeToMode's NewMode is a positional command argument, so it
         # precedes the destination, as the harness's own step 3.15 passes it.
         handle = H.invoke_chip(ctx, [cc] + args + [node, str(ep)], timeout=30)
+        rc, out = handle.join(30)
         if answer == "none":
-            fwd = link.await_urc(r"^\+MTCMD:\d+,%d,%d,\d+(,|$)" % (ep, fcl), 3.0)
-            s.check("%s no +MTCMD within 3s" % prefix, fwd is None)
+            # The response has landed, so any forward this command raised
+            # is already on the link: the check is a short window for a
+            # +MTCMD for this endpoint and cluster (the queue is checked
+            # before the wire, so an arrival the join already carried is
+            # seen), not a race against chip-tool's own exit.
+            fwd = link.await_urc(r"^\+MTCMD:\d+,%d,%d,\d+(,|$)" % (ep, fcl), 1.0)
+            s.check("%s no +MTCMD for the command" % prefix, fwd is None)
         else:
             responder = H.CmdResponder(link)
             fwd = responder.expect(cluster=fcl, command=fcmd, verdict=answer,
@@ -634,7 +647,6 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
             s.check("%s forward %d/%d answered %s" % (prefix, fcl, fcmd,
                                                      "allow" if answer else "deny"),
                     fwd is not None)
-        rc, out = handle.join(30)
         s.check("%s ChangeToMode status %d" % (prefix, want["mode_status"]),
                 rc == 0 and H.parse_change_to_mode_status(out) == want["mode_status"])
         if "current_mode" in want:
@@ -883,7 +895,7 @@ def main(argv=None):
         paired = s.check("commission: chip-tool pairing exits 0", rc == 0)
         if paired:
             paired = s.check("commission: paired the board under test (%s)" % EXPECTED_PRODUCT_ID,
-                             EXPECTED_PRODUCT_ID in out)
+                             paired_board_ok(out))
             if not paired:
                 print("ABORT: chip-tool paired another board (no %s in its output)"
                       % EXPECTED_PRODUCT_ID)

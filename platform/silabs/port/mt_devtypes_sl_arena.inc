@@ -137,7 +137,11 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * can build) by raising HEARTH_EP_ARENA_BYTES from 5,376 to 9,600 rather
  * than lowering the floor to the nRF's eight (the ruling of 2026-09-24), and
  * catalogue batch 4 raised it from 9,600 to 9,728 when the mode select
- * became the widest (the ruling of 2026-09-26). It is still a stronger
+ * became the widest (the ruling of 2026-09-26). The RVC (batch 5b) is the
+ * one admitted type below that sixteen: up to nine, because its 424 B of
+ * cluster objects per endpoint is what the cluster-object arena caps (DE566)
+ * rather than this arena, which would hold ten RVC blocks (10 x 936 = 9,360
+ * of 9,728). It is still a stronger
  * promise than the nRF's, whose 8,112 usable bytes hold only 13 of the same
  * extended colour light. The floor below asserts the strong form
  * deliberately: the batch that adds a wider type will fail this build and
@@ -434,8 +438,9 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * the mode select with the MT_COUNT over-count instead of the nRF's
  * exact-counting convention (metadata-only members excluded, as count_slots()
  * does), and the candidates for the types this build does not declare yet
- * (chime, the ModeBase families, the temperature-level labels) come with their
- * batches. And the nRF's floor carries a capped half (kFloorDemand,
+ * (the non-RVC ModeBase families, the temperature-level labels, and the other
+ * store-bearing types) come with their batches; the chime (batch 4) and the
+ * RVC (batch 5b) candidates already live above. And the nRF's floor carries a capped half (kFloorDemand,
  * kEvseEndpointCap and its two non-vacuity assertions) that this one does not:
  * it exists because the EVSE's own MT_EVSE_MAX of 2 makes "room for eight of
  * it" a demand no composition can make. No device type in this build carries a
@@ -527,7 +532,12 @@ constexpr size_t kChimeBlockBytes =
  * kWidestClusterList. It gets its own candidate (Identify, the two ModeBase
  * lists, the operational state list and the two trailing ModeBase stores,
  * the MT_COUNT over-count as everywhere here) and a documented maximum of
- * nine per composition; a composition past that is refused at create. */
+ * nine per composition; a composition past that is refused at create. Note
+ * that this arena would hold ten RVC blocks (10 x 936 = 9,360 of 9,728) and
+ * the 20-slot ModeBase pool would serve ten as well; the wall that refuses
+ * the tenth is the cluster-object arena, which fits nine x (264 + 2 x 80) =
+ * 3,816 of its 4,096 bytes but not the tenth's 4,240 total, pinned by the
+ * static_assert beside the nine-fit assert in mt_matter_sl_b5.inc. */
 constexpr size_t kRvcMaxEndpoints = 9;
 constexpr size_t kRvcBlockBytes =
     block_bytes(MT_COUNT(rvcClusters),
@@ -574,7 +584,10 @@ constexpr size_t kArenaUsableBytes = kEpArenaBytes;
  * the choice and keep the same strong form by raising it from 5,376 to
  * 9,600 (the ruling of 2026-09-24); catalogue batch 4's store-bearing mode
  * select revisits the choice and keeps the same strong form by raising it
- * from 9,600 to 9,728 (the ruling of 2026-09-26).
+ * from 9,600 to 9,728 (the ruling of 2026-09-26). The RVC (batch 5b) stays
+ * below this floor by design: its admission limit is up to nine (DE566),
+ * capped by the cluster-object arena, not by this endpoint floor, which
+ * would hold ten of its 936-byte blocks.
  *
  * That is deliberate rather than incidental. The next batch that adds a
  * wider device type fails THIS assertion and has to choose, with the numbers

@@ -544,10 +544,11 @@ struct instance_served_attr {
 };
 
 /*
- * Eight rows: Basic Information's four integer attributes on the root node
+ * Twelve rows: Basic Information's four integer attributes on the root node
  * (ruling F500), the per-endpoint OperationalState pair, and the per-endpoint
  * Chime pair (both brought in by catalogue batch 4 with the trio and the
- * chime).
+ * chime), and the RVC's two ModeBase CurrentMode attributes and its
+ * RvcOperationalState pair (catalogue batch 5b).
  *
  * The Basic Information strings (VendorName, ProductName, NodeLabel,
  * Location and the rest) and CapabilityMinima are deliberately NOT here:

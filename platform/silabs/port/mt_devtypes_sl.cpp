@@ -57,7 +57,7 @@
  *   mt_dyn_attr_slot()                 nRF 7052-7069  whole
  *   mt_dyn_mode_store() and
  *     mt_dyn_chime_store()             nRF 7084-7116  whole
- *   mt_dyn_mb_store()                  nRF 7118-7160  whole
+ *   mt_dyn_mb_store()                  nRF 7118-7159  whole
  *   the mt_devtypes.h quartet          nRF 7189-8413  the thirty-five ported
  *                                                     types
  *   the ember external-attribute hooks nRF 8415-8451  whole
@@ -934,10 +934,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     if (type_has_cluster(ep_type, RvcRunMode::Id)) {
         mb_run_delegate = mt_matter_modebase_delegate_alloc(RvcRunMode::Id);
         if (mb_run_delegate == nullptr) {
-            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate pool exhausted (run mode); %u of %u "
-                    "serviceable endpoints in use",
-                    (unsigned)devtype_id, (unsigned)live_endpoints(),
-                    (unsigned)kServiceableEndpoints);
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate unavailable (run mode): the "
+                    "cluster-object arena or the ModeBase pool cap (kModeBasePoolSlots) is exhausted",
+                    (unsigned)devtype_id);
             if (chime_delegate != nullptr) {
                 mt_matter_chime_delegate_unclaim(chime_delegate);
             }
@@ -947,10 +946,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     if (type_has_cluster(ep_type, RvcCleanMode::Id)) {
         mb_clean_delegate = mt_matter_modebase_delegate_alloc(RvcCleanMode::Id);
         if (mb_clean_delegate == nullptr) {
-            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate pool exhausted (clean mode); %u of %u "
-                    "serviceable endpoints in use",
-                    (unsigned)devtype_id, (unsigned)live_endpoints(),
-                    (unsigned)kServiceableEndpoints);
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate unavailable (clean mode): the "
+                    "cluster-object arena or the ModeBase pool cap (kModeBasePoolSlots) is exhausted",
+                    (unsigned)devtype_id);
             if (chime_delegate != nullptr) {
                 mt_matter_chime_delegate_unclaim(chime_delegate);
             }
@@ -961,10 +959,9 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     if (type_has_cluster(ep_type, RvcOperationalState::Id)) {
         rvc_opstate_delegate = mt_matter_rvc_opstate_delegate_alloc();
         if (rvc_opstate_delegate == nullptr) {
-            HEARTH_LOGE("devtypes", "devtype 0x%04X: rvc opstate delegate pool exhausted (%u slots); %u of %u "
-                    "serviceable endpoints in use",
-                    (unsigned)devtype_id, (unsigned)kServiceableEndpoints,
-                    (unsigned)live_endpoints(), (unsigned)kServiceableEndpoints);
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: rvc opstate delegate unavailable: the cluster-object "
+                    "arena is full (the RVC is admitted up to nine, DE566)",
+                    (unsigned)devtype_id);
             if (chime_delegate != nullptr) {
                 mt_matter_chime_delegate_unclaim(chime_delegate);
             }
@@ -1128,7 +1125,7 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * a failure there returns early and the Instance silently never
      * registers, no abort, no diagnostic. Both set_endpoint
      * implementations check Init()'s return and log loudly
-     * (mt_matter_zephyr.cpp), unlike the C6 whose SDK init-callback path
+     * (mt_matter_sl.cpp), unlike the C6 whose SDK init-callback path
      * discards it. The RVC opstate half is the trio's shape verbatim
      * (soft-bail Init, logged inside). */
     if (mb_run_delegate != nullptr) {

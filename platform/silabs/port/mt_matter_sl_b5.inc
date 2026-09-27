@@ -98,9 +98,10 @@ extern "C" int mt_matter_switch_click(uint16_t ep)
  *
  * Init() also LoadPersistentAttributes() (:79): three KVS reads per
  * (endpoint, cluster) at every boot, and UpdateCurrentMode() persists on
- * every controller ChangeToMode (:178). Two ModeBase clusters per RVC
- * endpoint makes this a second ZMS wear source after the chime's, on the
- * settings_storage partition already under a sizing watch. Also live but
+ * every controller ChangeToMode (:178), through the KVS (NVM3 on this
+ * port; the settings region the README keeps under a sizing watch). Two
+ * ModeBase clusters per RVC endpoint makes this a second wear source
+ * after the chime's. Also live but
  * inert: Init()'s OnOff coupling block compiles here
  * (MATTER_DM_PLUGIN_ON_OFF_SERVER is defined, OnOff is in hearth.zap) and
  * is skipped at :132 because no RVC endpoint carries an OnOff server.
@@ -263,9 +264,11 @@ private:
              * freshly composed microwave answer cooking commands before the
              * host has ever sent AT+MTMODES. Get it wrong and every
              * SetCookingParameters answers InvalidCommand with no +MTCMD
-             * raised, forever and silently. mt_matter_mwoc_register() reads
-             * it back at create time precisely so that cannot happen
-             * unnoticed. */
+             * raised, forever and silently. On the nRF, mt_matter_mwoc_register()
+             * reads it back at create time precisely so that cannot happen
+             * unnoticed; no microwave device type is ported to this one and
+             * the readback has no counterpart here, so this arm is inert in
+             * this build, kept for the bridge's copy-whole shape. */
             return chip::to_underlying(MicrowaveOvenMode::ModeTag::kNormal);
         }
         if (m_cluster == OvenMode::Id) {
@@ -317,22 +320,28 @@ private:
 };
 
 /*
- * Pool sizing, RULED (graph DE404): 18 slots, which is 2 x 9, two
- * ModeBase pairs per RVC endpoint times the NINE RVC endpoints the
- * endpoint block heap can actually serve (8,112 usable / 864 B per RVC
- * block; the arithmetic beside K_HEAP_DEFINE in mt_devtypes_zephyr.cpp).
- * Not kServiceableEndpoints like every other pool here, because this is
- * the port's first two-objects-per-endpoint pool and 16 would cap the
- * composition at eight RVCs, one below what the heap allows, while 32
- * (2 x 16) would reserve Instances for seven endpoints the heap can never
- * stand up. Exhaustion aborts the create before anything is spent, so a
- * tenth RVC fails on whichever wall it hits first (this pool or the
- * heap), loudly either way. MT_MB_MAX_LISTS is gone from core/include/
- * mt_matter.h (pay-per-composition round, task 7): the C6 no longer has a
- * fixed ModeBase pool at all, it allocates its mt_mb_store_t per
- * (endpoint, cluster) through its store index (mt_store_index.c) against
- * the runtime heap floor. This pool is unrelated to that: it is this
- * nRF port's own ModeBase Instance/delegate pool, sized as above.
+ * Pool sizing, this port's own (the nRF port's DE404 arithmetic did not
+ * copy over, because this port's composition is the RVC alone): 20 slots,
+ * which is 2 x 9 plus headroom, two ModeBase pairs per RVC endpoint times
+ * the NINE RVC endpoints this build admits (graph DE566). On the nRF the
+ * number was argued from its 8,112 usable block heap and a 864 B RVC
+ * block, against four or more ModeBase consumers; none of that applies
+ * here, where the endpoint arena is 9,728 usable bytes against a 936 B
+ * RVC block and the RVC is the ONLY ModeBase consumer in this build. The
+ * tenth RVC is refused by the cluster-object arena, not by this pool:
+ * nine RVCs draw nine x (264 + 2 x 80) = 3,816 B of it and the tenth's
+ * 4,240 B total would not fit the 4,096 B arena, while the pool still has
+ * two slots of its own left (the assert beside the RvcOperationalState
+ * pair below pins both walls). 20 = 18 + 2, the two being headroom the
+ * nRF's batch 7a ruling added, kept as is. The pool is checked first in
+ * mt_matter_modebase_delegate_alloc() and exhaustion aborts the create
+ * before anything is spent, loudly either way. MT_MB_MAX_LISTS is gone
+ * from core/include/mt_matter.h (pay-per-composition round, task 7): the
+ * C6 no longer has a fixed ModeBase pool at all, it allocates its
+ * mt_mb_store_t per (endpoint, cluster) through its store index
+ * (mt_store_index.c) against the runtime heap floor; this pool is
+ * unrelated to that, it is this port's own ModeBase Instance/delegate
+ * pool.
  *
  * The Instance pool is alignas raw storage (the four-argument ctor needs
  * create-time values), placement-constructed exactly once per slot in
@@ -342,44 +351,6 @@ private:
  * (AT+MTEP edits apply by reboot, which resets every pool wholesale), the
  * standing allocate-only policy.
  */
-/* Catalogue batch 7a: 18 -> 20, the batch brief's ruling, to admit
- * DEM/DEMMode-bearing endpoints beyond the RVC arithmetic. The arena
- * arithmetic itself says 18 still suffices with MT_DEM_MAX at 4: the
- * heaviest feasible mix is 7 RVCs (14 slots, 6,048 B of block heap) plus
- * 4 DEM endpoints (4 slots, 1,856 B) = 18 slots in 7,904 of 8,112 usable
- * B, and every other mix is at or under 18 before a heap or MT_DEM_MAX
- * wall lands; the two extra slots are the brief's deliberate headroom for
- * 160 B of .bss.
- *
- * Catalogue batch 7b redid the arithmetic with WaterHeaterMode as the
- * fourth consumer, as 7a's note promised, and 20 STANDS: the ceiling is
- * set by heap cost per ModeBase slot, and the RVC's 432 B/slot (864 B
- * block, two slots) beats every 7b provider (DEM v1 456 B/slot, water
- * heater v1 632, water heater v0 808, battery storage v0 856), so the
- * slot-maximizing mixes are still RVC-led: 9 RVCs = 18 slots in 7,776 B,
- * or 8 RVCs + 2 DEM v1 = 18 in 7,824 B, or 7 RVCs + 4 DEM v1 = 18 in
- * 7,872 B; folding a water heater in always costs more heap per slot and
- * lands at or under 18 before the heap or an MT_*_MAX wall does
- * (MT_WHM_MAX caps water heaters at 4, MT_DEM_MAX caps DEM-bearing
- * endpoints, battery storage included, at 4). No growth; the 7a headroom
- * still covers exactly the two slots it always did. EnergyEvseMode would
- * be the fifth consumer and is out by ruling DE408 (LM20 tier).
- *
- * Catalogue batch 8 added THREE more consumers at once (0x0052 on the
- * refrigerator and the cooler cabinet, OvenMode on the heater cabinet,
- * MicrowaveOvenMode on the microwave) and 20 STILL STANDS, for the reason
- * that has decided this number every time: the ceiling is set by endpoint
- * block-heap cost per ModeBase slot, and the RVC's 432 B/slot (864 B block,
- * two slots on one endpoint) still beats every batch-8 provider by a wide
- * margin: cooler cabinet v0 472 B/slot, refrigerator 520, microwave 536,
- * heater cabinet v0 536, every variant-1 shape worse again. The
- * slot-maximising mixes are therefore still RVC-led and still top out at 18
- * (9 RVCs, 7,776 B of block heap; 8 RVCs plus 2 cooler cabinets, 18 slots in
- * 7,856 B; 8 RVCs plus 2 DEM v1, 18 in 7,824), with nothing MB-bearing cheap
- * enough to fit any of their remainders. Re-derived by exhaustive search
- * over the full batch-8 catalogue rather than argued by inspection, the
- * batch's own worst-object-mix discipline. The 7a headroom is still exactly
- * the two slots it always was. */
 constexpr size_t kModeBasePoolSlots = 20;
 
 /* Memory reclaim round A: a table of pointers into the cluster-object
@@ -465,10 +436,12 @@ extern "C" void mt_matter_modebase_delegate_set_endpoint(void *delegate, uint16_
  * are enforced by cmd_mtmodes() in mt_at.c; the bounds re-checked here
  * are defensive. This bridge is the sole place that validates cluster
  * against the ModeBase ids this build serves, since mt_at.c has no CHIP
- * header to read them from: on this platform that is RvcRunMode and
- * RvcCleanMode only, and the other five ModeBase aliases the C6 already
- * accepts answer MT_ATTR_ERR_CLUSTER here until their device types land
- * in later batches (the composed-appliance and energy rounds).
+ * header to read them from. The accept set is all eight ModeBase ids (the
+ * check below is copied whole from the C6's; the in-code comment on it
+ * records the widening from the RVC's two, through the 7a/7b/8 consumers,
+ * to EVSE), but a cluster that no live endpoint carries is refused by the
+ * emberAfContainsServer carries-server check that follows, which answers
+ * MT_ATTR_ERR_CLUSTER, so the extra ids are harmless here.
  *
  * Tag-0 defaults are substituted at STORE time so every read is
  * branch-free, the C6's policy verbatim (main.cpp:2762-2766): RvcRunMode's
@@ -570,11 +543,12 @@ extern "C" int mt_matter_modebase_set(uint16_t ep, uint32_t cluster, const uint8
      * none of them kNormal, is accepted verbatim by the substitution loop
      * below (it only rewrites tag 0), and from that moment every
      * SetCookingParameters on that endpoint answers InvalidCommand with no
-     * +MTCMD raised, forever and silently. That is precisely the failure the
-     * boot readback in mt_matter_mwoc_register() exists to prevent, and the
-     * readback cannot see this one: it runs once at create, before any
-     * AT+MTMODES could have arrived. The two together close the class, the
-     * readback over the placeholder path and this over the host-fed one.
+     * +MTCMD raised, forever and silently. On the nRF the class is closed by
+     * two checks, the boot readback in mt_matter_mwoc_register() over the
+     * placeholder path and this one over the host-fed path; on this port the
+     * readback has no counterpart (no microwave device type is ported, so
+     * that function exists only in the nRF files), and this check alone
+     * closes the host-fed path here.
      *
      * A tag of 0 counts as satisfying the rule, because the loop below turns
      * it into kNormal for this cluster; only a list that is explicitly and
@@ -887,6 +861,8 @@ static_assert(hearth_arena_cost(obj_pair_bytes<HearthRvcOpStateDelegate,
               "the RvcOperationalState pair changed size; redo the RVC's admission arithmetic");
 static_assert(9 * (264 + 2 * 80) <= HEARTH_OBJ_ARENA_BYTES,
               "nine RVCs' objects no longer fit the cluster-object arena (DE566)");
+static_assert(10 * (264 + 2 * 80) > HEARTH_OBJ_ARENA_BYTES,
+              "a tenth RVC now fits the cluster-object arena: nothing else enforces the nine (DE566); add an explicit cap before growing the arena");
 
 extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
 {

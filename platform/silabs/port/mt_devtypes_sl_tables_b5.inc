@@ -372,7 +372,7 @@ constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
  * (one server, mode-base-server) and RvcOperationalState 0x0061, plus
  * Identify and Descriptor. Five clusters, fourteen slots, and the two
  * host-fed ModeBase stores that make this the widest block in the
- * catalogue (see the sizing table below).
+ * catalogue.
  *
  * The C6 composes the same five: robotic_vacuum_cleaner::add()
  * (esp_matter_endpoint.cpp:1389-1400) creates Identify, RvcRunMode and
@@ -398,7 +398,7 @@ constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
  *   Optional<EndpointId>(aEndpointId) with the cluster id
  *   (mode-base-server.cpp:44-53), so the one RVC endpoint carries TWO
  *   pairs. The pools and the Init() ordering rules live in
- *   mt_matter_zephyr.cpp beside the delegate; the create-path handout is
+ *   mt_matter_sl_b5.inc beside the delegate; the create-path handout is
  *   below in mt_devtype_create(). The ordering is this batch's sharpest
  *   constraint and is documented at both ends: Instance::Init()
  *   VerifyOrDies on emberAfContainsServer (mode-base-server.cpp:77), a
@@ -410,9 +410,9 @@ constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
  *   mode-base-server.cpp:325-347), and the switch has NO default arm, so
  *   ClusterRevision falls through to ember and its seeds are LIVE:
  *   RvcRunMode 4 and RvcCleanMode 5 per this tree's Metadata.h:20, per
- *   cluster in s_seeds. The CurrentMode and FeatureMap slots are inert
- *   shadows (the opstate split), carved out for AT+MTATTR by
- *   k_instance_served in mt_matter_zephyr.cpp. StartUpMode and OnMode are
+ *   cluster in s_seeds. The CurrentMode slot is an inert shadow (the
+ *   opstate split), carved out for AT+MTATTR by k_instance_served in
+ *   mt_matter_sl.cpp. StartUpMode and OnMode are
  *   optional and deliberately not declared, the ModeSelect precedent.
  *
  *   Neither joins B388: MatterRvcRunMode/RvcCleanModePluginServerInit
@@ -441,7 +441,7 @@ constexpr EmberAfDeviceType kRoomAirConditionerTypes[] = { { 0x0072, 3 } };
  *   OperationalState::Instance, constructed Instance(Delegate*, ep)
  *   forwarding Id as the cluster id (operational-state-server.h:421-423);
  *   the delegate is a NEW subclass (HearthRvcOpStateDelegate,
- *   mt_matter_zephyr.cpp) because the base HearthOpStateDelegate has no
+ *   mt_matter_sl_b5.inc) because the base HearthOpStateDelegate has no
  *   GoHome hook, and it takes its own pool: the base
  *   Delegate::SetInstance() VerifyOrDies on sharing
  *   (operational-state-server.h:349-353), so handing an RVC Instance a

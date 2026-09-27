@@ -2088,7 +2088,7 @@ class TestModeVerdictKind(unittest.TestCase):
                          % [n for n, ok in s.results if not ok])
         self.assertIn(
             "rvcrunmode ep2 change-to-mode 5 unlisted"
-            " no +MTCMD within 3s", got)
+            " no +MTCMD for the command", got)
         self.assertIn(
             "rvcrunmode ep2 change-to-mode 5 unlisted ChangeToMode status 1",
             got)
@@ -2097,20 +2097,20 @@ class TestModeVerdictKind(unittest.TestCase):
             got)
 
     def test_unlisted_fails_when_a_forward_does_arrive(self):
-        # A ChangeToMode forward lands on the link within the 3 s window
-        # while the unlisted check runs: the no-forward row awaits the
-        # check's own forward cluster (84, run-mode), so a forward on
-        # that cluster is the arrival that fails the row, and the kind
-        # still answers nothing (the adjudication for an unlisted mode
-        # is the no-forward row, not a response). The chip stays
-        # forward-less, so the window sees only the arrival.
+        # A ChangeToMode forward lands on the link after the response
+        # has joined: the no-forward row awaits the check's own forward
+        # cluster (84, run-mode) for the command's short window, so a
+        # forward on that cluster is the arrival that fails the row,
+        # and the kind still answers nothing (the adjudication for an
+        # unlisted mode is the no-forward row, not a response). The chip
+        # stays forward-less, so the window sees only the arrival.
         link = _VerdictLink()
         chip = _ModeChip(link=link, ep=2, cluster=84, command=0, seq=7,
                          rc=0, change_status=1, current_mode=1,
                          forward=False)
         # A run-mode ChangeToMode forward (cluster 84) already on the
-        # link when the check's window opens: the no-forward row awaits
-        # exactly cluster 84, so it is the arrival.
+        # link when the join returns: the await checks the queue before
+        # the wire, so the no-forward row sees exactly this arrival.
         link.urcs.append("+MTCMD:7,2,84,0,1")
         # The unlisted check (mode "5", forward cluster 84, want status
         # 1): its no-forward row sees the arrival and fails; the status
@@ -2119,7 +2119,7 @@ class TestModeVerdictKind(unittest.TestCase):
                          "rvcrunmode ep2 change-to-mode 5 unlisted")
         got = {n: ok for n, ok in s.results}
         self.assertFalse(got["rvcrunmode ep2 change-to-mode 5 unlisted"
-                             " no +MTCMD within 3s"])
+                             " no +MTCMD for the command"])
         self.assertEqual([x for x in link.sent
                           if x.startswith("AT+MTCMDRESP=")], [])
         # The arrival is consumed by the await (ATLink's pop semantics):
@@ -2251,17 +2251,19 @@ class TestSetupListForm(unittest.TestCase):
 class TestProductIdGuard(unittest.TestCase):
     """main's pairing guard: the paired output must name the expected
     product id, or the guard row fails and the endpoint proofs are
-    skipped (a proof on the wrong board proves nothing). The guard
-    logic lives inline in main, so the tests exercise it exactly as
-    main writes it: the s.check call, the in-test guard, and the
-    pairing-tail print that follows a failed pairing."""
+    skipped (a proof on the wrong board proves nothing). The guard's
+    test is the module-level paired_board_ok, which main calls on the
+    pairing output: the tests exercise that function, and the source
+    sniff below pins that main calls it with the row name, the expected
+    id, and the abort print that follows a failed pairing."""
 
     def _pairing_row(self, out):
-        # The guard as written in main: the row name, the check, and the
-        # skip decision the rest of main makes on it.
+        # The guard as main calls it: the row name, the check on
+        # paired_board_ok's result, and the skip decision the rest of
+        # main makes on it.
         s = _FakeSuite()
         paired = s.check("commission: paired the board under test (%s)"
-                         % P.EXPECTED_PRODUCT_ID, P.EXPECTED_PRODUCT_ID in out)
+                         % P.EXPECTED_PRODUCT_ID, P.paired_board_ok(out))
         return s, paired
 
     def test_expected_product_id_passes_the_guard_row(self):
@@ -2308,7 +2310,8 @@ class TestProductIdGuard(unittest.TestCase):
             "mt_catalogue_proof.py")).read()
         self.assertIn('s.check("commission: paired the board under test (%s)"', src)
         self.assertIn("% EXPECTED_PRODUCT_ID,", src)
-        self.assertIn("EXPECTED_PRODUCT_ID in out", src)
+        self.assertIn("paired_board_ok(out)", src)
+        self.assertIn("def paired_board_ok(out):", src)
         self.assertIn('EXPECTED_PRODUCT_ID = "productId=0x8010"', src)
         self.assertIn("ABORT: chip-tool paired another board (no %s in its output)", src)
         self.assertIn("ABORT: pairing failed, skipping the endpoint proofs", src)
@@ -2476,15 +2479,39 @@ class TestBatch5bRowNames(unittest.TestCase):
     def test_the_pinned_bench_names_occur(self):
         # Every row name the bench recorded (b5b-pinned-names.txt), the
         # commission: row excepted (main records it, not prove_endpoint),
-        # must occur among the fake run's names.
-        pin = os.path.join(
-            "/mnt/f86c891c-33c6-4bb7-afe1-2c8846257177/src/git/iLabs_Hearth_docs/.superpowers/sdd/2026-09-27-mg24-catalogue-batch-5b",
-            "b5b-pinned-names.txt")
+        # must occur among the fake run's names. The list is a copy of
+        # that file (the docs workspace is not part of this repo): the
+        # unlisted change-to-mode row carries the name the kind gives it
+        # now (no +MTCMD for the command), and the go-home no-forward
+        # row keeps its own kind's name (no +MTCMD within 3s).
+        pinned = [
+            "0x0074 robotic vacuum cleaner ep2 current-mode rvcrunmode"
+            " change-to-mode 5 unlisted ChangeToMode status 1",
+            "0x0074 robotic vacuum cleaner ep2 current-mode rvcrunmode"
+            " change-to-mode 5 unlisted current-mode = 1 after",
+            "0x0074 robotic vacuum cleaner ep2 current-mode rvcrunmode"
+            " change-to-mode 5 unlisted no +MTCMD for the command",
+            "0x0074 robotic vacuum cleaner ep2 operational-state go-home"
+            " no-forward AT+MTOPSTATE=2,0x42 -> OK",
+            "0x0074 robotic vacuum cleaner ep2 operational-state go-home"
+            " no-forward ErrorStateID 3",
+            "0x0074 robotic vacuum cleaner ep2 operational-state go-home"
+            " no-forward chip-tool exits 0",
+            "0x0074 robotic vacuum cleaner ep2 operational-state go-home"
+            " no-forward controller reads operational-state = 66 after the AT write",
+            "0x0074 robotic vacuum cleaner ep2 operational-state go-home"
+            " no-forward no +MTCMD within 3s",
+            '0x0074 robotic vacuum cleaner ep2 setup AT+MTMODES=2,84,0,'
+            '16384,"Idle",1,0,"Cleaning" -> OK',
+            '0x0074 robotic vacuum cleaner ep2 setup AT+MTMODES=2,85,0,0,'
+            '"Vacuum",1,0,"Mop" -> OK',
+            "0x0074 robotic vacuum cleaner ep2 setup rvccleanmode"
+            " supported-modes read carries Vacuum and Mop",
+            "0x0074 robotic vacuum cleaner ep2 setup rvcrunmode"
+            " supported-modes read carries Idle and Cleaning",
+        ]
         names = set(self._fake_run_names())
-        for name in open(pin).read().splitlines():
-            name = name.strip()
-            if not name or name.startswith("commission:"):
-                continue
+        for name in pinned:
             self.assertIn(name, names, "missing pinned bench row: %s" % name)
 
 
