@@ -2526,13 +2526,15 @@ class _MeasLink(_VerdictLink):
     (ATLink._collect returns the code, never the line); null holds the
     (ep, cluster, attr) triples that read +MTERR:5 until pushed; stray,
     when set, is a +MTATTR line every push queues, the URC a push must
-    never raise."""
+    never raise. at_read, when set, is the value every non-null live AT
+    read answers."""
 
-    def __init__(self, refuse=None, null=(), stray=None):
+    def __init__(self, refuse=None, null=(), stray=None, at_read=None):
         super().__init__()
         self._refuse = dict(refuse or {})
         self._null = set(null)
         self._stray = stray
+        self._at_read = at_read
 
     def command(self, cmd, *a, **k):
         if cmd in self._refuse:
@@ -2552,6 +2554,11 @@ class _MeasLink(_VerdictLink):
         if m and tuple(int(x) for x in m.groups()) in self._null:
             self.sent.append(cmd)
             return (5, [])
+        if m and self._at_read is not None:
+            # A live AT read that disagrees with what was pushed.
+            self.sent.append(cmd)
+            return (0, ["+MTATTR:%s,%s,%s,%s" % (m.group(1), m.group(2),
+                                                 m.group(3), self._at_read)])
         return super().command(cmd, *a, **k)
 
     def assert_no_urc(self, pattern, window):
@@ -2690,6 +2697,20 @@ class TestPushKind(unittest.TestCase):
         self.assertEqual([n for n, ok in s.results if not ok],
                          [self.V + " chip-tool electricalpowermeasurement read voltage = 230000"])
 
+    def test_a_wrong_at_readback_fails_only_the_at_read_row(self):
+        link = _MeasLink(null={(2, 144, 4)}, at_read="1")
+        s = self._run(self._voltage(), link, _MeasChip(link), self.V)
+        self.assertEqual([n for n, ok in s.results if not ok],
+                         [self.V + " AT read = 230000"])
+
+    def test_a_refused_push_fails_its_ok_row(self):
+        link = _MeasLink(refuse={"AT+MTMEAS=2,144,0,230000": 3},
+                         null={(2, 144, 4)})
+        s = self._run(self._voltage(), link, _MeasChip(link), self.V)
+        failed = [n for n, ok in s.results if not ok]
+        self.assertIn(self.V + " AT+MTMEAS=2,144,0,230000 -> OK", failed)
+        self.assertNotIn(self.V + " AT read before the push -> +MTERR:5", failed)
+
     def test_energy_push_reads_the_struct_and_skips_the_at_read(self):
         link = _MeasLink()
         s = self._run(self._energy(), link, _MeasChip(link), self.E)
@@ -2743,7 +2764,7 @@ class TestBatch7a1RowNames(unittest.TestCase):
         comp = P.composition_for("mg24-batch7a1")
         results = []
         for (ep, _), t in zip(comp[1:], P.rows_for("mg24-batch7a1")):
-            link = _MeasLink(refuse=self.REFUSE, null={(2, 144, 4)})
+            link = _MeasLink(refuse=self.REFUSE, null={(2, 144, 4), (3, 144, 8)})
             s = _FakeSuite()
             P.prove_endpoint(link, _MeasChip(link, types=_b7_types(t)), s,
                              "0x4845", ep, t)
@@ -2752,7 +2773,7 @@ class TestBatch7a1RowNames(unittest.TestCase):
 
     def test_every_row_passes_on_the_fakes(self):
         results = self._fake_run()
-        self.assertEqual(len(results), 54)
+        self.assertEqual(len(results), 55)
         self.assertEqual([n for n, ok in results if not ok], [])
 
     def test_no_duplicate_name(self):
@@ -2762,6 +2783,7 @@ class TestBatch7a1RowNames(unittest.TestCase):
     def test_the_pinned_names_occur(self):
         pinned = [
             "0x0510 electrical sensor ep2 voltage pushed AT read before the push -> +MTERR:5",
+            "0x0510 electrical sensor power-only ep3 active-power pushed AT read before the push -> +MTERR:5",
             "0x0510 electrical sensor ep2 voltage AT write refused"
             " AT+MTATTR=2,144,4,5 -> +MTERR:11",
             "0x0510 electrical sensor power-only ep3 cumulative-energy-imported"

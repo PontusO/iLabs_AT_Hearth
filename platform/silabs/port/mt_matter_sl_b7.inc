@@ -57,14 +57,14 @@
  *   CumulativeEnergyMeasured event in one call (ElectricalEnergyMeasurement
  *   Cluster.cpp:191-218, the LogEvent at :207), this port's second
  *   event emitter after batch 5's InitialPress. Its per-endpoint storage
- *   covers dynamic endpoints: gMeasurements is sized
- *   MATTER_DM_..._ENDPOINT_COUNT + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT
- *   (:42-43), 1 + 16 = 17 entries here, indexed through
- *   emberAfGetClusterServerEndpointIndex(). Measured in the batch 7a step-0
- *   build: 8,432 B of .bss (17 x 496 B), charged the moment this
- *   translation unit is referenced, for every composition, whether or not
- *   an EEM endpoint is ever declared; the audit's headline cost, accepted
- *   by the batch brief with measurement.
+ *   is the Hearth SDK patch's pool (sdk-patches, HEARTH_SDK_PATCH_REV 3):
+ *   CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES (8,
+ *   src/CHIPProjectConfig.h) entries of 496 B, 3,968 B of .bss measured in
+ *   the catalogue batch 7a-1 build (the stock table would be 17 x 496 =
+ *   8,432 B), charged the moment this translation unit is referenced,
+ *   whether or not an EEM endpoint is ever declared. A lookup for an
+ *   endpoint that holds no pool entry returns nullptr, which is why
+ *   mt_matter_eem_reserve() gates the pool before create.
  *
  * Accuracy: both electrical clusters must serve a MeasurementAccuracyStruct.
  * This firmware is a bridge and cannot know the host's real metering
@@ -260,15 +260,15 @@ private:
 };
 
 /*
- * The two pools, MT_MEAS_MAX (8, core/include/mt_matter.h:819, the C6's
+ * The two pools, MT_MEAS_MAX (8, core/include/mt_matter.h:828, the C6's
  * depth: cite-checked, "measurement-capable endpoints per composition")
  * each, deliberately NOT kServiceableEndpoints: the DE407 ruling pins the
  * C6 pool constants, and eight measurement-capable endpoints already
  * exceeds any host this firmware targets. Exhaustion aborts the create
  * before anything is spent (mt_devtype_create()'s two-halves rule).
  *
- * Each pool is a table of POINTERS into the cluster-object heap since
- * memory reclaim round A, one block per delegate with the raw storage for
+ * Each pool is a table of POINTERS into the cluster-object arena (the
+ * nRF's heap since its memory reclaim round A), one block per delegate with the raw storage for
  * its Instance behind it: the four-argument Instance ctor needs create-time
  * values, so the Instances are placement-constructed exactly once per block
  * in mt_matter_meas_delegate_set_endpoint() and never destroyed (no
@@ -476,7 +476,7 @@ static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
 /*
  * The EEM measurement-table capacity gate, the split-reserve shape every
  * other pool in this port uses (the EPM and PowerTopology blocks in
- * mt_devtypes_zephyr.cpp, and the C6's mt_matter_evse_reserve()).
+ * mt_devtypes_sl.cpp, and the C6's mt_matter_evse_reserve()).
  *
  * It exists because the SDK patch in ../sdk-patches replaced
  * ElectricalEnergyMeasurement's gMeasurements, which used to be as long as
@@ -494,7 +494,7 @@ static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
  *
  * Unreachable today, and deliberately kept anyway. Every one of the six
  * device types whose cluster list carries ElectricalEnergyMeasurement also
- * carries ElectricalPowerMeasurement (mt_devtypes_zephyr.cpp:2564/2566,
+ * carries ElectricalPowerMeasurement (the nRF's mt_devtypes_zephyr.cpp:2564/2566,
  * 2582/2584, 2682/2684, 3120/3122, 3269/3271, 3287/3289), so the
  * MT_MEAS_MAX EPM delegate pool is exhausted first and the static_assert
  * below keeps the EEM pool at least as deep. A seventh EEM-bearing type
@@ -557,11 +557,10 @@ extern "C" void mt_matter_eem_register(uint16_t ep)
  * family's hard contract: every pair is validated before any pair is
  * applied, so a bad third pair leaves the first two unapplied.
  *
- * Cluster admission WAS a batch boundary and is not one any more: all five
- * push-served ids the spec names are served here, 0x0090, 0x0091 and 0x0098
- * (batch 7a), 0x0094 (batch 7b) and 0x0099 (the EVSE round), so the list
- * below is now the spec's own set rather than a subset of it. An id outside
- * it still answers MT_ATTR_ERR_CLUSTER.
+ * Cluster admission is a batch boundary on this port: catalogue batch 7a-1
+ * serves 0x0090 and 0x0091 only; 0x0098 returns with batch 7a-2, 0x0094
+ * with batch 7b and 0x0099 with the EVSE round (the accept test below
+ * names them). An id outside the served set answers MT_ATTR_ERR_CLUSTER.
  */
 extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
                                   const int64_t *values, uint8_t count)
@@ -681,8 +680,9 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
     ElectricalEnergyMeasurement::MeasurementData *data =
         ElectricalEnergyMeasurement::MeasurementDataForEndpoint(ep);
     if (data == nullptr) {
-        /* Cannot happen once the endpoint is enabled: gMeasurements covers
-         * every dynamic endpoint (the section comment above); defensive. */
+        /* Reachable only for an endpoint that never took a pool entry;
+         * mt_matter_eem_reserve() gates the pool before create (the
+         * section comment above), so this is defensive. */
         return MT_ATTR_ERR_FAILED;
     }
 

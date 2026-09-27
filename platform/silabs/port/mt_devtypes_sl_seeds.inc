@@ -665,7 +665,7 @@ const attr_seed s_seeds[] = {
 
     /* ElectricalEnergyMeasurement. FeatureMap 0x7 is the inert shadow of
      * the ONE wildcard AttrAccess's fixed Imported|Exported|Cumulative
-     * mask (mt_matter_eem_register, mt_matter_zephyr.cpp: that object
+     * mask (mt_matter_eem_register, mt_matter_sl_b7.inc: that object
      * answers FeatureMap for every EEM endpoint, so this seed may never
      * diverge from its construction). ClusterRevision 2 is LIVE (the
      * wildcard AAI serves no revision case) and is
@@ -1013,19 +1013,16 @@ void seed_slots(dyn_endpoint *d)
                  * cannot hold. Anything ELSE too wide is still a mistake
                  * worth shouting about.
                  *
-                 * The nRF additionally consults attr_quiet_no_slot() here,
-                 * a narrow per-(cluster, attribute) table (DE407 option C)
-                 * that silences the shout for over-wide scalars PROVEN to
-                 * be served by a cluster Instance instead. Every row in it
-                 * belongs to an energy cluster this build does not declare,
-                 * so the table is absent and the shout is unconditional.
-                 * That is the ruling's intent, not a gap: the table admits
-                 * one proven pair at a time and never a whole type, so it
-                 * arrives with the batch that declares the first such
-                 * attribute. */
+                 * attr_quiet_no_slot() (DE407 option C, catalogue batch
+                 * 7a-1, mt_devtypes_sl_tables_b7.inc) is the narrow
+                 * per-(cluster, attribute) table that silences the shout
+                 * for over-wide scalars PROVEN to be served by a cluster
+                 * Instance instead, one pair at a time and never a whole
+                 * type. */
                 if (md.attributeType != ZAP_TYPE(ARRAY) &&
                     md.attributeType != ZAP_TYPE(CHAR_STRING) &&
-                    md.attributeType != ZAP_TYPE(STRUCT)) {
+                    md.attributeType != ZAP_TYPE(STRUCT) &&
+                    !attr_quiet_no_slot(cl.clusterId, md.attributeId)) {
                     HEARTH_LOGE("devtypes", "attr 0x%08X on cluster 0x%08X is %u bytes, a slot "
                                             "holds %u",
                                 (unsigned)md.attributeId, (unsigned)cl.clusterId,

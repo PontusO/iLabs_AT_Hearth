@@ -48,8 +48,8 @@
  * this firmware ACCEPTS must be one it can SERVE, so the pool is sized from the
  * port's own capacity rather than from a plausible number.
  *
- * The cluster is not in this round's build at all; the macro is here because it
- * belongs with the patch and the gate, which are.
+ * The cluster joined the build with catalogue batch 7a-1: the capped table
+ * measured 3,968 B of .bss (8 x 496 B).
  */
 #define CHIP_CONFIG_ELECTRICAL_ENERGY_MEASUREMENT_MAX_INSTANCES 8
 

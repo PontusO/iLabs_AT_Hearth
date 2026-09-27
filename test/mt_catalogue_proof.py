@@ -391,7 +391,7 @@ BATCHES = {
                    controller=("at_refused", ["AT+MTATTR=%(ep)d,144,4,5"], 11)),
         ]),
         _multi("0x0510", "electrical sensor power-only", 1, "electricalpowermeasurement", [
-            _check(144, 8, "active-power", 99590,
+            _check(144, 8, "active-power", 99590, null_read=True,
                    controller=("push", "AT+MTMEAS=%(ep)d,144,2,99590", "int")),
             _check(145, 1, "cumulative-energy-imported", 0,
                    controller=("at_refused", ["AT+MTMEAS=%(ep)d,145,0,1500000"], 3)),

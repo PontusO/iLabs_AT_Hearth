@@ -81,17 +81,12 @@
  * AT+MTEP=0x000A answer +MTERR:6 (unknown device type), which is a different
  * and wrong statement about a product whose wire contract names all 52.
  *
- * ONE SECTION OF THE nRF FILE IS DELIBERATELY ABSENT, because every
- * consumer it has belongs to an unported device type:
- *
- *   - The DE407 quiet table (nRF 4924-4990, kQuietNoSlot and
- *     attr_quiet_no_slot): every row in it is an
- *     ElectricalPowerMeasurement, DeviceEnergyManagement,
- *     WaterHeaterManagement or EnergyEvse 64-bit declaration. No list in
- *     this file declares an over-wide scalar, so seed_slots()'s shout is
- *     unconditional here, which is the ruling's intent: the table silences
- *     the shout one proven pair at a time and never by type, so it arrives
- *     with the batch that declares the first such pair.
+ * The DE407 quiet table (nRF 4924-4988, kQuietNoSlot and
+ * attr_quiet_no_slot) arrived with catalogue batch 7a-1 in
+ * mt_devtypes_sl_tables_b7.inc, its seven ElectricalPowerMeasurement rows
+ * only: the table admits one proven pair at a time, so the nRF's
+ * DeviceEnergyManagement, WaterHeaterManagement and EnergyEvse rows arrive
+ * with their batches.
  * The type-conditional trailing stores (nRF 5032-5197, kStoreWalk,
  * store_walk, store_offset and the four sizeof/alignof assertions) arrived
  * with catalogue batch 4, when the first store-bearing type, the mode
@@ -998,7 +993,7 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     if (type_has_cluster(ep_type, ElectricalPowerMeasurement::Id)) {
         epm_delegate = mt_matter_epm_delegate_alloc();
         if (epm_delegate == nullptr) {
-            HEARTH_LOGE("devtypes", "devtype 0x%04X: EPM delegate pool exhausted (MT_MEAS_MAX %u); %u of %u "
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: EPM delegate pool (MT_MEAS_MAX %u) or the cluster-object arena exhausted; %u of %u "
                     "serviceable endpoints in use",
                     (unsigned)devtype_id, (unsigned)MT_MEAS_MAX, (unsigned)live_endpoints(),
                     (unsigned)kServiceableEndpoints);
@@ -1012,7 +1007,7 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     if (type_has_cluster(ep_type, PowerTopology::Id)) {
         ptop_delegate = mt_matter_ptop_delegate_alloc();
         if (ptop_delegate == nullptr) {
-            HEARTH_LOGE("devtypes", "devtype 0x%04X: PowerTopology delegate pool exhausted (MT_MEAS_MAX %u); "
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: PowerTopology delegate pool (MT_MEAS_MAX %u) or the cluster-object arena exhausted; "
                     "%u of %u serviceable endpoints in use",
                     (unsigned)devtype_id, (unsigned)MT_MEAS_MAX, (unsigned)live_endpoints(),
                     (unsigned)kServiceableEndpoints);

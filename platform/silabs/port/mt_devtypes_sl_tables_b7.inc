@@ -13,8 +13,8 @@
 
 /* ---- electrical sensor (0x0510) and electrical meter (0x0514) ---------
  *
- * Catalogue batch 7a audit (batch7-audit.md sections 2.2 and 3.1/3.2),
- * every citation re-verified against the pinned NCS tree while writing.
+ * Catalogue batch 7a audit (the nRF's batch7-audit.md sections 2.2 and
+ * 3.1/3.2; the SDK citations below are the pinned NCS tree's).
  * The two measurement-push device types behind AT+MTMEAS, and the port's
  * first variant-carrying registry rows: variant 0 is power + energy,
  * variant 1 power only (the current-clamp case). On the C6 the variant-1
@@ -40,7 +40,7 @@
  *   measurement-server.cpp:65-221), so of the declared set only
  *   ClusterRevision ever falls through to ember. The Instance is
  *   constructed by the port itself in
- *   mt_matter_meas_delegate_set_endpoint() (mt_matter_zephyr.cpp; no SDK
+ *   mt_matter_meas_delegate_set_endpoint() (mt_matter_sl_b7.inc; no SDK
  *   init callback exists on this platform); its Init() is SOFT (AAI
  *   registration only, :43-47), no VerifyOrDie anywhere in this batch's
  *   energy clusters.
@@ -58,7 +58,7 @@
  * seed, and they are in seed_slots()'s narrow per-(cluster, attribute)
  * quiet table below, so the boot log stays silent for exactly these and
  * keeps shouting for any other over-wide scalar. AT+MTATTR reads reach
- * them through the k_instance_served carve-out (mt_matter_zephyr.cpp),
+ * them through the k_instance_served carve-out (mt_matter_sl.cpp),
  * answering the live delegate cache; writes answer +MTERR:11.
  *
  * PowerMode and NumberOfMeasurementTypes ARE slot-served over AT: their
@@ -74,7 +74,7 @@
  * ElectricalEnergyMeasurement (0x0091): no Instance and no delegate at
  * all; ONE wildcard AttributeAccessInterface serves every EEM endpoint
  * (ElectricalEnergyMeasurementCluster.h:36-57), registered once by
- * mt_matter_eem_register() (mt_matter_zephyr.cpp) because nothing in the
+ * mt_matter_eem_register() (mt_matter_sl_b7.inc) because nothing in the
  * SDK ever calls its Init(). Its fixed Imported|Exported|Cumulative mask
  * is what every FeatureMap read on every EEM endpoint answers, so the
  * seed here is 0x7 and may never diverge from that construction site
@@ -298,3 +298,45 @@ HEARTH_DECLARE_CONST_ENDPOINT(wiredElectricalSensorPowerOnlyEndpoint,
  * power source row, 0x0510 revision 1 matching the sensor row above). */
 constexpr EmberAfDeviceType kHeatPumpTypes[] = { { 0x0309, 1 }, { 0x0011, 1 }, { 0x0510, 1 } };
 constexpr EmberAfDeviceType kSolarPowerTypes[] = { { 0x0017, 1 }, { 0x0011, 1 }, { 0x0510, 1 } };
+
+/*
+ * The DE407 quiet table (nRF mt_devtypes_zephyr.cpp 4924-4988): the
+ * specific (cluster, attribute) pairs whose over-wide scalar declarations
+ * are DELIBERATE metadata-only 64-bit declarations, each proven
+ * Instance-served, admitted one pair at a time and NEVER by type: a future
+ * ember-served 64-bit attribute must keep failing loudly in seed_slots()
+ * (declared but slotless, it would answer a bare ERROR over AT). The
+ * declarations are refused a slot by attr_gets_slot()'s size clause; this
+ * table only silences the boot shout for the proven pairs. Catalogue batch
+ * 7a-1 brings the seven ElectricalPowerMeasurement rows; the nRF's
+ * DeviceEnergyManagement (7a-2), WaterHeaterManagement (7b) and EnergyEvse
+ * (the EVSE round) rows arrive with their batches.
+ */
+struct quiet_no_slot_attr {
+    ClusterId cluster;
+    AttributeId attr;
+};
+
+constexpr quiet_no_slot_attr kQuietNoSlot[] = {
+    /* ElectricalPowerMeasurement: the seven AT+MTMEAS push fields, served
+     * by Instance::Read()'s own cases from the HearthEpmDelegate cache
+     * (mt_matter_sl_b7.inc; the k_instance_served carve-out in
+     * mt_matter_sl.cpp serves the AT side). */
+    { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Voltage::Id },
+    { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActiveCurrent::Id },
+    { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::ActivePower::Id },
+    { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::RMSVoltage::Id },
+    { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::RMSCurrent::Id },
+    { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::Frequency::Id },
+    { ElectricalPowerMeasurement::Id, ElectricalPowerMeasurement::Attributes::PowerFactor::Id },
+};
+
+bool attr_quiet_no_slot(ClusterId cluster, AttributeId attr)
+{
+    for (auto &q : kQuietNoSlot) {
+        if (q.cluster == cluster && q.attr == attr) {
+            return true;
+        }
+    }
+    return false;
+}
