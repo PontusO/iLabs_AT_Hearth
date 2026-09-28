@@ -1042,7 +1042,8 @@ batch 1), `mt_devtypes_sl_tables_b2.inc` (batch 2),
 `mt_devtypes_sl_tables_b4.inc` (batch 4),
 `mt_devtypes_sl_tables_b5.inc` (batches 5a and 5b),
 `mt_devtypes_sl_tables_b7.inc` (batches 7a-1, 7a-2 and 7b, the EVSE round, and the DE407 quiet table),
-`mt_devtypes_sl_registry.inc` (the parenting policy and the registry),
+`mt_devtypes_sl_tables_b8.inc` (catalogue batch 8, with the parenting policy and the shape struct),
+`mt_devtypes_sl_registry.inc` (the registry),
 `mt_devtypes_sl_arena.inc` (the external attribute store, the endpoint arena,
 its sizing and floor) and `mt_devtypes_sl_seeds.inc` (the seed table and
 `seed_slots`). Reason: the 65,536-token window; the file was 3,790 lines,
@@ -1082,6 +1083,7 @@ index, and a round that changes one arm finds the other through it.
 | `HearthDemDelegate`, the DEM pool and register, `AT+MTMEAS`'s DEM branch restored, `AT+MTDEMCAP`, the DEM live read; the six DEM and the DEMMode Instance-served rows | `mt_matter_zephyr.cpp` 5641-6324, 917-938 | `port/mt_matter_sl_b7.inc`, `port/mt_matter_sl.cpp` | catalogue batch 7a-2 |
 | `HearthWhmDelegate` (the Boost verdict forwards, the guarded CancelBoost), the WHM pool and register, `AT+MTMEAS`'s 0x0094 branch with the BoostStarted/BoostEnded derivation, the WHM live read; the six WHM and the WaterHeaterMode Instance-served rows | `mt_matter_zephyr.cpp` 6326-6936, 939-968 | `port/mt_matter_sl_b7.inc`, `port/mt_matter_sl.cpp` | catalogue batch 7b |
 | `HearthEvseDelegate` (the scalar cache, the Disable and EnableCharging verdict forwards, SetTargets adjudicated through the inbound rows path, GetTargets and ClearTargets), the charging-target store persisted in NVM3 (`mt_evse`/`t<ep>`), the EVSE pool, reserve and register, the `AT+MTROW` kind-1 dispatchers, `AT+MTMEAS`'s 0x0099 branch, `mt_matter_evse_set`, the EVSE live read; the sixteen EnergyEvse and the EnergyEvseMode Instance-served rows | `mt_matter_zephyr.cpp` 6938-9135, 79-84, 118-120, 1012-1069, 5114-5163 | `port/mt_matter_sl_evse.inc`, `port/mt_matter_sl.cpp`, `port/mt_matter_sl_b7.inc` | the EVSE round |
+| `HearthTempLevelsDelegate` (the one global TemperatureControl iterator), its register and `AT+MTTEMPLEVELS`; `HearthMwocDelegate`, its pool and the ordered three-way microwave register; the RefrigeratorAlarm arm of `mt_matter_alarm_set`; the five batch 8 Instance-served rows | `mt_matter_zephyr.cpp` 3169-3312, 4007-4365, 2110-2164, 65-78, 969-1011 | `port/mt_matter_sl_b8.inc`, `port/mt_matter_sl_b4.inc`, `port/mt_matter_sl.cpp` | catalogue batch 8 |
 | shared cluster building blocks | `mt_devtypes_zephyr.cpp` 276-320 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | on/off light (0x0100) | `mt_devtypes_zephyr.cpp` 321-348 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
 | temperature sensor (0x0302) | `mt_devtypes_zephyr.cpp` 388-416 | `port/mt_devtypes_sl_tables_core.inc` | round 2 task 5 |
@@ -1124,6 +1126,9 @@ index, and a round that changes one arm finds the other through it.
 | energy EVSE (0x050C) with its no-SOC variant; the six EnergyEvse quiet rows | `mt_devtypes_zephyr.cpp` 4112-4400, 4536-4541, 4963-4977 | `port/mt_devtypes_sl_tables_b7.inc`, `port/mt_devtypes_sl_registry.inc` | the EVSE round |
 | the EVSE's exact-count block candidate (1,144 B of arena, pinned with its admission assert) | `mt_devtypes_zephyr.cpp` 5615-5649 | `port/mt_devtypes_sl_arena.inc` | the EVSE round |
 | the EVSE create path (the reserve first in the claim block, the EVSE and EnergyEvseMode claims, the store, the second halves) | `mt_devtypes_zephyr.cpp` 115-120, 7401-7434, 7819-7860, 8013-8020, 8366-8396 | `port/mt_devtypes_sl.cpp` | the EVSE round |
+| the composed appliances (cooktop, oven, extractor hood, refrigerator, the temperature controlled cabinet's six shapes, the cook surface's two, the microwave oven), the parenting policy and the shape struct | `mt_devtypes_zephyr.cpp` 3322-4110, 4517-4535 | `port/mt_devtypes_sl_tables_b8.inc`, `port/mt_devtypes_sl_registry.inc` | catalogue batch 8 |
+| the nRF's compile-time shape-domain check, the heater cabinet and microwave candidates (760 and 536 B of arena), the label store accessor | `mt_devtypes_zephyr.cpp` 4544-4640, 5546-5606, 7162-7187 | `port/mt_devtypes_sl_registry.inc`, `port/mt_devtypes_sl_arena.inc`, `port/mt_devtypes_sl.cpp` | catalogue batch 8 |
+| the batch 8 create path (the opstate claim serving the oven cavity, the mode and MWOC claims, the stores, the microwave's ordered second half, the temperature-level register) | `mt_devtypes_zephyr.cpp` 97-123, 7395-7455, 7726-7817, 7990-8036, 8231-8245, 8356-8364, 8398-8408 | `port/mt_devtypes_sl.cpp` | catalogue batch 8 |
 | the parenting policy | `mt_devtypes_zephyr.cpp` 3325-3428 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the registry | `mt_devtypes_zephyr.cpp` 4402-4641 | `port/mt_devtypes_sl_registry.inc` | round 2 task 5 |
 | the external attribute store | `mt_devtypes_zephyr.cpp` 4642-4658 | `port/mt_devtypes_sl_arena.inc` | round 2 task 5 |
@@ -1157,8 +1162,9 @@ registered with `PlatformMgr().AddEventHandler()` mapping `DeviceEventType` to
 the bit numbers the spec allocates, written once for both Thread arms. See
 "Commissioning" and "What round 2 leaves open".
 
-Everything in `core/include/mt_matter.h` that has no row above is still
-answered by `port/mt_matter_stub.c`. `test/host/check_decls.py` (run by
+Since catalogue batch 8 nothing in `core/include/mt_matter.h` is answered by
+`port/mt_matter_stub.c`, which is kept as an empty file (the
+`mt_devtypes_stub.c` precedent). `test/host/check_decls.py` (run by
 `make -C test/host silabs-stubs`) proves the pair between them defines every
 one of the header's 61 declarations exactly once, so a function that moves and
 is not deleted from the stub is a gate failure rather than a link-time
@@ -2464,6 +2470,70 @@ differ only in the line number of a deprecation warning, which is the comment
 that moved. Nothing else below is a two-run figure, and nothing else below
 claims to be.
 
+### Catalogue batch 8: the composed appliances
+
+The nRF's batch 8, and with it the catalogue complete: all 52 registry rows
+have a cluster set on this port. The cooktop (0x0078, an Off-only OnOff),
+the oven (0x007B) and the extractor hood (0x007A) are parents with no
+per-endpoint objects; the refrigerator (0x0070) carries the refrigerator and
+cabinet mode (0x52) and RefrigeratorAlarm; the temperature controlled cabinet
+(0x0071) has six shapes chosen by variant and parent (bare, Cooler under a
+refrigerator, Heater under an oven with OvenMode and the oven cavity's
+OperationalState, each by number or by level); the cook surface (0x0077, only
+under a cooktop) has two; the microwave oven (0x0079) constructs its
+OperationalState, MicrowaveOvenMode and MicrowaveOvenControl in a fixed order
+through one register and logs the order's readback at boot. The user's ruling
+DE615 came with it: the endpoint arena grew to 12,160 B. `mt_matter_stub.c`
+lost its last three stubs. The firmware is `85a7cfa` (the fix wave `efd251b`
+changed comments only; `.text` and `.bss` identical), built in
+`~/silabs/work/hearth-matter-b8` from a fresh `slc generate` and a `make
+clean`, **0 warnings**, with the development discriminator 0xF02.
+
+#### The proof: 259 passed, 0 failed, 1 not applicable
+
+```
+$ python3 test/mt_catalogue_proof.py \
+      --port /dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00 \
+      --bridge cpico --batch mg24-batch8 \
+      --openocd-config platform/silabs/mg24-swd.cfg \
+      --baseline platform/silabs/core-batch8.json
+```
+
+2026-09-28. Fourteen endpoints with every shape once, parents staged by index:
+each parent's PartsList, each shape's server list (the shape proof),
+SetTemperature from a controller in range (the `+MTATTR` URC) and out of range
+(`0x87`, no URC) on number and level shapes, the level labels; the cooktop's
+On and Toggle `0x81`; the oven cavity's Start and Stop allowed and denied
+(ErrorStateID), Pause `0x81`, `AT+MTOPSTATE` 0x40 refused; OvenMode and the
+refrigerator mode allow, deny, unlisted, the other mode cluster on a cabinet
+`+MTERR:3`; the refrigerator alarm's State and its Notify event count; the
+hood's fan write; the microwave's SetCookingParameters allowed and denied,
+AddMoreTime (the absolute 120), Pause from Stopped, MicrowaveOvenMode's
+ChangeToMode `0x81`, CountdownTime null. The one N/A is the refrigerator's
+alarm row, which has no controller write by design.
+
+#### Admission
+
+Sixteen microwaves compose (8,576 B of blocks, 6,656 B of objects). One oven
+with fifteen Heater level cabinets composes all sixteen endpoints: **11,472
+of 12,160 B** (DE615). Ten RVCs still compose; the eleventh is refused at its
+ModeBase claim, now the RVC's only wall.
+
+#### Phase 1 and 2 on the batch image
+
+Phase 1: **296 passed, 0 failed**, row-identical. Phase 2: 98 passed, 2
+failed (B512's two rows), 1 n/a, row-identical.
+
+#### The batch's memory record
+
+`arm-none-eabi-size` at `85a7cfa` against the EVSE round's `37058cd`: text
+990,164 (978,124: +12,040, the three servers and the bridge); `.bss` 149,528
+(+2,528: the endpoint arena's 2,432 and the servers' and pools' 96). Free heap
+at `+MTREADY`: 63,392 B (-2,544). Per endpoint: microwave 416 B of objects
+(the MWOC pair 80, pinned), Heater cabinet 336, refrigerator and Cooler
+cabinet 80, the rest none; blocks from 56 (cooktop) to 760 (Heater level
+cabinet) of arena.
+
 ### The EVSE round: the energy EVSE
 
 The nRF's EVSE round and the catalogue's last row: the energy EVSE (0x050C,
@@ -3023,6 +3093,8 @@ RVC is admitted up to ten**: the object arena grew to 4,256 B, ten RVCs use
 **Since the EVSE round (DE608)** the object arena would hold an eleventh
 RVC's objects; the twenty-slot ModeBase pool (asserted exact) and the
 endpoint arena (eleven blocks are 10,296 B, asserted) keep the ten.
+**Since catalogue batch 8 (DE615)** the endpoint arena would hold an
+eleventh too; the ModeBase pool alone keeps the ten.
 
 **The measurement family since catalogue batch 7a-1 (2026-09-27, DE584).**
 Each ElectricalPowerMeasurement endpoint draws a 152 B EPM pair and, where
@@ -3066,8 +3138,21 @@ measurement pairs inside theirs (2,656 B in all), **admitted up to two**
 1,440 + 608 + 672 + 4,208 = 8,464 B, which is why the arena grew (DE608); a
 joint assert holds it with `==`, and the bench composed them to 8,464 of
 8,464 B. The EVSE's block is 1,144 B of the endpoint arena, an admission
-candidate like the RVC's (two within 9,728 B, asserted). A third EVSE is
-refused at its reserve, the first claim of its create.
+candidate like the RVC's (two within the endpoint arena, asserted). A
+third EVSE is refused at its reserve, the first claim of its create.
+
+**The composed appliances since catalogue batch 8 (2026-09-28, DE615).**
+No new admission cap: a microwave draws 416 B of objects (sixteen are
+6,656 B), a Heater cabinet 336, a refrigerator or Cooler cabinet 80. The
+endpoint arena grew from 9,728 to **12,160 B** (+2,432 B of `.bss`, the
+user's ruling) because two cabinet shapes are wider than the old 608 B
+pin (Heater level 760, Cooler level 688) and carry no cap: 12,160 is
+sixteen of the widest again, so every composition of uncapped types the
+host can stage, the build can build; the bench composed an oven with
+fifteen Heater level cabinets to 11,472 B. Mixed limits, disclosed: RVCs
+with the four batch 8 mode-bearing types can meet the ModeBase pool
+first, and the energy families with microwaves or Heater cabinets can
+reach the object arena's end; each refusal log names both walls.
 
 ### Catalogue batch 2: the fabric proof, Phase 1 and 2 and the batch's memory record
 
@@ -5575,13 +5660,14 @@ are marked there.
 
 ### The catalogue
 
-The registry carries all 52 rows and the gate predicates; this build constructs
-forty-five of them (round 2's two milestone types, catalogue batch 1's
+The registry carries all 52 rows and the gate predicates; since catalogue
+batch 8 this build constructs all 52 of them (round 2's two milestone types,
+catalogue batch 1's
 twelve, batch 2's six, batch 3's two, batch 4's seven, batch 5a's six, batch
 5b's robotic vacuum cleaner, batch 7a-1's four measurement types, batch
 7a-2's utility meter and device energy management, batch 7b's water
-heater and battery storage, and the EVSE round's energy EVSE). The rest
-arrive in the nRF
+heater and battery storage, the EVSE round's energy EVSE, and batch 8's
+seven composed appliances). They arrived in the nRF
 arm's own order, batch by batch, each
 copying its sections out of `platform/nrf54l15/port/mt_devtypes_zephyr.cpp` at
 the line ranges "Port sections" lists, adding its cluster components to
@@ -5597,7 +5683,7 @@ the heap and the arenas.
 | 5 | standalone, 7 types | **5a built 2026-09-26**, six types (air purifier, mounted on/off control, mounted dimmable load control, generic switch, pump, room air conditioner), ember-only, no object and no store. Proof file `core-batch5a.json`; see "Catalogue batch 5a" under "Measured". **5b built 2026-09-27**: the robotic vacuum cleaner with its two ModeBase clusters and RvcOperationalState pair, admitted up to nine (DE566). Proof file `core-batch5b.json`; see "Catalogue batch 5b" under "Measured" |
 | 7a | energy foundation, 6 types | **7a-1 built 2026-09-27**: the measurement family (electrical sensor, electrical meter, heat pump, solar power, with their power-only variants), admitted up to eight (`MT_MEAS_MAX`). Proof file `core-batch7a1.json`; see "Catalogue batch 7a-1" under "Measured". **7a-2 built 2026-09-27**: the utility meter (admitted up to two) and device energy management with its report-only variant (up to four). Proof file `core-batch7a2.json`; see "Catalogue batch 7a-2" under "Measured" |
 | 7b | delegate-served pair, 2 types | **built 2026-09-27**: the water heater (up to four) and battery storage, each with its variant; the object arena grew to 4,256 B and the RVC's limit to ten (DE603). Proof file `core-batch7b.json`; see "Catalogue batch 7b" under "Measured" |
-| 8 | composed appliances, 7 types | the oven and refrigerator mode rows |
+| 8 | composed appliances, 7 types | **built 2026-09-28**: the cooktop, oven, extractor hood, refrigerator, the temperature controlled cabinet (six shapes) and cook surface (two), and the microwave oven; the endpoint arena grew to 12,160 B (DE615). Proof file `core-batch8.json`; see "Catalogue batch 8" under "Measured" |
 | EVSE | 1 type | **built 2026-09-28**: the energy EVSE (up to two) with its variant and its NVM3 charging-target store; the object arena grew to 8,464 B (DE608). Proof file `core-evse.json`; see "The EVSE round" under "Measured" |
 
 **No Phase 1 row is parked on that list any more.** The four that were (each
