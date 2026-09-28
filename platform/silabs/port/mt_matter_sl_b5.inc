@@ -326,16 +326,16 @@ private:
  * and is exactly 2 x 10 since the object arena grew and ten are (DE603),
  * asserted below. On the nRF the number was argued from its 8,112 usable block heap and a 864 B RVC
  * block, against four or more ModeBase consumers; none of that applies
- * here, where the endpoint arena is 9,728 usable bytes against a 936 B
+ * here, where the endpoint arena is 12,160 usable bytes against a 936 B
  * RVC block. Since catalogue batch 7a-2 device energy management's DEMMode
  * is the second ModeBase consumer (one slot per DEM endpoint, at most
  * four), catalogue batch 7b's WaterHeaterMode the third (at most four)
  * and the EVSE round's EnergyEvseMode the fourth (at most two). Since the
  * object arena is 8,464 B (DE608) this pool IS the RVC's wall: ten RVCs
  * take all twenty slots, and the eleventh is refused at its first
- * ModeBase claim here (its objects would fit the arena now; its block
- * would not fit the endpoint arena either, asserted beside
- * kRvcMaxEndpoints). Every refusal log names both walls. The pool is
+ * ModeBase claim here (its objects would fit the object arena, and since
+ * DE615 its block would fit the endpoint arena too: this pool is the one
+ * wall). Every refusal log names both walls. The pool is
  * checked first in mt_matter_modebase_delegate_alloc() and exhaustion
  * aborts the create before anything is spent, loudly either way.
  * MT_MB_MAX_LISTS is gone
@@ -356,8 +356,8 @@ private:
  */
 constexpr size_t kModeBasePoolSlots = 20;
 static_assert(kModeBasePoolSlots == 2 * 10,
-              "the ModeBase pool is the RVC's wall since DE608: fewer than twenty slots "
-              "lowers the RVC's maximum below ten, more admits an eleventh");
+              "the ModeBase pool is the RVC's only wall since DE615: fewer than twenty "
+              "slots lowers the RVC's maximum below ten, more admits an eleventh");
 
 /* Memory reclaim round A: a table of pointers into the cluster-object
  * heap, each block holding the delegate with the raw storage for its
@@ -862,8 +862,8 @@ static size_t s_rvc_opstate_delegate_next;
  * measurement; this pins the MG24's. It is wider than the 256 B pair the
  * object arena is sixteen-of, so the RVC is admitted up to ten (graph
  * DE566, ten since DE603): ten RVCs draw this pair and two ModeBase pairs
- * (80 B each). Since DE608 the object arena would hold an eleventh; the
- * ModeBase pool and the endpoint arena are its walls. */
+ * (80 B each). Since DE608 the object arena would hold an eleventh, and
+ * since DE615 the endpoint arena too; the ModeBase pool is its wall. */
 static_assert(hearth_arena_cost(obj_pair_bytes<HearthRvcOpStateDelegate,
                                                 chip::app::Clusters::RvcOperationalState::Instance>()) == 264,
               "the RvcOperationalState pair changed size; redo the RVC's admission arithmetic");

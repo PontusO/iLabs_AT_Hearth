@@ -85,6 +85,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::MeterIdentification::Id:
         emberAfMeterIdentificationClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::MicrowaveOvenControl::Id:
+        emberAfMicrowaveOvenControlClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::MicrowaveOvenMode::Id:
+        emberAfMicrowaveOvenModeClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::ModeSelect::Id:
         emberAfModeSelectClusterInitCallback(endpoint);
         break;
@@ -102,6 +108,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
         break;
      case  app::Clusters::OperationalState::Id:
         emberAfOperationalStateClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::OvenCavityOperationalState::Id:
+        emberAfOvenCavityOperationalStateClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::OvenMode::Id:
+        emberAfOvenModeClusterInitCallback(endpoint);
         break;
      case  app::Clusters::PowerSource::Id:
         emberAfPowerSourceClusterInitCallback(endpoint);
@@ -124,6 +136,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::RvcRunMode::Id:
         emberAfRvcRunModeClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::RefrigeratorAlarm::Id:
+        emberAfRefrigeratorAlarmClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id:
+        emberAfRefrigeratorAndTemperatureControlledCabinetModeClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::RelativeHumidityMeasurement::Id:
         emberAfRelativeHumidityMeasurementClusterInitCallback(endpoint);
         break;
@@ -135,6 +153,9 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
         break;
      case  app::Clusters::Switch::Id:
         emberAfSwitchClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::TemperatureControl::Id:
+        emberAfTemperatureControlClusterInitCallback(endpoint);
         break;
      case  app::Clusters::TemperatureMeasurement::Id:
         emberAfTemperatureMeasurementClusterInitCallback(endpoint);

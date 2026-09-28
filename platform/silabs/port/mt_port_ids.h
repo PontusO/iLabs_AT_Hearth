@@ -78,8 +78,11 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * were deliberately not copied: they price Zephyr's sys_heap chunk header
  * and bucket table.
  *
- * 9,728 is 16 x 608, i.e. kServiceableEndpoints blocks of the widest device
- * type this build declares. The mode select (catalogue batch 4) prices at 608,
+ * 12,160 is 16 x 760, i.e. kServiceableEndpoints blocks of the widest device
+ * type this build declares since catalogue batch 8 (DE615): the temperature
+ * controlled cabinet's Heater level shape, 755 payload bytes, 760 of arena.
+ * Before it the arena was 9,728 = 16 x 608: the mode select (catalogue
+ * batch 4) prices at 608,
  * which is the OVER-COUNT, not the block it actually gets: the price counts
  * modeSelectClusters' 3 clusters and MT_COUNT's 10 slots (12 of clusters plus
  * 160 of slots plus the host-fed mode store's 436 bytes, 608 payload, already
@@ -112,8 +115,18 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * The floor assertion in mt_devtypes_sl.cpp is written to FAIL when a
  * wider device type is added, so the batch that adds one has to choose
  * between raising this number and lowering the promise, in the open.
+ *
+ * DE615 (catalogue batch 8, 2026-09-28, the user's ruling): 9,728 grew to
+ * 12,160 (+2,432 B of .bss) on the same terms, because two shapes of the
+ * temperature controlled cabinet are wider than 608 and carry no cap:
+ * Heater level (760 of arena) and Cooler level (688). Rejected: keeping
+ * 9,728 with documented limits of twelve and thirteen of them, which only
+ * this arena would enforce, at boot; and lowering the floor to twelve of the
+ * widest. This is the catalogue's last batch. The RVC's ten no longer rest
+ * on this arena (eleven RVC blocks fit it now): the twenty-slot ModeBase
+ * pool holds them (mt_matter_sl_b5.inc).
  */
-#define HEARTH_EP_ARENA_BYTES 9728
+#define HEARTH_EP_ARENA_BYTES 12160
 
 /*
  * The cluster-object arena.

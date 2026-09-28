@@ -10887,7 +10887,7 @@
           "mfgCode": null,
           "define": "REFRIGERATOR_AND_TEMPERATURE_CONTROLLED_CABINET_MODE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "SupportedModes",
@@ -11027,7 +11027,7 @@
           "mfgCode": null,
           "define": "REFRIGERATOR_ALARM_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "Mask",
@@ -11166,7 +11166,7 @@
           "mfgCode": null,
           "define": "TEMPERATURE_CONTROL_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "TemperatureSetpoint",
@@ -11362,7 +11362,7 @@
           "mfgCode": null,
           "define": "OVEN_MODE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "SupportedModes",
@@ -11502,7 +11502,7 @@
           "mfgCode": null,
           "define": "OPERATIONAL_STATE_OVEN_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "PhaseList",
@@ -11698,7 +11698,7 @@
           "mfgCode": null,
           "define": "MICROWAVE_OVEN_MODE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "SupportedModes",
@@ -11821,7 +11821,7 @@
           "mfgCode": null,
           "define": "MICROWAVE_OVEN_CONTROL_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "CookTime",

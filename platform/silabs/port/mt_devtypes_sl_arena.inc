@@ -555,10 +555,10 @@ constexpr size_t kChimeBlockBytes =
  * the MT_COUNT over-count as everywhere here) and a documented maximum of
  * ten per composition (nine until the object arena grew, DE603); a
  * composition past that is refused at create. This arena holds ten RVC
- * blocks (10 x 936 = 9,360 of 9,728) and not eleven (10,296), both
- * asserted below; the eleventh is refused first by the 20-slot ModeBase
- * pool (asserted exact in mt_matter_sl_b5.inc). The 8,464 B
- * cluster-object arena would hold its objects since DE608. */
+ * blocks (10 x 936 = 9,360, asserted below) and, since it grew to
+ * 12,160 B (DE615), an eleventh too; the 8,464 B cluster-object arena has
+ * held its objects since DE608. So the eleventh is refused by the 20-slot
+ * ModeBase pool alone (asserted exact in mt_matter_sl_b5.inc). */
 constexpr size_t kRvcMaxEndpoints = 10;
 constexpr size_t kRvcBlockBytes =
     block_bytes(MT_COUNT(rvcClusters),
@@ -568,9 +568,6 @@ static_assert(hearth_arena_cost(kRvcBlockBytes) == 936,
               "the RVC block moved off the 936 B the admission limit was sized with");
 static_assert(kRvcMaxEndpoints * hearth_arena_cost(kRvcBlockBytes) <= kEpArenaBytes,
               "ten RVC blocks no longer fit the endpoint arena");
-static_assert((kRvcMaxEndpoints + 1) * hearth_arena_cost(kRvcBlockBytes) > kEpArenaBytes,
-              "an eleventh RVC block now fits the endpoint arena: with the object arena at "
-              "8,464 B (DE608) only the ModeBase pool would enforce the ten");
 
 /* Catalogue batch 7a-2 (nRF 5446-5459, its batch 7a fix round, review
  * B7A-3): the DEM device type is the fourth store-bearing block shape, so
@@ -602,7 +599,7 @@ static_assert(hearth_arena_cost(kDemBlockBytes) == 528,
  * heater's over-count would even fail its floor assertion; on this port
  * both are admission candidates, not floor terms (like the RVC), and an
  * over-count would overstate their admission arithmetic against the
- * fixed 9,728 B endpoint arena, the opposite of what the asserts are for.
+ * fixed endpoint arena, the opposite of what the asserts are for.
  * Catalogue batch 7b, 2026-09-27: the exact count departs from this
  * port's MT_COUNT convention for these two candidates, and the EVSE
  * round's energy EVSE, only.

@@ -383,6 +383,7 @@ component:
   # Catalogue batch 5a (2026-09-26): the pump and the switch.
   # No SDK patch: neither cluster is code-driven.
   - id: matter_pump_configuration_and_control
+  - id: matter_refrigerator_alarm        # catalogue batch 8
   - id: matter_switch
   # Catalogue batch 1 (2026-09-22): the three clusters of the batch that have a
   # server. LevelControl for the dimmable light and plug (commands MoveToLevel
@@ -406,12 +407,17 @@ component:
   - id: matter_fan_control
   - id: matter_level_control
   - id: matter_meter_identification
+  # Catalogue batch 8 (2026-09-28): the composed appliances. No SDK patch:
+  # none of the seven clusters is code-driven; the four mode/opstate aliases
+  # ride matter_mode_base and matter_operational_state.
+  - id: matter_microwave_oven_control
   # Catalogue batch 5b (2026-09-27): the robotic vacuum; no SDK patch: none of
   # RvcRunMode, RvcCleanMode, RvcOperationalState is code-driven.
   - id: matter_mode_base
   - id: matter_occupancy_sensor
   - id: matter_operational_credentials
   - id: matter_software_diagnostics
+  - id: matter_temperature_control       # catalogue batch 8
   - id: matter_thread_network_diagnostics
   - id: matter_thermostat
   - id: matter_valve_configuration_and_control

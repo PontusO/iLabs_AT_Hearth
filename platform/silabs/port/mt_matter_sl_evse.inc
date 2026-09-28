@@ -56,7 +56,7 @@
  *    about 3.4 KB of the 8,464 B cluster-object arena, which DE608 grew by
  *    4,208 B of .bss for it (about 67 KB of heap stays free at +MTREADY),
  *    while moving it into the endpoint block would take that block from
- *    1,144 B to roughly 2,900 B of the fixed 9,728 B endpoint arena for no
+ *    1,144 B to roughly 2,900 B of the fixed 12,160 B endpoint arena for no
  *    gain at a cap of two. The endpoint-block technique pays when a store is
  *    charged per POSSIBLE endpoint (the mode and chime stores were 16-deep
  *    .bss); this one occupies the shared object arena only while an EVSE is
