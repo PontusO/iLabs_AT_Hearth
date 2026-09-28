@@ -3167,5 +3167,327 @@ class TestBatch7bRowNames(unittest.TestCase):
         for name in _PINNED_7B:
             self.assertIn(name, names, "missing pinned row: %s" % name)
 
+# The EVSE round (design spec section 4): the energy EVSE; the verdict and
+# no_forward flags, no_forward's positional and after_rows, and the rows and
+# rows_verdict kinds.
+
+class _EvseLink(_DemLink):
+    """_DemLink widened to the energy EVSE. AT+MTMEAS on cluster 153 stores
+    each (field, value) pair under its attribute id (the 0x99 field numbers
+    differ from the attribute ids from field 4 on) and answers OK with no
+    lines; an unknown field answers +MTERR:1 and applies nothing. The
+    charging-target store: AT+MTROWGET=<ep>,1 answers the lines in
+    store[ep], AT+MTROWGET=<ep>,1,,<seq> the lines in pending[seq]; an
+    AT+MTROWAPPLY answers codes.get(cmd, 0) and, on 0, replaces the store
+    with after.get(cmd) when given; AT+MTROW, AT+MTROWCLEAR and
+    AT+MTCMDRESP answer OK. Every line is recorded in sent."""
+
+    FIELD_ATTR = {0: 0, 1: 1, 2: 2, 3: 3, 4: 5, 5: 6, 6: 7, 9: 0x23, 10: 0x24,
+                  11: 0x25, 12: 0x26, 14: 0x30, 15: 0x31, 16: 0x40, 17: 0x41, 18: 0x42}
+
+    def __init__(self, store=None, pending=None, codes=None, after=None, **kw):
+        super().__init__(**kw)
+        self.store = dict(store or {})
+        self.pending = dict(pending or {})
+        self.codes = dict(codes or {})
+        self.after = dict(after or {})
+
+    def command(self, cmd, *a, **k):
+        if cmd in self._refuse:
+            return super().command(cmd, *a, **k)
+        m = re.fullmatch(r"AT\+MTMEAS=(\d+),153,(-?\d+(?:,-?\d+)*)", cmd)
+        if m:
+            self.sent.append(cmd)
+            ep = int(m.group(1))
+            nums = [int(x) for x in m.group(2).split(",")]
+            pairs = list(zip(nums[0::2], nums[1::2]))
+            if any(f not in self.FIELD_ATTR for f, _ in pairs):
+                return (1, [])
+            for field, value in pairs:
+                self.state[(ep, 153, self.FIELD_ATTR[field])] = str(value)
+            return (0, [])
+        m = re.fullmatch(r"AT\+MTROWGET=(\d+),1,,(\d+)", cmd)
+        if m:
+            self.sent.append(cmd)
+            return (0, list(self.pending.get(int(m.group(2)), [])))
+        m = re.fullmatch(r"AT\+MTROWGET=(\d+),1", cmd)
+        if m:
+            self.sent.append(cmd)
+            return (0, list(self.store.get(int(m.group(1)), [])))
+        m = re.fullmatch(r"AT\+MTROWAPPLY=(\d+),1,\d+", cmd)
+        if m:
+            self.sent.append(cmd)
+            code = self.codes.get(cmd, 0)
+            if code == 0 and cmd in self.after:
+                self.store[int(m.group(1))] = list(self.after[cmd])
+            return (code, [])
+        if re.fullmatch(r"AT\+(MTROW=|MTROWCLEAR=|MTCMDRESP=).*", cmd):
+            self.sent.append(cmd)
+            return (0, [])
+        return super().command(cmd, *a, **k)
+
+
+class _TextChip:
+    """A chip whose every run answers (rc, text): the get-targets rows read
+    chip-tool's GetTargets response capture."""
+
+    def __init__(self, text, rc=0):
+        self.text = text
+        self.rc = rc
+        self.argvs = []
+
+    def run(self, args, timeout=None):
+        self.argvs.append(list(args))
+        return (self.rc, self.text)
+
+
+def _evse_row(variant=None):
+    return [t for t in P.BATCHES["mg24-evse"] if t.get("variant") == variant][0]
+
+
+def _evse_check(kind, key, variant=None):
+    """The table's check of the given controller kind whose second element
+    (the label, or the args list's first word) is key."""
+    for c in _evse_row(variant)["checks"]:
+        ctl = c["controller"]
+        if ctl and ctl[0] == kind:
+            k = ctl[1][0] if isinstance(ctl[1], list) else ctl[1]
+            if k == key:
+                return c
+    raise KeyError((kind, key))
+
+
+def _run_check(c, t, chip, link, ep=2, prefix="P", chip_call=None):
+    saved = H._threaded_chip_call
+    if chip_call is not None:
+        H._threaded_chip_call = chip_call
+    try:
+        s = _FakeSuite()
+        P.prove_check(link, chip, s, "0x4845", ep, t, c, prefix)
+    finally:
+        H._threaded_chip_call = saved
+    return dict(s.results)
+
+
+class TestEvseTable(unittest.TestCase):
+    def test_composition(self):
+        self.assertEqual(P.composition_for("mg24-evse"),
+                         [(1, "0x0100"), (2, "0x050C"), (3, "0x050C,1")])
+
+    def test_revisions_clusters_and_counts(self):
+        rows = P.BATCHES["mg24-evse"]
+        self.assertEqual([t["revision"] for t in rows], [2, 2])
+        self.assertEqual([len(t["checks"]) for t in rows], [46, 9])
+        for name in ("energyevse", "energyevsemode"):
+            self.assertIn(name, P.CHIP_CLUSTERS)
+        for t in rows:
+            self.assertIn(t["chip_cluster"], P.CHIP_CLUSTERS)
+            for c in t["checks"]:
+                if c["chip_cluster"]:
+                    self.assertIn(c["chip_cluster"], P.CHIP_CLUSTERS)
+
+    def test_every_energyevse_command_is_timed_but_the_untimed_refusal(self):
+        untimed = []
+        for t in P.BATCHES["mg24-evse"]:
+            for c in t["checks"]:
+                ctl = c["controller"]
+                if not ctl or ctl[0] not in ("verdict", "no_forward"):
+                    continue
+                if (c["chip_cluster"] or t["chip_cluster"]) != "energyevse":
+                    continue
+                want = ctl[4] if ctl[0] == "verdict" else ctl[2]
+                argv = list(ctl[1]) + list(want.get("flags", ()))
+                if "--timedInteractionTimeoutMs" not in argv:
+                    untimed.append((ctl[1][0], want.get("status")))
+        self.assertEqual(untimed, [("disable", 0xC6)])
+
+    def test_each_evse_setup_empties_the_store_first(self):
+        for variant in (None, 1):
+            self.assertEqual(_evse_row(variant)["setup"][1][0], "AT+MTROWAPPLY=%(ep)d,1,0")
+
+
+class TestFlagsAfterTheDestination(unittest.TestCase):
+    def test_a_positional_verdict_puts_its_flags_after_the_destination(self):
+        c = [c for c in _evse_row()["checks"] if c["controller"][0] == "verdict"
+             and c["controller"][1][0] == "enable-charging" and c["controller"][3] == 1][0]
+        link = _EvseLink()
+        chip = _RecordingChip(link=link, ep=2, cluster=153, command=2, seq=7,
+                              payload=[None, 6000, 32000])
+        _run_check(c, _evse_row(), chip, link, chip_call=chip.chip_call)
+        self.assertEqual(chip.argvs, [["energyevse", "enable-charging", "null", "6000", "32000",
+                                       "0x4845", "2", "--timedInteractionTimeoutMs", "5000"]])
+
+    def test_a_positional_no_forward_puts_its_fields_before_and_flags_after(self):
+        c = [c for c in _evse_row()["checks"] if c["controller"][0] == "no_forward"
+             and c["controller"][1][0] == "enable-charging"][0]
+        link = _EvseLink()
+        chip = _RecordingChip(link=None, ep=2, cluster=153, command=2, seq=7)
+        _run_check(c, _evse_row(), chip, link, chip_call=chip.chip_call)
+        self.assertEqual(chip.argvs, [["energyevse", "enable-charging", "null", "32000", "6000",
+                                       "0x4845", "2", "--timedInteractionTimeoutMs", "5000"]])
+
+    def test_a_plain_no_forward_keeps_its_argv(self):
+        c = _evse_check("no_forward", "start-diagnostics")
+        link = _EvseLink()
+        chip = _RecordingChip(link=None, ep=2, cluster=153, command=4, seq=7)
+        _run_check(c, _evse_row(), chip, link, chip_call=chip.chip_call)
+        self.assertEqual(chip.argvs, [["energyevse", "start-diagnostics", "0x4845", "2",
+                                       "--timedInteractionTimeoutMs", "5000"]])
+
+
+class TestNoForwardAfterRows(unittest.TestCase):
+    def _run(self, store):
+        c = _evse_check("no_forward", "clear-targets")
+        link = _EvseLink(store={2: store})
+        chip = _RecordingChip(link=None, ep=2, cluster=153, command=7, seq=7, value=80)
+        return _run_check(c, _evse_row(), chip, link, chip_call=chip.chip_call)
+
+    def test_an_empty_store_passes(self):
+        self.assertTrue(self._run([])["P store after reads 0 row(s)"])
+
+    def test_a_row_left_behind_fails(self):
+        self.assertFalse(self._run(["+MTROW:0,1,2,480,80,25000000"])["P store after reads 0 row(s)"])
+
+
+class TestRowsKind(unittest.TestCase):
+    MON_TUE_ROWS = ["+MTROW:0,2,2,480,80,25000000", "+MTROW:1,2,4,600,80,10000000"]
+
+    def test_a_merge_that_reads_back_exactly_passes(self):
+        c = _evse_check("rows", "merge-mon-tue")
+        link = _EvseLink(after={"AT+MTROWAPPLY=2,1,2": self.MON_TUE_ROWS})
+        chip = _TextChip("CHIP:TOO:   DayOfWeekForSequence: 2\nCHIP:TOO:   DayOfWeekForSequence: 4\n")
+        got = _run_check(c, _evse_row(), chip, link)
+        self.assertEqual(got, {"P AT+MTROW=2,1,0,2,480,80,25000000 -> OK": True,
+                               "P AT+MTROW=2,1,1,4,600,80,10000000 -> OK": True,
+                               "P AT+MTROWAPPLY=2,1,2 -> OK": True,
+                               "P store reads back 2 row(s)": True,
+                               "P get-targets carries DayOfWeekForSequence: 2": True,
+                               "P get-targets carries DayOfWeekForSequence: 4": True})
+        self.assertEqual(chip.argvs[0], ["energyevse", "get-targets", "0x4845", "2",
+                                         "--timedInteractionTimeoutMs", "5000"])
+
+    def test_a_readback_mismatch_fails_only_the_readback(self):
+        c = _evse_check("rows", "merge-mon-tue")
+        link = _EvseLink(after={"AT+MTROWAPPLY=2,1,2": self.MON_TUE_ROWS[:1]})
+        chip = _TextChip("DayOfWeekForSequence: 2 DayOfWeekForSequence: 4")
+        got = _run_check(c, _evse_row(), chip, link)
+        self.assertFalse(got["P store reads back 2 row(s)"])
+        self.assertTrue(got["P AT+MTROWAPPLY=2,1,2 -> OK"])
+
+    def test_a_missing_get_targets_substring_fails_its_row(self):
+        c = _evse_check("rows", "merge-mon-tue")
+        link = _EvseLink(after={"AT+MTROWAPPLY=2,1,2": self.MON_TUE_ROWS})
+        got = _run_check(c, _evse_row(), _TextChip("DayOfWeekForSequence: 2"), link)
+        self.assertTrue(got["P get-targets carries DayOfWeekForSequence: 2"])
+        self.assertFalse(got["P get-targets carries DayOfWeekForSequence: 4"])
+
+    def test_a_refused_apply_is_abandoned_with_a_clear(self):
+        c = _evse_check("rows", "soc-mandatory")
+        link = _EvseLink(codes={"AT+MTROWAPPLY=2,1,1": 1})
+        got = _run_check(c, _evse_row(), _TextChip(""), link)
+        self.assertTrue(got["P AT+MTROWAPPLY=2,1,1 -> +MTERR:1"])
+        self.assertTrue(got["P store reads back 0 row(s)"])
+        self.assertIn("AT+MTROWCLEAR=2,1", link.sent)
+
+    def test_an_accepted_apply_that_should_be_refused_fails(self):
+        c = _evse_check("rows", "soc-mandatory")
+        link = _EvseLink()
+        got = _run_check(c, _evse_row(), _TextChip(""), link)
+        self.assertFalse(got["P AT+MTROWAPPLY=2,1,1 -> +MTERR:1"])
+        self.assertNotIn("AT+MTROWCLEAR=2,1", link.sent)
+
+
+class TestRowsVerdictKind(unittest.TestCase):
+    AFTER = ["+MTROW:0,3,4,600,80,10000000", "+MTROW:1,3,2,900,80,5000000",
+             "+MTROW:2,3,8,420,90,20000000"]
+
+    def _run(self, label, pending, store, payload, rc=0, status="0x00", queue=True):
+        c = _evse_check("rows_verdict", label)
+        link = _EvseLink(store={2: store}, pending={7: pending})
+        chip = _RecordingChip(link=link if queue else None, ep=2, cluster=153, command=5,
+                              seq=7, payload=payload, rc=rc, status=status)
+        return _run_check(c, _evse_row(), chip, link, chip_call=chip.chip_call), link, chip
+
+    def test_an_allow_that_merges_passes(self):
+        got, link, chip = self._run("settargets-wed-allow", ["+MTROW:0,1,8,420,90,20000000"],
+                                    self.AFTER, [1, 8])
+        self.assertEqual(got, {"P forward 153/5 carries [1, 8]": True,
+                               "P pending rows read inside the window": True,
+                               "P answered allow": True,
+                               "P chip-tool exits 0": True,
+                               "P store after reads 3 row(s)": True})
+        self.assertEqual([x for x in link.sent if x.startswith(("AT+MTROWGET", "AT+MTCMDRESP"))],
+                         ["AT+MTROWGET=2,1,,7", "AT+MTCMDRESP=7,1", "AT+MTROWGET=2,1"])
+        self.assertEqual(chip.argvs[0][:2], ["energyevse", "set-targets"])
+        self.assertEqual(chip.argvs[0][3:], ["0x4845", "2", "--timedInteractionTimeoutMs", "5000"])
+
+    def test_a_wrong_pending_row_fails(self):
+        got, _link, _chip = self._run("settargets-wed-allow", ["+MTROW:0,1,8,420,80,20000000"],
+                                      self.AFTER, [1, 8])
+        self.assertFalse(got["P pending rows read inside the window"])
+        self.assertTrue(got["P answered allow"])
+
+    def test_a_deny_that_changed_the_store_fails(self):
+        got, link, _chip = self._run("settargets-thu-deny", ["+MTROW:0,1,16,60,50,"],
+                                     self.AFTER + ["+MTROW:3,4,16,60,50,"], [1, 16],
+                                     rc=1, status="0x01")
+        self.assertTrue(got["P wire status 0x1"])
+        self.assertFalse(got["P store after reads 3 row(s)"])
+        self.assertIn("AT+MTCMDRESP=7,0", link.sent)
+
+    def test_no_forward_means_no_pull_and_no_answer(self):
+        got, link, _chip = self._run("settargets-wed-allow", ["+MTROW:0,1,8,420,90,20000000"],
+                                     self.AFTER, [1, 8], queue=False)
+        self.assertFalse(got["P forward 153/5 carries [1, 8]"])
+        self.assertNotIn("P pending rows read inside the window", got)
+        self.assertFalse(any(x.startswith("AT+MTCMDRESP") for x in link.sent))
+
+
+_PINNED_EVSE = [
+    "0x050C energy EVSE ep2 setup AT+MTROWAPPLY=2,1,0 -> OK",
+    "0x050C energy EVSE ep2 session-energy-charged pushed AT read = 5000000001",
+    "0x050C energy EVSE ep2 state AT write refused AT+MTMEAS=2,153,17,99,12,101 -> +MTERR:1",
+    "0x050C energy EVSE ep2 supply-state enable-charging allow payload [None, 6000, 32000] forward 153/2 answered allow",
+    "0x050C energy EVSE ep2 supply-state enable-charging no-forward no +MTCMD within 3s",
+    "0x050C energy EVSE ep2 state disable no-forward wire status 0xC6",
+    "0x050C energy EVSE ep2 next-charge-target-so-c rows merge-replace-mon store reads back 2 row(s)",
+    "0x050C energy EVSE ep2 next-charge-target-so-c set-targets settargets-wed-allow pending rows read inside the window",
+    "0x050C energy EVSE ep2 next-charge-target-so-c set-targets settargets-thu-deny store after reads 3 row(s)",
+    "0x050C energy EVSE ep2 next-charge-target-so-c clear-targets no-forward store after reads 0 row(s)",
+    "0x050C energy EVSE without SOC ep3 next-charge-target-so-c rows soc-absent store reads back 1 row(s)",
+    "0x050C energy EVSE without SOC ep3 next-charge-target-so-c set-targets no-forward wire status 0x87",
+]
+
+
+class TestEvseRowNames(unittest.TestCase):
+    def _fake_run_names(self):
+        # Every endpoint against permissive fakes: the names come from the
+        # table, not from the answers (rows may fail here).
+        comp = P.composition_for("mg24-evse")
+        names = []
+        for (ep, dt), t in zip(comp[1:], P.rows_for("mg24-evse")):
+            link = _EvseLink()
+            chip = _RecordingChip(link=link, ep=ep, cluster=153, command=5, seq=7,
+                                  payload=[1, 8], devtype=t["devtype"], revision=t["revision"])
+            saved = H._threaded_chip_call
+            H._threaded_chip_call = chip.chip_call
+            try:
+                s = _FakeSuite()
+                P.prove_endpoint(link, chip, s, "0x4845", ep, t)
+            finally:
+                H._threaded_chip_call = saved
+            names += [n for n, _ in s.results] + [n for n, _ in s.na]
+        return names
+
+    def test_no_duplicate_name(self):
+        names = self._fake_run_names()
+        self.assertEqual(len(names), 204)
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_the_pinned_names_occur(self):
+        names = set(self._fake_run_names())
+        for name in _PINNED_EVSE:
+            self.assertIn(name, names, "missing pinned row: %s" % name)
+
 if __name__ == "__main__":
     unittest.main()
