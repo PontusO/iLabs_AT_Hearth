@@ -57,6 +57,9 @@ void hearth_os_restart(void);
  *     about one link, not a property a build maintains, and no compiler
  *     will notice when it stops being true. hearth_port_zephyr.c carries
  *     the worked example.
+ *     One stated exception: the MG24 serves the 1 KB OTA block from the
+ *     SDK heap (DE624; hearth_port_sl.c says why the pool cannot hold it
+ *     and why 1 KB cannot starve the stack).
  *   - Blocks are a few kilobytes each (one mt_row_stage_t, currently about
  *     5.6 KB) and at most two are live at once. Row staging is no longer the
  *     only tenant: the firmware-over-the-air relay takes one much smaller
