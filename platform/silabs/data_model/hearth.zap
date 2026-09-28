@@ -38,29 +38,38 @@
       "id": 1,
       "name": "MA-rootdevice",
       "deviceTypeRef": {
-        "code": 22,
+        "code": 18,
         "profileId": 259,
-        "label": "MA-rootdevice",
-        "name": "MA-rootdevice",
+        "label": "MA-otarequestor",
+        "name": "MA-otarequestor",
         "deviceTypeOrder": 0
       },
       "deviceTypes": [
+        {
+          "code": 18,
+          "profileId": 259,
+          "label": "MA-otarequestor",
+          "name": "MA-otarequestor",
+          "deviceTypeOrder": 0
+        },
         {
           "code": 22,
           "profileId": 259,
           "label": "MA-rootdevice",
           "name": "MA-rootdevice",
-          "deviceTypeOrder": 0
+          "deviceTypeOrder": 1
         }
       ],
       "deviceVersions": [
+        1,
         4
       ],
       "deviceIdentifiers": [
+        18,
         22
       ],
-      "deviceTypeName": "MA-rootdevice",
-      "deviceTypeCode": 22,
+      "deviceTypeName": "MA-otarequestor",
+      "deviceTypeCode": 18,
       "deviceTypeProfileId": 259,
       "clusters": [
         {
@@ -778,7 +787,7 @@
           "mfgCode": null,
           "define": "OTA_SOFTWARE_UPDATE_PROVIDER_CLUSTER",
           "side": "client",
-          "enabled": 0,
+          "enabled": 1,
           "commands": [
             {
               "name": "QueryImage",
@@ -828,7 +837,7 @@
           "mfgCode": null,
           "define": "OTA_SOFTWARE_UPDATE_REQUESTOR_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "commands": [
             {
               "name": "AnnounceOTAProvider",

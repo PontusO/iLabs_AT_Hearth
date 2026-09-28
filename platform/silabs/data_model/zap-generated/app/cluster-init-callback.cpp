@@ -97,6 +97,12 @@ void emberAfClusterInitCallback(EndpointId endpoint, ClusterId clusterId)
      case  app::Clusters::NetworkCommissioning::Id:
         emberAfNetworkCommissioningClusterInitCallback(endpoint);
         break;
+     case  app::Clusters::OtaSoftwareUpdateProvider::Id:
+        emberAfOtaSoftwareUpdateProviderClusterInitCallback(endpoint);
+        break;
+     case  app::Clusters::OtaSoftwareUpdateRequestor::Id:
+        emberAfOtaSoftwareUpdateRequestorClusterInitCallback(endpoint);
+        break;
      case  app::Clusters::OccupancySensing::Id:
         emberAfOccupancySensingClusterInitCallback(endpoint);
         break;
