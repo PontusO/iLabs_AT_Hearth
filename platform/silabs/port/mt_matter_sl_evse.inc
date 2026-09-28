@@ -1850,3 +1850,376 @@ extern "C" int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
         return MT_ROW_ERR_KIND;
     }
 }
+
+/*
+ * ---- AT+MTMEAS cluster 0x0099 ---------------------------------------------
+ *
+ * The EVSE's whole attribute surface is delegate-served, so this is the only
+ * way the host can set any of it (AT_MT_SPEC.md 3.25's 0x0099 rows).
+ * Nineteen field ids, of which fourteen are always present, two are SOC-only
+ * and three are never built: UserMaximumChargeCurrent (7),
+ * RandomizationDelayWindow (8) and ApproximateEVEfficiency (13) are optional
+ * attributes esp-matter never creates and this port therefore never declares
+ * either, so they answer MT_ATTR_ERR_ATTRIBUTE (+MTERR:4) on every variant.
+ *
+ * WHY AT+MTMEAS AND NOT AT+MTATTR for those same three, which are also the
+ * cluster's only WRITABLE attributes: they would be the first writable
+ * delegate-served (managed-internally plus WRITABLE) attributes this project
+ * ships, and DE270 resolved only the read-only half of that write path. This
+ * routing is an AVOIDANCE of that gap, not a fix for it. The irony worth
+ * keeping in mind: the three writable attributes are exactly the three that
+ * are never built, so today the avoidance is doubly theoretical.
+ *
+ * Existence gate: this port asks the endpoint's OWN declared metadata
+ * (emberAfLocateAttributeMetadata), not a feature-bit table, for the same
+ * reason the C6 asks esp-matter's. Three separate conditions converge on one
+ * check: StateOfCharge and BatteryCapacity exist only on variant 0; the three
+ * optionals exist nowhere; and the four NextCharge* attributes exist only
+ * because charging preferences is unconditional. Asking the metadata answers
+ * all three without a second table to keep in sync, and it answers what a
+ * controller would actually see.
+ *
+ * Called only from mt_matter_meas_set(), which already holds the StackLock
+ * and resolved the endpoint and cluster lookups. Two passes, the family's
+ * hard contract: every pair is validated before any pair is applied.
+ */
+static int mt_meas_evse_apply(uint16_t ep, const uint8_t *fields, const int64_t *values,
+                              uint8_t count)
+{
+    using namespace chip::app::Clusters::EnergyEvse;
+
+    HearthEvseDelegate *d = evse_for(ep);
+    if (d == nullptr) {
+        /* Cluster present but no pool slot serves this endpoint: cannot
+         * happen once the boot rebuild has run; defensive, the pool bridges'
+         * standing answer. */
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    /* Pass 1: field known, attribute present on this endpoint, value in the
+     * XML's range for it. */
+    for (uint8_t i = 0; i < count; i++) {
+        uint32_t attr_id;
+        int64_t  lo;
+        int64_t  hi;
+        switch (fields[i]) {
+        case MT_EVSE_F_STATE:
+            attr_id = Attributes::State::Id;
+            lo = 0; hi = (int64_t)StateEnum::kUnknownEnumValue - 1;
+            break;
+        case MT_EVSE_F_SUPPLY_STATE:
+            attr_id = Attributes::SupplyState::Id;
+            lo = 0; hi = (int64_t)SupplyStateEnum::kUnknownEnumValue - 1;
+            break;
+        case MT_EVSE_F_FAULT_STATE:
+            attr_id = Attributes::FaultState::Id;
+            lo = 0; hi = (int64_t)FaultStateEnum::kUnknownEnumValue - 1;
+            break;
+        case MT_EVSE_F_CHARGING_ENABLED_UNTIL:
+            attr_id = Attributes::ChargingEnabledUntil::Id;
+            lo = 0; hi = UINT32_MAX;
+            break;
+        case MT_EVSE_F_CIRCUIT_CAPACITY:
+            attr_id = Attributes::CircuitCapacity::Id;
+            lo = kMinimumChargeCurrentLimit; hi = kMeasValueAbsMax;
+            break;
+        case MT_EVSE_F_MIN_CHARGE_CURRENT:
+            attr_id = Attributes::MinimumChargeCurrent::Id;
+            lo = kMinimumChargeCurrentLimit; hi = kMeasValueAbsMax;
+            break;
+        case MT_EVSE_F_MAX_CHARGE_CURRENT:
+            attr_id = Attributes::MaximumChargeCurrent::Id;
+            lo = kMinimumChargeCurrentLimit; hi = kMeasValueAbsMax;
+            break;
+        case MT_EVSE_F_USER_MAX_CHARGE_CURRENT:
+            attr_id = Attributes::UserMaximumChargeCurrent::Id;
+            lo = kMinimumChargeCurrentLimit; hi = kMeasValueAbsMax;
+            break;
+        case MT_EVSE_F_RANDOMIZATION_WINDOW:
+            attr_id = Attributes::RandomizationDelayWindow::Id;
+            lo = 0; hi = kMaxRandomizationDelayWindow;
+            break;
+        case MT_EVSE_F_NEXT_CHARGE_START:
+            attr_id = Attributes::NextChargeStartTime::Id;
+            lo = 0; hi = UINT32_MAX;
+            break;
+        case MT_EVSE_F_NEXT_CHARGE_TARGET:
+            attr_id = Attributes::NextChargeTargetTime::Id;
+            lo = 0; hi = UINT32_MAX;
+            break;
+        case MT_EVSE_F_NEXT_CHARGE_ENERGY:
+            attr_id = Attributes::NextChargeRequiredEnergy::Id;
+            lo = 0; hi = kMeasValueAbsMax;
+            break;
+        case MT_EVSE_F_NEXT_CHARGE_SOC:
+            attr_id = Attributes::NextChargeTargetSoC::Id;
+            lo = 0; hi = 100;
+            break;
+        case MT_EVSE_F_APPROX_EFFICIENCY:
+            attr_id = Attributes::ApproximateEVEfficiency::Id;
+            lo = 0; hi = UINT16_MAX;
+            break;
+        case MT_EVSE_F_STATE_OF_CHARGE:
+            attr_id = Attributes::StateOfCharge::Id;
+            lo = 0; hi = 100;
+            break;
+        case MT_EVSE_F_BATTERY_CAPACITY:
+            attr_id = Attributes::BatteryCapacity::Id;
+            lo = 0; hi = kMeasValueAbsMax;
+            break;
+        case MT_EVSE_F_SESSION_ID:
+            attr_id = Attributes::SessionID::Id;
+            lo = 0; hi = UINT32_MAX;
+            break;
+        case MT_EVSE_F_SESSION_DURATION:
+            attr_id = Attributes::SessionDuration::Id;
+            lo = 0; hi = UINT32_MAX;
+            break;
+        case MT_EVSE_F_SESSION_ENERGY_CHARGED:
+            attr_id = Attributes::SessionEnergyCharged::Id;
+            lo = 0; hi = kMeasValueAbsMax;
+            break;
+        default:
+            return MT_ATTR_ERR_VALUE;
+        }
+        if (emberAfLocateAttributeMetadata(ep, Id, attr_id) == nullptr) {
+            /* The attribute is not on THIS endpoint: a SOC field on a
+             * variant-1 EVSE, or one of the three optionals nothing creates.
+             * Distinct from a bad value, which is what makes the host able to
+             * tell "wrong variant" from "wrong number". */
+            return MT_ATTR_ERR_ATTRIBUTE;
+        }
+        if (values[i] < lo || values[i] > hi) {
+            return MT_ATTR_ERR_VALUE;
+        }
+    }
+
+    /* Pass 2: apply, one subscription report per applied field. */
+    for (uint8_t i = 0; i < count; i++) {
+        int64_t  v = values[i];
+        uint32_t attr_id;
+        switch (fields[i]) {
+        case MT_EVSE_F_STATE:
+            d->m_state = (StateEnum)v;
+            attr_id    = Attributes::State::Id;
+            break;
+        case MT_EVSE_F_SUPPLY_STATE:
+            d->m_supply_state = (SupplyStateEnum)v;
+            attr_id           = Attributes::SupplyState::Id;
+            break;
+        case MT_EVSE_F_FAULT_STATE:
+            d->m_fault_state = (FaultStateEnum)v;
+            attr_id          = Attributes::FaultState::Id;
+            break;
+        case MT_EVSE_F_CHARGING_ENABLED_UNTIL:
+            d->m_charging_enabled_until = chip::app::DataModel::MakeNullable((uint32_t)v);
+            attr_id                     = Attributes::ChargingEnabledUntil::Id;
+            break;
+        case MT_EVSE_F_CIRCUIT_CAPACITY:
+            d->m_circuit_capacity = v;
+            attr_id               = Attributes::CircuitCapacity::Id;
+            break;
+        case MT_EVSE_F_MIN_CHARGE_CURRENT:
+            d->m_min_charge_current = v;
+            attr_id                 = Attributes::MinimumChargeCurrent::Id;
+            break;
+        case MT_EVSE_F_MAX_CHARGE_CURRENT:
+            d->m_max_charge_current = v;
+            attr_id                 = Attributes::MaximumChargeCurrent::Id;
+            break;
+        case MT_EVSE_F_USER_MAX_CHARGE_CURRENT:
+            d->m_user_max_charge_current = v;
+            attr_id                      = Attributes::UserMaximumChargeCurrent::Id;
+            break;
+        case MT_EVSE_F_RANDOMIZATION_WINDOW:
+            d->m_randomization_window = (uint32_t)v;
+            attr_id                   = Attributes::RandomizationDelayWindow::Id;
+            break;
+        case MT_EVSE_F_NEXT_CHARGE_START:
+            d->m_next_charge_start = chip::app::DataModel::MakeNullable((uint32_t)v);
+            attr_id                = Attributes::NextChargeStartTime::Id;
+            break;
+        case MT_EVSE_F_NEXT_CHARGE_TARGET:
+            d->m_next_charge_target = chip::app::DataModel::MakeNullable((uint32_t)v);
+            attr_id                 = Attributes::NextChargeTargetTime::Id;
+            break;
+        case MT_EVSE_F_NEXT_CHARGE_ENERGY:
+            d->m_next_charge_energy = chip::app::DataModel::MakeNullable(v);
+            attr_id                 = Attributes::NextChargeRequiredEnergy::Id;
+            break;
+        case MT_EVSE_F_NEXT_CHARGE_SOC:
+            d->m_next_charge_soc = chip::app::DataModel::MakeNullable((chip::Percent)v);
+            attr_id              = Attributes::NextChargeTargetSoC::Id;
+            break;
+        case MT_EVSE_F_APPROX_EFFICIENCY:
+            d->m_approx_efficiency = chip::app::DataModel::MakeNullable((uint16_t)v);
+            attr_id                = Attributes::ApproximateEVEfficiency::Id;
+            break;
+        case MT_EVSE_F_STATE_OF_CHARGE:
+            d->m_state_of_charge = chip::app::DataModel::MakeNullable((chip::Percent)v);
+            attr_id              = Attributes::StateOfCharge::Id;
+            break;
+        case MT_EVSE_F_BATTERY_CAPACITY:
+            d->m_battery_capacity = chip::app::DataModel::MakeNullable(v);
+            attr_id               = Attributes::BatteryCapacity::Id;
+            break;
+        case MT_EVSE_F_SESSION_ID:
+            d->m_session_id = chip::app::DataModel::MakeNullable((uint32_t)v);
+            attr_id         = Attributes::SessionID::Id;
+            break;
+        case MT_EVSE_F_SESSION_DURATION:
+            d->m_session_duration = chip::app::DataModel::MakeNullable((uint32_t)v);
+            attr_id               = Attributes::SessionDuration::Id;
+            break;
+        default: /* MT_EVSE_F_SESSION_ENERGY_CHARGED, pass 1 admits nothing else */
+            d->m_session_energy_charged = chip::app::DataModel::MakeNullable(v);
+            attr_id                     = Attributes::SessionEnergyCharged::Id;
+            break;
+        }
+        MatterReportingAttributeChangeCallback(ep, Id, attr_id);
+    }
+    return MT_ATTR_OK;
+}
+
+/*
+ * The single-pair form of the same contract, mt_matter.h's
+ * mt_matter_evse_set(). It runs the identical two-pass body, so the two
+ * cannot drift; it exists because the header declares it and because a host
+ * library with one value to push should not have to build a pair array.
+ */
+extern "C" int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value)
+{
+    using namespace chip::app::Clusters::EnergyEvse;
+    chip::DeviceLayer::StackLock lock;
+
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ATTR_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, Id)) {
+        return MT_ATTR_ERR_CLUSTER;
+    }
+    return mt_meas_evse_apply(ep, &field, &value, 1);
+}
+
+/*
+ * DE397 live read for the nineteen EVSE values, dispatched from
+ * mt_matter_attr_read() under its StackLock: the delegate cache is the served
+ * truth (the narrow shadows are seeds, and the six 64-bit declarations have
+ * no slot at all). A null nullable answers MT_ATTR_ERR_TYPE, the
+ * no-null-literal rule the EPM reader already applies, so a host sees
+ * +MTERR:5 until the value is first pushed.
+ */
+static int mt_evse_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned)
+{
+    using namespace chip::app::Clusters::EnergyEvse;
+
+    HearthEvseDelegate *d = evse_for(ep);
+    if (d == nullptr) {
+        /* Cannot happen once the boot rebuild has run; defensive. */
+        if (is_unsigned) {
+            *is_unsigned = false;
+        }
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    bool    u    = true;
+    bool    null = false;
+    int64_t v    = 0;
+    switch (attr) {
+    case Attributes::State::Id:       v = chip::to_underlying(d->m_state); break;
+    case Attributes::SupplyState::Id: v = chip::to_underlying(d->m_supply_state); break;
+    case Attributes::FaultState::Id:  v = chip::to_underlying(d->m_fault_state); break;
+    case Attributes::ChargingEnabledUntil::Id:
+        null = d->m_charging_enabled_until.IsNull();
+        if (!null) {
+            v = d->m_charging_enabled_until.Value();
+        }
+        break;
+    case Attributes::CircuitCapacity::Id:
+        v = d->m_circuit_capacity;
+        u = false;
+        break;
+    case Attributes::MinimumChargeCurrent::Id:
+        v = d->m_min_charge_current;
+        u = false;
+        break;
+    case Attributes::MaximumChargeCurrent::Id:
+        v = d->m_max_charge_current;
+        u = false;
+        break;
+    case Attributes::NextChargeStartTime::Id:
+        null = d->m_next_charge_start.IsNull();
+        if (!null) {
+            v = d->m_next_charge_start.Value();
+        }
+        break;
+    case Attributes::NextChargeTargetTime::Id:
+        null = d->m_next_charge_target.IsNull();
+        if (!null) {
+            v = d->m_next_charge_target.Value();
+        }
+        break;
+    case Attributes::NextChargeRequiredEnergy::Id:
+        u    = false;
+        null = d->m_next_charge_energy.IsNull();
+        if (!null) {
+            v = d->m_next_charge_energy.Value();
+        }
+        break;
+    case Attributes::NextChargeTargetSoC::Id:
+        null = d->m_next_charge_soc.IsNull();
+        if (!null) {
+            v = d->m_next_charge_soc.Value();
+        }
+        break;
+    case Attributes::StateOfCharge::Id:
+        null = d->m_state_of_charge.IsNull();
+        if (!null) {
+            v = d->m_state_of_charge.Value();
+        }
+        break;
+    case Attributes::BatteryCapacity::Id:
+        u    = false;
+        null = d->m_battery_capacity.IsNull();
+        if (!null) {
+            v = d->m_battery_capacity.Value();
+        }
+        break;
+    case Attributes::SessionID::Id:
+        null = d->m_session_id.IsNull();
+        if (!null) {
+            v = d->m_session_id.Value();
+        }
+        break;
+    case Attributes::SessionDuration::Id:
+        null = d->m_session_duration.IsNull();
+        if (!null) {
+            v = d->m_session_duration.Value();
+        }
+        break;
+    case Attributes::SessionEnergyCharged::Id:
+        u    = false;
+        null = d->m_session_energy_charged.IsNull();
+        if (!null) {
+            v = d->m_session_energy_charged.Value();
+        }
+        break;
+    default:
+        /* Unreachable: only the k_instance_served rows route here. */
+        if (is_unsigned) {
+            *is_unsigned = false;
+        }
+        return MT_ATTR_ERR_FAILED;
+    }
+
+    /* Signedness is reported before the null check, so a caller about to
+     * WRITE can still fetch it (core/include/mt_matter.h:176-181, binding). */
+    if (is_unsigned) {
+        *is_unsigned = u;
+    }
+    if (null) {
+        return MT_ATTR_ERR_TYPE;
+    }
+    *out = v;
+    return MT_ATTR_OK;
+}

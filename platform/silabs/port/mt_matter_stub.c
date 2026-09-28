@@ -46,9 +46,8 @@
  *
  * WHICH code "no such cluster" is varies by family and is taken from that
  * family's own entry in core/include/mt_matter.h, never assumed: most answer
- * MT_ATTR_ERR_CLUSTER, the AT+MTROW family answers MT_ROW_ERR_NO_PAYLOAD
- * (+MTERR:4 through mt_at.c's row code mapping, where MT_ROW_ERR_ENDPOINT is
- * +MTERR:2), and AT+MTMETERID answers MT_ATTR_ERR_ATTRIBUTE because its
+ * MT_ATTR_ERR_CLUSTER (the AT+MTROW family answered MT_ROW_ERR_NO_PAYLOAD
+ * until the EVSE round made it real), and AT+MTMETERID answers MT_ATTR_ERR_ATTRIBUTE because its
  * header entry says "deliberately not MT_ATTR_ERR_CLUSTER" and gives the
  * reason. Each call site below names the code it uses for that reason.
  *
@@ -73,9 +72,8 @@ static bool stub_endpoint_live(uint16_t ep)
     return false;
 }
 
-/* The two shapes the step-1b stubs answer with. */
+/* The shape the step-1b stubs answer with. */
 #define STUB_ATTR_MISS(ep) (stub_endpoint_live(ep) ? MT_ATTR_ERR_CLUSTER : MT_ATTR_ERR_ENDPOINT)
-#define STUB_ROW_MISS(ep)  (stub_endpoint_live(ep) ? MT_ROW_ERR_NO_PAYLOAD : MT_ROW_ERR_ENDPOINT)
 
 /* ---- commissioning state and identity ----------------------------------- */
 /* ---- network transport (C3) -------------------------------------------- */
@@ -153,105 +151,9 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
 void *mt_matter_mwoc_delegate_alloc(void) { return NULL; }
 void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)delegate; (void)ep; }
 
-/* ---- nested row payloads (AT+MTROW family, energy round C2) ------------------------ */
-
-/* The MT_ROW_* family's "the endpoint exists but no cluster stores this row
- * kind" code is MT_ROW_ERR_NO_PAYLOAD, which mt_at.c renders as +MTERR:4, not
- * MT_ROW_ERR_CLUSTER: mt_rows.h's codec owns the MT_ROW_ERR_* space and has
- * no such name (mt_matter.h:1152-1163, :1207-1208). */
-
-int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
-{
-    (void)kind; (void)stage;
-    return STUB_ROW_MISS(ep);
-}
-
-int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx,
-                       mt_row_t *out, uint16_t *total)
-{
-    (void)kind;
-    (void)idx;
-    if (out != NULL) memset(out, 0, sizeof(*out));
-    if (total != NULL) *total = 0;
-    return STUB_ROW_MISS(ep);
-}
-
-int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
-{
-    (void)kind;
-    if (total != NULL) *total = 0;
-    return STUB_ROW_MISS(ep);
-}
-
-/* ---- Energy EVSE delegate and targets store (energy round C2) --------------------- */
-
-void *mt_matter_evse_delegate_alloc(uint16_t ep) { (void)ep; return NULL; }
-
-bool mt_matter_evse_reserve(void) { return false; }
-
-/* The port-local second half mt_devtypes_sl.cpp calls (it is not in
- * mt_matter.h, hence the prototype here). Unreachable while
- * mt_matter_evse_reserve() above refuses every EVSE; it exists only so the
- * tree links until the EVSE bridge (mt_matter_sl_evse.inc) brings the real
- * one and this leaves with the other EVSE stubs. */
-void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_soc);
-void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_soc)
-{
-    (void)delegate;
-    (void)ep;
-    (void)with_soc;
-}
-
-int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value)
-{
-    (void)field;
-    (void)value;
-    /* ep carries no EnergyEvse cluster: MT_ATTR_ERR_CLUSTER
-     * (mt_matter.h:1552-1553) */
-    return STUB_ATTR_MISS(ep);
-}
-
-/* The three below are the kind-1 arm mt_matter_rows_*() routes to, so they
- * carry the same MT_ROW_* contract by reference (mt_matter.h:1586-1606; the
- * _total entry names +MTERR:2 / +MTERR:4 outright). No AT command reaches
- * them while the rows_* trio above is itself a stub; they answer the same way
- * so the pair cannot disagree the day one of them stops being a stub. */
-
-int mt_matter_evse_targets_apply(uint16_t ep, const mt_row_stage_t *stage)
-{
-    (void)stage;
-    return STUB_ROW_MISS(ep);
-}
-
-int mt_matter_evse_targets_get(uint16_t ep, uint16_t idx, mt_row_t *out, uint16_t *total)
-{
-    (void)idx;
-    if (out != NULL) memset(out, 0, sizeof(*out));
-    if (total != NULL) *total = 0;
-    return STUB_ROW_MISS(ep);
-}
-
-int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total)
-{
-    if (total != NULL) *total = 0;
-    return STUB_ROW_MISS(ep);
-}
-
-/*
- * Ruling B493: this ANSWERS rather than refuses, and the 0 is the honest
- * answer rather than a convenient one.
- *
- * core/mt/mt_at.c's cmd_mtfreset() calls this before mt_matter_factory_reset()
- * so that a factory reset leaves no EVSE charging schedule behind. This image
- * has no EVSE device type and therefore no targets store at all, so there is
- * nothing to erase and erasing nothing SUCCEEDED. Returning -1 would make
- * AT+MTFRESET fail on a device whose state is already exactly what the command
- * asks for, which is the transport stub's precedent one command over: a stub
- * for a capability the image does not have answers for the state it is in
- * instead of refusing the question.
- *
- * The EVSE round's real implementation replaces this; until then AT+MTFRESET
- * is exercised on the bench (round 2 task 5) and must answer OK, clear the
- * composition and reboot.
- */
-int mt_matter_evse_targets_erase_all(void) { return 0; }
+/* The AT+MTROW family and the energy EVSE stubs (mt_matter_rows_apply,
+ * _get, _total, mt_matter_evse_delegate_alloc, mt_matter_evse_reserve,
+ * mt_matter_evse_set, mt_matter_evse_targets_apply, _get, _total,
+ * mt_matter_evse_targets_erase_all and the interim mt_matter_evse_register
+ * link stub) left this file in the EVSE round
+ * (2026-09-28): they are the real things now, in mt_matter_sl_evse.inc. */

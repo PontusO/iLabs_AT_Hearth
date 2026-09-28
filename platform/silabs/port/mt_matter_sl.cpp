@@ -67,6 +67,12 @@
 /* Catalogue batch 7b: WaterHeaterManagement::Instance and Delegate, both
  * interface bases, the DEM shape (batch7-audit.md 2.2). */
 #include <app/clusters/water-heater-management-server/water-heater-management-server.h>
+/* Catalogue EVSE: EnergyEvse::Instance and Delegate, both interface bases,
+ * the DEM and WHM shape with a five-argument constructor (feature mask,
+ * optional attributes, optional commands). The header also brings the
+ * ChargingTargetScheduleStruct / ChargingTargetStruct types the delegate's
+ * store is made of and the four spec-defined store bounds it is sized by. */
+#include <app/clusters/energy-evse-server/energy-evse-server.h>
 #include <app/EventLogging.h>
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>
@@ -101,6 +107,9 @@
 #include <new>
 
 extern "C" {
+/* Catalogue EVSE: hearth_kv_* is where the charging-target store persists,
+ * this port's equivalent of the C6's own NVS namespace. */
+#include "hearth_port.h"
 #include "mt_at.h"
 #include "mt_matter.h"
 }
@@ -516,9 +525,10 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * Every row of the nRF's table, and the batch that ports the device type it
  * belongs to (nRF README batch roster); the batch 4, batch 5, batch 7a-1
  * (ElectricalPowerMeasurement) and batch 7a-2 (MeterIdentification,
- * DeviceEnergyManagement, DeviceEnergyManagementMode) and batch 7b
- * (WaterHeaterManagement, WaterHeaterMode) rows are present here, the
- * rest arrive with their batches:
+ * DeviceEnergyManagement, DeviceEnergyManagementMode), batch 7b
+ * (WaterHeaterManagement, WaterHeaterMode) and EVSE round (EnergyEvse,
+ * EnergyEvseMode) rows are present here, the rest arrive with their
+ * batches:
  *
  *   OperationalState OperationalState, CurrentPhase           batch 4
  *   Chime SelectedChime, Enabled                              batch 4
@@ -567,15 +577,16 @@ struct instance_served_attr {
 };
 
 /*
- * Thirty-four rows: Basic Information's four integer attributes on the
+ * Fifty-one rows: Basic Information's four integer attributes on the
  * root node (ruling F500), the per-endpoint OperationalState pair, and the
  * per-endpoint Chime pair (both brought in by catalogue batch 4 with the
  * trio and the chime), the RVC's two ModeBase CurrentMode attributes and
  * its RvcOperationalState pair (catalogue batch 5b), the seven
  * ElectricalPowerMeasurement push fields (7a-1), MeterIdentification
  * MeterType and the six DeviceEnergyManagement scalars with DEMMode's
- * CurrentMode (7a-2), and the six WaterHeaterManagement values with
- * WaterHeaterMode's CurrentMode (7b).
+ * CurrentMode (7a-2), the six WaterHeaterManagement values with
+ * WaterHeaterMode's CurrentMode (7b), and the sixteen EnergyEvse values
+ * with EnergyEvseMode's CurrentMode (the EVSE round).
  *
  * The Basic Information strings (VendorName, ProductName, NodeLabel,
  * Location and the rest) and CapabilityMinima are deliberately NOT here:
@@ -713,6 +724,64 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::WaterHeaterManagement::Attributes::BoostState::Id },
     { chip::app::Clusters::WaterHeaterMode::Id,
       chip::app::Clusters::WaterHeaterMode::Attributes::CurrentMode::Id },
+    /* EnergyEvse (the EVSE round), the catalogue's largest carve-out and the
+     * simplest to justify: Instance::Read() serves ALL 23 attributes from the
+     * delegate and falls through to ember only for ClusterRevision
+     * (energy-evse-server.cpp:68-133), so every arena slot under this cluster
+     * is an inert shadow and the sixteen rows below are every one of those
+     * attributes this port DECLARES. Reads answer the HearthEvseDelegate
+     * cache; writes answer +MTERR:11 through the non-Chime arm, mirroring the
+     * C6, where all of them are MANAGED_INTERNALLY without WRITABLE, and
+     * AT+MTMEAS 0x99 is the write path.
+     *
+     * What is NOT here is the interesting half. The three optional writables
+     * (UserMaximumChargeCurrent, RandomizationDelayWindow,
+     * ApproximateEVEfficiency) and the four V2X/PNC attributes are never
+     * DECLARED on either variant, so attr_locate()'s metadata miss answers
+     * +MTERR:4 long before this table is consulted; rows for them would be
+     * dead text claiming a carve-out for attributes that do not exist. The two
+     * SOC rows ARE here and their attributes are declared on variant 0 only,
+     * the WHM feature-gated rows' arrangement, harmless on a variant-1
+     * endpoint for the same reason. And EnergyEvse's ClusterRevision stays out
+     * because its seed is genuinely LIVE, the ModeBase reason rather than the
+     * WHM one: Read() has no case for it at all.
+     *
+     * The EnergyEvseMode CurrentMode row is the ModeBase pair's standing rule
+     * on the eighth and last alias. */
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::State::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::SupplyState::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::FaultState::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::ChargingEnabledUntil::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::CircuitCapacity::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::MinimumChargeCurrent::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::MaximumChargeCurrent::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::NextChargeStartTime::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::NextChargeTargetTime::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::NextChargeRequiredEnergy::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::NextChargeTargetSoC::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::StateOfCharge::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::BatteryCapacity::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::SessionID::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::SessionDuration::Id },
+    { chip::app::Clusters::EnergyEvse::Id,
+      chip::app::Clusters::EnergyEvse::Attributes::SessionEnergyCharged::Id },
+    { chip::app::Clusters::EnergyEvseMode::Id,
+      chip::app::Clusters::EnergyEvseMode::Attributes::CurrentMode::Id },
 };
 
 static bool instance_attr_served(uint32_t cluster, uint32_t attr)
@@ -878,6 +947,7 @@ static int mt_epm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool 
 static int mt_meter_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_dem_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_whm_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
+static int mt_evse_attr_read_live(uint16_t ep, uint32_t attr, int64_t *out, bool *is_unsigned);
 static int mt_chime_attr_write_live(uint16_t ep, uint32_t attr, int64_t val);
 /* The RVC opstate pool's Instance lookup (defined beside the pool below),
  * shared by mt_matter_opstate_set()'s RVC branch and the live reader. */
@@ -910,6 +980,7 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         case chip::app::Clusters::RvcCleanMode::Id:
         case chip::app::Clusters::DeviceEnergyManagementMode::Id:
         case chip::app::Clusters::WaterHeaterMode::Id:
+        case chip::app::Clusters::EnergyEvseMode::Id:
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::RvcOperationalState::Id:
             return mt_rvc_opstate_attr_read_live(ep, attr, out, is_unsigned);
@@ -923,6 +994,8 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
             return mt_dem_attr_read_live(ep, attr, out, is_unsigned);
         case chip::app::Clusters::WaterHeaterManagement::Id:
             return mt_whm_attr_read_live(ep, attr, out, is_unsigned);
+        case chip::app::Clusters::EnergyEvse::Id:
+            return mt_evse_attr_read_live(ep, attr, out, is_unsigned);
         default:
             return MT_ATTR_ERR_FAILED;
         }
@@ -945,7 +1018,7 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
     }
     /* Set before the null check below, so the flag stays valid even when this
      * read goes on to answer MT_ATTR_ERR_TYPE for a null nullable value
-     * (core/include/mt_matter.h:172-176, binding). */
+     * (core/include/mt_matter.h:176-181, binding). */
     if (is_unsigned) {
         *is_unsigned = unsigned_type;
     }
@@ -1751,3 +1824,4 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
 #include "mt_matter_sl_b4.inc"
 #include "mt_matter_sl_b5.inc"
 #include "mt_matter_sl_b7.inc"
+#include "mt_matter_sl_evse.inc"

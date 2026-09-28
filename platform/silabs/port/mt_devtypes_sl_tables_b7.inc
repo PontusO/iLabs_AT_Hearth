@@ -638,8 +638,8 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  * more pool consumer; the batch 5 ModeBase notes apply unchanged,
  * including the Init() ordering panic and the placeholder-mode-0 policy.
  * ChangeToMode forwards on cluster 158, already in AT_MT_SPEC.md 3.17's
- * registration list (the six registrations; only EnergyEvseMode 0x9D is
- * the list's known gap, and it is out of this batch by ruling DE408).
+ * registration list (EnergyEvseMode 0x9D, once the list's known gap under
+ * ruling DE408, has since been admitted too).
  * ClusterRevision 1 LIVE (WaterHeaterMode/Metadata.h:20; the ModeBase AAI
  * has no revision case). Tag-0 default kManual on every mode
  * (AT_MT_SPEC.md 3.20's table row; WaterHeaterMode/Enums.h:45).

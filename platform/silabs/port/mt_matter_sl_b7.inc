@@ -562,10 +562,11 @@ extern "C" void mt_matter_eem_register(uint16_t ep)
  * family's hard contract: every pair is validated before any pair is
  * applied, so a bad third pair leaves the first two unapplied.
  *
- * Cluster admission is a batch boundary on this port: catalogue batch 7a-1
- * served 0x0090 and 0x0091, 7a-2 added 0x0098 and 7b 0x0094; 0x0099 comes
- * with the EVSE round (the accept test below names it). An id outside the
- * served set answers MT_ATTR_ERR_CLUSTER.
+ * Cluster admission WAS a batch boundary and is not one any more: all five
+ * push-served ids the spec names are served here, 0x0090, 0x0091 and 0x0098
+ * (batch 7a), 0x0094 (batch 7b) and 0x0099 (the EVSE round), so the list
+ * below is now the spec's own set rather than a subset of it. An id outside
+ * it still answers MT_ATTR_ERR_CLUSTER.
  */
 /* The DeviceEnergyManagement (0x0098) and WaterHeaterManagement (0x0094)
  * branch bodies: defined in their sections below, after HearthDemDelegate
@@ -575,6 +576,10 @@ static int mt_meas_dem_apply(uint16_t ep, const uint8_t *fields, const int64_t *
                              uint8_t count);
 static int mt_meas_whm_apply(uint16_t ep, const uint8_t *fields, const int64_t *values,
                              uint8_t count);
+/* The EnergyEvse (0x0099) branch body, defined beside HearthEvseDelegate and
+ * its pool in mt_matter_sl_evse.inc; it runs under the StackLock this function holds. */
+static int mt_meas_evse_apply(uint16_t ep, const uint8_t *fields, const int64_t *values,
+                              uint8_t count);
 extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
                                   const int64_t *values, uint8_t count)
 {
@@ -584,12 +589,9 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
     if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
         return MT_ATTR_ERR_ENDPOINT;
     }
-    /* Catalogue batches 7a-1, 7a-2 and 7b on this port: the measurement
-     * family, DeviceEnergyManagement and WaterHeaterManagement. The nRF also
-     * routes EnergyEvse (0x0099, the EVSE round) here; until that round it
-     * answers "no such cluster". */
     if (cluster != ElectricalPowerMeasurement::Id && cluster != ElectricalEnergyMeasurement::Id &&
-        cluster != DeviceEnergyManagement::Id && cluster != WaterHeaterManagement::Id) {
+        cluster != DeviceEnergyManagement::Id && cluster != WaterHeaterManagement::Id &&
+        cluster != EnergyEvse::Id) {
         return MT_ATTR_ERR_CLUSTER;
     }
     if (!emberAfContainsServer(ep, cluster)) {
@@ -605,6 +607,9 @@ extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *
     }
     if (cluster == WaterHeaterManagement::Id) {
         return mt_meas_whm_apply(ep, fields, values, count);
+    }
+    if (cluster == EnergyEvse::Id) {
+        return mt_meas_evse_apply(ep, fields, values, count);
     }
     if (cluster == ElectricalPowerMeasurement::Id) {
         HearthEpmDelegate *d = meas_epm_for(ep);
@@ -1527,10 +1532,10 @@ static_assert(hearth_arena_cost(obj_pair_bytes<HearthDemDelegate,
 static_assert(MT_DEM_MAX * (280 + 80) <= HEARTH_OBJ_ARENA_BYTES,
               "MT_DEM_MAX DEM endpoints' objects no longer fit the cluster-object arena (DE584)");
 static_assert(MT_MEAS_MAX * (152 + 40) + MT_DEM_MAX * (280 + 80) + MT_METER_MAX * 304 +
-                      MT_WHM_MAX * (88 + 80) <=
+                      MT_WHM_MAX * (88 + 80) + MT_EVSE_MAX * (2024 + 80) ==
                   HEARTH_OBJ_ARENA_BYTES,
-              "the four energy families at their caps no longer fit the cluster-object arena "
-              "together (DE603)");
+              "the five energy families at their caps no longer fill the cluster-object arena "
+              "exactly (DE608)");
 
 /* Fix round M1 (the nRF's batch 7b): the id is NOT stamped at handout. The
  * WHM alloc's comment below carries the full reasoning, one discipline for
