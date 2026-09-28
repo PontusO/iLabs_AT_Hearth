@@ -547,9 +547,10 @@ constexpr size_t kChimeBlockBytes =
 
 /* Catalogue batch 5b, the robotic vacuum cleaner, under admission limits
  * (graph DE566): its block is wider than the 608 B the other types are
- * sixteen-of (as are the water heater's and battery storage's since batch
- * 7b and the energy EVSE's since the EVSE round), so it is NOT folded into kWidestEndpointSlots or
- * kWidestClusterList. It gets its own candidate (Identify, the two ModeBase
+ * sixteen-of (as are the water heater's and battery storage's since
+ * batch 7b and the energy EVSE's since the EVSE round), so it is NOT
+ * folded into kWidestEndpointSlots or kWidestClusterList. It gets its
+ * own candidate (Identify, the two ModeBase
  * lists, the operational state list and the two trailing ModeBase stores,
  * the MT_COUNT over-count as everywhere here) and a documented maximum of
  * ten per composition (nine until the object arena grew, DE603); a

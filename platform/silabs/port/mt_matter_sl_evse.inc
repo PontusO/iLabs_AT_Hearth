@@ -53,13 +53,14 @@
  *    justification ("1680 bytes against ~106 KB free heap is not the
  *    constraint it is for a general-purpose reference") does not transfer to
  *    a 256 KB part. The arithmetic that does: at MT_EVSE_MAX 2 the store is
- *    about 3.4 KB against about 67 KB of free heap at +MTREADY, while moving
- *    it into the endpoint block would take that block from 1,144 B to roughly
- *    2,900 B of the fixed 9,728 B endpoint arena for no gain at a cap of two.
- *    The endpoint-block technique pays when a store is charged per POSSIBLE
- *    endpoint (the mode and chime stores were 16-deep .bss); this one is
- *    already charged per DECLARED endpoint, because the pool allocates from
- *    the cluster-object arena when an EVSE is composed and never otherwise.
+ *    about 3.4 KB of the 8,464 B cluster-object arena, which DE608 grew by
+ *    4,208 B of .bss for it (about 67 KB of heap stays free at +MTREADY),
+ *    while moving it into the endpoint block would take that block from
+ *    1,144 B to roughly 2,900 B of the fixed 9,728 B endpoint arena for no
+ *    gain at a cap of two. The endpoint-block technique pays when a store is
+ *    charged per POSSIBLE endpoint (the mode and chime stores were 16-deep
+ *    .bss); this one occupies the shared object arena only while an EVSE is
+ *    composed, and other families draw on that space otherwise.
  *
  * The mutating side of contract 2 is the stack lock. Instance::HandleGetTargets
  * calls GetTargets() and AddResponse() back to back on the CHIP event loop
@@ -1072,11 +1073,11 @@ public:
      *
      * The fabric's write path: Instance::Write dispatches a controller write
      * straight into them, which is why they validate and report rather than
-     * just assigning. They are the only writable attributes the cluster has,
-     * and DE270's carve-out (a write to a delegate-served attribute over
-     * AT+MTATTR collapses to a bare ERROR because the SDK discards the
-     * provider's status) is why the HOST pushes the same three fields through
-     * AT+MTMEAS instead.
+     * just assigning. They are the only writable attributes the cluster has.
+     * The HOST pushes the same three fields through AT+MTMEAS (AT_MT_SPEC.md
+     * 3.25), the C6's avoidance of DE270 kept as the contract; this port's
+     * AT+MTATTR write has no bare-ERROR gap (the 0x0099 section comment
+     * below).
      *
      * Instance::Write additionally gates all three on its OptionalAttributes
      * mask, which this port constructs EMPTY (the register below), matching
@@ -1863,12 +1864,15 @@ extern "C" int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
  * either, so they answer MT_ATTR_ERR_ATTRIBUTE (+MTERR:4) on every variant.
  *
  * WHY AT+MTMEAS AND NOT AT+MTATTR for those same three, which are also the
- * cluster's only WRITABLE attributes: they would be the first writable
- * delegate-served (managed-internally plus WRITABLE) attributes this project
- * ships, and DE270 resolved only the read-only half of that write path. This
- * routing is an AVOIDANCE of that gap, not a fix for it. The irony worth
- * keeping in mind: the three writable attributes are exactly the three that
- * are never built, so today the avoidance is doubly theoretical.
+ * cluster's only WRITABLE attributes: AT_MT_SPEC.md 3.25 routes every
+ * 0x0099 field through AT+MTMEAS, and on the C6 that routing avoided
+ * DE270's open half (esp-matter's WriteAttribute detour collapses a
+ * writable managed-internally attribute's failure to a bare ERROR). That
+ * gap does not exist here: mt_matter_attr_write()'s carve-out arm answers
+ * an Instance-served attribute with +MTERR:11 or, for the Chime pair (this
+ * image's writable Instance-served attributes), its server's own setters.
+ * And the three are never declared on this port, so AT+MTATTR answers
+ * +MTERR:4 for them from attr_locate() before either arm is reached.
  *
  * Existence gate: this port asks the endpoint's OWN declared metadata
  * (emberAfLocateAttributeMetadata), not a feature-bit table, for the same
@@ -2102,7 +2106,9 @@ extern "C" int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value)
 }
 
 /*
- * DE397 live read for the nineteen EVSE values, dispatched from
+ * DE397 live read for the sixteen EVSE values this port declares (the
+ * k_instance_served rows; fields 7, 8 and 13 are never declared),
+ * dispatched from
  * mt_matter_attr_read() under its StackLock: the delegate cache is the served
  * truth (the narrow shadows are seeds, and the six 64-bit declarations have
  * no slot at all). A null nullable answers MT_ATTR_ERR_TYPE, the

@@ -335,9 +335,10 @@ private:
  * take all twenty slots, and the eleventh is refused at its first
  * ModeBase claim here (its objects would fit the arena now; its block
  * would not fit the endpoint arena either, asserted beside
- * kRvcMaxEndpoints). Every refusal log names both walls. The pool is checked first in
- * mt_matter_modebase_delegate_alloc() and exhaustion aborts the create
- * before anything is spent, loudly either way. MT_MB_MAX_LISTS is gone
+ * kRvcMaxEndpoints). Every refusal log names both walls. The pool is
+ * checked first in mt_matter_modebase_delegate_alloc() and exhaustion
+ * aborts the create before anything is spent, loudly either way.
+ * MT_MB_MAX_LISTS is gone
  * from core/include/mt_matter.h (pay-per-composition round, task 7): the
  * C6 no longer has a fixed ModeBase pool at all, it allocates its
  * mt_mb_store_t per (endpoint, cluster) through its store index

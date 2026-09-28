@@ -174,8 +174,9 @@ extern "C" void mt_matter_whm_register(void *delegate, uint16_t ep, bool with_em
  * variant's feature mask, then a SOFT Init(), the WHM register's shape).
  * Port-local for the reason every register in this block is: the alloc /
  * set_endpoint pair core/include/mt_matter.h publishes has no place to carry
- * a variant predicate, and that header is read-only this round. Defined beside the EVSE pool in the
- * mt_matter_sl_evse.inc fragment at the end of mt_matter_sl.cpp. */
+ * a variant predicate, and that header is read-only this round. Defined
+ * beside the EVSE pool in the mt_matter_sl_evse.inc fragment at the end
+ * of mt_matter_sl.cpp. */
 extern "C" void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_soc);
 
 using namespace chip;
@@ -889,9 +890,10 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * Hence the split gate, and hence this claim before anything is spent.
      *
      * It is first among the claims for a second reason of its own: the
-     * reserve also COMMITS the inbound row staging session (ruling DE419), a
-     * 5,608-byte slot of the static two-slot staging pool (hearth_port_sl.c
-     * on this port), which fails when both slots are taken, unlike every pool claim below it whose depth is arithmetic. Failing
+     * reserve also COMMITS the inbound row staging session (ruling DE419),
+     * one 5,632-byte slot (a 5,608 B stage) of the static two-slot staging
+     * pool in hearth_port_sl.c, which fails when both slots are taken,
+     * unlike every pool claim below it whose depth is arithmetic. Failing
      * early costs nothing; failing late would strand the claims above it for
      * the rest of the boot.
      */

@@ -47,9 +47,10 @@
  * WHICH code "no such cluster" is varies by family and is taken from that
  * family's own entry in core/include/mt_matter.h, never assumed: most answer
  * MT_ATTR_ERR_CLUSTER (the AT+MTROW family answered MT_ROW_ERR_NO_PAYLOAD
- * until the EVSE round made it real), and AT+MTMETERID answers MT_ATTR_ERR_ATTRIBUTE because its
- * header entry says "deliberately not MT_ATTR_ERR_CLUSTER" and gives the
- * reason. Each call site below names the code it uses for that reason.
+ * until the EVSE round made it real), and AT+MTMETERID answers
+ * MT_ATTR_ERR_ATTRIBUTE because its header entry says "deliberately not
+ * MT_ATTR_ERR_CLUSTER" and gives the reason. Each call site below names
+ * the code it uses for that reason.
  *
  * Stubs whose family takes no endpoint id are unchanged, and so are the
  * delegate allocators: a pointer return has no error code to divide.

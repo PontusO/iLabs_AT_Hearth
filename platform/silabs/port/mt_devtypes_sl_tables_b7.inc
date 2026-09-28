@@ -924,8 +924,9 @@ constexpr EmberAfDeviceType kBatteryStorageNoDemTypes[] = { { 0x0018, 2 },
  * cluster-object arena to 8,464 B so two fit beside the other energy
  * families at their caps.
  *
- * On the nRF, batch 7 audit section 3.8 is the lead this was written from, and it was
- * written before the const catalogue macros, the object heap, store_walk and
+ * On the nRF, batch 7 audit section 3.8 is the lead this was written
+ * from, and it was written before the const catalogue macros, the object
+ * heap, store_walk and
  * batch 8's shape mechanism existed. Everything below is re-verified against
  * the pinned NCS tree and against current main; where the audit and the code
  * disagree the code wins and the disagreement is named at the line. This
@@ -955,8 +956,9 @@ constexpr EmberAfDeviceType kBatteryStorageNoDemTypes[] = { { 0x0018, 2 },
  *                           0x009F, and the 0x050D device type
  *
  * EIGHT clusters, the largest list in the catalogue by one (the water
- * heater's and battery storage's are seven), on both variants. THE AUDIT AND THE CODE DISAGREE ON NOTHING HERE, but one of its
- * remarks does not survive the port: it says the DEM cluster is "kept, not
+ * heater's and battery storage's are seven), on both variants. THE AUDIT
+ * AND THE CODE DISAGREE ON NOTHING HERE, but one of its remarks does not
+ * survive the port: it says the DEM cluster is "kept, not
  * stripped ... relying on esp-matter's idempotent duplicate cluster create".
  * On this port there is no duplicate to reconcile, because nothing creates a
  * bare DEM first: the list below simply declares DEM once, with the
@@ -1020,7 +1022,8 @@ constexpr EmberAfDeviceType kBatteryStorageNoDemTypes[] = { { 0x0018, 2 },
  * ---- THE ATTRIBUTE LISTS ------------------------------------------------
  *
  * EnergyEvse's three answers: code-driven no, CHI-only YES (its seven
- * commands have no generated dispatch; the batch's zap regeneration (on the nRF build) left
+ * commands have no generated dispatch; the batch's zap regeneration on
+ * the nRF build left
  * IMClusterCommandHandler.cpp and CodeDrivenInitShutdown.cpp byte-identical,
  * as batch 7's audit 5.5 predicted), AAI YES per endpoint (Instance derives
  * from both AttributeAccessInterface and CommandHandlerInterface,

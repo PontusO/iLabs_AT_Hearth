@@ -576,8 +576,9 @@ static int mt_meas_dem_apply(uint16_t ep, const uint8_t *fields, const int64_t *
                              uint8_t count);
 static int mt_meas_whm_apply(uint16_t ep, const uint8_t *fields, const int64_t *values,
                              uint8_t count);
-/* The EnergyEvse (0x0099) branch body, defined beside HearthEvseDelegate and
- * its pool in mt_matter_sl_evse.inc; it runs under the StackLock this function holds. */
+/* The EnergyEvse (0x0099) branch body, defined beside HearthEvseDelegate
+ * and its pool in mt_matter_sl_evse.inc; it runs under the StackLock this
+ * function holds. */
 static int mt_meas_evse_apply(uint16_t ep, const uint8_t *fields, const int64_t *values,
                               uint8_t count);
 extern "C" int mt_matter_meas_set(uint16_t ep, uint32_t cluster, const uint8_t *fields,
@@ -1523,9 +1524,10 @@ static size_t            s_dem_next;
 /* Pinned (catalogue batch 7a-2, DE584): the DEM pair's arena cost, the
  * DEM admission maximum with its DEMMode ModeBase pair (80 B, pinned in
  * mt_matter_sl_b5.inc), and the energy families at their caps together
- * (four since catalogue batch 7b and DE603's 4,256 B arena: the water
- * heater's 168 B outside the measurement caps), so any composition of
- * those families inside their caps fits the object arena. */
+ * (five since the EVSE round and DE608's 8,464 B arena, which they fill
+ * exactly: the water heater's 168 B and the energy EVSE's 2,104 B outside
+ * the measurement and DEM caps), so any composition of those families
+ * inside their caps fits the object arena. */
 static_assert(hearth_arena_cost(obj_pair_bytes<HearthDemDelegate,
                                                 chip::app::Clusters::DeviceEnergyManagement::Instance>()) == 280,
               "the DEM pair changed size; redo the DEM admission arithmetic");
