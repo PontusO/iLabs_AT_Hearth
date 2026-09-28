@@ -634,6 +634,33 @@ mt_mb_store_t *mt_dyn_mb_store(EndpointId ep, ClusterId cluster)
     return nullptr;
 }
 
+/* Catalogue batch 8: the label store. The one accessor whose presence test
+ * is not "does the type carry the cluster" but "does the type declare
+ * SupportedTemperatureLevels", the same question store_walk() and the
+ * create-path construction ask, because both variants of both carrying
+ * device types have the cluster and only one variant has the store. A
+ * TemperatureNumber cabinet therefore answers nullptr here with its
+ * TemperatureControl cluster fully live, which is exactly the state
+ * AT+MTTEMPLEVELS renders as +MTERR:4 (the header's contract). */
+mt_temp_levels_store_t *mt_dyn_temp_levels_store(EndpointId ep)
+{
+    for (auto &d : s_dyn) {
+        if (!d.used || d.ep_id != ep) {
+            continue;
+        }
+        if (!type_has_cluster(d.ep_type, TemperatureControl::Id) ||
+            !type_has_attr(d.ep_type, TemperatureControl::Id,
+                           TemperatureControl::Attributes::SupportedTemperatureLevels::Id)) {
+            return nullptr;
+        }
+        return reinterpret_cast<mt_temp_levels_store_t *>(
+            static_cast<uint8_t *>(d.block) +
+            block_bytes(d.ep_type->clusterCount, d.slot_capacity) +
+            store_offset(d.ep_type, TemperatureControl::Id));
+    }
+    return nullptr;
+}
+
 /*
  * The endpoint arena's occupancy, on the console, once per boot. Called by
  * src/main.cpp's rebuild_composition() after the loop, so the line is

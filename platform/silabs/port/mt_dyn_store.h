@@ -13,12 +13,10 @@
  * the rest of the port reaches those blocks; it is C++ only and never leaves
  * platform/silabs/port.
  *
- * WHAT DID NOT COME WITH IT, and why, so the next batch does not go looking:
- * the nRF header's remaining type-conditional store accessor,
- * mt_dyn_temp_levels_store. It serves a host-fed list belonging to a device
- * type this round does not build (the TemperatureLevel cabinet), and it is
- * dead code without its device type. It arrives with the batch that ports
- * that type. The mode select and chime accessors (mt_dyn_mode_store,
+ * The nRF header's last type-conditional store accessor,
+ * mt_dyn_temp_levels_store, came with catalogue batch 8 and its
+ * TemperatureLevel cabinet and cook surface. The mode select and chime
+ * accessors (mt_dyn_mode_store,
  * mt_dyn_chime_store) came with catalogue batch 4's mode select (0x0027),
  * along with the kStoreWalk table mt_devtypes_sl.cpp's store_bytes() walks.
  */
@@ -204,6 +202,21 @@ struct mt_mode_store_t {
 mt_mode_store_t *mt_dyn_mode_store(chip::EndpointId ep);
 mt_chime_store_t *mt_dyn_chime_store(chip::EndpointId ep);
 mt_mb_store_t *mt_dyn_mb_store(chip::EndpointId ep, chip::ClusterId cluster);
+
+/*
+ * Catalogue batch 8: the temperature-level label store. Keyed by endpoint
+ * alone (one TemperatureControl cluster per endpoint), same nullptr and
+ * locking contract as the accessors above, with ONE extra way to answer
+ * nullptr that no earlier store has: the endpoint may carry the
+ * TemperatureControl cluster and still have no store, because the store
+ * belongs to the TemperatureLevel VARIANT of that cluster and not to the
+ * cluster itself. Callers that need to tell the two apart (AT+MTTEMPLEVELS
+ * owes +MTERR:3 for a missing cluster and +MTERR:4 for a
+ * TemperatureNumber-variant one) must ask emberAfContainsServer() first;
+ * this accessor deliberately does not, because every other caller only
+ * wants the store or nothing.
+ */
+mt_temp_levels_store_t *mt_dyn_temp_levels_store(chip::EndpointId ep);
 
 /*
  * Log the endpoint arena's occupancy on the console: handed out, capacity,

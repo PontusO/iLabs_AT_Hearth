@@ -28,9 +28,9 @@
  * the rows whose cluster set depends on their parent: a non-empty shapes
  * span REPLACES the ep_type/ep_type_v1 selection entirely.
  *
- * In THIS build every one of those four members is null or empty on every
- * row but the forty-five ported ones, which carry ep_type and device_types
- * and, on the variant rows, ep_type_v1 and device_types_v1.
+ * Since catalogue batch 8 every row carries a cluster set: ep_type and
+ * device_types (on the variant rows also ep_type_v1 and device_types_v1),
+ * or, on the two shape-bearing rows, device_types and shapes.
  */
 struct hearth_devtype {
     uint32_t id;
@@ -49,17 +49,9 @@ struct hearth_devtype {
  * constant expression.
  *
  * ALL 52 CATALOGUE ROWS ARE HERE, in the nRF's order, so the two arms diff
- * row for row. Each row carries its id, its max_variant and (implicitly,
- * through parent_policy_ok() keying on the id) its parenting rule. A row
- * whose cluster set this build does not declare carries a trailing comment
- * naming the nRF batch that ports it, and nothing else: no ep_type, no
- * device types, no shapes. mt_devtype_create() refuses such a row at its
- * first check.
- *
- * The max_variant column is NOT a placeholder and must not be zeroed for an
- * unported row: mt_devtype_variant_ok() answers from it on the AT+MTEP=
- * line, so AT+MTEP=0x050F,1 has to be accepted by this image exactly as the
- * nRF accepts it. What differs is only what happens at the rebuild.
+ * row for row, and since catalogue batch 8 every one of them has a cluster
+ * set. Each row carries its id, its max_variant and (implicitly, through
+ * parent_policy_ok() keying on the id) its parenting rule.
  */
 constexpr hearth_devtype s_registry[] = {
     { 0x0100, 0, &onOffLightEndpoint, Span<const EmberAfDeviceType>(kOnOffLightTypes) },
@@ -130,20 +122,25 @@ constexpr hearth_devtype s_registry[] = {
       &waterHeaterBareEndpoint, Span<const EmberAfDeviceType>(kWaterHeaterBareTypes) },
     { 0x0018, 1, &batteryStorageEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageTypes),
       &batteryStorageNoDemEndpoint, Span<const EmberAfDeviceType>(kBatteryStorageNoDemTypes) },
-    /* Catalogue batch 8: the composed appliances. The first three carry no
-     * shapes even on the nRF: the policy is permissive for all of them, and
-     * a cooktop's or an oven's own cluster set does not change when a child
-     * is composed under it. */
-    { kDtCooktop, 0 },                                                  /* batch 8: cooktop */
-    { kDtOven, 0 },                                                     /* batch 8: oven */
-    { 0x007A, 0 },                                                      /* batch 8: extractor hood */
-    { kDtRefrigerator, 0 },                                             /* batch 8: refrigerator */
-    /* The two shape-bearing rows. Their PARENTING RULE is live in this image
-     * (parent_policy_ok() above keys on exactly these two ids); only their
-     * cluster sets are batch 8's. */
-    { kDtTempControlledCabinet, 1 },                                    /* batch 8: temperature controlled cabinet */
-    { kDtCookSurface, 1 },                                              /* batch 8: cook surface */
-    { 0x0079, 0 },                                                      /* batch 8: microwave oven */
+    /* Catalogue batch 8: the composed appliances. These four carry no
+     * shapes (nor does the microwave below): the policy is permissive for
+     * all of them, and a cooktop's or an oven's own cluster set does not
+     * change when a child is composed under it (only the child's does, and
+     * only PartsList moves on the parent, which the provider serves). */
+    { kDtCooktop, 0, &cooktopEndpoint, Span<const EmberAfDeviceType>(kCooktopTypes) },
+    { kDtOven, 0, &ovenEndpoint, Span<const EmberAfDeviceType>(kOvenTypes) },
+    { 0x007A, 0, &extractorHoodEndpoint, Span<const EmberAfDeviceType>(kExtractorHoodTypes) },
+    { kDtRefrigerator, 0, &refrigeratorEndpoint,
+      Span<const EmberAfDeviceType>(kRefrigeratorTypes) },
+    /* The registry's first shape-bearing rows. ep_type and ep_type_v1 stay
+     * null on both: a shape map REPLACES that selection rather than
+     * refining it, and leaving them null keeps the two mechanisms from
+     * looking interchangeable at a glance. */
+    { kDtTempControlledCabinet, 1, nullptr, Span<const EmberAfDeviceType>(kCabinetTypes), nullptr,
+      Span<const EmberAfDeviceType>(), Span<const hearth_shape>(kCabinetShapes) },
+    { kDtCookSurface, 1, nullptr, Span<const EmberAfDeviceType>(kCookSurfaceTypes), nullptr,
+      Span<const EmberAfDeviceType>(), Span<const hearth_shape>(kCookSurfaceShapes) },
+    { 0x0079, 0, &microwaveOvenEndpoint, Span<const EmberAfDeviceType>(kMicrowaveOvenTypes) },
     /* The EVSE round: the fifty-second and last row, closing the catalogue.
      * Two variants split on SOC reporting, one device-type span for both (the
      * declaration's note), no shape map: its cluster set does not depend on a
@@ -158,10 +155,10 @@ static_assert(sizeof(s_registry) / sizeof(s_registry[0]) == 52,
 /*
  * ---- the tie between the two encodings of the parenting policy --------
  *
- * nRF 4543-4641, recast for a registry most of whose rows have no cluster
- * set. This walks the whole registry at compile time and proves, for every
- * row THIS BUILD CAN CREATE, every variant it accepts and every device type
- * in the catalogue used as a parent (plus the unparented form), that:
+ * Catalogue batch 8, and the reason parent_policy_ok() and s_registry are
+ * both constexpr. This walks the whole registry at compile time and proves,
+ * for every row, every variant it accepts and every device type in the
+ * catalogue used as a parent (plus the unparented form), that:
  *
  *   a row the policy RESTRICTS carries a shape map, and its domain is
  *   EXACTLY the policy's accept set: one shape for every accepted pair, no
@@ -170,38 +167,34 @@ static_assert(sizeof(s_registry) / sizeof(s_registry[0]) == 52,
  *   a row the policy leaves PERMISSIVE carries no shape map, because it
  *   needs none: its cluster set is chosen by variant alone.
  *
- * WHAT THE RECAST CHANGED, and what it did not. The nRF's version runs this
- * check over every row unconditionally, because on that arm every row has a
- * cluster set. Here a row with neither an ep_type nor a shape map is a row
- * this build cannot create at all, and there is nothing to check: it has no
- * cluster set for any (variant, parent) pair, the policy cannot leave one
- * unserved, and mt_devtype_create() refuses it before the parent is even
- * looked at. So the per-row body is skipped for those, and what the
- * assertion now proves is the same property over the rows that can be
- * created. It does NOT weaken into vacuity: the forty-five ported rows are
- * checked in full, the parent universe is still the whole 52-row registry (so a
- * future restricted row is enumerated against every catalogue id from the
- * moment it gains a cluster set), and the day a batch gives the cabinet or
- * the cook surface an ep_type without a shape map, this fails the build
- * exactly as it would on the nRF.
+ * The parent universe is s_registry itself, so nothing here is a second list
+ * that could go stale: adding a device type automatically widens the
+ * enumeration, and a new restricted row without a matching shape map, or a
+ * shape map with a hole in it, fails THIS build rather than a boot rebuild
+ * on someone's bench.
+ *
+ * Fix round N4, the honest scope of that universe: a shape row naming a
+ * parent device type that is NOT in the registry is never enumerated by the
+ * second loop and so is not checked against the policy there. It cannot
+ * matter, because parent_devtype at create time is either 0 or the device
+ * type of a live endpoint, which is by construction a registry id, so such a
+ * row would be unreachable rather than wrong. The per-shape loop above still
+ * checks its variant and its ep_type. Said plainly rather than left implied
+ * by "every shape is accepted".
  *
  * Which direction is load-bearing, said plainly. "Every shape is accepted"
  * catches a dead shape row, which is confusing but harmless. "Every accepted
  * pair has a shape" catches the dangerous one: a pairing AT+MTEP accepts at
  * staging time whose cluster set does not exist, which would be discovered
  * only at the next boot, as a create failure that aborts the whole rebuild
- * and truncates the composition.
+ * and truncates the composition (mt_devtype_create()'s no-shape arm logs it,
+ * but by then the device is already serving a prefix).
  */
 constexpr bool shape_domain_matches_policy()
 {
     constexpr size_t kRows = sizeof(s_registry) / sizeof(s_registry[0]);
     for (size_t r = 0; r < kRows; r++) {
         const hearth_devtype &e = s_registry[r];
-        /* An unported row: no cluster set for any pairing, refused by
-         * mt_devtype_create() at its first check. Nothing to prove. */
-        if (e.ep_type == nullptr && e.shapes.empty()) {
-            continue;
-        }
         for (size_t s = 0; s < e.shapes.size(); s++) {
             if (e.shapes.data()[s].variant > e.max_variant) {
                 return false;
@@ -209,6 +202,17 @@ constexpr bool shape_domain_matches_policy()
             if (e.shapes.data()[s].ep_type == nullptr) {
                 return false;
             }
+        }
+        /* Fix round M4, the mirror of the check just above. A row with NO
+         * shape map selects through the ep_type / ep_type_v1 fallback, and
+         * that arm of mt_devtype_create() has no null guard of its own (the
+         * shape arm aborts loudly; the fallback would hand a null list
+         * straight to type_has_cluster() and fault at boot). Asserting it
+         * here turns that into a build failure. ep_type_v1 needs no check:
+         * null is its documented "this row has one variant" value and the
+         * fallback already tests it. */
+        if (e.shapes.empty() && e.ep_type == nullptr) {
+            return false;
         }
         for (uint8_t v = 0; v <= e.max_variant; v++) {
             /* p == kRows is the unparented probe; the rest walk the
@@ -243,6 +247,6 @@ constexpr bool shape_domain_matches_policy()
 
 static_assert(shape_domain_matches_policy(),
               "the shape maps and mt_devtype_parent_ok() disagree: a restricted device type "
-              "this build CREATES has no shape map, a shape map has a hole or a duplicate, or "
-              "a permissive row grew a shape map");
+              "has no shape map, a shape map has a hole or a duplicate, a permissive row "
+              "grew a shape map, or a shapeless row has no ep_type to fall back to");
 

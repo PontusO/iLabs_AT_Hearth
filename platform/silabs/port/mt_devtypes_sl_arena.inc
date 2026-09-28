@@ -103,7 +103,10 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * types (power source, smoke/CO, the laundry trio, the chime) are narrower
  * than 608 and priced by the candidates below, not tabled here: batch 5a's
  * pump and room air conditioner (304 B) and generic switch (144 B) are
- * priced by the candidates too, not tabled:
+ * priced by the candidates too, not tabled; and batch 8's thirteen shapes
+ * are priced by its two candidates below (the heater cabinet's variant 1,
+ * 755 payload and 760 of arena, is now the widest; the rest are listed in
+ * the candidate comment):
  *
  *   device type                        clusters  slots  payload  arena cost
  *   mode select           0x0027            3     10      608         608  * over-count price
@@ -130,9 +133,11 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * clusters, 8 slots (the 5 modeSelect plus the 3 identify, no descriptor
  * slots), 140 + 436 = 576.
  *
- * HEARTH_EP_ARENA_BYTES is 9,728, which is 16 x 608: this arena holds
- * kServiceableEndpoints of the WIDEST type it can build, the mode select's
- * 608-byte block, with nothing left over and nothing wasted. Catalogue batch
+ * HEARTH_EP_ARENA_BYTES is 12,160, which is 16 x 760: this arena holds
+ * kServiceableEndpoints of the WIDEST type it can build, the heater
+ * cabinet's variant 1 (catalogue batch 8, DE615; 755 payload, 760 of
+ * arena), with nothing left over and nothing wasted. Before it the widest
+ * was the mode select's 608-byte block and the arena 9,728. Catalogue batch
  * 2 kept batch 1's strong promise (every composition the build accepts, it
  * can build) by raising HEARTH_EP_ARENA_BYTES from 5,376 to 9,600 rather
  * than lowering the floor to the nRF's eight (the ruling of 2026-09-24), and
@@ -140,7 +145,7 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * became the widest (the ruling of 2026-09-26). The RVC (batch 5b) and
  * the water heater and battery storage (batch 7b) are the admitted types
  * below that sixteen: the RVC up to ten (DE566, DE603; ten blocks are
- * 9,360 of 9,728), the water heater up to four (MT_WHM_MAX; four blocks
+ * 9,360 of 12,160), the water heater up to four (MT_WHM_MAX; four blocks
  * 3,200), battery storage up to eight (MT_MEAS_MAX; eight blocks 6,784)
  * and the energy EVSE (the EVSE round) up to two (MT_EVSE_MAX; two blocks
  * 2,288). It is still a stronger
@@ -214,10 +219,9 @@ constexpr size_t block_bytes(size_t n_clusters, size_t n_slots)
  * 436 B, chime's 273, the ModeBase families' 306 each, the temperature-level
  * labels' 273) at its own alignment behind the slot region. Catalogue batch
  * 4's ruling copied the table WHOLE, including the batch 5, 7 and 8 rows for
- * device types this build does not declare yet: type_has_cluster() is false
- * for their clusters on every declared type, so those rows walk as dead
- * entries and only their sizeof/alignof assertions cost anything, which is
- * what the store shapes in mt_stores.h exist for.
+ * device types that build did not declare yet (they walked as dead entries,
+ * only their sizeof/alignof assertions costing anything); since catalogue
+ * batch 8 every row serves a declared type.
  */
 
 /* Does this endpoint type carry cluster id as a server? nRF type_has_cluster.
@@ -440,12 +444,11 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * kEvseBlockBytes), which this one does not: catalogue batch 4's ruling priced
  * the mode select with the MT_COUNT over-count instead of the nRF's
  * exact-counting convention (metadata-only members excluded, as count_slots()
- * does), and the candidates for the types this build does not declare yet
- * (the non-RVC ModeBase families, the temperature-level labels, and the other
- * store-bearing types) come with their batches; the chime (batch 4), the
+ * does); the chime (batch 4), the
  * RVC (batch 5b), the DEM (batch 7a-2), the water heater and battery
- * storage (batch 7b) and the energy EVSE (the EVSE round; these three
- * counted exactly, the nRF's convention) candidates live below. And the
+ * storage (batch 7b), the energy EVSE (the EVSE round) and batch 8's heater
+ * cabinet and microwave (these five counted exactly, the nRF's convention)
+ * candidates live below. And the
  * nRF's floor carries a capped half (kFloorDemand, kEvseEndpointCap and its
  * two non-vacuity assertions) that this one does not: it exists because the
  * EVSE's own MT_EVSE_MAX of 2 makes "room for eight of it" a demand no
@@ -720,18 +723,89 @@ static_assert(hearth_arena_cost(kEvseBlockBytes) == 1144,
 static_assert(MT_EVSE_MAX * hearth_arena_cost(kEvseBlockBytes) <= kEpArenaBytes,
               "MT_EVSE_MAX energy EVSE blocks no longer fit the endpoint arena (DE584)");
 
+/*
+ * Catalogue batch 8. Seven new device types and thirteen new realised block
+ * shapes, and ONE new candidate, which needs its argument made rather than
+ * assumed: the store-reclaim round's rule is that every store-bearing type
+ * is its own candidate, and eight of the thirteen carry a store.
+ *
+ * The cook surface variant 1 (381 B), the unparented cabinet variant 1
+ * (329), the refrigerator (514), the microwave (530) and the cooler and
+ * heater cabinets in every combination are ALL strict subsets of the heater
+ * cabinet variant 1 in both dimensions that matter: it has the most clusters
+ * (4), the most slots of any TemperatureLevel shape, and it is the only
+ * shape in the batch that carries BOTH new store types at once (a ModeBase
+ * store and a label store). So growing either store, or any list either
+ * candidate composes, moves THIS candidate's pinned value and fails the
+ * build, which is exactly the drift-proofing the per-type rule buys, without
+ * eight near-identical constants that would each have to be kept honest.
+ *
+ * Exact counting, the batch-7b convention rather than the older MT_COUNT
+ * over-count: these lists are small enough that over-counting would not have
+ * tripped the floor, but the convention is the newer one and mixing them
+ * across neighbouring candidates is how a reader stops trusting either.
+ * Metadata-only members, from each declaration's own audit note:
+ * temperatureControlLevelAttrs has one (SupportedTemperatureLevels, the
+ * ARRAY that doubles as the store discriminator), opStateAttrs three
+ * (PhaseList and OperationalStateList, both ARRAY, and OperationalError, a
+ * STRUCT), modeBaseAttrs one (SupportedModes, already named above).
+ *
+ */
+constexpr size_t kTcLevelNoSlot = 1;
+constexpr size_t kOpStateNoSlot = 3;
+
+/* Cabinet, Heater, variant 1: 4 clusters (TemperatureControl, OvenMode,
+ * OvenCavityOperationalState, Descriptor), 3 + 3 + 4 = 10 slots, one
+ * ModeBase store and one label store. */
+constexpr size_t kCabinetHeaterLevelBlockBytes =
+    block_bytes(MT_COUNT(cabinetHeaterLevelClusters),
+                (MT_COUNT(temperatureControlLevelAttrs) - kTcLevelNoSlot) +
+                       (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) +
+                       (MT_COUNT(opStateAttrs) - kOpStateNoSlot)) +
+    sizeof(mt_mb_store_t) + sizeof(mt_temp_levels_store_t);
+static_assert(kCabinetHeaterLevelBlockBytes == 755,
+              "the heater cabinet variant 1 block changed size; redo the sizing table rows and "
+              "the batch 8 capacity arithmetic");
+
+/* The microwave oven, the batch's other store-bearing candidate worth naming
+ * separately (the nRF's fix round N3). It loses to the heater cabinet v1 by
+ * 225 bytes and so cannot move kWidestBlockBytes; on this port it is a
+ * candidate of its own (store-bearing, 536 of arena) and sixteen fit the
+ * endpoint arena, pinned below with the heater cabinet's 760.
+ * 4 clusters (OperationalState, MicrowaveOvenMode, MicrowaveOvenControl,
+ * Descriptor), 5 + 3 + 5 = 13 slots, one ModeBase store. */
+constexpr size_t kMicrowaveBlockBytes =
+    block_bytes(MT_COUNT(microwaveOvenClusters),
+                (MT_COUNT(microwaveOpStateAttrs) - kOpStateNoSlot) +
+                    (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) + MT_COUNT(mwocAttrs)) +
+    sizeof(mt_mb_store_t);
+static_assert(kMicrowaveBlockBytes == 530,
+              "the microwave oven block changed size; redo the sizing table row");
+static_assert(hearth_arena_cost(kCabinetHeaterLevelBlockBytes) == 760,
+              "the heater cabinet variant 1 block's arena cost moved off the 760 B DE615 was "
+              "sized with");
+static_assert(hearth_arena_cost(kMicrowaveBlockBytes) == 536,
+              "the microwave oven block's arena cost moved off the 536 B this batch was sized "
+              "with");
+
+/* DE615 (catalogue batch 8): the two uncapped wide shapes fold into the
+ * widest block rather than taking the admission route, so the floor below
+ * holds sixteen of them. The heater cabinet v1 dominates the batch (the
+ * candidate comment above), the microwave is folded for completeness. */
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
-          kMax2(kModeSelectBlockBytes, kMax2(kChimeBlockBytes, kDemBlockBytes)));
+          kMax2(kMax2(kModeSelectBlockBytes, kMax2(kChimeBlockBytes, kDemBlockBytes)),
+                kMax2(kCabinetHeaterLevelBlockBytes, kMicrowaveBlockBytes)));
 
 /* Pinned, so the sizing table above cannot go stale without the build
- * noticing: the mode select is the widest type this build declares, at 608
- * payload bytes and 608 of arena. */
-static_assert(kWidestBlockBytes == 608,
+ * noticing: since catalogue batch 8 the heater cabinet's variant 1 is the
+ * widest type this build declares, at 755 payload bytes and 760 of arena
+ * (the mode select's 608 before it). */
+static_assert(kWidestBlockBytes == 755,
               "the widest declared block changed size; redo the sizing table above and the "
               "README's capacity rows");
-static_assert(hearth_arena_cost(kWidestBlockBytes) == 608,
-              "the widest declared block's arena cost moved off the table's 608");
+static_assert(hearth_arena_cost(kWidestBlockBytes) == 760,
+              "the widest declared block's arena cost moved off the table's 760");
 
 /*
  * Usable bytes ARE gross bytes on a bump arena: nothing is spent on an
@@ -748,7 +822,8 @@ constexpr size_t kArenaUsableBytes = kEpArenaBytes;
  * precisely the trade that round declined, and its own arena serves only
  * thirteen of the extended colour light this catalogue now builds. This
  * catalogue stays small enough that the strong form holds: sixteen mode
- * selects are 9,728 bytes, so the floor stays the full
+ * selects were 9,728 bytes and sixteen heater cabinets (catalogue batch 8's
+ * widest, DE615) are 12,160, so the floor stays the full
  * kServiceableEndpoints and the capacity claim is "every composition this
  * build accepts, it can build". Catalogue batch 1 kept that promise by
  * raising HEARTH_EP_ARENA_BYTES from 3,072 to 5,376 rather than lowering the
@@ -756,7 +831,9 @@ constexpr size_t kArenaUsableBytes = kEpArenaBytes;
  * the choice and keep the same strong form by raising it from 5,376 to
  * 9,600 (the ruling of 2026-09-24); catalogue batch 4's store-bearing mode
  * select revisits the choice and keeps the same strong form by raising it
- * from 9,600 to 9,728 (the ruling of 2026-09-26). The RVC (batch 5b) and
+ * from 9,600 to 9,728 (the ruling of 2026-09-26); catalogue batch 8's
+ * uncapped wide cabinet shapes revisit it once more and keep it, from
+ * 9,728 to 12,160 (DE615, 2026-09-28). The RVC (batch 5b) and
  * the water heater and battery storage (batch 7b) and the energy EVSE (the
  * EVSE round) stay below this floor by design: their admission limits (the
  * RVC's ten, DE603; MT_WHM_MAX; MT_MEAS_MAX; MT_EVSE_MAX) are asserted
