@@ -3,11 +3,11 @@
     "batch": "mg24-batch8",
     "cgmr": "1.2.0",
     "chip_tool": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool",
-    "fw_repo_head": "62f61e5b7d2518ac7a7f367e78b899fc3ce3c589",
+    "fw_repo_head": "efd251bb199cbc5581d8690b20201d995682da7e",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "ssid": null,
-    "timestamp": "2026-09-28T10:02:16+00:00"
+    "timestamp": "2026-09-28T10:27:47+00:00"
   },
   "results": {
     "0x0070 refrigerator ep8 current-mode refrigeratorandtemperaturecontrolledcabinetmode change-to-mode 0 deny ChangeToMode status 2": "PASS",
@@ -161,6 +161,7 @@
     "0x0077 cook surface, level ep4 selected-temperature-level set-temperature no-forward controller reads selected-temperature-level = 1 after the AT write": "PASS",
     "0x0077 cook surface, level ep4 selected-temperature-level set-temperature no-forward no +MTCMD within 3s": "PASS",
     "0x0077 cook surface, level ep4 selected-temperature-level set-temperature no-forward wire status 0x87": "PASS",
+    "0x0077 cook surface, level ep4 server-list carries [86, 6] and lacks [3]": "PASS",
     "0x0077 cook surface, level ep4 setup AT+MTTEMPLEVELS=4,\"Low\",\"Medium\",\"High\" -> OK": "PASS",
     "0x0077 cook surface, level ep4 setup temperaturecontrol supported-temperature-levels read carries Low and Medium and High": "PASS",
     "0x0077 cook surface, level ep4 state AT write refused AT+MTATTR=4,86,0 -> +MTERR:4": "PASS",
