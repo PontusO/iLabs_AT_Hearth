@@ -189,6 +189,19 @@ void *mt_matter_evse_delegate_alloc(uint16_t ep) { (void)ep; return NULL; }
 
 bool mt_matter_evse_reserve(void) { return false; }
 
+/* The port-local second half mt_devtypes_sl.cpp calls (it is not in
+ * mt_matter.h, hence the prototype here). Unreachable while
+ * mt_matter_evse_reserve() above refuses every EVSE; it exists only so the
+ * tree links until the EVSE bridge (mt_matter_sl_evse.inc) brings the real
+ * one and this leaves with the other EVSE stubs. */
+void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_soc);
+void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_soc)
+{
+    (void)delegate;
+    (void)ep;
+    (void)with_soc;
+}
+
 int mt_matter_evse_set(uint16_t ep, uint8_t field, int64_t value)
 {
     (void)field;

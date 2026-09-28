@@ -170,6 +170,14 @@ extern "C" void mt_matter_dem_register(void *delegate, uint16_t ep, bool with_pa
  * end of mt_matter_sl.cpp. */
 extern "C" void mt_matter_whm_register(void *delegate, uint16_t ep, bool with_em_tp);
 
+/* Catalogue EVSE: the EnergyEvse Instance's second half (construct with the
+ * variant's feature mask, then a SOFT Init(), the WHM register's shape).
+ * Port-local for the reason every register in this block is: the alloc /
+ * set_endpoint pair core/include/mt_matter.h publishes has no place to carry
+ * a variant predicate, and that header is read-only this round. Defined beside the EVSE pool in the
+ * mt_matter_sl_evse.inc fragment at the end of mt_matter_sl.cpp. */
+extern "C" void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_soc);
+
 using namespace chip;
 using namespace chip::app::Clusters;
 
@@ -865,6 +873,42 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     const size_t store = store_bytes(ep_type);
     const size_t want = base + store;
 
+    /*
+     * ---- the EVSE's reserve, and why it is FIRST in the claim block -----
+     *
+     * mt_matter_evse_reserve() is a count-only gate with no endpoint id, and
+     * it is the C6's reserve-before-create fix rendered here. On that
+     * platform energy_evse::create() allocates the endpoint, marks it enabled
+     * and appends it to the node's own list before the delegate handout can
+     * run, so a pool-exhausted third EVSE left a LIVE, delegate-less endpoint
+     * behind: reachable through provider::Endpoints(), absent from AT+MTEP?
+     * and failing every attribute read. This port's create path has the same
+     * shape and the same hazard, one function further along: the Instance is
+     * built by mt_matter_evse_register() below a successful
+     * emberAfSetDynamicEndpoint(), so the register cannot be the gate either.
+     * Hence the split gate, and hence this claim before anything is spent.
+     *
+     * It is first among the claims for a second reason of its own: the
+     * reserve also COMMITS the inbound row staging session (ruling DE419), a
+     * 5,608-byte slot of the static two-slot staging pool (hearth_port_sl.c
+     * on this port), which fails when both slots are taken, unlike every pool claim below it whose depth is arithmetic. Failing
+     * early costs nothing; failing late would strand the claims above it for
+     * the rest of the boot.
+     */
+    if (type_has_cluster(ep_type, EnergyEvse::Id)) {
+        if (!mt_matter_evse_reserve()) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: EVSE delegate pool exhausted (MT_EVSE_MAX "
+                    "%u), or the inbound row stage could not be committed; %u of %u "
+                    "serviceable endpoints in use, endpoint arena %u of %u usable B used; "
+                    "host may declare %u, this build serves %u",
+                    (unsigned)devtype_id, (unsigned)MT_EVSE_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints, (unsigned)s_ep_arena.used,
+                    (unsigned)kArenaUsableBytes, (unsigned)MT_COMP_MAX_ENDPOINTS,
+                    (unsigned)kServiceableEndpoints);
+            return -1;
+        }
+    }
+
     /* The valve's delegate is claimed before any endpoint memory is spent,
      * so an exhausted cluster-object arena refuses the create cleanly (nRF
      * mt_devtypes_zephyr.cpp 7862-7883). A claim stranded by a later failure
@@ -1166,6 +1210,49 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* The EVSE round: the delegate handout's first half, CONSUMING the
+     * reservation taken at the top of this block (mt_matter_evse_reserve()
+     * refuses a handout with no outstanding reservation, so this can no
+     * longer be the first place a full pool is discovered). Unlike the DEM
+     * and WHM allocs this one really uses the id it is passed, because it
+     * also LOADS this endpoint's stored charging schedule, satisfying the
+     * SDK's unenforced "LoadTargets before GetTargets" contract; the fix
+     * round M1 aliasing hazard those two avoid by discarding the id does not
+     * arise, since a claim stranded by a later failure cannot alias a LATER
+     * create's id when the rebuild stops at the first failure. Its
+     * EnergyEvseMode ModeBase claim is the RVC pair's discipline verbatim,
+     * one slot from the shared pool with the cluster id fixed at alloc, and
+     * its second half's Instance::Init() VerifyOrDies on ordering, so the
+     * only acceptable failure is this abort before anything is spent. */
+    void *evse_delegate = nullptr;
+    if (type_has_cluster(ep_type, EnergyEvse::Id)) {
+        evse_delegate = mt_matter_evse_delegate_alloc(s_next_ep_id);
+        if (evse_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: EVSE delegate pool (MT_EVSE_MAX %u) or the "
+                    "cluster-object arena exhausted; %u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)MT_EVSE_MAX, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    void *evse_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, EnergyEvseMode::Id)) {
+        evse_mode_delegate = mt_matter_modebase_delegate_alloc(EnergyEvseMode::Id);
+        if (evse_mode_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate unavailable (energy EVSE mode): "
+                    "the cluster-object arena or the ModeBase pool cap (kModeBasePoolSlots) is "
+                    "exhausted",
+                    (unsigned)devtype_id);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     void *block = hearth_arena_alloc(s_ep_arena, want, "endpoint block arena");
     if (block == nullptr) {
         /* hearth_arena_alloc() has already said what was wanted and what was
@@ -1225,6 +1312,14 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
          * obligation. */
         if (type_has_cluster(ep_type, WaterHeaterMode::Id)) {
             new (region + store_offset(ep_type, WaterHeaterMode::Id)) mt_mb_store_t();
+        }
+        /* The EVSE round: the EnergyEvseMode list, the eighth and last
+         * ModeBase store and the second one in THIS block (the DEM mode's
+         * construction above is the other). Same before-the-endpoint
+         * obligation as every other: the ModeBase Init() reads the
+         * delegate's index 0 as its first act. */
+        if (type_has_cluster(ep_type, EnergyEvseMode::Id)) {
+            new (region + store_offset(ep_type, EnergyEvseMode::Id)) mt_mb_store_t();
         }
     }
 
@@ -1375,8 +1470,8 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * single source both the FeatureMap seed and the Instance mask derive
      * from (the variant-qualified seed rows on this port). */
     /* THE PA PREDICATE IS READ FROM THE DECLARED LIST, not from the variant,
-     * since the nRF's EVSE round (the EVSE named here reaches this port with
-     * the EVSE round; battery storage came with batch 7b). It used to be
+     * since the nRF's EVSE round (the EVSE named here reached this port with
+     * the EVSE round, battery storage with batch 7b). It used to be
      * `variant == 0`, which was exactly right while the only DEM-bearing
      * types were the standalone DEM and
      * battery storage, whose variant 0 carries PowerAdjustment and whose
@@ -1417,6 +1512,38 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     if (wh_mode_delegate != nullptr) {
         mt_matter_modebase_delegate_set_endpoint(wh_mode_delegate, d.ep_id);
+    }
+
+    /* The EVSE round's second halves. mt_matter_evse_register() constructs
+     * the Instance with the variant's feature mask and Init()s it, SOFT on
+     * both registrations (CHI then AAI, energy-evse-server.cpp:40-46: no
+     * emberAfContainsServer check and no VerifyOrDie), so an ordering mistake
+     * here cannot panic; it is below the successful create so the
+     * registration serves a live endpoint, and because the Instance's own
+     * constructor is what stamps the delegate's endpoint id and the back
+     * pointer the delegate needs. The ModeBase setter carries the RVC block's
+     * panic warning verbatim.
+     *
+     * with_soc READS THE DECLARED LIST, the same source and the same argument
+     * as the DEM PowerAdjustment predicate two blocks above, and it was
+     * `variant == 0` until the EVSE round's fix pass. Both answers are
+     * identical today, because the registry selects evseAttrs for variant 0
+     * and evseNoSocAttrs for variant 1 and StateOfCharge is exactly what
+     * separates them. The reason to ask the list anyway is that the identity
+     * is a property of one registry row rather than of anything the compiler
+     * or this call site can see, and the stamped mask feeds THREE consumers
+     * (the Instance's own mFeature, the AT+MTMEAS existence gates, and the
+     * merge's SOC-variant rule), so a future edit that split the variant from
+     * the list would have been silent in all three at once. Asking the list
+     * makes "the declared list and the served feature cannot disagree" true
+     * rather than merely observed. */
+    if (evse_delegate != nullptr) {
+        mt_matter_evse_register(
+            evse_delegate, d.ep_id,
+            type_has_attr(ep_type, EnergyEvse::Id, EnergyEvse::Attributes::StateOfCharge::Id));
+    }
+    if (evse_mode_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(evse_mode_delegate, d.ep_id);
     }
 
     s_next_ep_id++;
