@@ -15,5 +15,6 @@ void hearth_swver_install(void);
 void hearth_swver_load(void);
 
 /* Under the stack lock, after a successful Server::Init(): wires Hearth's
- * requestor and queues the server-ready hook behind the driver's own. */
+ * requestor and registers the handler that sends a pending first-run
+ * notification once Thread has attached (hearth_ota_sl.cpp). */
 void hearth_ota_wire(void);

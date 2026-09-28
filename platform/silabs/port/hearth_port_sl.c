@@ -59,8 +59,15 @@ const char *hearth_port_model(void)
 /* ---- OS ------------------------------------------------------------ */
 void hearth_os_sleep_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
+/* hearth_matter_init.cpp: saves the CHIP key-value store's key map now. */
+void hearth_matter_kvs_flush(void);
+
 void hearth_os_restart(void)
 {
+    /* The CHIP key-value store saves its key map two seconds late; a reboot
+     * inside that window loses the keys created in it (the reason is at
+     * hearth_matter_kvs_flush()). */
+    hearth_matter_kvs_flush();
     /* Let the OK that precedes a restart leave the wire first (two
      * character times at 115200 is under 200 us; 5 ms is generous). */
     vTaskDelay(pdMS_TO_TICKS(5));

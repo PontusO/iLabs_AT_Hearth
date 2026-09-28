@@ -42,6 +42,7 @@
 #include <lib/support/logging/CHIPLogging.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/CommissionableDataProvider.h>
+#include <platform/KeyValueStoreManager.h>
 #include <platform/DeviceInfoProvider.h>
 #include <platform/DeviceInstanceInfoProvider.h>
 #include <platform/OpenThread/GenericNetworkCommissioningThreadDriver.h>
@@ -293,4 +294,22 @@ CHIP_ERROR hearth_matter_init(const char *ble_name)
 
     HEARTH_LOGI("matter", "stack up: server initialised, event loop running");
     return CHIP_NO_ERROR;
+}
+
+/*
+ * hearth_port_sl.c's hearth_os_restart(), from C, just before the reset.
+ *
+ * The Silicon Labs key-value store saves its key map two seconds after the
+ * last change (KeyValueStoreManagerImpl::ScheduleKeyMapSave(),
+ * SL_KVS_SAVE_DELAY_SECONDS), so a reboot inside that window loses every key
+ * created in it: a fabric committed just before the reboot, or the OTA
+ * requestor's applying state and target version, which the host follows with
+ * AT+MTEPAPPLY within seconds (bench, 2026-09-28: the first-run notification
+ * never went out). Hearth reboots itself only through hearth_os_restart(), so
+ * flushing there covers every reboot Hearth starts. A reset pin or a power
+ * cut inside the window is not covered.
+ */
+extern "C" void hearth_matter_kvs_flush(void)
+{
+    chip::DeviceLayer::PersistedStorage::KeyValueStoreManagerImpl::ForceKeyMapSave();
 }
