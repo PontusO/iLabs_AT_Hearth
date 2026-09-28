@@ -2466,6 +2466,14 @@ with the development discriminator 0xF02, against catalogue batch 8's record:
 | Free heap at `+MTREADY` | 63,392 B | 62,328 B | -1,064 B |
 | `.gbl` | | 1,029,712 B, 8,044 XMODEM blocks, 114 s | |
 
+The shipped image is `76985ee`, the final review's fix wave on top, built
+the same way in `~/silabs/work/hearth-matter-ota-76985ee` (**0 warnings**):
+`.text` 1,025,460 B, `.data` 3,544 B, `.bss` unchanged, `.gbl` 1,029,928 B;
+its free heap was not re-measured. On it: Phase 4 64/64 both with
+`AT+MTEPAPPLY` and with an SWD reset in row 4.9, Phase 1 296/0, Phase 2
+98/2/1 and catalogue batch 8 259/0/1, every row identical to the committed
+baselines.
+
 The `.bss` delta is the requestor's statics, the same shape the nRF measured:
 `sRequestor` 592, `sDownloader` 224, `sProcessor` 64, `sSoftwareVersion` 40,
 `sDriver` 32, `sStorage` 8, `sConfigMgr` 4, `sModeEnabled` 1 (965 B, from
@@ -2510,11 +2518,12 @@ commissioning (the next paragraph says why).
   whenever the OTA requestor writes one of its own keys (`g/o/...`), which is
   what covers the product's path: after `+MTOTA:APPLY` the host enters the
   bootloader with the strap and a reset pulse, which no Hearth code sees
-  (found by the round's final review; the bench's row 4.9 reboots with
-  `AT+MTEPAPPLY` and could not show it). Any other reset pin or power cut
-  inside the window is still not covered: on the bench, opening the CPico's
-  port resets the module, and
-  doing that within a second of commissioning lost the fabric and left a
+  (found by the round's final review, then shown on the bench: Phase 4 with
+  row 4.9's reboot replaced by an SWD reset of the module, the AT link left
+  open, lost the notification on `dcfc7af` and passes 64/64 on `76985ee`).
+  Any other reset pin or power cut inside the window is still not covered:
+  on the bench, opening the CPico's port resets the module, and doing that
+  within a second of commissioning lost the fabric and left a
   stale operational key that failed every later CASE session until
   `AT+MTFRESET` (graph F631, B632, parked for a later round).
 - **The first-run notification waits for Thread.** The event loop runs for
