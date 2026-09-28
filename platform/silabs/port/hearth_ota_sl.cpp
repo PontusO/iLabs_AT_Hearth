@@ -25,7 +25,9 @@
 #include <app/reporting/reporting.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/ConfigurationManager.h>
+#include <platform/PlatformManager.h>
 #include <platform/silabs/ConfigurationManagerImpl.h>
+#include <system/SystemClock.h>
 
 #include "hearth_ota_requestor.h"
 #include "hearth_ota_sl.h"
@@ -89,6 +91,41 @@ public:
 };
 
 HearthConfigurationManager sConfigMgr;
+
+/* How long after Thread attaches before the first-run notification goes out:
+ * attaching is not yet reachability. The OMR address (SLAAC) and the SRP
+ * registration follow the attach, and the notification needs a CASE session
+ * to the provider, which needs both. */
+constexpr System::Clock::Seconds32 kNotifySettle{ 10 };
+
+void NotifyAfterSettle(System::Layer *, void *)
+{
+    hearth::ota_requestor_server_ready();
+}
+
+/*
+ * Matter thread. The first-run NotifyUpdateApplied waits for the network: on
+ * this part the event loop starts seconds before Thread attaches, and a
+ * notification sent before then fails and is never retried (the shared code
+ * clears the applying state before it sends). Every attach (re)arms the
+ * settle timer and a detach cancels it; ota_requestor_server_ready() is
+ * one-shot, so later attaches are no-ops once it has run.
+ */
+void OnPlatformEvent(const ChipDeviceEvent *event, intptr_t)
+{
+    if (event->Type != DeviceEventType::kThreadConnectivityChange) {
+        return;
+    }
+    SystemLayer().CancelTimer(NotifyAfterSettle, nullptr);
+    if (event->ThreadConnectivityChange.Result == kConnectivity_Established) {
+        CHIP_ERROR err = SystemLayer().StartTimer(kNotifySettle, NotifyAfterSettle, nullptr);
+        if (err != CHIP_NO_ERROR) {
+            HEARTH_LOGE(TAG, "could not arm the first-run notification timer (%" CHIP_ERROR_FORMAT
+                             "); a pending NotifyUpdateApplied is lost for this boot",
+                        err.Format());
+        }
+    }
+}
 
 } // namespace
 
@@ -174,15 +211,15 @@ extern "C" int mt_matter_swver_set(uint32_t version, const char *str)
  * hearth_matter_init(), inside the stack-lock block, after Server::Init()
  * has succeeded and before the event loop starts.
  *
- * WHY THE SECOND CALL IS DEFERRED: DefaultOTARequestorDriver::Init() does not
- * call the image processor's ConfirmCurrentImage() inline, it posts a
- * SystemLayer().ScheduleLambda() that does, and that lambda sets the pending
- * flag ota_requestor_server_ready() acts on. Called as the next statement it
- * would run before the driver's lambda and a freshly applied bundle would
- * never be reported. Posting our own lambda here queues it behind the
- * driver's: both are kChipLambdaEvent posts to the one FreeRTOS event queue,
- * which is FIFO, and the event loop that drains it starts after this
- * returns.
+ * The first-run NotifyUpdateApplied is NOT sent from here, and not on the
+ * next turn of the event loop either: DefaultOTARequestorDriver::Init()
+ * (inside ota_requestor_init()) posts a lambda that decides whether a
+ * notification is owed, and on this part the event loop then runs for
+ * seconds before Thread attaches. The bench showed a notification sent that
+ * early failing and never being retried (Phase 4 row 4.9, 2026-09-28). So
+ * the notification waits for the attach plus a settle (OnPlatformEvent
+ * above); the driver's lambda, queued here before the loop starts, always
+ * runs before the attach event.
  *
  * Not from platform/chip/mt_chip_events.cpp's kServerReady: Server::Init()
  * can post kServerReady itself, before this wiring exists.
@@ -190,9 +227,9 @@ extern "C" int mt_matter_swver_set(uint32_t version, const char *str)
 void hearth_ota_wire(void)
 {
     hearth::ota_requestor_init();
-    CHIP_ERROR err = SystemLayer().ScheduleLambda([] { hearth::ota_requestor_server_ready(); });
+    CHIP_ERROR err = PlatformMgr().AddEventHandler(OnPlatformEvent, 0);
     if (err != CHIP_NO_ERROR) {
-        HEARTH_LOGE(TAG, "could not schedule the server-ready hook (%" CHIP_ERROR_FORMAT
+        HEARTH_LOGE(TAG, "could not register the Thread attach handler (%" CHIP_ERROR_FORMAT
                          "); a pending NotifyUpdateApplied is lost for this boot",
                     err.Format());
     }
