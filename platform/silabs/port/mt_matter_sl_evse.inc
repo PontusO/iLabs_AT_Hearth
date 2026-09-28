@@ -872,3 +872,498 @@ public:
         mt_rows_inbound_release();
         return out;
     }
+
+    /*
+     * LoadTargets: contract 1. Reads this endpoint's blob out of the port's
+     * own KV namespace into the member store. A missing key is success with
+     * an empty schedule (a device that has never been given one), which is
+     * why the not-found arm does not log.
+     */
+    chip::Protocols::InteractionModel::Status LoadTargets() override
+    {
+        using chip::Protocols::InteractionModel::Status;
+
+        clear_store();
+
+        char key[16];
+        evse_key_for(mEndpointId, key, sizeof(key));
+        size_t len = sizeof(s_evse_blob);
+        int    rc  = hearth_kv_get_blob(MT_EVSE_KV_NS, key, s_evse_blob, &len);
+        if (rc == 1) {
+            m_loaded = true; /* no schedule for this endpoint: that is the truth */
+            return Status::Success;
+        }
+        if (rc != 0) {
+            /* m_loaded stays FALSE, and the distinction is the whole point:
+             * "there is nothing stored" and "I could not find out what is
+             * stored" are different facts, and only the first makes an empty
+             * store authoritative. A transient read failure that marked the
+             * store loaded would let the next apply merge into nothing and
+             * then save that over a schedule which was intact all along,
+             * which is silent data loss. */
+            HEARTH_LOGE("matter", "ep %u: reading charging targets failed", (unsigned)mEndpointId);
+            return Status::Failure;
+        }
+        if (!decode(len)) {
+            /* CORRUPT is not transient: the bytes were read successfully and
+             * they are not a schedule. Empty is then the only honest state,
+             * re-reading would produce the same bytes for ever, and an apply
+             * overwriting them loses nothing that was ever a schedule. So
+             * this arm DOES mark the store loaded, unlike the one above. */
+            m_loaded = true;
+            HEARTH_LOGE("matter", "ep %u: stored charging targets are corrupt (%u bytes), ignored",
+                    (unsigned)mEndpointId, (unsigned)len);
+            return Status::Failure;
+        }
+        m_loaded = true;
+        /* The apply path's retry and GetTargets()'s lazy retry both land
+         * here, which is what covers them (the helper's own comment); the
+         * boot load reaches the helper through mt_matter_evse_register()
+         * instead, because the variant is not knowable yet at this point. */
+        drop_store_if_variant_mismatch();
+        HEARTH_LOGI("matter", "ep %u: loaded %u charging target schedule(s)", (unsigned)mEndpointId,
+                (unsigned)m_schedule_count);
+        return Status::Success;
+    }
+
+    /*
+     * GetTargets: contract 2. Hands back a view over the member store, which
+     * stays alive and unmodified until the encoder has run (the section
+     * comment). The lazy LoadTargets() is defence in depth, not the primary
+     * satisfaction of contract 1: mt_matter_evse_delegate_alloc() has already
+     * loaded at boot, and this guard is here so a future path that reaches a
+     * delegate before the rebuild has loaded it cannot encode a view over an
+     * uninitialised store.
+     *
+     * A RETRY THAT STILL CANNOT READ THE STORE FAILS THE READ. m_loaded false
+     * means a previous LoadTargets() hit a TRANSIENT failure, so this store
+     * is empty only because nobody could find out what is in it (a corrupt
+     * blob marks itself loaded, precisely so it does not land here). The
+     * natural response to an empty schedule is to send a new one, and the
+     * user would be re-authoring a plan that was never lost. An honest
+     * failure is retryable; a confident empty list is not recoverable,
+     * because nothing about it looks wrong. HandleGetTargets passes a
+     * non-Success status straight through as the command status and sends no
+     * response, which is exactly the shape wanted.
+     */
+    chip::Protocols::InteractionModel::Status GetTargets(
+        chip::app::DataModel::List<
+            const chip::app::Clusters::EnergyEvse::Structs::ChargingTargetScheduleStruct::Type>
+            &chargingTargetSchedules) override
+    {
+        using namespace chip::app::Clusters::EnergyEvse;
+        if (!m_loaded) {
+            (void)LoadTargets();
+            if (!m_loaded) {
+                chargingTargetSchedules =
+                    chip::app::DataModel::List<const Structs::ChargingTargetScheduleStruct::Type>();
+                HEARTH_LOGE("matter", "ep %u: charging targets unreadable, failing GetTargets",
+                        (unsigned)mEndpointId);
+                return chip::Protocols::InteractionModel::Status::Failure;
+            }
+        }
+        refresh_views();
+        chargingTargetSchedules =
+            chip::app::DataModel::List<const Structs::ChargingTargetScheduleStruct::Type>(
+                m_schedules, m_schedule_count);
+        return chip::Protocols::InteractionModel::Status::Success;
+    }
+
+    /*
+     * ClearTargets: empties the whole store, the same end state an
+     * AT+MTROWAPPLY with count 0 reaches from the host side. Not adjudicated:
+     * SetTargets is adjudicated because it installs a plan, while a clear
+     * only removes one, and the host learns about it the way it learns about
+     * any other fabric-side change, by reading back.
+     */
+    chip::Protocols::InteractionModel::Status ClearTargets() override
+    {
+        clear_store();
+        m_loaded = true;
+        if (!save()) {
+            return chip::Protocols::InteractionModel::Status::Failure;
+        }
+        return chip::Protocols::InteractionModel::Status::Success;
+    }
+
+    /* ---- the 23 attribute getters --------------------------------------- */
+
+    chip::app::Clusters::EnergyEvse::StateEnum GetState() override { return m_state; }
+    chip::app::Clusters::EnergyEvse::SupplyStateEnum GetSupplyState() override
+    {
+        return m_supply_state;
+    }
+    chip::app::Clusters::EnergyEvse::FaultStateEnum GetFaultState() override
+    {
+        return m_fault_state;
+    }
+    chip::app::DataModel::Nullable<uint32_t> GetChargingEnabledUntil() override
+    {
+        return m_charging_enabled_until;
+    }
+    chip::app::DataModel::Nullable<uint32_t> GetDischargingEnabledUntil() override
+    {
+        return m_discharging_enabled_until;
+    }
+    int64_t GetCircuitCapacity() override { return m_circuit_capacity; }
+    int64_t GetMinimumChargeCurrent() override { return m_min_charge_current; }
+    int64_t GetMaximumChargeCurrent() override { return m_max_charge_current; }
+    int64_t GetMaximumDischargeCurrent() override { return m_max_discharge_current; }
+    int64_t GetUserMaximumChargeCurrent() override { return m_user_max_charge_current; }
+    uint32_t GetRandomizationDelayWindow() override { return m_randomization_window; }
+
+    chip::app::DataModel::Nullable<uint32_t> GetNextChargeStartTime() override
+    {
+        return m_next_charge_start;
+    }
+    chip::app::DataModel::Nullable<uint32_t> GetNextChargeTargetTime() override
+    {
+        return m_next_charge_target;
+    }
+    chip::app::DataModel::Nullable<int64_t> GetNextChargeRequiredEnergy() override
+    {
+        return m_next_charge_energy;
+    }
+    chip::app::DataModel::Nullable<chip::Percent> GetNextChargeTargetSoC() override
+    {
+        return m_next_charge_soc;
+    }
+    chip::app::DataModel::Nullable<uint16_t> GetApproximateEVEfficiency() override
+    {
+        return m_approx_efficiency;
+    }
+
+    chip::app::DataModel::Nullable<chip::Percent> GetStateOfCharge() override
+    {
+        return m_state_of_charge;
+    }
+    chip::app::DataModel::Nullable<int64_t> GetBatteryCapacity() override
+    {
+        return m_battery_capacity;
+    }
+
+    /*
+     * VehicleID is PlugAndCharge's, and PNC is never built (the evseAttrs
+     * declaration note), so the attribute does not exist and this getter is
+     * unreachable. Null rather than a dangling CharSpan: a Nullable<CharSpan>
+     * over storage this delegate does not own would be the same non-owning-view
+     * mistake contract 2 is about, one attribute down.
+     */
+    chip::app::DataModel::Nullable<chip::CharSpan> GetVehicleID() override
+    {
+        return chip::app::DataModel::Nullable<chip::CharSpan>();
+    }
+
+    chip::app::DataModel::Nullable<uint32_t> GetSessionID() override { return m_session_id; }
+    chip::app::DataModel::Nullable<uint32_t> GetSessionDuration() override
+    {
+        return m_session_duration;
+    }
+    chip::app::DataModel::Nullable<int64_t> GetSessionEnergyCharged() override
+    {
+        return m_session_energy_charged;
+    }
+    chip::app::DataModel::Nullable<int64_t> GetSessionEnergyDischarged() override
+    {
+        return m_session_energy_discharged;
+    }
+
+    /* ---- the 3 attribute setters ----------------------------------------
+     *
+     * The fabric's write path: Instance::Write dispatches a controller write
+     * straight into them, which is why they validate and report rather than
+     * just assigning. They are the only writable attributes the cluster has,
+     * and DE270's carve-out (a write to a delegate-served attribute over
+     * AT+MTATTR collapses to a bare ERROR because the SDK discards the
+     * provider's status) is why the HOST pushes the same three fields through
+     * AT+MTMEAS instead.
+     *
+     * Instance::Write additionally gates all three on its OptionalAttributes
+     * mask, which this port constructs EMPTY (the register below), matching
+     * esp-matter, which creates none of the three. So on this firmware's
+     * endpoints the attributes are absent from the metadata and these setters
+     * are unreachable from the fabric; the cache is served either way, so the
+     * moment the attributes are declared these become live with no further
+     * change here.
+     */
+    CHIP_ERROR SetUserMaximumChargeCurrent(int64_t aNewValue) override
+    {
+        using namespace chip::app::Clusters::EnergyEvse;
+        if (aNewValue < kMinimumChargeCurrentLimit) {
+            return CHIP_IM_GLOBAL_STATUS(ConstraintError);
+        }
+        if (m_user_max_charge_current != aNewValue) {
+            m_user_max_charge_current = aNewValue;
+            MatterReportingAttributeChangeCallback(mEndpointId, Id,
+                                                   Attributes::UserMaximumChargeCurrent::Id);
+        }
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR SetRandomizationDelayWindow(uint32_t aNewValue) override
+    {
+        using namespace chip::app::Clusters::EnergyEvse;
+        if (aNewValue > kMaxRandomizationDelayWindow) {
+            return CHIP_IM_GLOBAL_STATUS(ConstraintError);
+        }
+        if (m_randomization_window != aNewValue) {
+            m_randomization_window = aNewValue;
+            MatterReportingAttributeChangeCallback(mEndpointId, Id,
+                                                   Attributes::RandomizationDelayWindow::Id);
+        }
+        return CHIP_NO_ERROR;
+    }
+
+    CHIP_ERROR SetApproximateEVEfficiency(
+        chip::app::DataModel::Nullable<uint16_t> aNewValue) override
+    {
+        using namespace chip::app::Clusters::EnergyEvse;
+        if (m_approx_efficiency != aNewValue) {
+            m_approx_efficiency = aNewValue;
+            MatterReportingAttributeChangeCallback(mEndpointId, Id,
+                                                   Attributes::ApproximateEVEfficiency::Id);
+        }
+        return CHIP_NO_ERROR;
+    }
+
+private:
+    uint32_t m_features = 0;
+    /* False until mt_matter_evse_register() stamps the mask, which is the one
+     * window in which this delegate does not know its own variant: the boot
+     * load runs before the endpoint exists. drop_store_if_variant_mismatch()
+     * above is a no-op while it is false, and register() calls that helper
+     * the moment it flips. */
+    bool m_features_known = false;
+};
+
+/*
+ * The pool, MT_EVSE_MAX (2, core/include/mt_matter.h:1292) delegates plus raw
+ * aligned Instance storage, the WHM pool's exact shape. Two, not sixteen,
+ * and the target store is the whole reason: each slot carries about 1.8 KB
+ * of schedule, so this is the one pool in the port whose DEPTH is a memory
+ * decision rather than an inherited C6 constant that happened to be small.
+ * A third declared EVSE fails its create with the established loud line and
+ * the composition serves the prefix before it, exactly as the measurement
+ * pools do.
+ *
+ * The Instance is constructed in mt_matter_evse_register() with the
+ * variant's own mask, where the C6 lets esp-matter's EnergyEvseDelegateInitCB
+ * new it from a FeatureMap snapshot at endpoint enable. Never destroyed
+ * (~Instance() would Shutdown() cleanly, but this platform has no teardown
+ * path, the standing allocate-only policy).
+ */
+static HearthEvseDelegate *s_evse_delegates[MT_EVSE_MAX];
+static size_t             s_evse_next;
+
+/* The EVSE round's pins, the WHM pool's shape (DE608): the pair's arena
+ * cost, and the EVSE admission maximum with its draw (the pair, the
+ * EnergyEvseMode ModeBase pair, the DEM and DEMMode pairs and the EPM and
+ * PowerTopology graft). A pin that fires with another value is a stop,
+ * not a re-pin. */
+static_assert(hearth_arena_cost(obj_pair_bytes<HearthEvseDelegate,
+                                                chip::app::Clusters::EnergyEvse::Instance>()) == 2024,
+              "the EVSE pair changed size; redo the EVSE admission arithmetic (DE608)");
+static_assert(MT_EVSE_MAX * (2024 + 80 + 280 + 80 + 152 + 40) <= HEARTH_OBJ_ARENA_BYTES,
+              "MT_EVSE_MAX energy EVSEs' objects no longer fit the cluster-object arena (DE584)");
+
+/*
+ * Reservations claimed by mt_matter_evse_reserve(), the count-only gate
+ * mt_devtype_create()'s claim block calls before anything is spent.
+ *
+ * WHY A SECOND COUNTER RATHER THAN THE PLAIN POOL BOUND, and it is the same
+ * hazard on both platforms in two different shapes. On the C6 the delegate
+ * handout needs the endpoint id, which only energy_evse::create() can
+ * produce, and by then create() has allocated the endpoint, marked it
+ * enabled and appended it to the node's own endpoint list: a pool-exhausted
+ * third EVSE left a LIVE, delegate-less EnergyEvse endpoint behind, visible
+ * to a controller and invisible to AT+MTEP?. This port's create path has the
+ * same shape and the same hazard: mt_matter_evse_register() (the second half)
+ * is what constructs the Instance, and it must run BELOW a successful
+ * emberAfSetDynamicEndpoint(), so it cannot be the capacity gate either.
+ *
+ * So the gate is SPLIT. reserve() takes the capacity decision before
+ * anything is built; the alloc CONSUMES that reservation. The consumption
+ * check (s_evse_next >= s_evse_reserved) is what makes the split safe: alloc
+ * can never hand out a slot that was not reserved first, so the two counters
+ * cannot drift into a state where the reservation said no and the alloc said
+ * yes.
+ *
+ * Monotonic with no release, boot-scoped, the s_meter_reserved reasoning
+ * verbatim: ANY create failure aborts the WHOLE composition rebuild for the
+ * rest of this boot (main.cpp's rebuild loop breaks), so no later attempt in
+ * the same boot can be blocked by a reservation an aborted endpoint never
+ * consumed. A reboot reinitialises both counters with every other static
+ * here.
+ */
+static size_t s_evse_reserved;
+
+/*
+ * The by-endpoint lookup every bridge below starts from, the whm_for() shape,
+ * WITHOUT that pool's kInvalidEndpointId sentinel: this alloc stamps the real
+ * id immediately, because LoadTargets() needs to know which endpoint's blob to
+ * read (the alloc's own comment). So a delegate whose second half never ran IS
+ * matchable here, and what makes that safe is one level up rather than in this
+ * function: there are THREE callers, and each proves the endpoint exists and
+ * carries the cluster before this lookup runs. evse_locate() does it for the
+ * row bridges, mt_matter_meas_set() for the 0x0099 push branch, and
+ * attr_locate() for mt_evse_attr_read_live() on the AT+MTATTR carve-out. A
+ * create that failed after the alloc never produced an endpoint, so none of
+ * the three can reach a stranded delegate. The rebuild also stops at the first
+ * failure, so there is no later create to re-use the id and alias onto the
+ * stranded delegate, which is the specific hazard the DEM and WHM pools'
+ * sentinel exists to prevent and this pool does not have.
+ */
+static HearthEvseDelegate *evse_for(chip::EndpointId ep)
+{
+    for (size_t i = 0; i < s_evse_next; i++) {
+        if (s_evse_delegates[i]->endpoint() == ep) {
+            return s_evse_delegates[i];
+        }
+    }
+    return nullptr;
+}
+
+extern "C" bool mt_matter_evse_reserve(void)
+{
+    if (s_evse_reserved >= MT_EVSE_MAX) {
+        return false;
+    }
+    /*
+     * Commit the INBOUND row staging buffer here too (ruling DE419,
+     * mt_at.h's mt_rows_inbound_commit()). This endpoint's SetTargets is the
+     * only fabric-originated command in this firmware that carries rows, so
+     * this reserve is the exact moment the buffer becomes reachable; a
+     * composition with no EVSE never gets here and never pays for it. That
+     * is the "committed per composition" half of DE419, and this port is the
+     * first to reach it: until this device type landed, mt_rows_inbound_claim()
+     * refused every claim here because nothing ever committed.
+     *
+     * It belongs in the RESERVE rather than in the delegate alloc for the
+     * same reason the delegate count does: this runs before anything is
+     * built, so a failure builds nothing at all. Idempotent, so a second EVSE
+     * costs nothing more, and the reservation counter is not consumed when it
+     * fails.
+     */
+    if (!mt_rows_inbound_commit()) {
+        HEARTH_LOGE("matter", "inbound row stage could not be committed (%u B, a slot of the two-slot staging pool); "
+                "an EVSE cannot adjudicate SetTargets without it",
+                (unsigned)sizeof(mt_row_stage_t));
+        return false;
+    }
+    s_evse_reserved++;
+    return true;
+}
+
+/*
+ * The handout's first half. Unlike the DEM and WHM pools this one DOES use
+ * the endpoint id the header's alloc(ep) contract passes, and the reason is
+ * the load: LoadTargets() needs to know which endpoint's blob to read, and
+ * the load has to happen before the endpoint can serve GetTargets (contract
+ * 1). The fix round M1 hazard the other two pools avoid by discarding the id
+ * does not arise here, because the id stamped now is overwritten by the
+ * Instance constructor in the success-only second half with the same value,
+ * and a claim stranded by a later failure cannot alias a LATER create's id:
+ * the rebuild stops at the first failure, so there is no later create in
+ * this boot.
+ */
+extern "C" void *mt_matter_evse_delegate_alloc(uint16_t ep)
+{
+    /*
+     * Consume a reservation mt_matter_evse_reserve() made before anything was
+     * spent (the s_evse_reserved comment). This, not the MT_EVSE_MAX bound
+     * below, is the live capacity check: reserved can never exceed
+     * MT_EVSE_MAX, so a handout with no outstanding reservation is either a
+     * caller that skipped reserve() or a pool that is genuinely full, and
+     * both must fail here.
+     */
+    if (s_evse_next >= s_evse_reserved) {
+        return nullptr;
+    }
+    /* Defensive backstop only, unreachable given the check above, kept for
+     * the reason mt_meter_register_all()'s slot bound is: cheap, and worth
+     * labelling as defensive rather than leaving a reader to wonder whether
+     * it is still load-bearing. */
+    if (s_evse_next >= MT_EVSE_MAX) {
+        return nullptr;
+    }
+    HearthEvseDelegate *d =
+        obj_pair_new<HearthEvseDelegate, chip::app::Clusters::EnergyEvse::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    d->SetEndpointId(ep);
+    s_evse_delegates[s_evse_next++] = d;
+
+    /*
+     * Contract 1, satisfied here: LoadTargets() before anything can call
+     * GetTargets(). This runs from the boot composition rebuild, inside
+     * mt_devtype_create()'s stack lock, so the KV is reachable
+     * (nvm3_ensure_init() is lazy inside hearth_kv_*, hearth_port_sl.c) and
+     * no fabric
+     * command can be in flight. A load failure is logged by LoadTargets()
+     * itself and leaves an empty schedule; it must NOT abort the endpoint,
+     * because a corrupt schedule is not a reason to refuse to be an EVSE.
+     */
+    (void)d->LoadTargets();
+    return d;
+}
+
+/*
+ * The EVSE second half: construct the Instance with the variant's feature
+ * mask and Init() it (CHI registration then AAI, SOFT on both,
+ * energy-evse-server.cpp:40-46: no emberAfContainsServer check anywhere, so
+ * an ordering mistake here cannot panic, unlike the ModeBase halves; below
+ * the successful create so the registration serves a live endpoint).
+ *
+ * THE FIVE-ARGUMENT CONSTRUCTOR, and what each argument is doing:
+ *
+ *   Feature: kChargingPreferences always (PREF is unconditional on both
+ *     platforms, the evseAttrs note), plus kSoCReporting on variant 0. NOT
+ *     kV2x and NOT kPlugAndCharge, ever: V2X would put EnableDischarging in
+ *     the advertised AcceptedCommandList (RetrieveAcceptedCommands gates it
+ *     on exactly that bit) with no attribute behind it, and PNC would
+ *     advertise a VehicleID this firmware has no host story for.
+ *   OptionalAttributes: EMPTY. The three optional writables
+ *     (UserMaximumChargeCurrent, RandomizationDelayWindow,
+ *     ApproximateEVEfficiency) are not declared on this endpoint, esp-matter
+ *     creates none of them either, and Instance::Write refuses each one on
+ *     this same mask, so an empty mask and an undeclared attribute agree.
+ *   OptionalCommands: EMPTY, which is what keeps StartDiagnostics out of the
+ *     advertised list (the delegate's own note).
+ *
+ * with_soc is READ FROM THE DECLARED CLUSTER LIST by the create path
+ * (type_has_attr for StateOfCharge), not from the variant, and it is recorded
+ * on the delegate for the 0x99 push branch's existence gates, the merge's
+ * SOC-variant rule and drop_store_if_variant_mismatch(). The FeatureMap seed
+ * in mt_devtypes_sl_seeds.inc is NOT the shared source, and this comment used
+ * to say it was: the seed is a variant-keyed table row, so it is the derived
+ * copy, and it is an inert shadow (the Instance serves FeatureMap from
+ * mFeature), which is what would make it the one to go wrong quietly.
+ */
+extern "C" void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_soc)
+{
+    using namespace chip::app::Clusters::EnergyEvse;
+    auto    *d    = static_cast<HearthEvseDelegate *>(delegate);
+    uint32_t mask = chip::to_underlying(Feature::kChargingPreferences);
+    if (with_soc) {
+        mask |= chip::to_underlying(Feature::kSoCReporting);
+    }
+    d->set_features(mask);
+    /* The boot load ran before this endpoint existed, so the delegate could
+     * not check its stored schedule against its own variant until now. The
+     * helper is a no-op until set_features() above flips m_features_known,
+     * which is exactly why it is called here and once; the other two load
+     * sites reach it from inside LoadTargets(). Its own comment carries the
+     * three-loads argument and why the discard is RAM-only. */
+    d->drop_store_if_variant_mismatch();
+
+    auto *inst = new (obj_inst_storage<HearthEvseDelegate, Instance>(d))
+        Instance(ep, *d, static_cast<Feature>(mask), static_cast<OptionalAttributes>(0),
+                 static_cast<OptionalCommands>(0));
+    CHIP_ERROR err = inst->Init();
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "EnergyEvse Instance::Init failed for endpoint %u: %" CHIP_ERROR_FORMAT
+                "; the cluster will serve nothing and its commands will not dispatch",
+                (unsigned)ep, err.Format());
+    }
+}
