@@ -1,13 +1,13 @@
 {
   "header": {
     "cgmr": "1.2.0",
-    "fw_repo_head": "2bfc63e675ea9ac1c84b07a0f71ce5099a4693cf",
+    "fw_repo_head": "37058cddd19d33aa5bf9400b1d156cb2496b2029",
     "manual_code": "34970112332",
     "net": "+MTNET:THREAD,0,0,0",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "qr_payload": "MT:SAGA4KQS02KA0648G00",
     "ssid": null,
-    "timestamp": "2026-09-27T20:13:12+00:00",
+    "timestamp": "2026-09-28T06:20:18+00:00",
     "transport": "THREAD"
   },
   "results": {
@@ -232,7 +232,7 @@
     "MTROW=70000,1,0,2,480,,25000000 -> +MTERR:1 (ep > 0xFFFF)": "PASS",
     "MTROW=zz,1,0,2,480,,25000000 -> +MTERR:1 (ep not numeric)": "PASS",
     "MTROW? -> ERROR (query form on a set-only command)": "PASS",
-    "MTROWAPPLY count-0, both directions, on a real EVSE endpoint (case a: nothing staged; case b: two rows staged, must be abandoned not committed); SOC-variant rule negative arm; meter identity push + AT+MTATTR readback (the dead-shell fix)": "FAIL",
+    "MTROWAPPLY count-0, both directions, on a real EVSE endpoint (case a: nothing staged; case b: two rows staged, must be abandoned not committed); SOC-variant rule negative arm; meter identity push + AT+MTATTR readback (the dead-shell fix)": "PASS",
     "MTROWAPPLY no args -> ERROR (exec form)": "PASS",
     "MTROWAPPLY=1,1 -> ERROR (two tokens, fewer than <ep>,<kind>,<count>)": "PASS",
     "MTROWAPPLY=1,1,0,5 -> ERROR (four tokens, one too many)": "PASS",
