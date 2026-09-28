@@ -128,8 +128,9 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * carry admission limits (DE566, DE584): the RVC up to ten (424 B each),
  * the measurement family up to eight (192 B), device energy management up
  * to four (360 B), the utility meter up to two (304 B) and the water heater
- * up to four (360 B, of which 168 B outside the measurement caps), each
- * pinned beside its pool.
+ * up to four (360 B, of which 168 B outside the measurement caps) and the
+ * energy EVSE up to two (2,656 B, of which 2,104 B outside the measurement
+ * and DEM caps), each pinned beside its pool.
  *
  * DE603 (catalogue batch 7b, 2026-09-27, the user's ruling): 4,096 grew to
  * 4,256 (+160 B of .bss) so the four energy families at their caps fit
@@ -140,6 +141,15 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * refused at that claim. The same growth lets a tenth RVC fit
  * (10 x 424 = 4,240), so the RVC's maximum rose from nine to ten.
  *
+ * DE608 (the EVSE round, 2026-09-28, the user's ruling): 4,256 grew to
+ * 8,464 (+4,208 B of .bss) for the energy EVSE, whose pair alone is
+ * 2,024 B (1,680 B of it the charging-target store): the five energy
+ * families at their caps fit together exactly, 8 x 192 + 4 x 360 +
+ * 2 x 304 + 4 x 168 + 2 x 2,104 = 8,464, the joint static_assert. The
+ * RVC stays at ten: its objects no longer limit it (eleven would fit
+ * here), the twenty-slot ModeBase pool and the endpoint arena do, both
+ * asserted.
+ *
  * DE541: batch 3's minimal form, 128 B of valve delegates only.
  */
-#define HEARTH_OBJ_ARENA_BYTES 4256
+#define HEARTH_OBJ_ARENA_BYTES 8464

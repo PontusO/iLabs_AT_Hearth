@@ -329,14 +329,13 @@ private:
  * here, where the endpoint arena is 9,728 usable bytes against a 936 B
  * RVC block. Since catalogue batch 7a-2 device energy management's DEMMode
  * is the second ModeBase consumer (one slot per DEM endpoint, at most
- * four), and catalogue batch 7b's WaterHeaterMode the third (at most
- * four). Since the object arena is 4,256 B (DE603) this pool can be the
- * first wall: ten RVCs take all twenty slots (4,240 B of objects), and
- * nine RVCs with two bare water heaters take twenty in 4,152 B. The
- * eleventh RVC is refused at its first ModeBase claim by this pool, and
- * its 4,664 B total would not fit the arena either (the asserts beside the
- * RvcOperationalState pair below pin both). Every refusal log names both
- * walls. The pool is checked first in
+ * four), catalogue batch 7b's WaterHeaterMode the third (at most four)
+ * and the EVSE round's EnergyEvseMode the fourth (at most two). Since the
+ * object arena is 8,464 B (DE608) this pool IS the RVC's wall: ten RVCs
+ * take all twenty slots, and the eleventh is refused at its first
+ * ModeBase claim here (its objects would fit the arena now; its block
+ * would not fit the endpoint arena either, asserted beside
+ * kRvcMaxEndpoints). Every refusal log names both walls. The pool is checked first in
  * mt_matter_modebase_delegate_alloc() and exhaustion aborts the create
  * before anything is spent, loudly either way. MT_MB_MAX_LISTS is gone
  * from core/include/mt_matter.h (pay-per-composition round, task 7): the
@@ -355,9 +354,9 @@ private:
  * standing allocate-only policy.
  */
 constexpr size_t kModeBasePoolSlots = 20;
-static_assert(kModeBasePoolSlots >= 2 * 10,
-              "the ModeBase pool no longer holds ten RVCs' two ModeBase pairs each: it "
-              "would silently lower the RVC's admission maximum below DE603's ten");
+static_assert(kModeBasePoolSlots == 2 * 10,
+              "the ModeBase pool is the RVC's wall since DE608: fewer than twenty slots "
+              "lowers the RVC's maximum below ten, more admits an eleventh");
 
 /* Memory reclaim round A: a table of pointers into the cluster-object
  * heap, each block holding the delegate with the raw storage for its
@@ -862,15 +861,13 @@ static size_t s_rvc_opstate_delegate_next;
  * measurement; this pins the MG24's. It is wider than the 256 B pair the
  * object arena is sixteen-of, so the RVC is admitted up to ten (graph
  * DE566, ten since DE603): ten RVCs draw this pair and two ModeBase pairs
- * (80 B each). */
+ * (80 B each). Since DE608 the object arena would hold an eleventh; the
+ * ModeBase pool and the endpoint arena are its walls. */
 static_assert(hearth_arena_cost(obj_pair_bytes<HearthRvcOpStateDelegate,
                                                 chip::app::Clusters::RvcOperationalState::Instance>()) == 264,
               "the RvcOperationalState pair changed size; redo the RVC's admission arithmetic");
 static_assert(10 * (264 + 2 * 80) <= HEARTH_OBJ_ARENA_BYTES,
               "ten RVCs' objects no longer fit the cluster-object arena (DE603)");
-static_assert(11 * (264 + 2 * 80) > HEARTH_OBJ_ARENA_BYTES,
-              "an eleventh RVC now fits the cluster-object arena: nothing else enforces "
-              "the ten (DE603); add an explicit cap before growing the arena");
 
 extern "C" void *mt_matter_rvc_opstate_delegate_alloc(void)
 {

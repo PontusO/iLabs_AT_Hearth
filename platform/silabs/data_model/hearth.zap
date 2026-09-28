@@ -12073,7 +12073,7 @@
           "mfgCode": null,
           "define": "ENERGY_EVSE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "State",
@@ -12469,7 +12469,7 @@
           "mfgCode": null,
           "define": "ENERGY_EVSE_MODE_CLUSTER",
           "side": "server",
-          "enabled": 0,
+          "enabled": 1,
           "attributes": [
             {
               "name": "SupportedModes",

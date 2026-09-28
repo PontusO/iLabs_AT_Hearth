@@ -353,6 +353,10 @@ component:
   # applied).
   - id: matter_electrical_energy_measurement
   - id: matter_electrical_power_measurement
+  # The EVSE round (2026-09-28): the energy EVSE. No SDK patch: EnergyEvse
+  # is not code-driven (CHI-only, its Instance registers its own CHI and
+  # AAI); EnergyEvseMode rides matter_mode_base.
+  - id: matter_energy_evse
   # Catalogue batch 4 (2026-09-26): the smoke/CO and power-source clusters.
   # No SDK patch: none code-driven (F554).
   - id: matter_chime
