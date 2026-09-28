@@ -44,8 +44,8 @@
  *   door lock (0x000A)                 nRF 1248-1357  whole
  *   water valve (0x0042)               nRF 1358-1484  whole
  *   the parenting policy               nRF 3325-3428  whole (predicate + shape struct)
- *   the registry                       nRF 4402-4641  all 52 rows' identity,
- *                                                     forty-five rows' cluster
+ *   the registry                       nRF 4402-4641  whole: all 52 rows'
+ *                                                     identity and cluster
  *                                                     sets
  *   the external attribute store       nRF 4642-4658  whole
  *   the endpoint block arena           nRF 4659-5272  on a bump arena
@@ -58,28 +58,19 @@
  *   mt_dyn_mode_store() and
  *     mt_dyn_chime_store()             nRF 7084-7116  whole
  *   mt_dyn_mb_store()                  nRF 7118-7159  whole
- *   the mt_devtypes.h quartet          nRF 7189-8413  the forty-five ported
- *                                                     types
+ *   the mt_devtypes.h quartet          nRF 7189-8413  all 52 types
  *   the ember external-attribute hooks nRF 8415-8451  whole
  *
- * THE REGISTRY POLICY OF THIS ROUND, stated once here because it is what
- * makes the file readable. The registry carries all 52 catalogue rows, and
- * every row keeps its IDENTITY: its device type id, its max_variant, and the
- * parenting rule the policy predicate reads for it. That is what
- * mt_devtype_is_known(), mt_devtype_variant_ok() and mt_devtype_parent_ok()
- * answer from, and those three are called by core/mt/mt_at.c on the
- * AT+MTEP= line itself, so the AT surface answers for the whole catalogue
- * exactly as the nRF's does. What a row for an unported type does NOT carry
- * is a cluster set: its ep_type, ep_type_v1, device_types, device_types_v1
- * and shapes are null or empty, and each such row names the nRF batch that
- * will port it. mt_devtype_create() refuses a null-ep_type row at its first
- * check, so a composition naming one is staged and persisted like any other
- * and then fails its rebuild loudly at that entry, with the endpoints before
- * it live as a prefix (AT_MT_SPEC.md 501-506). That is the same
- * stop-at-failure semantics every other create failure has, and it is why
- * the unported rows are kept rather than deleted: deleting them would make
- * AT+MTEP=0x000A answer +MTERR:6 (unknown device type), which is a different
- * and wrong statement about a product whose wire contract names all 52.
+ * THE REGISTRY, stated once here because it is what makes the file
+ * readable. The registry carries all 52 catalogue rows, and since
+ * catalogue batch 8 every row carries both its IDENTITY (its device type
+ * id, its max_variant, and the parenting rule the policy predicate reads
+ * for it, which mt_devtype_is_known(), mt_devtype_variant_ok() and
+ * mt_devtype_parent_ok() answer from on the AT+MTEP= line) and a cluster
+ * set. Until then the rows of unported batches carried their identity
+ * alone and mt_devtype_create() refused them at its first check; that arm
+ * went with the last of them, and the nRF's compile-time check beside the
+ * registry now proves every row has a cluster set to select.
  *
  * The DE407 quiet table (nRF 4924-4988, kQuietNoSlot and
  * attr_quiet_no_slot) arrived with catalogue batch 7a-1 in
@@ -178,6 +169,28 @@ extern "C" void mt_matter_whm_register(void *delegate, uint16_t ep, bool with_em
  * beside the EVSE pool in the mt_matter_sl_evse.inc fragment at the end
  * of mt_matter_sl.cpp. */
 extern "C" void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_soc);
+
+/* Catalogue batch 8: the ONE process-global TemperatureControl iterator
+ * delegate, handed to the SDK's free-function SetInstance(), which has no
+ * caller anywhere in the SDK itself. Port-local for the reason the three
+ * registers above are; the mode select manager is the same shape one
+ * cluster over (a single global the SDK dispatches per endpoint), and it
+ * differs only in taking no arguments, because this delegate learns its
+ * endpoint from the SDK's own Reset() before every iteration. */
+extern "C" void mt_matter_temp_levels_register(void);
+
+/* Catalogue batch 8: the microwave's three-way second half. Port-local for
+ * the reason every register above is, and a SINGLE function rather than
+ * three calls for a reason none of them had: MicrowaveOvenControl::Instance's
+ * constructor takes C++ REFERENCES to the live OperationalState and ModeBase
+ * Instances, so those two must be fully constructed before it can even be
+ * built. That order is a correctness requirement nothing at runtime
+ * enforces, and every way of getting it wrong is silent, so it is owned by
+ * one function with the sequence fixed and commented rather than by the call
+ * order of three independent-looking lines here. Defined beside the MWOC
+ * pool in the mt_matter_sl_b8.inc fragment at the end of mt_matter_sl.cpp. */
+extern "C" void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_delegate,
+                                        void *mode_delegate, uint16_t ep);
 
 using namespace chip;
 using namespace chip::app::Clusters;
@@ -748,33 +761,6 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         return -1;
     }
 
-    /*
-     * THE UNPORTED-TYPE ARM, and the one place this port's create differs
-     * from the nRF's in kind rather than in scale.
-     *
-     * A row with neither an ep_type nor a shape map is a catalogue device
-     * type whose IDENTITY this build knows (so AT+MTEP= accepted it, its
-     * variant range was checked against the real max_variant, and its
-     * parenting rule was enforced) and whose CLUSTER SET this build does not
-     * declare. There is nothing to stand up, and the failure has to happen
-     * HERE, before an endpoint id, a header entry or a block is spent, for
-     * the same reason every pool check on the nRF aborts early: a
-     * half-created endpoint is worse than none.
-     *
-     * The rebuild loop treats this exactly as it treats any other create
-     * failure: abort, keep the prefix, do not renumber. So a host that
-     * declared a door lock on a build that does not serve one gets a
-     * truncated, honest AT+MTEP? rather than a lock endpoint that answers
-     * nothing, and the console says which device type stopped it.
-     */
-    if (type->ep_type == nullptr && type->shapes.empty()) {
-        HEARTH_LOGE("devtypes", "devtype 0x%04X is in this build's registry but has no cluster "
-                                "set: the catalogue batch that builds it has not been ported "
-                                "yet, so the composition naming it cannot be rebuilt",
-                    (unsigned)devtype_id);
-        return -1;
-    }
-
     /* Re-checked here, not just at AT+MTEP staging time: a composition blob
      * persisted by a wider build can name a variant this build does not
      * implement, and silently dropping it would hand a commissioned device
@@ -801,8 +787,8 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * accepted; it is the drift alarm for the day someone edits one encoding
      * and not the other, and it aborts rather than falling back, because a
      * fallback would serve a cabinet whose stored composition says something
-     * else. No row carries a shape map in this build (the registry comment);
-     * the arm is carried so the batch that adds one adds a table only.
+     * else. Since catalogue batch 8 the cabinet and the cook surface carry
+     * shape maps (their tables in mt_devtypes_sl_tables_b8.inc).
      *
      * A DELIBERATE DIVERGENCE FROM THE C6, and the better half of it. The C6
      * builds the base endpoint, calls set_parent_endpoint(), and only THEN
@@ -966,9 +952,21 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * because Init() bails on emberAfContainsServer (see the opStateAttrs
      * audit note). Pool exhaustion aborts here, before anything is spent,
      * for the valve's exact reasons. */
+    /* Catalogue batch 8: the pool now serves TWO cluster ids. The heater
+     * cabinet carries OvenCavityOperationalState (0x0048), a derived cluster
+     * whose Instance is a public subclass of the base one with no data
+     * members of its own, so it shares this pool, this delegate class and
+     * this raw storage; only the cluster id, fixed at alloc, differs. No
+     * device type carries both, so one variable still suffices. */
     void *opstate_delegate = nullptr;
+    ClusterId opstate_cluster = kInvalidClusterId;
     if (type_has_cluster(ep_type, OperationalState::Id)) {
-        opstate_delegate = mt_matter_opstate_delegate_alloc(OperationalState::Id);
+        opstate_cluster = OperationalState::Id;
+    } else if (type_has_cluster(ep_type, OvenCavityOperationalState::Id)) {
+        opstate_cluster = OvenCavityOperationalState::Id;
+    }
+    if (opstate_cluster != kInvalidClusterId) {
+        opstate_delegate = mt_matter_opstate_delegate_alloc(opstate_cluster);
         if (opstate_delegate == nullptr) {
             HEARTH_LOGE("devtypes", "devtype 0x%04X: opstate delegate unavailable: the "
                                     "cluster-object arena or the opstate cap (kServiceableEndpoints) "
@@ -1240,6 +1238,100 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         }
     }
 
+    /* Catalogue batch 8: the refrigerator's ModeBase claim, and from the
+     * cabinet commit the cooler cabinet's too. One more slot from the shared
+     * pool with the cluster id fixed at alloc, the RVC pair's discipline
+     * verbatim; RefrigeratorAlarm needs nothing here at all (a process
+     * singleton with no per-endpoint object and an empty plugin init, the
+     * refrigeratorAlarmAttrs audit note). */
+    void *fridge_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, RefrigeratorAndTemperatureControlledCabinetMode::Id)) {
+        fridge_mode_delegate =
+            mt_matter_modebase_delegate_alloc(RefrigeratorAndTemperatureControlledCabinetMode::Id);
+        if (fridge_mode_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate unavailable (refrigerator/cabinet mode): the "
+                    "cluster-object arena or the ModeBase pool cap (kModeBasePoolSlots) is "
+                    "exhausted",
+                    (unsigned)devtype_id);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
+    /* Catalogue batch 8: the heater cabinet's OvenMode claim, the seventh
+     * ModeBase consumer. Same discipline as every other. */
+    void *oven_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, OvenMode::Id)) {
+        oven_mode_delegate = mt_matter_modebase_delegate_alloc(OvenMode::Id);
+        if (oven_mode_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate unavailable (oven mode): the "
+                    "cluster-object arena or the ModeBase pool cap (kModeBasePoolSlots) is "
+                    "exhausted",
+                    (unsigned)devtype_id);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
+    /* Catalogue batch 8: the microwave's TWO claims, on top of the
+     * OperationalState claim it already made above. Three per-endpoint
+     * object pairs on one endpoint, the most in the catalogue: 416 B of the
+     * cluster-object arena, sixteen of which fit it. Both abort before
+     * anything is spent, the standing rule; the second halves are NOT
+     * independent and are handed to one ordering function below. */
+    void *mwoc_delegate = nullptr;
+    void *microwave_mode_delegate = nullptr;
+    if (type_has_cluster(ep_type, MicrowaveOvenControl::Id)) {
+        mwoc_delegate = mt_matter_mwoc_delegate_alloc();
+        if (mwoc_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: MicrowaveOvenControl delegate unavailable: the "
+                    "cluster-object arena or the MWOC cap (kServiceableEndpoints) is exhausted; "
+                    "%u of %u serviceable endpoints in use",
+                    (unsigned)devtype_id, (unsigned)live_endpoints(),
+                    (unsigned)kServiceableEndpoints);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+    /* Fix round M5: this claim is made on the CLUSTER but consumed only
+     * inside the mwoc_delegate arm of the second half, so a future device
+     * type carrying MicrowaveOvenMode WITHOUT MicrowaveOvenControl would take
+     * a pool slot and never construct or Init() its Instance: the cluster
+     * would be declared, unregistered and silent, which is the exact class of
+     * quiet cripple this file alarms on. Unreachable today (only 0x0079
+     * carries either), and alarmed anyway, because mt_matter_mwoc_register()
+     * already carries the alarm for the opposite pairing. */
+    if (type_has_cluster(ep_type, MicrowaveOvenMode::Id) &&
+        !type_has_cluster(ep_type, MicrowaveOvenControl::Id)) {
+        HEARTH_LOGE("devtypes", "devtype 0x%04X carries MicrowaveOvenMode without "
+                "MicrowaveOvenControl; its ModeBase Instance would never be constructed "
+                "and the cluster would answer nothing on the fabric",
+                (unsigned)devtype_id);
+        if (chime_delegate != nullptr) {
+            mt_matter_chime_delegate_unclaim(chime_delegate);
+        }
+        return -1;
+    }
+    if (type_has_cluster(ep_type, MicrowaveOvenMode::Id)) {
+        microwave_mode_delegate = mt_matter_modebase_delegate_alloc(MicrowaveOvenMode::Id);
+        if (microwave_mode_delegate == nullptr) {
+            HEARTH_LOGE("devtypes", "devtype 0x%04X: modebase delegate unavailable (microwave oven mode): the "
+                    "cluster-object arena or the ModeBase pool cap (kModeBasePoolSlots) is "
+                    "exhausted",
+                    (unsigned)devtype_id);
+            if (chime_delegate != nullptr) {
+                mt_matter_chime_delegate_unclaim(chime_delegate);
+            }
+            return -1;
+        }
+    }
+
     /* The EVSE round: the delegate handout's first half, CONSUMING the
      * reservation taken at the top of this block (mt_matter_evse_reserve()
      * refuses a handout with no outstanding reservation, so this can no
@@ -1343,6 +1435,29 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         if (type_has_cluster(ep_type, WaterHeaterMode::Id)) {
             new (region + store_offset(ep_type, WaterHeaterMode::Id)) mt_mb_store_t();
         }
+        /* Catalogue batch 8: the refrigerator's (and, from the cabinet
+         * commit, the cooler cabinet's) mode list, same obligation. */
+        if (type_has_cluster(ep_type, RefrigeratorAndTemperatureControlledCabinetMode::Id)) {
+            new (region + store_offset(ep_type,
+                                       RefrigeratorAndTemperatureControlledCabinetMode::Id))
+                mt_mb_store_t();
+        }
+        /* Catalogue batch 8: the heater cabinet's mode list, same
+         * obligation. */
+        if (type_has_cluster(ep_type, OvenMode::Id)) {
+            new (region + store_offset(ep_type, OvenMode::Id)) mt_mb_store_t();
+        }
+        /* Catalogue batch 8: the microwave's mode list. The obligation is
+         * SHARPER here than anywhere else it appears, because the ModeBase
+         * Init()'s index-0 read is not the only reader of the placeholder:
+         * MicrowaveOvenControl's very first SetCookingParameters resolves
+         * its default cookMode through GetModeValueByModeTag(kNormal), which
+         * walks this delegate's tags. An unconstructed store there would not
+         * merely fail an Init, it would refuse every cooking command with a
+         * status the server also produces legitimately. */
+        if (type_has_cluster(ep_type, MicrowaveOvenMode::Id)) {
+            new (region + store_offset(ep_type, MicrowaveOvenMode::Id)) mt_mb_store_t();
+        }
         /* The EVSE round: the EnergyEvseMode list, the eighth and last
          * ModeBase store and the second one in THIS block (the DEM mode's
          * construction above is the other). Same before-the-endpoint
@@ -1350,6 +1465,22 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
          * delegate's index 0 as its first act. */
         if (type_has_cluster(ep_type, EnergyEvseMode::Id)) {
             new (region + store_offset(ep_type, EnergyEvseMode::Id)) mt_mb_store_t();
+        }
+        /* Catalogue batch 8: the temperature-level label store, the first
+         * store whose presence is finer than a cluster id (the kStoreWalk
+         * struct comment). The condition below must be the SAME question
+         * store_walk() asks, or the writer and the readers would disagree
+         * about whether this block has one; asking type_has_attr() here,
+         * exactly as the walk does, is what keeps them tied. Unlike the
+         * ModeBase stores there is no Init() waiting on it, but it must
+         * still be constructed before the endpoint is served, because the
+         * SDK's wildcard AAI is already registered and a controller could
+         * read SupportedTemperatureLevels the moment the endpoint enables. */
+        if (type_has_cluster(ep_type, TemperatureControl::Id) &&
+            type_has_attr(ep_type, TemperatureControl::Id,
+                          TemperatureControl::Attributes::SupportedTemperatureLevels::Id)) {
+            new (region + store_offset(ep_type, TemperatureControl::Id))
+                mt_temp_levels_store_t();
         }
     }
 
@@ -1429,7 +1560,19 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
      * Init() failure is logged loudly inside and does not abort, the
      * valve read-back's reasoning: unreachable by ordering, and the
      * endpoint is live and correct in every other respect by then. */
-    if (opstate_delegate != nullptr) {
+    /* Catalogue batch 8: the microwave takes the ordered path instead, and
+     * the else here is the whole guard against constructing its
+     * OperationalState Instance twice. Every other type's second halves are
+     * independent and may run in any order among themselves; this one's are
+     * a three-way construction ORDER whose violations are all silent, so
+     * they are handed to a single function that owns the sequence. See
+     * mt_matter_mwoc_register() in mt_matter_sl_b8.inc for the contract;
+     * the two ModeBase and OperationalState claims it consumes were made in
+     * the claim block above like everyone else's. */
+    if (mwoc_delegate != nullptr) {
+        mt_matter_mwoc_register(mwoc_delegate, opstate_delegate, microwave_mode_delegate,
+                                d.ep_id);
+    } else if (opstate_delegate != nullptr) {
         mt_matter_opstate_delegate_set_endpoint(opstate_delegate, d.ep_id);
     }
 
@@ -1544,6 +1687,16 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
         mt_matter_modebase_delegate_set_endpoint(wh_mode_delegate, d.ep_id);
     }
 
+    /* Catalogue batch 8: the refrigerator/cooler-cabinet mode's second half,
+     * carrying the RVC block's panic warning verbatim (Init() VerifyOrDies
+     * unless it runs below a successful emberAfSetDynamicEndpoint()). */
+    if (fridge_mode_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(fridge_mode_delegate, d.ep_id);
+    }
+    if (oven_mode_delegate != nullptr) {
+        mt_matter_modebase_delegate_set_endpoint(oven_mode_delegate, d.ep_id);
+    }
+
     /* The EVSE round's second halves. mt_matter_evse_register() constructs
      * the Instance with the variant's feature mask and Init()s it, SOFT on
      * both registrations (CHI then AAI, energy-evse-server.cpp:40-46: no
@@ -1574,6 +1727,18 @@ extern "C" int mt_devtype_create(uint32_t devtype_id, uint8_t variant, uint32_t 
     }
     if (evse_mode_delegate != nullptr) {
         mt_matter_modebase_delegate_set_endpoint(evse_mode_delegate, d.ep_id);
+    }
+
+    /* Catalogue batch 8: hand the SDK the one global TemperatureControl
+     * iterator delegate. Idempotent (a bare pointer store), takes no
+     * endpoint, and has no ordering requirement of its own; it sits here
+     * with the other second halves so every registration this file owns is
+     * in one place. Registered for BOTH variants: a TemperatureNumber
+     * endpoint never reaches the iterator, and making the registration
+     * conditional on the level variant would make it depend on composition
+     * order for no gain. */
+    if (type_has_cluster(ep_type, TemperatureControl::Id)) {
+        mt_matter_temp_levels_register();
     }
 
     s_next_ep_id++;

@@ -152,6 +152,26 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
 void *mt_matter_mwoc_delegate_alloc(void) { return NULL; }
 void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)delegate; (void)ep; }
 
+/* Interim link stubs for the two port-local second halves mt_devtypes_sl.cpp
+ * calls (neither is in mt_matter.h, hence the prototypes). The MWOC
+ * register is unreachable while the stubbed alloc above refuses every
+ * microwave; the temperature-level register is reached by any
+ * TemperatureControl create and does nothing (SupportedTemperatureLevels
+ * reads empty). Both leave with the three stubs when the batch 8 bridge
+ * (mt_matter_sl_b8.inc) brings the real ones. */
+void mt_matter_temp_levels_register(void);
+void mt_matter_temp_levels_register(void) {}
+void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_delegate, void *mode_delegate,
+                             uint16_t ep);
+void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_delegate, void *mode_delegate,
+                             uint16_t ep)
+{
+    (void)mwoc_delegate;
+    (void)opstate_delegate;
+    (void)mode_delegate;
+    (void)ep;
+}
+
 /* The AT+MTROW family and the energy EVSE stubs (mt_matter_rows_apply,
  * _get, _total, mt_matter_evse_delegate_alloc, mt_matter_evse_reserve,
  * mt_matter_evse_set, mt_matter_evse_targets_apply, _get, _total,
