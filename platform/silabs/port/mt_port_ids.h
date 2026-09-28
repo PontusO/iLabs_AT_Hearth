@@ -100,7 +100,7 @@ constexpr uint16_t kServiceableEndpoints = 16;
  * sensors, 128 for the air quality sensor and the four boolean-state
  * sensors. So every composition of those types this image accepts, it can
  * build (the wider types since carry admission limits, DE566, DE584,
- * DE603, and a mix of them with many 608 B types can still stop at this
+ * DE603, and a mix of them with many 760 B types can still stop at this
  * arena), which is a stronger promise than the nRF arm makes (its 8,112 usable bytes hold
  * thirteen of the same extended colour light, not sixteen).
  *

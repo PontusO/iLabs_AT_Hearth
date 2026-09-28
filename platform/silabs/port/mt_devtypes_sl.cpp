@@ -5,10 +5,11 @@
  *
  * The source is the nRF54L15 port, platform/nrf54l15/port/mt_devtypes_zephyr.cpp
  * in the firmware repository, transferred section by section so the two ports
- * stay diffable. Most sections now live in the eight fragments #included
+ * stay diffable. Most sections now live in the ten fragments #included
  * below, in order: mt_devtypes_sl_tables_core.inc,
  * mt_devtypes_sl_tables_b2.inc, mt_devtypes_sl_tables_b3.inc,
  * mt_devtypes_sl_tables_b4.inc, mt_devtypes_sl_tables_b5.inc,
+ * mt_devtypes_sl_tables_b7.inc, mt_devtypes_sl_tables_b8.inc,
  * mt_devtypes_sl_registry.inc, mt_devtypes_sl_arena.inc,
  * mt_devtypes_sl_seeds.inc. Every section below names the nRF line range it
  * came from;
@@ -43,7 +44,9 @@
  *   air quality sensor (0x002C)        nRF 1200-1246  whole
  *   door lock (0x000A)                 nRF 1248-1357  whole
  *   water valve (0x0042)               nRF 1358-1484  whole
- *   the parenting policy               nRF 3325-3428  whole (predicate + shape struct)
+ *   the parenting policy               nRF 3325-3428  whole (predicate + shape
+ *                                                     struct), in tables_b8.inc
+ *   the batch 8 tables                 nRF 3322-4110  whole, tables_b8.inc
  *   the registry                       nRF 4402-4641  whole: all 52 rows'
  *                                                     identity and cluster
  *                                                     sets

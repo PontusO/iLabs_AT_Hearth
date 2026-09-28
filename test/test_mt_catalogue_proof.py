@@ -3640,7 +3640,7 @@ class TestBatch8RowNames(unittest.TestCase):
 
     def test_no_duplicate_name(self):
         names = self._fake_run_names()
-        self.assertEqual(len(names), 242)
+        self.assertEqual(len(names), 243)
         self.assertEqual(len(names), len(set(names)), [n for n in names if names.count(n) > 1][:5])
 
     def test_the_pinned_names_occur(self):

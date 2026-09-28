@@ -843,7 +843,7 @@ BATCHES = {
         ], variant=1, parent=0,
            setup=("setup", [TC_LEVELS], [("temperaturecontrol", "supported-temperature-levels",
                                           ["Low", "Medium", "High"])]),
-           extra_reads=[("read", "feature-map", 2)]),
+           extra_reads=[("read", "feature-map", 2), ("server-list", [86, 6], [3])]),
         _multi("0x007B", "oven", 2, "identify", [],   # a bare parent: types, parts-list, server list
                extra_reads=[("parts-list", [1, 2]), ("server-list", [3, 29], [86, 73, 72])]),
         _multi("0x0071", "cabinet, Heater, number", 5, "ovencavityoperationalstate", [
@@ -1519,11 +1519,10 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         ctx = types.SimpleNamespace(chip=chip, chip_call=None)
         # The EVSE round: positional fields before the destination and the
         # flags after it, as the verdict kind builds them.
-        ncc = want.get("cluster", cc)
         if want.get("positional"):
-            argv = [ncc] + args + [node, str(ep)]
+            argv = [cc] + args + [node, str(ep)]
         else:
-            argv = [ncc] + args[:1] + [node, str(ep)] + args[1:]
+            argv = [cc] + args[:1] + [node, str(ep)] + args[1:]
         handle = H.invoke_chip(ctx, argv + list(want.get("flags", ())), timeout=30)
         fwd = link.await_urc(r"^\+MTCMD:\d+,%d,%d,\d+(,|$)" % (ep, c["cluster"]), 3.0)
         s.check("%s no +MTCMD within 3s" % prefix, fwd is None)

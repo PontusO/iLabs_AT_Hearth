@@ -32,12 +32,12 @@ constexpr uint32_t kDtOven                  = 0x007B;
 /*
  * ---- the parenting policy, encoding one of two ------------------------
  *
- * Catalogue batch 8. Until this batch mt_devtype_parent_ok() was a
- * `return true` stub, because no device type in s_registry required a parent
- * or restricted which device type could parent it. Two now do
- * (AT_MT_SPEC.md 3.9's policy), and this constexpr predicate is where the rule
- * lives; the extern "C" entry point the AT layer calls is a one-line
- * forwarder further down.
+ * Catalogue batch 8. On this port the predicate and its extern "C"
+ * forwarder (mt_devtype_parent_ok() in mt_devtypes_sl.cpp) were live before
+ * this batch, ported ahead of the cluster sets so AT+MTEP= answered the
+ * policy early; batch 8 moved the predicate here, the nRF's order. Two
+ * device types restrict their parent (AT_MT_SPEC.md 3.9's policy), and this
+ * constexpr predicate is where the rule lives.
  *
  * It is constexpr for one reason: the SAME policy is encoded a second time,
  * as the per-row shape maps below, and the two can disagree. That hazard is
@@ -97,15 +97,17 @@ constexpr bool parent_policy_ok(uint32_t devtype_id, uint8_t variant, uint32_t p
  * mt_devtype_create()'s parent_devtype argument uses (main.cpp passes 0 when
  * comp.parent[i] is MT_COMP_NO_PARENT).
  *
- * WHY NOT A WIDENED ROW FOR ALL 44 EXISTING ROWS. Ruled in the batch brief
- * (DE416). A Span<const shape> replacing ep_type/ep_type_v1 on every row is
+ * WHY NOT A WIDENED ROW FOR EVERY ROW. The nRF's ruling (DE416), kept here
+ * as its reasoning; on this port the member and all 52 rows were carried
+ * before batch 8, so this batch added tables only. A Span<const shape>
+ * replacing ep_type/ep_type_v1 on every row is
  * the more general mechanism and remains the right refactor for the day a
  * SECOND parent-conditional device type appears; landing it in the same
- * commit as seven new device types, a heap resize, three new SDK translation
+ * commit as seven new device types, an arena resize, three new SDK translation
  * units and a zap regeneration would make the whole batch unreviewable. This
  * member is additive by construction: it is the LAST member, so aggregate
  * initialization zero-fills it to an empty span for every row that does not
- * name it, and all 44 pre-batch-8 rows keep their exact original text and
+ * name it, and every shapeless row keeps its exact original text and
  * their exact original bytes. That is the same trick batches 7a and 7b each
  * relied on once (ep_type_v1, device_types_v1) and this is its third use.
  *
@@ -231,8 +233,9 @@ constexpr EmberAfDeviceType kOvenTypes[] = { { 0x007B, 2 } };
  * would carry an Identify cluster the C6 does not, breaking the stated
  * invariant that this file's lists mirror what the C6 actually builds, for a
  * cluster ExtractorHood.xml:66-67 lists as optional anyway. Ruled in the
- * batch brief: compose WITHOUT Identify. The cost is four slots and 64 arena
- * bytes cheaper per endpoint, which is incidental.
+ * batch brief: compose WITHOUT Identify. The cost is four slots and 72 arena
+ * bytes cheaper per endpoint (104 against the fan's 176), which is
+ * incidental.
  *
  * Conformance note: ExtractorHood.xml:79-85 marks the FanControl Wind,
  * AirflowDirection and Rocking features disallowConform. This port seeds
@@ -298,7 +301,7 @@ constexpr EmberAfDeviceType kExtractorHoodTypes[] = { { 0x007A, 1 } };
  *   0x0002, Supported 0x0003 (RefrigeratorAlarm/AttributeIds.h:19-29). Every
  *   one is a plain BITMAP32 and every one is ordinary AT+MTATTR-reachable;
  *   only State's WRITE path is diverted to AT+MTALARM (AT_MT_SPEC.md
- *   2356-2362 says reading all three and writing Mask or Supported works
+ *   3.22 says reading all three and writing Mask or Supported works
  *   over AT+MTATTR like any other attribute, and that only writing State
  *   goes through AT+MTALARM so the Notify event actually fires; nothing in
  *   the code enforces that, and a raw write would land in the arena and
@@ -364,10 +367,11 @@ constexpr EmberAfDeviceType kRefrigeratorTypes[] = { { 0x0070, 2 } };
  *   byte-identical). NOT CommandHandlerInterface-only either
  *   (config-data.yaml:21-88), and this time that MATTERS: the cluster
  *   declares SetTemperature, so regenerating hearth.zap added a
- *   TemperatureControl case to IMClusterCommandHandler.cpp, the FIRST new
- *   generated dispatch case since batch 3. Before it, this build dispatched
- *   only Groups, LevelControl, OtaSoftwareUpdateRequestor, OnOff,
- *   SmokeCoAlarm, ModeSelect and Thermostat.
+ *   TemperatureControl case to IMClusterCommandHandler.cpp, the first new
+ *   generated dispatch case since catalogue batch 4. Before it, this build
+ *   dispatched Groups, OnOff, LevelControl, ColorControl, Thermostat,
+ *   WindowCovering, DoorLock, ValveConfigurationAndControl,
+ *   ThreadNetworkDiagnostics, SmokeCoAlarm and ModeSelect.
  *
  *   No Instance and no per-endpoint Delegate. What the SDK keeps is one
  *   file-scope TemperatureControlAttrAccess constructed
@@ -666,7 +670,7 @@ constexpr hearth_shape kCookSurfaceShapes[] = {
  *   disallowConform, along with ChangeToModeResponse
  *   (data_model/1.5/clusters/Mode_MicrowaveOven.xml, the commands block),
  *   which is exactly the treatment the oven cavity gives Pause and Resume
- *   forty lines above; the generated MicrowaveOvenMode/CommandIds.h
+ *   in the cabinet section above; the generated MicrowaveOvenMode/CommandIds.h
  *   consequently carries kAcceptedCommandsCount 0 and kGeneratedCommandsCount
  *   0. Every other ModeBase alias in this file reuses kModeBaseIncoming and
  *   kModeBaseOutgoing, and this one MUST NOT: its incoming and outgoing lists

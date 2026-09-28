@@ -477,7 +477,8 @@ constexpr EmberAfDeviceType kElectricalUtilityMeterTypes[] = { { 0x0511, 1 } };
  * 306 B store = 462 B payload (the nRF's heap charges 472 B,
  * roundup(462 + 4, 8)); v1 446 B payload (456 B there). This port's
  * floor prices the block with its over-count (kDemBlockBytes, 528 B of
- * arena), under the mode select's 608 B widest.
+ * arena), under the widest block (the mode select's 608 B then, 760 since
+ * batch 8).
  *
  * ESAState's shadow seeds kOnline (1), the delegate's default and the
  * spec's pre-first-push answer (3.25); ESAType/ESACanGenerate/OptOutState
@@ -680,7 +681,8 @@ constexpr EmberAfDeviceType kDemTypes[] = { { 0x050D, 3 } };
  * Block: v0 7 clusters, 29 slots, one 306 B mt_mb_store_t = 798 B payload
  * (800 of this port's arena; the nRF's heap charges 808); v1 4 clusters,
  * 19 slots, one store = 626 B payload, 632 of arena. Both wider than the
- * 608 B the other types are sixteen-of, so an admission candidate like
+ * 608 B the other types were sixteen-of at batch 7b (v0 still wider than
+ * the 760 B of DE615, v1 no longer), so an admission candidate like
  * the RVC's (its 936 over-count, 856 exact), compile-time-derived and
  * asserted in mt_devtypes_sl_arena.inc.
  *
@@ -831,9 +833,9 @@ constexpr EmberAfDeviceType kWaterHeaterBareTypes[] = { { 0x050F, 1 } };
  * clusters, 23 slots, no store = 388 B payload, 392 of arena. The nRF audit's 3.6 table said 31 slots / 830 / 832 for v0: it
  * under-counted this list by one slot (its "about 14" PowerSource figure
  * against the real 15 below) and mis-rounded the heap cost; re-derived
- * here per the batch brief; wider than the 608 B the other types are
- * sixteen-of, so an admission candidate like the RVC's, pinned with the
- * corrected arithmetic in mt_devtypes_sl_arena.inc. */
+ * here per the batch brief; wider than the 760 B the other types are
+ * sixteen-of (608 until DE615), so an admission candidate like the RVC's,
+ * pinned with the corrected arithmetic in mt_devtypes_sl_arena.inc. */
 
 HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(rechargeableBatteryPowerSourceAttrs)
 DECLARE_DYNAMIC_ATTRIBUTE(PowerSource::Attributes::Status::Id, ENUM8, 1, 0),

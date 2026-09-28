@@ -289,7 +289,7 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
  * One Instance PLUS one Delegate object per endpoint; the audit trail for
  * why (SetInstance's VerifyOrDie, the AAI-served attribute set, the forced
  * construct-after-create ordering, the never-destroy policy) lives on
- * opStateAttrs in mt_devtypes_zephyr.cpp. This section owns the objects.
+ * opStateAttrs in mt_devtypes_sl_tables_b4.inc. This section owns the objects.
  *
  * The verdict here IS the wire response, unlike the valve: the only caller
  * of each Handle*StateCallback copies err straight into the
@@ -341,7 +341,7 @@ public:
      * reader gets +MTERR:5 either way. A future round that gives this
      * delegate a real countdown must add that carve-out in the same commit
      * or the AT-visible shadow silently goes stale. The full reasoning is at
-     * microwaveOpStateAttrs in mt_devtypes_zephyr.cpp; the note is here
+     * microwaveOpStateAttrs in mt_devtypes_sl_tables_b8.inc; the note is here
      * because this is where the invariant would break. */
     chip::app::DataModel::Nullable<uint32_t> GetCountdownTime() override
     {
@@ -551,8 +551,9 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
  * AT+MTOPSTATE bridge. mt_at.c's cmd_mtopstate has already rejected
  * anything outside the UNION of every opstate cluster family's legal set
  * (and 3, kError, outright) before this is called; this bridge narrows to
- * the legal set of the cluster ep actually carries, two branches since
- * catalogue batch 5: the base cluster's {0 Stopped, 1 Running, 2 Paused}
+ * the legal set of the cluster ep actually carries, three branches since
+ * catalogue batch 8 (two since batch 5):
+ * the base cluster's {0 Stopped, 1 Running, 2 Paused}
  * for the washer/dishwasher/dryer trio, and RvcOperationalState's widened
  * {0, 1, 2, 0x40 kSeekingCharger, 0x41 kCharging, 0x42 kDocked} for the
  * RVC. A union-legal RVC state (0x40..0x42) on a washer answers

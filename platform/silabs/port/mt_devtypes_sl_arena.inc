@@ -99,7 +99,8 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * Block payload is 4 * clusterCount + 16 * slots. The cost is that rounded
  * up to 8 and nothing more (hearth_arena_cost, mt_dyn_store.h: no chunk
  * header, no bucket table, so usable bytes are gross bytes). The types of
- * batches 1 to 3 and batch 4's mode select, the widest; batch 4's other
+ * batches 1 to 3 and batch 4's mode select, the widest until batch 8;
+ * batch 4's other
  * types (power source, smoke/CO, the laundry trio, the chime) are narrower
  * than 608 and priced by the candidates below, not tabled here: batch 5a's
  * pump and room air conditioner (304 B) and generic switch (144 B) are
@@ -549,9 +550,10 @@ constexpr size_t kChimeBlockBytes =
     block_bytes(MT_COUNT(chimeClusters), MT_COUNT(chimeAttrs)) + sizeof(mt_chime_store_t);
 
 /* Catalogue batch 5b, the robotic vacuum cleaner, under admission limits
- * (graph DE566): its block is wider than the 608 B the other types are
- * sixteen-of (as are the water heater's and battery storage's since
- * batch 7b and the energy EVSE's since the EVSE round), so it is NOT
+ * (graph DE566): its block is wider than the 760 B the other types are
+ * sixteen-of since DE615 (608 before; as are the water heater's and
+ * battery storage's since batch 7b and the energy EVSE's since the EVSE
+ * round), so it is NOT
  * folded into kWidestEndpointSlots or kWidestClusterList. It gets its
  * own candidate (Identify, the two ModeBase
  * lists, the operational state list and the two trailing ModeBase stores,
@@ -580,8 +582,9 @@ static_assert(kRvcMaxEndpoints * hearth_arena_cost(kRvcBlockBytes) <= kEpArenaBy
  * wider one (demAttrs strictly contains demReportOnlyAttrs); MT_COUNT
  * over-counts the metadata-only members as ever, only pushing the
  * asserted floor higher than the real 462 B payload. On this port it is
- * 526 B, 528 of arena, and loses to the mode select's 608, so the widest
- * block below does not move; the EVSE round's EVSE (two stores, eight
+ * 526 B, 528 of arena, and loses to the widest block (the mode select's
+ * 608 then, the heater cabinet's 760 since batch 8), so it does not move
+ * it; the EVSE round's EVSE (two stores, eight
  * clusters) took the title, as an admission candidate. */
 constexpr size_t kDemBlockBytes =
     block_bytes(MT_COUNT(demClusters), MT_COUNT(demAttrs) + MT_COUNT(modeBaseAttrs)) +
@@ -725,17 +728,19 @@ static_assert(MT_EVSE_MAX * hearth_arena_cost(kEvseBlockBytes) <= kEpArenaBytes,
 
 /*
  * Catalogue batch 8. Seven new device types and thirteen new realised block
- * shapes, and ONE new candidate, which needs its argument made rather than
- * assumed: the store-reclaim round's rule is that every store-bearing type
+ * shapes, and two new candidates, whose argument needs making rather than
+ * assuming: the store-reclaim round's rule is that every store-bearing type
  * is its own candidate, and eight of the thirteen carry a store.
  *
  * The cook surface variant 1 (381 B), the unparented cabinet variant 1
- * (329), the refrigerator (514), the microwave (530) and the cooler and
- * heater cabinets in every combination are ALL strict subsets of the heater
+ * (329), the refrigerator (514) and the cooler and heater cabinets in
+ * every combination are ALL strict subsets of the heater
  * cabinet variant 1 in both dimensions that matter: it has the most clusters
  * (4), the most slots of any TemperatureLevel shape, and it is the only
  * shape in the batch that carries BOTH new store types at once (a ModeBase
- * store and a label store). So growing either store, or any list either
+ * store and a label store). The microwave (530) is the one exception, 13
+ * slots against 10, and is priced by its own candidate below. So growing
+ * either store, or any list either
  * candidate composes, moves THIS candidate's pinned value and fails the
  * build, which is exactly the drift-proofing the per-type rule buys, without
  * eight near-identical constants that would each have to be kept honest.
