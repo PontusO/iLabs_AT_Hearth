@@ -141,7 +141,9 @@ constexpr size_t kSlotDataBytes = sizeof(attr_slot::data);
  * the water heater and battery storage (batch 7b) are the admitted types
  * below that sixteen: the RVC up to ten (DE566, DE603; ten blocks are
  * 9,360 of 9,728), the water heater up to four (MT_WHM_MAX; four blocks
- * 3,200) and battery storage up to eight (MT_MEAS_MAX; eight blocks 6,784). It is still a stronger
+ * 3,200), battery storage up to eight (MT_MEAS_MAX; eight blocks 6,784)
+ * and the energy EVSE (the EVSE round) up to two (MT_EVSE_MAX; two blocks
+ * 2,288). It is still a stronger
  * promise than the nRF's, whose 8,112 usable bytes hold only 13 of the same
  * extended colour light. The floor below asserts the strong form
  * deliberately: the batch that adds a wider type will fail this build and
@@ -441,18 +443,20 @@ attr_slot *block_slots(const dyn_endpoint &d)
  * does), and the candidates for the types this build does not declare yet
  * (the non-RVC ModeBase families, the temperature-level labels, and the other
  * store-bearing types) come with their batches; the chime (batch 4), the
- * RVC (batch 5b), the DEM (batch 7a-2) and the water heater and battery
- * storage (batch 7b, counted exactly, the nRF's convention) candidates
- * live below. And the
+ * RVC (batch 5b), the DEM (batch 7a-2), the water heater and battery
+ * storage (batch 7b) and the energy EVSE (the EVSE round; these three
+ * counted exactly, the nRF's convention) candidates live below. And the
  * nRF's floor carries a capped half (kFloorDemand, kEvseEndpointCap and its
  * two non-vacuity assertions) that this one does not: it exists because the
  * EVSE's own MT_EVSE_MAX of 2 makes "room for eight of it" a demand no
  * composition can make. The caps this build does carry (the RVC's
  * ten, the measurement family's eight, the DEM's and the water heater's
- * four, the meter's two: DE566, DE584, DE603) are admission limits on the cluster-object arena, not floor
- * demands, so every candidate is uncapped and the floor is
- * the single inequality the nRF had before the EVSE round. The capped half
- * comes back with the EVSE.
+ * four, the meter's and the EVSE's two: DE566, DE584, DE603, DE608) are
+ * admission limits asserted beside their candidates, not floor demands,
+ * so the floor is the single inequality the nRF had before the EVSE
+ * round. The nRF's capped half is not carried even with the EVSE here:
+ * on this port kFloorDemand(MT_EVSE_MAX) is two, and two blocks within
+ * the fixed endpoint arena is exactly the EVSE's admission assert.
  */
 #define MT_COUNT(array) (sizeof(array) / sizeof((array)[0]))
 
@@ -544,7 +548,7 @@ constexpr size_t kChimeBlockBytes =
 /* Catalogue batch 5b, the robotic vacuum cleaner, under admission limits
  * (graph DE566): its block is wider than the 608 B the other types are
  * sixteen-of (as are the water heater's and battery storage's since batch
- * 7b), so it is NOT folded into kWidestEndpointSlots or
+ * 7b and the energy EVSE's since the EVSE round), so it is NOT folded into kWidestEndpointSlots or
  * kWidestClusterList. It gets its own candidate (Identify, the two ModeBase
  * lists, the operational state list and the two trailing ModeBase stores,
  * the MT_COUNT over-count as everywhere here) and a documented maximum of
@@ -577,7 +581,7 @@ static_assert((kRvcMaxEndpoints + 1) * hearth_arena_cost(kRvcBlockBytes) > kEpAr
  * asserted floor higher than the real 462 B payload. On this port it is
  * 526 B, 528 of arena, and loses to the mode select's 608, so the widest
  * block below does not move; the EVSE round's EVSE (two stores, eight
- * clusters) is the candidate expected to take the title. */
+ * clusters) took the title, as an admission candidate. */
 constexpr size_t kDemBlockBytes =
     block_bytes(MT_COUNT(demClusters), MT_COUNT(demAttrs) + MT_COUNT(modeBaseAttrs)) +
     sizeof(mt_mb_store_t);
@@ -599,7 +603,8 @@ static_assert(hearth_arena_cost(kDemBlockBytes) == 528,
  * over-count would overstate their admission arithmetic against the
  * fixed 9,728 B endpoint arena, the opposite of what the asserts are for.
  * Catalogue batch 7b, 2026-09-27: the exact count departs from this
- * port's MT_COUNT convention for these two candidates only.
+ * port's MT_COUNT convention for these two candidates, and the EVSE
+ * round's energy EVSE, only.
  *
  * So these candidates count EXACTLY: MT_COUNT per list minus a NAMED
  * constant for that list's metadata-only members, each constant carrying
@@ -676,6 +681,47 @@ static_assert(hearth_arena_cost(kBatteryStorageBlockBytes) == 848,
 static_assert(MT_MEAS_MAX * hearth_arena_cost(kBatteryStorageBlockBytes) <= kEpArenaBytes,
               "MT_MEAS_MAX battery storage blocks no longer fit the endpoint arena (DE584)");
 
+/*
+ * The EVSE round's candidate, an admission candidate like the RVC's and
+ * batch 7b's two: MT_EVSE_MAX bounds how many of these a composition can
+ * hold, asserted against the fixed endpoint arena below, not folded into
+ * kWidestBlockBytes. Exact
+ * counting, the batch-7b convention: 8 clusters, 12 + 3 + 5 + 3 + 2 + 4 + 2 =
+ * 31 slots and TWO ModeBase stores. The EnergyEvse list has six metadata-only
+ * members (the three amperage_ma currents, NextChargeRequiredEnergy,
+ * BatteryCapacity and SessionEnergyCharged, the quiet-table rows above), the
+ * DEM report-only list two (its two power_mw scalars), and modeBaseAttrs one
+ * each, all named as constants so a list edit moves the pinned sum instead of
+ * going unnoticed.
+ *
+ * The variant-0 list is the wider one (evseAttrs strictly contains
+ * evseNoSocAttrs), so this candidate covers both: v1 is 1,128 B of arena
+ * against v0's 1,144.
+ */
+constexpr size_t kEvseNoSlot = 6;
+
+constexpr size_t kEvseBlockBytes =
+    block_bytes(MT_COUNT(energyEvseClusters),
+                (MT_COUNT(evseAttrs) - kEvseNoSlot) +
+                    (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) +
+                    (MT_COUNT(demReportOnlyAttrs) - kDemNoSlot + 1) +
+                    (MT_COUNT(modeBaseAttrs) - kModeBaseNoSlot) + MT_COUNT(ptopAttrs) +
+                    (MT_COUNT(epmAttrs) - kEpmNoSlot) + (MT_COUNT(eemAttrs) - kEemNoSlot)) +
+    2 * sizeof(mt_mb_store_t);
+/* Payload pinned here; its arena cost (1,144) and admission are pinned
+ * below. kDemNoSlot is
+ * demAttrs' count (three: PowerAdjustmentCapability and the two power_mw
+ * scalars) and the report-only list drops PowerAdjustmentCapability with the
+ * feature, so it has two: the "+ 1" is that difference, spelled out rather
+ * than given a near-duplicate constant of its own. */
+static_assert(kEvseBlockBytes == 1140,
+              "the energy EVSE block changed size; redo the sizing table rows and the EVSE "
+              "round's capacity arithmetic");
+static_assert(hearth_arena_cost(kEvseBlockBytes) == 1144,
+              "the energy EVSE block's arena cost moved off the 1,144 B this round was sized with");
+static_assert(MT_EVSE_MAX * hearth_arena_cost(kEvseBlockBytes) <= kEpArenaBytes,
+              "MT_EVSE_MAX energy EVSE blocks no longer fit the endpoint arena (DE584)");
+
 constexpr size_t kWidestBlockBytes =
     kMax2(block_bytes(kWidestClusterList, kWidestEndpointSlots),
           kMax2(kModeSelectBlockBytes, kMax2(kChimeBlockBytes, kDemBlockBytes)));
@@ -713,9 +759,10 @@ constexpr size_t kArenaUsableBytes = kEpArenaBytes;
  * 9,600 (the ruling of 2026-09-24); catalogue batch 4's store-bearing mode
  * select revisits the choice and keeps the same strong form by raising it
  * from 9,600 to 9,728 (the ruling of 2026-09-26). The RVC (batch 5b) and
- * the water heater and battery storage (batch 7b) stay below this floor
- * by design: their admission limits (the RVC's ten, DE603; MT_WHM_MAX;
- * MT_MEAS_MAX) are asserted beside their candidates against this arena.
+ * the water heater and battery storage (batch 7b) and the energy EVSE (the
+ * EVSE round) stay below this floor by design: their admission limits (the
+ * RVC's ten, DE603; MT_WHM_MAX; MT_MEAS_MAX; MT_EVSE_MAX) are asserted
+ * beside their candidates against this arena.
  *
  * That is deliberate rather than incidental. The next batch that adds a
  * wider device type fails THIS assertion and has to choose, with the numbers

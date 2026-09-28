@@ -8,7 +8,9 @@
  * catalogue batch 7a-2 (nRF 2725-2954): the electrical utility meter
  * (0x0511) and device energy management (0x050D) with its report-only
  * variant; and catalogue batch 7b (nRF 2956-3320): the water heater
- * (0x050F) and battery storage (0x0018), each with its variant.
+ * (0x050F) and battery storage (0x0018), each with its variant; and the
+ * EVSE round (nRF 4112-4400): the energy EVSE (0x050C) with its no-SOC
+ * variant.
  * mt_devtypes_sl.cpp #includes it inside its anonymous namespace, in
  * order with the other fragments, after mt_devtypes_sl_tables_b5.inc
  * and before mt_devtypes_sl_registry.inc, so the whole is still one
@@ -909,6 +911,303 @@ constexpr EmberAfDeviceType kBatteryStorageNoDemTypes[] = { { 0x0018, 2 },
                                                             { 0x0011, 1 },
                                                             { 0x0510, 1 } };
 
+/* ---- energy EVSE (0x050C) ----------------------------------------------
+ *
+ * The last device type, and the one ruling DE408 excluded when the nRF sat
+ * at 96.67 percent of RAM. The nRF's memory reclaim rounds left 46.5 KB free
+ * and made the row staging buffers pay per use, so the exclusion is lifted
+ * WITH A CAP: MT_EVSE_MAX (2, core/include/mt_matter.h:1292), the C6's own
+ * constant, and
+ * a third declared EVSE fails its create with the established loud line while
+ * the composition serves the prefix before it, exactly as the measurement
+ * pools do. On this port the same cap holds, and DE608 grew the
+ * cluster-object arena to 8,464 B so two fit beside the other energy
+ * families at their caps.
+ *
+ * On the nRF, batch 7 audit section 3.8 is the lead this was written from, and it was
+ * written before the const catalogue macros, the object heap, store_walk and
+ * batch 8's shape mechanism existed. Everything below is re-verified against
+ * the pinned NCS tree and against current main; where the audit and the code
+ * disagree the code wins and the disagreement is named at the line. This
+ * port's Silicon Labs SDK carries energy-evse-server sources identical to
+ * the pinned NCS tree's, so the line citations below hold here too.
+ *
+ * ---- THE COMPOSITION, verified against the C6's thunk ------------------
+ *
+ * mk_energy_evse() (platform/esp32c6/main/mt_devtypes.cpp) calls the SDK's
+ * energy_evse::create() and then grafts, so the endpoint's real cluster set
+ * is the union of four things:
+ *
+ *   energy_evse::add()      EnergyEvse 0x0099, EnergyEvseMode 0x009D and a
+ *                           bare DeviceEnergyManagement 0x0098
+ *   feature::charging_preferences::add(), called UNCONDITIONALLY at
+ *                           esp_matter_cluster.cpp:3395, OUTSIDE the
+ *                           CLUSTER_FLAG_SERVER guard that closes one line
+ *                           above it: the four NextCharge* attributes and
+ *                           SetTargets/GetTargets/ClearTargets
+ *   mt_graft_electrical_sensor(ep, true, ...)   PowerTopology 0x009C,
+ *                           ElectricalPowerMeasurement 0x0090 and
+ *                           ElectricalEnergyMeasurement 0x0091, with_eem TRUE
+ *                           on BOTH variants (EVSE.xml revision 2 mandates a
+ *                           composed Electrical Sensor carrying both)
+ *   mt_add_dem_triple(ep, FALSE, ...)   the over-delivered DEM rewired with
+ *                           its delegate and DeviceEnergyManagementMode
+ *                           0x009F, and the 0x050D device type
+ *
+ * EIGHT clusters, the largest list in the catalogue by one (the water
+ * heater's and battery storage's are seven), on both variants. THE AUDIT AND THE CODE DISAGREE ON NOTHING HERE, but one of its
+ * remarks does not survive the port: it says the DEM cluster is "kept, not
+ * stripped ... relying on esp-matter's idempotent duplicate cluster create".
+ * On this port there is no duplicate to reconcile, because nothing creates a
+ * bare DEM first: the list below simply declares DEM once, with the
+ * report-only attribute set.
+ *
+ * ---- THE TWO VARIANTS --------------------------------------------------
+ *
+ * Variant 0 adds SOC reporting, variant 1 does not, and it is a genuine
+ * wire-visible difference rather than decoration: with the SOC feature
+ * Instance::ValidateTargets() makes targetSoC MANDATORY in every charging
+ * target and answers InvalidCommand when it is missing, while without it
+ * targetSoC must be absent or exactly 100. evse_targets_apply_locked()
+ * enforces the identical rule on the AT path so a host cannot install a
+ * schedule a controller's SetTargets would have been refused. Both variants
+ * are conformant; the difference is two attributes and one validation rule.
+ *
+ * ---- WHAT IS NEVER BUILT, AND WHY EACH ONE IS A DELIBERATE OMISSION ----
+ *
+ * PREF (charging preferences) is UNCONDITIONALLY ON, both variants, because
+ * the SDK's own Instance derives the advertised AcceptedCommandList from its
+ * feature mask (RetrieveAcceptedCommands, energy-evse-server.cpp:186-211) and
+ * this port hands it kChargingPreferences. So the four NextCharge*
+ * attributes and SetTargets/GetTargets/ClearTargets exist on every EVSE.
+ *
+ * V2X IS NEVER BUILT, and this is the iron rule (ARCHITECTURE.md 8.12) in its
+ * clearest form yet. Setting the V2X bit would put EnableDischarging in that
+ * derived AcceptedCommandList, and the four V2X attributes
+ * (DischargingEnabledUntil, MaximumDischargeCurrent, SessionEnergyDischarged
+ * and the discharge half of the session) are NOT declared below, so a
+ * hand-set bit would advertise a command with no attribute behind it and a
+ * capability this firmware has no host story for. On the C6 the rule is
+ * "never write FeatureMap, always feature::add()"; here there is no
+ * feature::add(), so it inverts into "the mask handed to the Instance and the
+ * declared list are one decision", which is what mt_matter_evse_register()'s
+ * with_soc argument and this list are.
+ *
+ * RFID IS NEVER BUILT either. On the C6, feature::rfid::add() sets the bit
+ * and creates nothing at all, not even the Rfid event metadata the XML
+ * declares, so an advertising endpoint would answer an empty shell to any
+ * controller that subscribed. Here it would be one bit with no consequence,
+ * which is worse rather than better: a truthful FeatureMap is the whole
+ * point.
+ *
+ * PLUG-AND-CHARGE IS NEVER BUILT: VehicleID is a char_string with no host
+ * story, and the delegate's getter answers a null CharSpan for exactly that
+ * reason.
+ *
+ * STARTDIAGNOSTICS IS NEVER ADVERTISED: the Instance is constructed with an
+ * EMPTY OptionalCommands mask, so RetrieveAcceptedCommands never appends it
+ * and an invoke answers UnsupportedCommand. The delegate implements the pure
+ * virtual and can never be reached, which is coherent and needs no fix. The
+ * C6 reaches the same wire by a different route (esp-matter declares
+ * command::create_start_diagnostics and has zero callers for it).
+ *
+ * THE THREE OPTIONAL WRITABLES are not declared: UserMaximumChargeCurrent,
+ * RandomizationDelayWindow and ApproximateEVEfficiency. esp-matter creates
+ * none of them, the Instance gates each one on an OptionalAttributes mask
+ * this port constructs empty, and AT+MTMEAS fields 7, 8 and 13 therefore
+ * answer +MTERR:4 on every variant, exactly as AT_MT_SPEC.md 3.25 says.
+ *
+ * ---- THE ATTRIBUTE LISTS ------------------------------------------------
+ *
+ * EnergyEvse's three answers: code-driven no, CHI-only YES (its seven
+ * commands have no generated dispatch; the batch's zap regeneration (on the nRF build) left
+ * IMClusterCommandHandler.cpp and CodeDrivenInitShutdown.cpp byte-identical,
+ * as batch 7's audit 5.5 predicted), AAI YES per endpoint (Instance derives
+ * from both AttributeAccessInterface and CommandHandlerInterface,
+ * energy-evse-server.h:176-186, and its ctor calls both SetEndpointId() and
+ * SetInstance() on the delegate). Init() registers the CHI then the AAI, SOFT
+ * on both (energy-evse-server.cpp:40-46): no emberAfContainsServer check, no
+ * VerifyOrDie, so an ordering mistake here cannot panic the device, unlike
+ * the ModeBase alias riding beside it.
+ *
+ * Instance::Read() serves ALL 23 attributes from the delegate and falls
+ * through to ember only for ClusterRevision (:68-133), so every slot below is
+ * an INERT SHADOW except ClusterRevision, whose seed is live, and the DE397
+ * carve-out in mt_matter_sl.cpp is what makes an AT read answer the same
+ * value a subscribed controller sees.
+ *
+ * SIX of the declarations are metadata-only, the DE407 option-C shape: the
+ * three amperage_ma currents, NextChargeRequiredEnergy, BatteryCapacity and
+ * SessionEnergyCharged are 8-byte ZCL types that attr_gets_slot() refuses a
+ * 4-byte slot, and they are Instance-served, so they take quiet-table rows
+ * below rather than shouting at boot.
+ *
+ * Slots: v0 = State, SupplyState, FaultState, ChargingEnabledUntil,
+ * SessionID, SessionDuration, FeatureMap, NextChargeStartTime,
+ * NextChargeTargetTime, NextChargeTargetSoC, StateOfCharge and
+ * ClusterRevision = 12; v1 drops StateOfCharge = 11. That is the audit's
+ * 12/11 exactly.
+ *
+ * ---- THE BLOCK ---------------------------------------------------------
+ *
+ * 8 clusters, 31 slots on v0 (12 EVSE + 3 EvseMode + 5 DEM + 3 DEMMode + 2
+ * PTOP + 4 EPM + 2 EEM) and TWO mt_mb_store_t, the second type after the RVC
+ * to carry two: 32 + 496 + 612 = 1,140 B payload, 1,144 of this port's
+ * arena. The widest block in the catalogue (the RVC's is 936 by this
+ * port's over-count, 856 exact; battery storage's 848), and an admission
+ * candidate like the RVC's (kEvseBlockBytes in mt_devtypes_sl_arena.inc).
+ * Variant 1 is 1,124 B payload, 1,128 of arena.
+ *
+ * ---- EVENTS -------------------------------------------------------------
+ *
+ * CumulativeEnergyMeasured, from the EEM push path (batch 7a), and nothing
+ * else: EVSEs, EVNotDetected, EnergyTransferStarted/Stopped and Fault are all
+ * declared by the cluster XML and emitted by nobody, on either platform,
+ * because this firmware has no host verb that would say when one happened.
+ *
+ * Device revision 2 per data_model/1.5/device_types/EVSE.xml:60. */
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(evseAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::State::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::SupplyState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::FaultState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::ChargingEnabledUntil::Id, EPOCH_S, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::CircuitCapacity::Id, AMPERAGE_MA, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::MinimumChargeCurrent::Id, AMPERAGE_MA, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::MaximumChargeCurrent::Id, AMPERAGE_MA, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::NextChargeStartTime::Id, EPOCH_S, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::NextChargeTargetTime::Id, EPOCH_S, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::NextChargeRequiredEnergy::Id, ENERGY_MWH, 8,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::NextChargeTargetSoC::Id, PERCENT, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::StateOfCharge::Id, PERCENT, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::BatteryCapacity::Id, ENERGY_MWH, 8,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::SessionID::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::SessionDuration::Id, ELAPSED_S, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::SessionEnergyCharged::Id, ENERGY_MWH, 8,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+/* Variant 1, without SOC reporting: the same list minus StateOfCharge and
+ * BatteryCapacity, the two attributes soc_reporting::add() creates. The
+ * FeatureMap seed drops the bit with them, and mt_matter_evse_register()
+ * builds the Instance's mask by asking THIS list for StateOfCharge (the
+ * create path's second half), so the declared list and the Instance cannot
+ * disagree: one is derived from the other. The SEED is the one of the three
+ * that is not, being a table row keyed on the variant, and it agrees because
+ * the registry selects the list by that same variant; if a future row ever
+ * breaks that, the seed is the copy that goes wrong, and it is an inert
+ * shadow (the Instance serves FeatureMap from mFeature), so it would go
+ * wrong quietly. That is the DEM report-only list's rule with its one real
+ * weak point named rather than glossed. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(evseNoSocAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::State::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::SupplyState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::FaultState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::ChargingEnabledUntil::Id, EPOCH_S, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::CircuitCapacity::Id, AMPERAGE_MA, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::MinimumChargeCurrent::Id, AMPERAGE_MA, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::MaximumChargeCurrent::Id, AMPERAGE_MA, 8, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::NextChargeStartTime::Id, EPOCH_S, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::NextChargeTargetTime::Id, EPOCH_S, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::NextChargeRequiredEnergy::Id, ENERGY_MWH, 8,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::NextChargeTargetSoC::Id, PERCENT, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::SessionID::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::SessionDuration::Id, ELAPSED_S, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::SessionEnergyCharged::Id, ENERGY_MWH, 8,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(EnergyEvse::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+/* The five commands the Instance really advertises under
+ * kChargingPreferences, and no more: Disable and EnableCharging are
+ * unconditional, SetTargets/GetTargets/ClearTargets ride PREF, and
+ * EnableDischarging (V2X) and StartDiagnostics (an optional command with an
+ * empty mask) are absent from BOTH this list and the Instance's own derived
+ * one. The two must agree: RetrieveAcceptedCommands is what a controller
+ * reads, and a declared-but-unadvertised command is the quiet incoherence the
+ * DE399 truthfulness discipline exists to prevent. */
+constexpr CommandId kEvseIncoming[] = { EnergyEvse::Commands::Disable::Id,
+                                        EnergyEvse::Commands::EnableCharging::Id,
+                                        EnergyEvse::Commands::SetTargets::Id,
+                                        EnergyEvse::Commands::GetTargets::Id,
+                                        EnergyEvse::Commands::ClearTargets::Id,
+                                        kInvalidCommandId };
+
+/* GetTargetsResponse is the port's second outgoing command list, after the
+ * OperationalState trio's, and unlike that one it is not a DE399 disclosure:
+ * GetTargets really does answer with it (HandleGetTargets calls
+ * AddResponse()), so declaring it is the truthful thing to do. */
+constexpr CommandId kEvseOutgoing[] = { EnergyEvse::Commands::GetTargetsResponse::Id,
+                                        kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(energyEvseClusters)
+DECLARE_DYNAMIC_CLUSTER(EnergyEvse::Id, evseAttrs, ZAP_CLUSTER_MASK(SERVER), kEvseIncoming,
+                        kEvseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(EnergyEvseMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demReportOnlyAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+/* Variant 1: the identical eight clusters with the no-SOC EnergyEvse list.
+ * Nothing else moves, which is why the two variants draw the same six
+ * per-endpoint objects and differ by 16 block bytes. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(energyEvseNoSocClusters)
+DECLARE_DYNAMIC_CLUSTER(EnergyEvse::Id, evseNoSocAttrs, ZAP_CLUSTER_MASK(SERVER), kEvseIncoming,
+                        kEvseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(EnergyEvseMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagement::Id, demReportOnlyAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(DeviceEnergyManagementMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(PowerTopology::Id, ptopAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalPowerMeasurement::Id, epmAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(ElectricalEnergyMeasurement::Id, eemAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(energyEvseEndpoint, energyEvseClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(energyEvseNoSocEndpoint, energyEvseNoSocClusters);
+
+/* Three device types on one endpoint, the same span on both variants: the
+ * sensor graft and the DEM triple are unconditional here, unlike the water
+ * heater's (whose variant 1 loses the graft and its 0x0510 id together), so
+ * this row needs no device_types_v1. 0x050C revision 2 per EVSE.xml:60,
+ * 0x0510 revision 1 and 0x050D revision 3 matching their standalone rows. */
+constexpr EmberAfDeviceType kEnergyEvseTypes[] = { { 0x050C, 2 }, { 0x0510, 1 }, { 0x050D, 3 } };
+
 /*
  * The DE407 quiet table (nRF mt_devtypes_zephyr.cpp 4924-4988): the
  * specific (cluster, attribute) pairs whose over-wide scalar declarations
@@ -919,8 +1218,8 @@ constexpr EmberAfDeviceType kBatteryStorageNoDemTypes[] = { { 0x0018, 2 },
  * declarations are refused a slot by attr_gets_slot()'s size clause; this
  * table only silences the boot shout for the proven pairs. Catalogue batch
  * 7a-1 brought the seven ElectricalPowerMeasurement rows, 7a-2 the two
- * DeviceEnergyManagement rows and 7b the WaterHeaterManagement row; the
- * nRF's EnergyEvse rows arrive with the EVSE round.
+ * DeviceEnergyManagement rows, 7b the WaterHeaterManagement row and the
+ * EVSE round the six EnergyEvse rows.
  */
 struct quiet_no_slot_attr {
     ClusterId cluster;
@@ -950,6 +1249,21 @@ constexpr quiet_no_slot_attr kQuietNoSlot[] = {
      * (water-heater-management-server.cpp:128-133; the carve-out serves
      * the AT side). Declared 8 B in whmAttrs, variant 0 only. */
     { WaterHeaterManagement::Id, WaterHeaterManagement::Attributes::EstimatedHeatRequired::Id },
+    /* EnergyEvse (the EVSE round): the six 8-byte scalars, served by
+     * Instance::Read()'s own cases from the HearthEvseDelegate cache
+     * (energy-evse-server.cpp:73-127; the k_instance_served carve-out serves
+     * the AT side). Three amperage_ma currents that are declared on both
+     * variants, NextChargeRequiredEnergy which rides unconditional PREF,
+     * SessionEnergyCharged which is mandatory, and BatteryCapacity which is
+     * variant 0 only; a variant-1 endpoint never declares that last one, so
+     * its row is simply never consulted there. Admitted one pair at a time
+     * per the DE407 ruling, never by type. */
+    { EnergyEvse::Id, EnergyEvse::Attributes::CircuitCapacity::Id },
+    { EnergyEvse::Id, EnergyEvse::Attributes::MinimumChargeCurrent::Id },
+    { EnergyEvse::Id, EnergyEvse::Attributes::MaximumChargeCurrent::Id },
+    { EnergyEvse::Id, EnergyEvse::Attributes::NextChargeRequiredEnergy::Id },
+    { EnergyEvse::Id, EnergyEvse::Attributes::BatteryCapacity::Id },
+    { EnergyEvse::Id, EnergyEvse::Attributes::SessionEnergyCharged::Id },
 };
 
 bool attr_quiet_no_slot(ClusterId cluster, AttributeId attr)

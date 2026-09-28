@@ -45,7 +45,7 @@
  *   water valve (0x0042)               nRF 1358-1484  whole
  *   the parenting policy               nRF 3325-3428  whole (predicate + shape struct)
  *   the registry                       nRF 4402-4641  all 52 rows' identity,
- *                                                     forty-four rows' cluster
+ *                                                     forty-five rows' cluster
  *                                                     sets
  *   the external attribute store       nRF 4642-4658  whole
  *   the endpoint block arena           nRF 4659-5272  on a bump arena
@@ -58,7 +58,7 @@
  *   mt_dyn_mode_store() and
  *     mt_dyn_chime_store()             nRF 7084-7116  whole
  *   mt_dyn_mb_store()                  nRF 7118-7159  whole
- *   the mt_devtypes.h quartet          nRF 7189-8413  the forty-four ported
+ *   the mt_devtypes.h quartet          nRF 7189-8413  the forty-five ported
  *                                                     types
  *   the ember external-attribute hooks nRF 8415-8451  whole
  *
@@ -84,9 +84,9 @@
  * The DE407 quiet table (nRF 4924-4988, kQuietNoSlot and
  * attr_quiet_no_slot) arrived with catalogue batch 7a-1 in
  * mt_devtypes_sl_tables_b7.inc, its seven ElectricalPowerMeasurement rows,
- * 7a-2 added the two DeviceEnergyManagement rows and 7b the
- * WaterHeaterManagement row: the table admits one proven pair at a time,
- * so the nRF's EnergyEvse rows arrive with the EVSE round.
+ * 7a-2 added the two DeviceEnergyManagement rows, 7b the
+ * WaterHeaterManagement row and the EVSE round the six EnergyEvse rows:
+ * the table admits one proven pair at a time.
  * The type-conditional trailing stores (nRF 5032-5197, kStoreWalk,
  * store_walk, store_offset and the four sizeof/alignof assertions) arrived
  * with catalogue batch 4, when the first store-bearing type, the mode

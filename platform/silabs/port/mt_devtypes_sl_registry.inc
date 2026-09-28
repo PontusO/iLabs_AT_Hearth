@@ -104,7 +104,7 @@ struct hearth_shape {
  * span REPLACES the ep_type/ep_type_v1 selection entirely.
  *
  * In THIS build every one of those four members is null or empty on every
- * row but the forty-four ported ones, which carry ep_type and device_types
+ * row but the forty-five ported ones, which carry ep_type and device_types
  * and, on the variant rows, ep_type_v1 and device_types_v1.
  */
 struct hearth_devtype {
@@ -219,8 +219,12 @@ constexpr hearth_devtype s_registry[] = {
     { kDtTempControlledCabinet, 1 },                                    /* batch 8: temperature controlled cabinet */
     { kDtCookSurface, 1 },                                              /* batch 8: cook surface */
     { 0x0079, 0 },                                                      /* batch 8: microwave oven */
-    /* The EVSE round: the fifty-second and last row, closing the catalogue. */
-    { 0x050C, 1 },                                                      /* EVSE round: energy EVSE */
+    /* The EVSE round: the fifty-second and last row, closing the catalogue.
+     * Two variants split on SOC reporting, one device-type span for both (the
+     * declaration's note), no shape map: its cluster set does not depend on a
+     * parent and the policy is permissive for it. */
+    { 0x050C, 1, &energyEvseEndpoint, Span<const EmberAfDeviceType>(kEnergyEvseTypes),
+      &energyEvseNoSocEndpoint },
 };
 
 static_assert(sizeof(s_registry) / sizeof(s_registry[0]) == 52,
@@ -249,7 +253,7 @@ static_assert(sizeof(s_registry) / sizeof(s_registry[0]) == 52,
  * unserved, and mt_devtype_create() refuses it before the parent is even
  * looked at. So the per-row body is skipped for those, and what the
  * assertion now proves is the same property over the rows that can be
- * created. It does NOT weaken into vacuity: the forty-four ported rows are
+ * created. It does NOT weaken into vacuity: the forty-five ported rows are
  * checked in full, the parent universe is still the whole 52-row registry (so a
  * future restricted row is enumerated against every catalogue id from the
  * moment it gains a cluster set), and the day a batch gives the cabinet or
