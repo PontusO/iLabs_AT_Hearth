@@ -56,6 +56,7 @@
 #include <cstdio>
 
 #include "hearth_log.h"
+#include "hearth_ota_sl.h"
 
 /*
  * Route CHIP's own log output to Hearth's console (USART0 TX on PA00).
@@ -188,6 +189,10 @@ void hearth_matter_log_route_init(void)
 
 CHIP_ERROR hearth_matter_init(const char *ble_name)
 {
+    /* FOTA: before InitChipStack(), which runs ConfigurationMgr().Init() on
+     * whatever manager is installed by then (hearth_ota_sl.cpp). */
+    hearth_swver_install();
+
     /* SilabsMatterConfig::AppInit():238. NvmInit() (SilabsConfig::Init() plus
      * the NVM3 key migrations) is what KeyValueStoreManagerImpl and
      * ConfigurationManagerImpl read through, so this is not optional; it also
@@ -199,6 +204,11 @@ CHIP_ERROR hearth_matter_init(const char *ble_name)
 
     ChipLogProgress(DeviceLayer, "Init CHIP Stack"); /* :273 */
     ReturnErrorOnFailure(PlatformMgr().InitChipStack()); /* :286 */
+
+    /* FOTA: the stored product version in force before Server::Init(),
+     * where Basic Information starts answering and the requestor latches
+     * the running version. */
+    hearth_swver_load();
 
     /* :288. This REPLACES the advertised name rather than prefixing it:
      * BLEManagerImpl.cpp:251-266 sets kDeviceNameSet, and :466-471 is the
@@ -262,6 +272,13 @@ CHIP_ERROR hearth_matter_init(const char *ble_name)
         SetDeviceInfoProvider(&sDeviceInfoProvider);
 
         err = Server::GetInstance().Init(sInitParams); /* :377 */
+
+        /* FOTA: Hearth's requestor, under this lock and before the event
+         * loop starts (hearth_ota_sl.cpp says why here and not on
+         * kServerReady). Nothing to wire on a failed Init. */
+        if (err == CHIP_NO_ERROR) {
+            hearth_ota_wire();
+        }
     }
     ReturnErrorOnFailure(err); /* :391, reported after the lock is dropped */
 

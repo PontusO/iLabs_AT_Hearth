@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """check_decls.py - every hearth_port.h / mt_matter.h / mt_devtypes.h /
 hearth_console.h declaration must have exactly one function definition in
-the Silabs port file behind it, or across the pair of files that share the
-header while the stubs are being retired. -fsyntax-only alone proves a stub
+the Silabs port file behind it, or across the set of files that share the
+header (stub + sl.cpp, plus hearth_ota_sl.cpp and the shared
+hearth_ota_requestor.cpp for mt_matter.h). -fsyntax-only alone proves a stub
 compiles clean; it says nothing about a missing or duplicated definition.
 This does."""
 import os
@@ -11,6 +12,7 @@ import sys
 
 CORE = "../../core/include"
 PORT = "../../platform/silabs/port"
+COMMON = "../../platform/common"
 DECL_START = re.compile(r'^[A-Za-z_][A-Za-z0-9_ \*]*\(')
 
 
@@ -100,7 +102,9 @@ def check(header, impls, label):
 
 rc = 0
 rc |= check(CORE + "/mt_matter.h",
-            [PORT + "/mt_matter_stub.c", PORT + "/mt_matter_sl.cpp"], "mt_matter.h")
+            [PORT + "/mt_matter_stub.c", PORT + "/mt_matter_sl.cpp",
+             PORT + "/hearth_ota_sl.cpp", COMMON + "/hearth_ota_requestor.cpp"],
+            "mt_matter.h")
 rc |= check(CORE + "/mt_devtypes.h",
             [PORT + "/mt_devtypes_stub.c", PORT + "/mt_devtypes_sl.cpp"], "mt_devtypes.h")
 rc |= check(CORE + "/hearth_port.h", [PORT + "/hearth_port_sl.c"], "hearth_port.h")
