@@ -349,3 +349,458 @@ DECLARE_DYNAMIC_CLUSTER(RefrigeratorAndTemperatureControlledCabinetMode::Id, mod
 HEARTH_DECLARE_CONST_ENDPOINT(refrigeratorEndpoint, refrigeratorClusters);
 
 constexpr EmberAfDeviceType kRefrigeratorTypes[] = { { 0x0070, 2 } };
+
+/* ---- TemperatureControl (0x0056), and its two mutually exclusive shapes -
+ *
+ * Catalogue batch 8 audit. One cluster, two declared attribute lists, and
+ * the variant picks which. Shared verbatim by the Temperature Controlled
+ * Cabinet (0x0071) and the Cook Surface (0x0077), which is what forced the
+ * seed table's variant column: the two device types need the SAME
+ * variant-dependent FeatureMap, so no device-type-qualified row could split
+ * them.
+ *
+ *   Code-driven? No (absent from CodeDrivenClusters, config-data.yaml:
+ *   144-168; the regeneration left CodeDrivenInitShutdown.cpp
+ *   byte-identical). NOT CommandHandlerInterface-only either
+ *   (config-data.yaml:21-88), and this time that MATTERS: the cluster
+ *   declares SetTemperature, so regenerating hearth.zap added a
+ *   TemperatureControl case to IMClusterCommandHandler.cpp, the FIRST new
+ *   generated dispatch case since batch 3. Before it, this build dispatched
+ *   only Groups, LevelControl, OtaSoftwareUpdateRequestor, OnOff,
+ *   SmokeCoAlarm, ModeSelect and Thermostat.
+ *
+ *   No Instance and no per-endpoint Delegate. What the SDK keeps is one
+ *   file-scope TemperatureControlAttrAccess constructed
+ *   Optional<EndpointId>::Missing() (temperature-control-server.cpp:40-49),
+ *   i.e. a wildcard AttributeAccessInterface serving
+ *   SupportedTemperatureLevels on every endpoint, and one process-global
+ *   SupportedTemperatureLevelsIteratorDelegate * behind free-function
+ *   GetInstance()/SetInstance() (:37, :56-66). The AAI is registered by
+ *   MatterTemperatureControlPluginServerInitCallback() (:232-235), which is
+ *   emitted into MATTER_PLUGINS_INIT only because the cluster is now in the
+ *   zap; miss that and SupportedTemperatureLevels answers
+ *   UnsupportedAttribute on every cabinet, silently. The iterator delegate
+ *   is the SDK's usual "the app must supply it" hole: SetInstance() has no
+ *   caller anywhere in the SDK, so the port calls it itself, exactly as the
+ *   C6 does (main.cpp:1829).
+ *
+ *   Init()? None by that name, and no VerifyOrDie anywhere in this cluster.
+ *   emberAfTemperatureControlClusterServerInitCallback() is an empty body
+ *   (:230). No ordering hazard at all.
+ *
+ *   Events: none.
+ *
+ * SetTemperature IS NOT A +MTCMD CONSUMER, on either platform, and that is
+ * worth stating loudly because every other adjudicated cluster in this
+ * firmware is. The whole command is handled by the ember callback
+ * (temperature-control-server.cpp:112-224): it range-checks the target
+ * against MinTemperature/MaxTemperature, enforces the Step modulus
+ * (:150-168), then writes TemperatureSetpoint (:169) or
+ * SelectedTemperatureLevel (:186). Those writes land in this port's arena
+ * and DO raise a +MTATTR URC through MatterPostAttributeChangeCallback(). So
+ * a controller changing a cabinet's setpoint reaches the host as an
+ * attribute URC, never as a command forward, and the host has no veto. The
+ * C6 overrides nothing here either.
+ *
+ * THE FEATUREMAP IS FUNCTIONALLY LOAD-BEARING, not descriptive. The callback
+ * reads it back through TemperatureControlHasFeature() to choose its branch
+ * (:117-124, :183), so the seeded value and the declared list must agree or
+ * a healthy endpoint rejects valid commands: with BOTH bits set it answers
+ * Failure outright (:118-123), and on the TemperatureLevel branch a null
+ * iterator delegate answers NotFound (:188-192). The C6 enforces
+ * exactly-one at cluster-create time through VALIDATE_FEATURES_EXACT_ONE;
+ * here the two separate declared lists plus the two variant-qualified seed
+ * rows are what enforce it.
+ *
+ * The Step bit rides variant 0 with TemperatureNumber, and that is the B119
+ * fix carried over rather than rediscovered: Step is its own feature
+ * (esp_matter_feature.cpp:1943-1966), and a TemperatureNumber cabinet
+ * without it answered +MTERR:4 to every host-library begin(). */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(temperatureControlNumberAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::TemperatureSetpoint::Id, INT16S, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::MinTemperature::Id, INT16S, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::MaxTemperature::Id, INT16S, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::Step::Id, INT16S, 2, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+/* SupportedTemperatureLevels is declared ARRAY size 0: metadata-only, so
+ * AttributeList stays truthful while attr_gets_slot() refuses it a slot and
+ * seed_slots() skips it quietly. It is served by the SDK's wildcard AAI out
+ * of this endpoint's block-resident label store, and it doubles as the
+ * kStoreWalk discriminator that tells this list from the number list above
+ * (they share a cluster id). AT+MTATTR has no path to it at all
+ * (AT_MT_SPEC.md 3.16); AT+MTTEMPLEVELS is how a host fills it. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(temperatureControlLevelAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::SelectedTemperatureLevel::Id, INT8U, 1,
+                          0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::SupportedTemperatureLevels::Id,
+                              ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(TemperatureControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+/* SetTemperature is mandatory on both variants (temperature-control-cluster.xml
+ * :83 declares it with no optional attribute) and, unlike every other
+ * incoming list in this file, it is answered entirely inside the SDK: the
+ * generated dispatch case the zap regeneration added calls
+ * emberAfTemperatureControlClusterSetTemperatureCallback(), which validates
+ * and writes an arena attribute. No outgoing list: the command's response is
+ * a plain status, not a response command. */
+constexpr CommandId kTemperatureControlIncoming[] = {
+    TemperatureControl::Commands::SetTemperature::Id, kInvalidCommandId
+};
+
+/* ---- temperature controlled cabinet (0x0071), unparented -----------------
+ *
+ * Catalogue batch 8. The bare cabinet: TemperatureControl and Descriptor and
+ * nothing else, which is exactly what the C6 builds, because
+ * temperature_controlled_cabinet::add() calls add_device_type() then
+ * temperature_control::create() and stops (esp_matter_endpoint.cpp:
+ * 1308-1316), and its config_t is {descriptor, temperature_control} with no
+ * identify field. TemperatureControlledCabinet.xml lists no Identify either,
+ * so there is NO Identify on a cabinet on either platform.
+ *
+ * These are two of the cabinet's six realised shapes, the two the parent
+ * does not touch; the Cooler and Heater halves are below. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetNumberClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlNumberAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetLevelClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlLevelAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetNumberEndpoint, cabinetNumberClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetLevelEndpoint, cabinetLevelClusters);
+
+/* Revision 5 per data_model/1.5/device_types/TemperatureControlledCabinet.xml.
+ * The advertised span does NOT change with the parent, unlike the water
+ * heater's and battery storage's variant spans: a Cooler cabinet and a
+ * Heater cabinet are both 0x0071 revision 5, and the conformance difference
+ * lives in the cluster set alone. */
+constexpr EmberAfDeviceType kCabinetTypes[] = { { 0x0071, 5 } };
+
+/* ---- the cabinet's parent-conditional halves --------------------------
+ *
+ * Catalogue batch 8. Four more shapes, and the batch's one genuinely good
+ * surprise: where the C6 had to HAND-ROLL two entire cluster shells because
+ * esp-matter ships no cluster::oven_mode and no
+ * cluster::oven_cavity_operational_state namespace at all
+ * (ARCHITECTURE.md records that as the section 8.6 disease at its
+ * worst grade), CHIP ships both server halves. OvenMode is a plain
+ * mode-base-server alias (zap_cluster_list.json:279), so modeBaseAttrs and
+ * the two shared ModeBase command lists carry it verbatim, and
+ * OvenCavityOperationalState::Instance is a purpose-built public subclass
+ * that forwards to the protected three-argument OperationalState::Instance
+ * ctor with the id baked in (operational-state-server.h:459-478). It adds no
+ * data members, so opStateAttrs is reused verbatim too and the existing
+ * OperationalState Instance storage is exactly the right size (asserted at
+ * the pool in mt_matter_sl_b4.inc).
+ *
+ * THE CAVITY'S COMMAND LIST IS NARROWER THAN THE BASE CLUSTER'S, and that is
+ * not an omission. operational-state-oven-cluster.xml declares Stop (0x01)
+ * and Start (0x02) only; Pause (0x00) and Resume (0x03) are disallowConform
+ * on this derived cluster, so a controller invoking either gets
+ * UNSUPPORTED_COMMAND from the data model with nothing reaching the host at
+ * all (AT_MT_SPEC.md 3.17). The outgoing list is the shared
+ * kOpStateOutgoing: OperationalCommandResponse is 0x04 in the cavity's own
+ * generated CommandIds.h as well, so one constant serves both.
+ *
+ * Revisions are this tree's own Metadata.h, as ever, and BOTH diverge
+ * downward from the C6, which hand-set 2 for each from the 1.5.1 XMLs
+ * (mt_devtypes.cpp:1200, :1218) rather than copying the 4 and 3 its mirrored
+ * rvc_run_mode / rvc_operational_state bodies carried. This tree says
+ * OvenMode 1 and OvenCavityOperationalState 1. Disclosable, not a bug: the
+ * port's convention has been this tree's kRevision since batch 2, and the
+ * cavity's is inert anyway because Instance::Read() answers ClusterRevision
+ * itself. */
+constexpr CommandId kOvenCavityIncoming[] = { OvenCavityOperationalState::Commands::Stop::Id,
+                                              OvenCavityOperationalState::Commands::Start::Id,
+                                              kInvalidCommandId };
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetCoolerNumberClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlNumberAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(RefrigeratorAndTemperatureControlledCabinetMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetCoolerLevelClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlLevelAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(RefrigeratorAndTemperatureControlledCabinetMode::Id, modeBaseAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetHeaterNumberClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlNumberAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(OvenMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(OvenCavityOperationalState::Id, opStateAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kOvenCavityIncoming, kOpStateOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cabinetHeaterLevelClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlLevelAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(OvenMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kModeBaseIncoming, kModeBaseOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(OvenCavityOperationalState::Id, opStateAttrs,
+                            ZAP_CLUSTER_MASK(SERVER), kOvenCavityIncoming, kOpStateOutgoing),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetCoolerNumberEndpoint, cabinetCoolerNumberClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetCoolerLevelEndpoint, cabinetCoolerLevelClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetHeaterNumberEndpoint, cabinetHeaterNumberClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cabinetHeaterLevelEndpoint, cabinetHeaterLevelClusters);
+
+/* All six realised shapes, and the whole point of the mechanism: the
+ * composition blob stores only device type, variant and parent index, and
+ * this table is what turns the pair into a cluster set at rebuild time. A
+ * host cannot ask for a different set, and changing a cabinet's parent
+ * changes the cabinet (AT_MT_SPEC.md 3.9). */
+constexpr hearth_shape kCabinetShapes[] = {
+    { 0, 0, &cabinetNumberEndpoint },
+    { 1, 0, &cabinetLevelEndpoint },
+    { 0, kDtRefrigerator, &cabinetCoolerNumberEndpoint },
+    { 1, kDtRefrigerator, &cabinetCoolerLevelEndpoint },
+    { 0, kDtOven, &cabinetHeaterNumberEndpoint },
+    { 1, kDtOven, &cabinetHeaterLevelEndpoint },
+};
+
+/* ---- cook surface (0x0077) ---------------------------------------------
+ *
+ * Catalogue batch 8. TemperatureControl (either variant) plus an OffOnly
+ * OnOff plus Descriptor, and no Identify: cook_surface::config_t is
+ * {descriptor, temperature_control} (esp_matter_endpoint.h:832-841) and
+ * CookSurface.xml lists only OnOff, TemperatureControl and
+ * TemperatureMeasurement.
+ *
+ * THE ONLY DEVICE TYPE IN THE CATALOGUE THAT REQUIRES A PARENT. Both shapes
+ * name a Cooktop; the unparented form has no shape at all, which is the
+ * cluster-set half of what mt_devtype_parent_ok() says on the AT+MTEP= line
+ * itself (+MTERR:1, AT_MT_SPEC.md 3.9). It is also the only append this
+ * platform can reject for a reason no earlier nRF test exercises.
+ *
+ * THE C6'S B216 SCRUB IS NOT MIRRORED, AND THAT IS DELIBERATE.
+ * cook_surface::add() OVERWRITES config->temperature_control.feature_flags
+ * with temperature_level before creating the cluster
+ * (esp_matter_endpoint.cpp:1540), so pre-set flags cannot survive; the C6's
+ * thunk therefore destroys the forced TemperatureLevel cluster after
+ * create() and rebuilds it as TemperatureNumber plus Step, for variant 0
+ * only (mt_devtypes.cpp:1305-1321). None of that transfers: this port
+ * declares its lists, so there is nothing to overwrite and nothing to
+ * destroy. What DOES transfer is the reason B216 existed, that the two
+ * variants must be distinguishable on the wire, and the two declared lists
+ * deliver it directly. The regression net that caught B216 (AT+MTATTR on
+ * 0x0056/0x0000 and 0x0003 answering on v0 and +MTERR:4 on v1, and
+ * AT+MTTEMPLEVELS accepted on v1 only) is the right check here too.
+ *
+ * The OffOnly OnOff is the cooktop's list one endpoint down: racOnOffAttrs
+ * with kOnOffOffOnlyIncoming, and the same device-type-qualified 0x04
+ * FeatureMap seed. CookSurface.xml:67-73 makes OnOff optional with OFFONLY
+ * mandatory inside it, so composing it at all is the C6's superset choice
+ * mirrored, not a requirement; AT_MT_SPEC.md 3.9 already tells hosts
+ * that turning a surface on is an AT+MTATTR write of 0x0006/0x0000.
+ *
+ * Revision 2 per data_model/1.5/device_types/CookSurface.xml. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cookSurfaceNumberClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlNumberAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kOnOffOffOnlyIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(cookSurfaceLevelClusters)
+DECLARE_DYNAMIC_CLUSTER(TemperatureControl::Id, temperatureControlLevelAttrs,
+                        ZAP_CLUSTER_MASK(SERVER), kTemperatureControlIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(OnOff::Id, racOnOffAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kOnOffOffOnlyIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(cookSurfaceNumberEndpoint, cookSurfaceNumberClusters);
+HEARTH_DECLARE_CONST_ENDPOINT(cookSurfaceLevelEndpoint, cookSurfaceLevelClusters);
+
+constexpr EmberAfDeviceType kCookSurfaceTypes[] = { { 0x0077, 2 } };
+
+constexpr hearth_shape kCookSurfaceShapes[] = {
+    { 0, kDtCooktop, &cookSurfaceNumberEndpoint },
+    { 1, kDtCooktop, &cookSurfaceLevelEndpoint },
+};
+
+/* ---- microwave oven (0x0079) -------------------------------------------
+ *
+ * Catalogue batch 8 audit, MicrowaveOvenMode (0x005E) and
+ * MicrowaveOvenControl (0x005F). The heaviest device type in the batch by
+ * every measure: three per-endpoint object pairs on one endpoint, and the
+ * heaviest object draw of the batch (416 B), which the 8,464 B
+ * cluster-object arena holds sixteen of.
+ *
+ * MicrowaveOvenMode 0x005E:
+ *
+ *   Code-driven? No. CHI-only? No either (absent from config-data.yaml:
+ *   21-88), and harmlessly, because IT DECLARES NO COMMANDS AT ALL. The
+ *   regeneration left IMClusterCommandHandler.cpp byte-identical.
+ *
+ *   THE TRAP, and it is a copy-paste trap rather than a reasoning one:
+ *   MicrowaveOvenMode inherits ChangeToMode from ModeBase and then marks it
+ *   disallowConform, along with ChangeToModeResponse
+ *   (data_model/1.5/clusters/Mode_MicrowaveOven.xml, the commands block),
+ *   which is exactly the treatment the oven cavity gives Pause and Resume
+ *   forty lines above; the generated MicrowaveOvenMode/CommandIds.h
+ *   consequently carries kAcceptedCommandsCount 0 and kGeneratedCommandsCount
+ *   0. Every other ModeBase alias in this file reuses kModeBaseIncoming and
+ *   kModeBaseOutgoing, and this one MUST NOT: its incoming and outgoing lists
+ *   are both nullptr, so both lists come out empty. The mode is selected
+ *   through MicrowaveOvenControl's SetCookingParameters cookMode field
+ *   instead (AT_MT_SPEC.md 3.17 and 3.20.1; batch 5's audit found the
+ *   same). Advertising ChangeToMode here would let a controller invoke a
+ *   command the cluster disallows, and the ModeBase Instance's own
+ *   CommandHandlerInterface would execute it.
+ *
+ *   Everything else about it is the standard alias: modeBaseAttrs verbatim,
+ *   a ModeBase pool slot, a block-resident mt_mb_store_t, and Init()'s
+ *   VerifyOrDie ordering hazard.
+ *
+ * MicrowaveOvenControl 0x005F:
+ *
+ *   Code-driven? No. CHI-only? YES (config-data.yaml:61), so no generated
+ *   dispatch for its two commands; the Instance's own
+ *   CommandHandlerInterface takes them. Events: none.
+ *
+ *   Its Instance is the batch's sharpest hazard, and the whole ordering
+ *   contract lives at mt_matter_mwoc_register() in mt_matter_sl_b8.inc.
+ *
+ *   PowerAsNumber is MANDATORY and PowerNumberLimits is dead code, and that
+ *   pair of facts is why mwocAttrs is four attributes and not nine.
+ *   Instance::Init() enforces exactly one of PowerAsNumber/PowerInWatts and
+ *   that PowerNumberLimits implies PowerAsNumber
+ *   (microwave-oven-control-server.cpp:66-96); esp-matter's own create() runs
+ *   VALIDATE_FEATURES_EXACT_ONE against PowerAsNumber alone
+ *   (esp_matter_cluster.cpp:3083-3084), and its power_number_limits::add()
+ *   only applies when PowerAsNumber is ABSENT, the inverse of conformance
+ *   and therefore dead in the pinned tree. Consequence, on both platforms:
+ *   MinPower, MaxPower and PowerStep are NOT declared and read the SDK's own
+ *   compiled-in 10/100/10 (microwave-oven-control-server.cpp:163-179,
+ *   constants at the header's :34-38). SupportedWatts, SelectedWattIndex and
+ *   WattRating are PowerInWatts-side and absent for the same reason.
+ *
+ *   CookTime, MaxCookTime and PowerSetting ARE declared, and all three are
+ *   Instance-served: Instance::Read() answers CookTime from its own member
+ *   and the other two from the delegate (:142-157). The slots exist for
+ *   AttributeList truthfulness and are seeded to exactly what those sources
+ *   serve at boot, the FanControl agreement discipline, so an AT+MTATTR read
+ *   answers the same value a controller sees until the first cooking command
+ *   moves the live value. NO k_instance_served carve-out, deliberately and
+ *   against the audit's suggestion: AT_MT_SPEC.md 3.17 says plainly
+ *   that neither attribute raises a +MTATTR URC and that a host reads them
+ *   back only through a commissioned controller, because SetCookTimeSec()
+ *   and the delegate's own bookkeeping bypass emberAfWriteAttribute
+ *   entirely. A carve-out would have made the AT read live and contradicted
+ *   the published contract; the shadow going stale is what the spec
+ *   describes.
+ *
+ * AddMoreTime is where this port is SIMPLER than the C6. esp-matter ships
+ * create_add_more_time() (esp_matter_command.cpp:2590) with zero callers, so
+ * the C6's thunk hand-adds it after create() (mt_devtypes.cpp:946-949). Here
+ * the accepted-command list is declared metadata and AddMoreTime is simply a
+ * second entry in it.
+ *
+ * OperationalState needs its OWN attribute list, and this is the one place
+ * opStateAttrs could not be reused: MicrowaveOven.xml:76-88 makes
+ * CountdownTime (0x0002) MANDATORY and opStateAttrs does not declare it.
+ * Instance::Read() serves it from the delegate's GetCountdownTime()
+ * (operational-state-server.cpp:402-406), which this port's delegate answers
+ * NullNullable for, so the ember slot is an inert shadow seeded to the uint32
+ * null sentinel: the arena read and the served value agree on null, both
+ * answer +MTERR:5, and no carve-out row is needed. That agreement is exactly
+ * why CountdownTime is NOT in k_instance_served even though its two
+ * neighbours on the same cluster are.
+ *
+ * NO Identify: microwave_oven::config_t derives from
+ * app_with_operational_state_config, whose base has no identify field at all
+ * (mt_devtypes.cpp:885-889), and MicrowaveOven.xml agrees.
+ *
+ * ONE DISCLOSED CONFORMANCE GAP, and it is worth naming because it is the
+ * thing revision 2 exists for. MicrowaveOven.xml's own revision history
+ * reads "2: Mandate OperationCompletion Event", and this firmware emits
+ * neither OperationCompletion nor OperationalError, on either platform: the
+ * host owns appliance state transitions and reports them with AT+MTOPSTATE,
+ * which writes the attribute and reports it without generating the cluster's
+ * events. The dynamic endpoint's eventList is empty regardless, so EventList
+ * reads empty rather than advertising an event that never fires. The
+ * advertised device-type revision stays 2 because it matches the XML this
+ * file has taken as its authority since batch 1 AND what the C6 advertises
+ * (ESP_MATTER_MICROWAVE_OVEN_DEVICE_TYPE_VERSION 2,
+ * esp_matter_endpoint.h:90), so dropping to 1 would invent a divergence
+ * rather than fix one. The same gap exists unremarked on the washer trio and
+ * the RVC; it is named here because here the revision number points straight
+ * at it.
+ *
+ * Revision 2 per data_model/1.5/device_types/MicrowaveOven.xml. */
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(microwaveOpStateAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::PhaseList::Id, ARRAY, 0,
+                          ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::CurrentPhase::Id, INT8U, 1,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::CountdownTime::Id, INT32U, 4,
+                              ZAP_ATTRIBUTE_MASK(NULLABLE)),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalStateList::Id, ARRAY, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalState::Id, ENUM8, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::OperationalError::Id, STRUCT, 0, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(OperationalState::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_BEGIN(mwocAttrs)
+DECLARE_DYNAMIC_ATTRIBUTE(MicrowaveOvenControl::Attributes::CookTime::Id, INT32U, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(MicrowaveOvenControl::Attributes::MaxCookTime::Id, INT32U, 4, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(MicrowaveOvenControl::Attributes::PowerSetting::Id, INT8U, 1, 0),
+    DECLARE_DYNAMIC_ATTRIBUTE(MicrowaveOvenControl::Attributes::FeatureMap::Id, BITMAP32, 4, 0),
+    HEARTH_DECLARE_CONST_ATTRIBUTE_LIST_END();
+
+constexpr CommandId kMwocIncoming[] = {
+    MicrowaveOvenControl::Commands::SetCookingParameters::Id,
+    MicrowaveOvenControl::Commands::AddMoreTime::Id, kInvalidCommandId
+};
+
+/* kOpStateIncoming keeps all four commands here, and Start is load-bearing
+ * beyond its own invoke: SetCookingParameters with a startAfterSetting field
+ * asks the data model provider whether OperationalState's Start command is
+ * accepted on this endpoint, and answers InvalidCommand if it is not
+ * (microwave-oven-control-server.cpp:249-273). Dropping Start from this list
+ * as "the host starts it anyway" would break a legal cooking command. */
+HEARTH_DECLARE_CONST_CLUSTER_LIST_BEGIN(microwaveOvenClusters)
+DECLARE_DYNAMIC_CLUSTER(OperationalState::Id, microwaveOpStateAttrs, ZAP_CLUSTER_MASK(SERVER),
+                        kOpStateIncoming, kOpStateOutgoing),
+    /* nullptr, NOT kModeBaseIncoming: this alias has no ChangeToMode at all
+     * (the section comment's trap). */
+    DECLARE_DYNAMIC_CLUSTER(MicrowaveOvenMode::Id, modeBaseAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            nullptr, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(MicrowaveOvenControl::Id, mwocAttrs, ZAP_CLUSTER_MASK(SERVER),
+                            kMwocIncoming, nullptr),
+    DECLARE_DYNAMIC_CLUSTER(Descriptor::Id, descriptorAttrs, ZAP_CLUSTER_MASK(SERVER), nullptr,
+                            nullptr),
+    HEARTH_DECLARE_CONST_CLUSTER_LIST_END;
+
+HEARTH_DECLARE_CONST_ENDPOINT(microwaveOvenEndpoint, microwaveOvenClusters);
+
+constexpr EmberAfDeviceType kMicrowaveOvenTypes[] = { { 0x0079, 2 } };
