@@ -38,7 +38,8 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "powertopology",
                  "meteridentification", "deviceenergymanagement",
                  "deviceenergymanagementmode",
-                 "waterheatermanagement", "waterheatermode"}
+                 "waterheatermanagement", "waterheatermode",
+                 "energyevse", "energyevsemode"}
 
 # The MG24 Hearth build's product id. Two Hearth boards on the bench share
 # discriminator 0xF00, so chip-tool's BLE scan can pair the other one
@@ -78,7 +79,17 @@ def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
     asserts +MTERR:5 on an AT read before the write (AT_MT_SPEC 3.8's null
     rule). chip_cluster overrides the type's for a check on another cluster.
     at_cmd, when set, is the format string (with %(ep)d) of the AT line the
-    write step sends instead of the AT+MTATTR write, e.g. "AT+MTLOCK=%(ep)d,1"."""
+    write step sends instead of the AT+MTATTR write, e.g. "AT+MTLOCK=%(ep)d,1".
+    The EVSE round adds: a want key "flags" (verdict and no_forward: argv
+    words after the destination, the timed-invoke flag every EnergyEvse
+    command needs), "positional" honoured by no_forward too, and
+    no_forward's "after_rows" (the exact AT+MTROWGET=<ep>,1 lines after);
+    kind "rows" is (label, [stage lines], apply line, apply code,
+    readback lines, get-targets substrings or None): the host-side
+    charging-target store, no write step; kind "rows_verdict" is (label,
+    schedule JSON, answer, [rowcount, daymask], pending lines, want, after
+    lines): a fabric SetTargets whose forward is pulled with
+    AT+MTROWGET=<ep>,1,,<seq> inside the rows window, then answered."""
     return {"cluster": cluster, "attr": attr, "chip_attr": chip_attr,
             "at_value": at_value, "parse": parse, "controller": controller,
             "echo": echo, "null_read": null_read, "chip_cluster": chip_cluster,
@@ -144,6 +155,13 @@ ANCHOR_NAME = "on/off light (anchor)"
 # before the destination on chip-tool's command line; it forwards as
 # 3600,265,80 (AT_MT_SPEC 3.17's worked example).
 BOOST = '{"duration": 3600, "oneShot": true, "targetPercentage": 80}'
+
+# The EVSE round: every EnergyEvse command is a timed invoke (the SDK
+# answers 0xC6 NeedsTimedInteraction before the delegate otherwise), the
+# flag after the destination; and the two charging targets the merge rows
+# stage (Monday 08:00 and Tuesday 10:00, SoC 80).
+EVSE_TIMED = ["--timedInteractionTimeoutMs", "5000"]
+MON_TUE = ["AT+MTROW=%(ep)d,1,0,2,480,80,25000000", "AT+MTROW=%(ep)d,1,1,4,600,80,10000000"]
 
 BATCHES = {
     "mg24-batch1": [
@@ -642,6 +660,147 @@ BATCHES = {
         ], variant=1, extra_types=[("0x0011", 1), ("0x0510", 1)],
            extra_reads=[("read", "feature-map", 6)]),
     ],
+    # The EVSE round (design spec section 4): the energy EVSE v0 and v1.
+    # AT+MTMEAS 0x99 raises no URC; reads by attribute id, and the 0x99 field
+    # numbers differ from field 4 on (CircuitCapacity field 4 is attribute
+    # 5 ... SessionEnergyCharged field 18 is attribute 0x42). Every EnergyEvse
+    # command is timed. Push checks are unique (attribute, value) pairs.
+    # Each EVSE's setup empties its charging-target store first (the store is
+    # NVM3 user data and survives a re-run's apply), so the rows start known.
+    "mg24-evse": [
+        _multi("0x050C", "energy EVSE", 2, "energyevse", [
+            _check(153, 0, "state", 1, controller=("push", "AT+MTMEAS=%(ep)d,153,0,1", "int")),
+            _check(153, 1, "supply-state", 1, controller=("push", "AT+MTMEAS=%(ep)d,153,1,1", "int")),
+            _check(153, 2, "fault-state", 2, controller=("push", "AT+MTMEAS=%(ep)d,153,2,2", "int")),
+            _check(153, 2, "fault-state", 0, controller=("push", "AT+MTMEAS=%(ep)d,153,2,0", "int")),
+            _check(153, 3, "charging-enabled-until", 1800000000, null_read=True,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,3,1800000000", "int")),
+            _check(153, 5, "circuit-capacity", 32000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,4,32000", "int")),
+            _check(153, 6, "minimum-charge-current", 6000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,5,6000", "int")),
+            _check(153, 7, "maximum-charge-current", 32000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,6,32000", "int")),
+            _check(153, 0x23, "next-charge-start-time", 1800003600, null_read=True,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,9,1800003600", "int")),
+            _check(153, 0x24, "next-charge-target-time", 1800010800,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,10,1800010800", "int")),
+            _check(153, 0x25, "next-charge-required-energy", 5000000000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,11,5000000000", "int")),
+            _check(153, 0x26, "next-charge-target-so-c", 80,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,12,80", "int")),
+            _check(153, 0x30, "state-of-charge", 45, null_read=True,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,14,45", "int")),
+            _check(153, 0x31, "battery-capacity", 75000000,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,15,75000000", "int")),
+            _check(153, 0x40, "session-id", 7, null_read=True,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,16,7", "int")),
+            _check(153, 0x41, "session-duration", 3600,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,17,3600", "int")),
+            _check(153, 0x42, "session-energy-charged", 5000000001,
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,18,5000000001", "int")),
+            _check(153, 0, "state", 3,            # two pairs, one push: atomic apply
+                   controller=("push", "AT+MTMEAS=%(ep)d,153,0,3,17,3601", "int")),
+            _check(153, 9, "state", 0, controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,7,1"], 4)),
+            _check(153, 10, "state", 0, controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,8,1"], 4)),
+            _check(153, 0x27, "state", 0, controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,13,1"], 4)),
+            _check(153, 0, "state", 0, controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,0,7"], 1)),
+            _check(153, 0x26, "state", 0, controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,12,101"], 1)),
+            _check(153, 0, "state", 0, controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,19,1"], 1)),
+            _check(153, 5, "state", 0, controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,4,-1"], 1)),
+            _check(153, 0x41, "state", 0,         # atomicity: a bad second pair applies nothing
+                   controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,17,99,12,101"], 1)),
+            _check(153, 1, "state", 0, controller=("at_refused", ["AT+MTATTR=%(ep)d,153,1,0"], 11)),
+            _check(153, 1, "supply-state", 0, at_cmd="AT+MTMEAS=%(ep)d,153,1,0",
+                   controller=("verdict", ["disable"] + EVSE_TIMED, (153, 1), 1,
+                               {"rc0": True, "after": [("supply-state", 0)]})),
+            _check(153, 1, "supply-state", 0, at_cmd="AT+MTMEAS=%(ep)d,153,1,0",
+                   controller=("verdict", ["disable"] + EVSE_TIMED, (153, 1), 0,
+                               {"rc0": False, "status": 0x1})),
+            _check(153, 1, "supply-state", 0, at_cmd="AT+MTMEAS=%(ep)d,153,1,0",
+                   controller=("verdict", ["enable-charging", "null", "6000", "32000"], (153, 2), 1,
+                               {"rc0": True, "positional": True, "flags": EVSE_TIMED,
+                                "after": [("supply-state", 0)]}, [None, 6000, 32000])),
+            _check(153, 1, "supply-state", 0, at_cmd="AT+MTMEAS=%(ep)d,153,1,0",
+                   controller=("verdict", ["enable-charging", "1800", "6000", "32000"], (153, 2), 0,
+                               {"rc0": False, "status": 0x1, "positional": True, "flags": EVSE_TIMED},
+                               [1800, 6000, 32000])),
+            _check(153, 1, "supply-state", 0, at_cmd="AT+MTMEAS=%(ep)d,153,1,0",
+                   controller=("no_forward", ["enable-charging", "null", "32000", "6000"],
+                               {"rc0": False, "status": 0x87, "positional": True, "flags": EVSE_TIMED})),
+            _check(153, 0, "state", 0, at_cmd="AT+MTMEAS=%(ep)d,153,0,0",
+                   controller=("no_forward", ["start-diagnostics"] + EVSE_TIMED,
+                               {"rc0": False, "status": 0x81})),
+            _check(153, 0, "state", 1, at_cmd="AT+MTMEAS=%(ep)d,153,0,1",
+                   controller=("no_forward", ["disable"], {"rc0": False, "status": 0xC6})),
+            _check(153, 0x26, "next-charge-target-so-c", 80, controller=("rows", "soc-mandatory",
+                   ["AT+MTROW=%(ep)d,1,0,2,480,,25000000"], "AT+MTROWAPPLY=%(ep)d,1,1", 1, [], None)),
+            _check(153, 0x26, "next-charge-target-so-c", 80, controller=("rows", "merge-mon-tue",
+                   MON_TUE, "AT+MTROWAPPLY=%(ep)d,1,2", 0,
+                   ["+MTROW:0,2,2,480,80,25000000", "+MTROW:1,2,4,600,80,10000000"],
+                   ["DayOfWeekForSequence: 2", "DayOfWeekForSequence: 4"])),
+            _check(153, 0x26, "next-charge-target-so-c", 80, controller=("rows", "merge-replace-mon",
+                   ["AT+MTROW=%(ep)d,1,0,2,900,80,5000000"], "AT+MTROWAPPLY=%(ep)d,1,1", 0,
+                   ["+MTROW:0,2,4,600,80,10000000", "+MTROW:1,2,2,900,80,5000000"],
+                   ["TargetTimeMinutesPastMidnight: 900"])),
+            _check(153, 0x26, "next-charge-target-so-c", 80, controller=("rows_verdict", "settargets-wed-allow",
+                   '[{"dayOfWeekForSequence": 8, "chargingTargets": [{"targetTimeMinutesPastMidnight": 420, '
+                   '"targetSoC": 90, "addedEnergy": 20000000}]}]', 1, [1, 8],
+                   ["+MTROW:0,1,8,420,90,20000000"], {"rc0": True},
+                   ["+MTROW:0,3,4,600,80,10000000", "+MTROW:1,3,2,900,80,5000000",
+                    "+MTROW:2,3,8,420,90,20000000"])),
+            _check(153, 0x26, "next-charge-target-so-c", 80, controller=("rows_verdict", "settargets-thu-deny",
+                   '[{"dayOfWeekForSequence": 16, "chargingTargets": [{"targetTimeMinutesPastMidnight": 60, '
+                   '"targetSoC": 50}]}]', 0, [1, 16],
+                   ["+MTROW:0,1,16,60,50,"], {"rc0": False, "status": 0x1},
+                   ["+MTROW:0,3,4,600,80,10000000", "+MTROW:1,3,2,900,80,5000000",
+                    "+MTROW:2,3,8,420,90,20000000"])),
+            _check(153, 0x26, "next-charge-target-so-c", 80, at_cmd="AT+MTMEAS=%(ep)d,153,12,80",
+                   controller=("no_forward", ["clear-targets"] + EVSE_TIMED,
+                               {"rc0": True, "after_rows": []})),
+            _check(157, 1, "current-mode", 1, chip_cluster="energyevsemode",
+                   controller=("mode_verdict", ["change-to-mode", "1"], (157, 0), 1,
+                               {"mode_status": 0, "current_mode": 1}, 1)),
+            _check(157, 1, "current-mode", 1, chip_cluster="energyevsemode",
+                   controller=("mode_verdict", ["change-to-mode", "0"], (157, 0), 0,
+                               {"mode_status": 2, "current_mode": 1}, 0)),
+            _check(157, 1, "current-mode", 1, chip_cluster="energyevsemode",
+                   controller=("mode_verdict", ["change-to-mode", "5"], (157, 0), "none",
+                               {"mode_status": 1, "current_mode": 1}, None)),
+            _check(144, 8, "active-power", 7400000, chip_cluster="electricalpowermeasurement",
+                   controller=("push", "AT+MTMEAS=%(ep)d,144,2,7400000", "int")),
+            _check(152, 0, "esatype", 0, chip_cluster="deviceenergymanagement",
+                   controller=("push", "AT+MTMEAS=%(ep)d,152,0,0", "int")),
+            _check(152, 5, "power-adjustment-capability", 0,
+                   controller=("at_refused", ["AT+MTDEMCAP=%(ep)d,1,0"], 4)),
+        ], setup=("setup", ["AT+MTROWAPPLY=%(ep)d,1,0",
+                            'AT+MTMODES=%(ep)d,157,0,0,"Manual",1,16385,"TimeOfUse"'],
+                  [("energyevsemode", "supported-modes", ["Manual", "TimeOfUse"])]),
+           extra_types=[("0x0510", 1), ("0x050D", 3)],
+           extra_reads=[("read", "feature-map", 3)]),
+        _multi("0x050C", "energy EVSE without SOC", 2, "energyevse", [
+            _check(153, 0, "state", 2, controller=("push", "AT+MTMEAS=%(ep)d,153,0,2", "int")),
+            _check(153, 0x30, "state", 0, controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,14,50"], 4)),
+            _check(153, 0x31, "state", 0, controller=("at_refused", ["AT+MTMEAS=%(ep)d,153,15,1"], 4)),
+            _check(153, 0x30, "state", 0, controller=("at_refused", ["AT+MTATTR=%(ep)d,153,48"], 4)),
+            _check(153, 0x26, "next-charge-target-so-c", 0, controller=("rows", "soc-50-refused",
+                   ["AT+MTROW=%(ep)d,1,0,2,480,50,25000000"], "AT+MTROWAPPLY=%(ep)d,1,1", 1, [], None)),
+            _check(153, 0x26, "next-charge-target-so-c", 0, controller=("rows", "soc-100",
+                   ["AT+MTROW=%(ep)d,1,0,2,480,100,25000000"], "AT+MTROWAPPLY=%(ep)d,1,1", 0,
+                   ["+MTROW:0,1,2,480,100,25000000"], None)),
+            _check(153, 0x26, "next-charge-target-so-c", 0, controller=("rows", "soc-absent",
+                   ["AT+MTROW=%(ep)d,1,0,2,480,,25000000"], "AT+MTROWAPPLY=%(ep)d,1,1", 0,
+                   ["+MTROW:0,1,2,480,,25000000"], None)),
+            _check(153, 0x26, "next-charge-target-so-c", 0, controller=("rows", "clear",
+                   [], "AT+MTROWAPPLY=%(ep)d,1,0", 0, [], None)),
+            _check(153, 0x26, "next-charge-target-so-c", 0, at_cmd="AT+MTMEAS=%(ep)d,153,12,0",
+                   controller=("no_forward", ["set-targets", '[{"dayOfWeekForSequence": 2, "chargingTargets": '
+                                              '[{"targetTimeMinutesPastMidnight": 480, "targetSoC": 50}]}]'],
+                               {"rc0": False, "status": 0x87, "positional": True, "flags": EVSE_TIMED})),
+        ], setup=("setup", ["AT+MTROWAPPLY=%(ep)d,1,0"], []),
+           variant=1, extra_types=[("0x0510", 1), ("0x050D", 3)],
+           extra_reads=[("read", "feature-map", 1)]),
+    ],
 }
 
 def composition_for(batch):
@@ -786,7 +945,16 @@ def print_plan(batch):
                            + follow + f" then read-event {event[1]}")
                 elif c["controller"][0] == "no_forward":
                     kind, args, want = c["controller"]
-                    urc = "%s -> no +MTCMD within 3s" % " ".join(str(a) for a in args)
+                    urc = "%s -> no +MTCMD within 3s" % " ".join(str(a) for a in args + want.get("flags", []))
+                elif c["controller"][0] == "rows":
+                    _kind, label, stage, apply_line, code, readback, _gt = c["controller"]
+                    urc = "rows %s: %d staged, %s -> %s, then %d row(s) read back" % (
+                        label, len(stage), apply_line % {"ep": ep}, code,
+                        len(readback or []))
+                elif c["controller"][0] == "rows_verdict":
+                    _kind, label, _json, answer, fields, pending, _want, after = c["controller"]
+                    urc = "set-targets %s -> +MTCMD:153,5 %s, %d pending row(s), answer %s, then %d row(s)" % (
+                        label, fields, len(pending), answer, len(after))
                 elif c["controller"][0] == "at_refused":
                     kind, atlines, err = c["controller"]
                     urc = "host write %s -> +MTERR:%d (refused, no forward)" % (
@@ -886,6 +1054,10 @@ def prove_endpoint(link, chip, s, node, ep, t):
                     "allow" if answer == 1 else "deny" if answer == 0 else "unlisted")
             elif c["controller"][0] == "push":
                 prefix += " pushed"
+            elif c["controller"][0] == "rows":
+                prefix += " rows %s" % c["controller"][1]
+            elif c["controller"][0] == "rows_verdict":
+                prefix += " set-targets %s" % c["controller"][1]
         prove_check(link, chip, s, node, ep, t, c, prefix)
     for extra in t["extra_reads"]:
         if extra[0] == "read-event":
@@ -934,6 +1106,64 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         wcmd = atlines[0] % {"ep": ep}
         res, wlines = link.command(wcmd)
         s.check("%s %s -> +MTERR:%d" % (prefix, wcmd, err), res == err)
+        return
+    if c["controller"] is not None and c["controller"][0] == "rows":
+        # The EVSE round: the host-side charging-target store (AT_MT_SPEC
+        # 3.28). Every stage line answers OK, the apply answers its code
+        # (a stage the firmware refused is abandoned with an unscored
+        # AT+MTROWCLEAR, the harness's discipline), and the store then
+        # reads back EXACTLY the
+        # given lines; optionally the controller's GetTargets carries the
+        # given substrings. No write step: the store is not an attribute.
+        _kind, label, stage, apply_line, code, readback, gt = c["controller"]
+        link.drain(0.2)
+        for line in stage:
+            wcmd = line % {"ep": ep}
+            res, _lines = link.command(wcmd)
+            s.check("%s %s -> OK" % (prefix, wcmd), res == 0)
+        acmd = apply_line % {"ep": ep}
+        res, _lines = link.command(acmd)
+        s.check("%s %s -> %s" % (prefix, acmd, "OK" if code == 0 else "+MTERR:%d" % code),
+                res == code)
+        if res != 0:
+            link.command("AT+MTROWCLEAR=%d,1" % ep)
+        res, lines = link.command("AT+MTROWGET=%d,1" % ep)
+        s.check("%s store reads back %d row(s)" % (prefix, len(readback)),
+                res == 0 and lines == list(readback))
+        for sub in gt or ():
+            rc, out = chip.run([cc, "get-targets", node, str(ep)] + EVSE_TIMED, timeout=30)
+            s.check("%s get-targets carries %s" % (prefix, sub), rc == 0 and sub in out)
+        return
+    if c["controller"] is not None and c["controller"][0] == "rows_verdict":
+        # The EVSE round: a fabric SetTargets adjudicated by the host. The
+        # forward carries the row count and the day mask; the pending rows
+        # are pulled with AT+MTROWGET=<ep>,1,,<seq> inside the rows window
+        # (MT_CMD_VERDICT_ROWS_MS) BEFORE the answer, then the verdict
+        # lands, and the store is read back: merged by day on allow,
+        # untouched on deny.
+        _kind, label, sched, answer, fields, pending, want, after = c["controller"]
+        link.drain(0.2)
+        ctx = types.SimpleNamespace(chip=chip, chip_call=None)
+        handle = H.invoke_chip(ctx, [cc, "set-targets", sched, node, str(ep)] + EVSE_TIMED,
+                               timeout=30)
+        responder = H.CmdResponder(link)
+        fwd = responder._match(c["cluster"], 5, fields, 2.5)
+        s.check("%s forward %d/5 carries %s" % (prefix, c["cluster"], fields), fwd is not None)
+        if fwd is not None:
+            res, lines = link.command("AT+MTROWGET=%d,1,,%d" % (ep, fwd["seq"]))
+            s.check("%s pending rows read inside the window" % prefix,
+                    res == 0 and lines == list(pending))
+            res, _lines = link.command("AT+MTCMDRESP=%d,%d" % (fwd["seq"], answer))
+            s.check("%s answered %s" % (prefix, "allow" if answer else "deny"), res == 0)
+        rc, out = handle.join(30)
+        s.check("%s chip-tool %s" % (prefix, "exits 0" if want["rc0"] else "fails"),
+                (rc == 0) == want["rc0"])
+        if "status" in want:
+            s.check("%s wire status 0x%X" % (prefix, want["status"]),
+                    H.parse_status(out) == want["status"])
+        res, lines = link.command("AT+MTROWGET=%d,1" % ep)
+        s.check("%s store after reads %d row(s)" % (prefix, len(after)),
+                res == 0 and lines == list(after))
         return
     if c["controller"] is not None and c["controller"][0] == "push":
         # AT+MTMEAS (AT_MT_SPEC 3.25): the host pushes a value the cluster's
@@ -1095,7 +1325,13 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         _kind, args, want = c["controller"]
         link.drain(0.2)
         ctx = types.SimpleNamespace(chip=chip, chip_call=None)
-        handle = H.invoke_chip(ctx, [cc] + args[:1] + [node, str(ep)] + args[1:], timeout=30)
+        # The EVSE round: positional fields before the destination and the
+        # flags after it, as the verdict kind builds them.
+        if want.get("positional"):
+            argv = [cc] + args + [node, str(ep)]
+        else:
+            argv = [cc] + args[:1] + [node, str(ep)] + args[1:]
+        handle = H.invoke_chip(ctx, argv + list(want.get("flags", ())), timeout=30)
         fwd = link.await_urc(r"^\+MTCMD:\d+,%d,%d,\d+(,|$)" % (ep, c["cluster"]), 3.0)
         s.check("%s no +MTCMD within 3s" % prefix, fwd is None)
         rc, out = handle.join(30)
@@ -1107,6 +1343,12 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         if "error_state" in want:
             s.check("%s ErrorStateID %d" % (prefix, want["error_state"]),
                     H.parse_status(out) == want["error_state"])
+        # The EVSE round: the charging-target store after the command (the
+        # controller's ClearTargets empties it).
+        if "after_rows" in want:
+            res, lines = link.command("AT+MTROWGET=%d,1" % ep)
+            s.check("%s store after reads %d row(s)" % (prefix, len(want["after_rows"])),
+                    res == 0 and lines == list(want["after_rows"]))
     elif c["controller"][0] == "verdict":
         # Ordering rule for verdict checks: an allowed command may move the
         # attribute (an opened valve's CurrentState to Transitioning or Open,
@@ -1134,7 +1376,9 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
             argv = [cc] + args + [node, str(ep)]
         else:
             argv = [cc] + args[:1] + [node, str(ep)] + args[1:]
-        handle = H.invoke_chip(ctx, argv, timeout=30)
+        # want["flags"] (the EVSE round): words after the destination, the
+        # timed-invoke flag a positional command cannot carry in args.
+        handle = H.invoke_chip(ctx, argv + list(want.get("flags", ())), timeout=30)
         responder = H.CmdResponder(link)
         if answer is None:
             # Seen, deliberately not answered: the firmware must time out
