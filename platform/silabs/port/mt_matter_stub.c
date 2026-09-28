@@ -1,80 +1,22 @@
 /*
- * mt_matter_stub.c - every mt_matter.h entry point, stubbed, for the Silabs
- * skeleton. The linker proves completeness: an unimplemented declaration
- * fails the build. Each stub is replaced by the real implementation in the
- * upward-port round's batches; a stub that survives a batch is a stub the
- * batch forgot, which is what the "linker proves it" rule is for.
+ * mt_matter_stub.c - empty since catalogue batch 8.
  *
- * Return convention, mechanically from the header comments: int with a
- * 0-on-success convention -> -1; mt_attr_result_t and MT_ROW_* -> the
- * endpoint code when the endpoint id is dead, the family's "the endpoint
- * exists but does not carry this" code when it is live (see
- * stub_endpoint_live() below); counts 0; bool false; pointer NULL; void
- * empty. Every out-parameter is zeroed (after a NULL check) before the
- * failure return.
+ * This file held every mt_matter.h entry point, stubbed, for the Silabs
+ * skeleton: the linker proved completeness, and each stub was replaced by
+ * the real implementation in the upward-port round's batches. Catalogue
+ * batch 8 (2026-09-28) retired the last three (mt_matter_temp_levels_set
+ * and the MicrowaveOvenControl pair), so every declaration has its one
+ * definition in port/mt_matter_sl.cpp and its fragments, and the step-1b
+ * helper that told a live endpoint from a dead one went with them.
  *
- * Round 2 task 4 retired the first nine: the commissioning state, network
- * and Thread answers come from the running stack in port/mt_matter_sl.cpp
- * now. Round 2 task 5 retired the live-composition trio, and round 2 task 6
- * the attribute read/write pair. Catalogue batch 3 (2026-09-25) retired the
- * door lock and water valve pair, and catalogue batch 4 (2026-09-26) the
- * mode select pair. What is left below is everything the data model has to
- * exist for.
+ * THE FILE IS KEPT RATHER THAN DELETED, mt_devtypes_stub.c's reasoning:
+ * deleting it would mean editing hearth.slcp's source list,
+ * test/host/Makefile's silabs-stubs target and test/host/check_decls.py's
+ * pair list together, for one empty translation unit. check_decls.py goes
+ * on proving that mt_matter.h's declarations have exactly one definition
+ * across this file and mt_matter_sl.cpp. The banners stay so each section
+ * can be found by the same name in both files.
  */
-
-#include <stddef.h>
-#include <string.h>
-
-#include "mt_matter.h"
-
-/*
- * ---- step 1b (round 2 task 6): a stub that knows the live endpoints ------
- *
- * A stub for a family this image has not ported. The endpoint may still be
- * live (round 2 task 5's dynamic endpoints), and the honest answer then is
- * "no such cluster on that endpoint", the code the family's real port gives
- * for a light. Only a dead endpoint id answers "no such endpoint". No
- * data-model access: this is still a stub, replaced by the batch that ports
- * the family.
- *
- * Before this, every one of these answered "no such endpoint"
- * unconditionally, which was right only while no endpoint existed at all. It
- * stopped being right the moment task 5 stood up the rig's light: eighteen
- * harness Phase 1 rows exist precisely to prove a host can tell "that
- * endpoint is not there" from "that endpoint is there and does not do this",
- * and a stub that collapses the two answers the wrong one for a live light.
- *
- * WHICH code "no such cluster" is varies by family and is taken from that
- * family's own entry in core/include/mt_matter.h, never assumed: most answer
- * MT_ATTR_ERR_CLUSTER (the AT+MTROW family answered MT_ROW_ERR_NO_PAYLOAD
- * until the EVSE round made it real), and AT+MTMETERID answers
- * MT_ATTR_ERR_ATTRIBUTE because its header entry says "deliberately not
- * MT_ATTR_ERR_CLUSTER" and gives the reason. Each call site below names
- * the code it uses for that reason.
- *
- * Stubs whose family takes no endpoint id are unchanged, and so are the
- * delegate allocators: a pointer return has no error code to divide.
- *
- * This reads the same table AT+MTEP? reports (port/mt_matter_sl.cpp), which
- * the boot rebuild fills before mt_at_start() lets any command run, so there
- * is nothing to lock and no CHIP call to make from here.
- */
-static bool stub_endpoint_live(uint16_t ep)
-{
-    uint16_t n = mt_matter_endpoint_count();
-    for (uint16_t i = 0; i < n; i++) {
-        uint32_t dt;
-        uint16_t id;
-        uint8_t var, pidx;
-        if (mt_matter_endpoint_info(i, &dt, &id, &var, &pidx) == 0 && id == ep) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* The shape the step-1b stubs answer with. */
-#define STUB_ATTR_MISS(ep) (stub_endpoint_live(ep) ? MT_ATTR_ERR_CLUSTER : MT_ATTR_ERR_ENDPOINT)
 
 /* ---- commissioning state and identity ----------------------------------- */
 /* ---- network transport (C3) -------------------------------------------- */
@@ -105,13 +47,8 @@ static bool stub_endpoint_live(uint16_t ep)
 
 /* ---- temperature level labels (C3) --------------------------------------- */
 
-int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t count)
-{
-    (void)labels;
-    (void)count;
-    /* no TemperatureControl cluster: MT_ATTR_ERR_CLUSTER (mt_matter.h:248) */
-    return STUB_ATTR_MISS(ep);
-}
+/* mt_matter_temp_levels_set() left this file in catalogue batch 8
+ * (2026-09-28); it lives in mt_matter_sl_b8.inc. */
 
 /* The door lock and water valve bridge functions left this file in
  * catalogue batch 3 (2026-09-25); they live in mt_matter_sl.cpp. */
@@ -137,8 +74,7 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
 /* ---- smoke/co alarm + refrigerator alarm ------------------------------------- */
 
 /* mt_matter_alarm_set() left this file in catalogue batch 4 (2026-09-26);
- * it lives in mt_matter_sl.cpp (the smoke/co arm only; the refrigerator
- * alarm arm is catalogue batch 8). */
+ * it lives in mt_matter_sl_b4.inc, both arms since catalogue batch 8. */
 
 /* ---- chime -------------------------------------------------------------------- */
 
@@ -149,28 +85,10 @@ int mt_matter_temp_levels_set(uint16_t ep, const char *const *labels, uint8_t co
 
 /* ---- Microwave Oven Control ----------------------------------------------------- */
 
-void *mt_matter_mwoc_delegate_alloc(void) { return NULL; }
-void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep) { (void)delegate; (void)ep; }
-
-/* Interim link stubs for the two port-local second halves mt_devtypes_sl.cpp
- * calls (neither is in mt_matter.h, hence the prototypes). The MWOC
- * register is unreachable while the stubbed alloc above refuses every
- * microwave; the temperature-level register is reached by any
- * TemperatureControl create and does nothing (SupportedTemperatureLevels
- * reads empty). Both leave with the three stubs when the batch 8 bridge
- * (mt_matter_sl_b8.inc) brings the real ones. */
-void mt_matter_temp_levels_register(void);
-void mt_matter_temp_levels_register(void) {}
-void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_delegate, void *mode_delegate,
-                             uint16_t ep);
-void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_delegate, void *mode_delegate,
-                             uint16_t ep)
-{
-    (void)mwoc_delegate;
-    (void)opstate_delegate;
-    (void)mode_delegate;
-    (void)ep;
-}
+/* The MicrowaveOvenControl pair (mt_matter_mwoc_delegate_alloc,
+ * mt_matter_mwoc_delegate_set_endpoint) and the two interim link stubs of
+ * its round left this file in catalogue batch 8 (2026-09-28): they are the
+ * real things now, in mt_matter_sl_b8.inc. */
 
 /* The AT+MTROW family and the energy EVSE stubs (mt_matter_rows_apply,
  * _get, _total, mt_matter_evse_delegate_alloc, mt_matter_evse_reserve,

@@ -330,7 +330,10 @@ private:
  * RVC block. Since catalogue batch 7a-2 device energy management's DEMMode
  * is the second ModeBase consumer (one slot per DEM endpoint, at most
  * four), catalogue batch 7b's WaterHeaterMode the third (at most four)
- * and the EVSE round's EnergyEvseMode the fourth (at most two). Since the
+ * and the EVSE round's EnergyEvseMode the fourth (at most two); catalogue
+ * batch 8 adds four uncapped consumers of one slot each (the refrigerator,
+ * the Cooler and Heater cabinets, the microwave), so a mix of RVCs with
+ * them can meet this pool first, a disclosed mixed limit. Since the
  * object arena is 8,464 B (DE608) this pool IS the RVC's wall: ten RVCs
  * take all twenty slots, and the eleventh is refused at its first
  * ModeBase claim here (its objects would fit the object arena, and since

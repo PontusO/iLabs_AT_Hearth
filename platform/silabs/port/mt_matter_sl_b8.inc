@@ -362,3 +362,166 @@ private:
      * powerSetting to and the value mwocAttrs seeds its shadow with. */
     uint8_t m_power_setting = chip::app::Clusters::MicrowaveOvenControl::kDefaultMaxPowerNum;
 };
+
+/* One slot per serviceable endpoint, the opstate and chime pools' depth: one
+ * MicrowaveOvenControl cluster per microwave endpoint, so a seventeenth
+ * endpoint of any type fails its create before it could ask. Memory reclaim
+ * round A's shape, a table of pointers into the cluster-object arena with the
+ * Instance's raw storage behind each delegate in the same block.
+ *
+ * The Delegate's own SetInstance() carries the OperationalState shape, not
+ * the ModeBase one: VerifyOrDie(mInstance == nullptr || aInstance == nullptr
+ * || mInstance == aInstance) (microwave-oven-control-server.h:183-186), an
+ * ABORT on sharing. One delegate per Instance is enforced by the SDK here,
+ * not merely by this pool's discipline. */
+static HearthMwocDelegate *s_mwoc_delegates[kServiceableEndpoints];
+static size_t s_mwoc_delegate_next;
+
+extern "C" void *mt_matter_mwoc_delegate_alloc(void)
+{
+    if (s_mwoc_delegate_next >= kServiceableEndpoints) {
+        return nullptr;
+    }
+    HearthMwocDelegate *d =
+        obj_pair_new<HearthMwocDelegate, chip::app::Clusters::MicrowaveOvenControl::Instance>();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    s_mwoc_delegates[s_mwoc_delegate_next++] = d;
+    return d;
+}
+
+/* The header's second half, and on this platform it stamps the endpoint and
+ * nothing else: the Instance cannot be born here, because this signature has
+ * no way to reach the other two Instances its constructor needs. It is
+ * called by mt_matter_mwoc_register() below as the first step of the ordered
+ * sequence, which is the only caller. */
+extern "C" void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep)
+{
+    static_cast<HearthMwocDelegate *>(delegate)->set_endpoint(ep);
+}
+
+/* Catalogue batch 8's pins, the WHM pool's shape: the MicrowaveOvenControl
+ * pair's arena cost, and sixteen microwaves' draw (the OperationalState
+ * pair 256, the MicrowaveOvenMode ModeBase pair 80 and this pair) within
+ * the object arena. A pin that fires with another value is a stop, not a
+ * re-pin. */
+static_assert(hearth_arena_cost(obj_pair_bytes<HearthMwocDelegate,
+                                                chip::app::Clusters::MicrowaveOvenControl::Instance>()) == 80,
+              "the MicrowaveOvenControl pair changed size; redo the microwave's object arithmetic");
+static_assert(kServiceableEndpoints * (256 + 80 + 80) <= HEARTH_OBJ_ARENA_BYTES,
+              "sixteen microwave ovens' objects no longer fit the cluster-object arena");
+
+/*
+ * THE ORDERED CONSTRUCTION. Read the section comment above before changing a
+ * line of this; the order below is a correctness requirement that nothing at
+ * runtime enforces and every violation of which is silent.
+ */
+extern "C" void mt_matter_mwoc_register(void *mwoc_delegate, void *opstate_delegate,
+                                        void *mode_delegate, uint16_t ep)
+{
+    namespace Mwoc    = chip::app::Clusters::MicrowaveOvenControl;
+    namespace OpState = chip::app::Clusters::OperationalState;
+    namespace MwoMode = chip::app::Clusters::MicrowaveOvenMode;
+
+    /* A null delegate here is unrecoverable rather than degrading: there
+     * would be no object for the Instance constructor to bind a reference
+     * to. Cannot happen (all three claims aborted the create before anything
+     * was spent), so this is the drift alarm for a future edit that adds a
+     * claim without adding it to this call. */
+    /* Fix round M5: the CONVERSE of this alarm lives at the
+     * MicrowaveOvenMode claim in mt_devtype_create(), because a device
+     * type carrying MicrowaveOvenMode WITHOUT MicrowaveOvenControl would
+     * never reach this function at all and its Instance would never be
+     * constructed. Both directions are unreachable today and both are
+     * alarmed, this file's convention. */
+    if (mwoc_delegate == nullptr || opstate_delegate == nullptr || mode_delegate == nullptr) {
+        HEARTH_LOGE("matter", "microwave endpoint %u: a delegate is missing (mwoc %p, opstate %p, mode %p); "
+                "no MicrowaveOvenControl cluster will be registered and every cooking command "
+                "will fail",
+                (unsigned)ep, mwoc_delegate, opstate_delegate, mode_delegate);
+        return;
+    }
+
+    /* STEP 1 and STEP 2, in this order and before anything else: the two
+     * Instances the MWOC constructor takes references to. Both are
+     * placement-constructed and Init()ed by these helpers, both returns are
+     * kept. */
+    CHIP_ERROR ops_err  = opstate_construct_and_init(opstate_delegate, ep);
+    CHIP_ERROR mode_err = modebase_construct_and_init(mode_delegate, ep);
+
+    OpState::Instance *ops_inst =
+        static_cast<HearthOpStateDelegate *>(opstate_delegate)->instance();
+    chip::app::Clusters::ModeBase::Instance *mode_inst =
+        static_cast<HearthModeBaseDelegate *>(mode_delegate)->instance();
+    if (ops_inst == nullptr || mode_inst == nullptr) {
+        /* Each Instance's constructor calls SetInstance(this) on its own
+         * delegate, so a null here means a constructor did not run, which
+         * the two steps above just did. Unreachable, and checked because
+         * binding a reference to it would be undefined rather than merely
+         * broken. */
+        HEARTH_LOGE("matter", "microwave endpoint %u: neighbour Instance missing after construction "
+                "(opstate %p, mode %p); MicrowaveOvenControl will NOT be registered",
+                (unsigned)ep, (void *)ops_inst, (void *)mode_inst);
+        return;
+    }
+
+    /* STEP 3: only now can the MWOC Instance be built. The feature mask is
+     * kPowerAsNumber and is mandatory rather than chosen: Init() below
+     * refuses anything else, and it must agree with the FeatureMap seeded on
+     * mwocAttrs, which it does by both being derived from the same
+     * conformance fact. */
+    mt_matter_mwoc_delegate_set_endpoint(mwoc_delegate, ep);
+    auto *d = static_cast<HearthMwocDelegate *>(mwoc_delegate);
+    auto *mwoc_inst = new (obj_inst_storage<HearthMwocDelegate, Mwoc::Instance>(d))
+        Mwoc::Instance(d, ep, Mwoc::Id, chip::BitMask<Mwoc::Feature>(Mwoc::Feature::kPowerAsNumber),
+                       *ops_inst, *mode_inst);
+    CHIP_ERROR mwoc_err = mwoc_inst->Init();
+
+    /* All three returns, in one place. Each helper has already logged its
+     * own failure in its own words; this line exists so a bench sees the
+     * ENDPOINT named as degraded rather than three unrelated cluster
+     * complaints, and so a failure of this Init() (which nothing else logs)
+     * is never silent. */
+    if (mwoc_err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "microwave endpoint %u: MicrowaveOvenControl Instance::Init failed: "
+                "%" CHIP_ERROR_FORMAT
+                "; SetCookingParameters and AddMoreTime will not reach the host",
+                (unsigned)ep, mwoc_err.Format());
+    }
+    if (ops_err != CHIP_NO_ERROR || mode_err != CHIP_NO_ERROR || mwoc_err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "microwave endpoint %u is DEGRADED: opstate Init %" CHIP_ERROR_FORMAT
+                ", mode Init %" CHIP_ERROR_FORMAT ", control Init %" CHIP_ERROR_FORMAT,
+                (unsigned)ep, ops_err.Format(), mode_err.Format(), mwoc_err.Format());
+    }
+
+    /* THE READBACK. GetModeValueByModeTag(kNormal) is what
+     * SetCookingParameters uses to resolve an omitted cookMode, and a
+     * failure of it makes every cooking command answer InvalidCommand
+     * forever with nothing raised to the host. It succeeds here against the
+     * unfed ModeBase placeholder because placeholder_tag()'s
+     * MicrowaveOvenMode arm answers kNormal, which is the whole reason a
+     * freshly composed microwave works before the host has sent
+     * AT+MTMODES. Read back rather than trusted, because that arm is one
+     * edit away from being wrong and nothing else would notice.
+     *
+     * This probe covers the PLACEHOLDER path only, and deliberately: it
+     * runs once at create, before any AT+MTMODES can have arrived, so it
+     * cannot see a host feed that carries no kNormal-tagged mode. That
+     * half is refused outright in mt_matter_modebase_set() (fix round,
+     * RULED DE417). The two together close the class; neither alone
+     * does. */
+    uint8_t normal_mode = 0;
+    CHIP_ERROR tag_err = mode_inst->GetModeValueByModeTag(
+        chip::to_underlying(MwoMode::ModeTag::kNormal), normal_mode);
+    if (tag_err != CHIP_NO_ERROR) {
+        HEARTH_LOGE("matter", "microwave endpoint %u: NO MODE CARRIES THE kNormal TAG "
+                "(%" CHIP_ERROR_FORMAT "); every SetCookingParameters will answer "
+                "InvalidCommand and raise no +MTCMD. Check the MicrowaveOvenMode placeholder "
+                "tag and any host-fed AT+MTMODES list",
+                (unsigned)ep, tag_err.Format());
+    } else {
+        HEARTH_LOGI("matter", "microwave endpoint %u ready: kNormal resolves to mode %u", (unsigned)ep,
+                (unsigned)normal_mode);
+    }
+}

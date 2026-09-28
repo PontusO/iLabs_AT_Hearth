@@ -67,6 +67,20 @@
 /* Catalogue batch 7b: WaterHeaterManagement::Instance and Delegate, both
  * interface bases, the DEM shape (batch7-audit.md 2.2). */
 #include <app/clusters/water-heater-management-server/water-heater-management-server.h>
+/* Catalogue batch 8: RefrigeratorAlarmServer, the batch's one process-global
+ * singleton with no Instance, no Delegate and no per-endpoint object at all.
+ * AT+MTALARM's second cluster arm reaches it; nothing else in this file
+ * does. */
+#include <app/clusters/refrigerator-alarm-server/refrigerator-alarm-server.h>
+/* Catalogue batch 8: the TemperatureControl iterator delegate interface and
+ * its free-function SetInstance(), the SDK's "the app must supply it" hole
+ * that no SDK code fills. */
+#include <app/clusters/temperature-control-server/supported-temperature-levels-manager.h>
+/* Catalogue batch 8: MicrowaveOvenControl::Instance and Delegate. The one
+ * Instance in this file whose constructor takes references to two OTHER
+ * clusters' Instances; the ordering that makes that safe is at
+ * mt_matter_mwoc_register() below. */
+#include <app/clusters/microwave-oven-control-server/microwave-oven-control-server.h>
 /* Catalogue EVSE: EnergyEvse::Instance and Delegate, both interface bases,
  * the DEM and WHM shape with a five-argument constructor (feature mask,
  * optional attributes, optional commands). The header also brings the
@@ -526,9 +540,10 @@ static bool attr_type_info(EmberAfAttributeType t, bool *is_unsigned, uint8_t *b
  * belongs to (nRF README batch roster); the batch 4, batch 5, batch 7a-1
  * (ElectricalPowerMeasurement) and batch 7a-2 (MeterIdentification,
  * DeviceEnergyManagement, DeviceEnergyManagementMode), batch 7b
- * (WaterHeaterManagement, WaterHeaterMode) and EVSE round (EnergyEvse,
- * EnergyEvseMode) rows are present here, the rest arrive with their
- * batches:
+ * (WaterHeaterManagement, WaterHeaterMode), EVSE round (EnergyEvse,
+ * EnergyEvseMode) and batch 8 (RefrigeratorAndTemperatureControlledCabinet
+ * Mode, OvenMode, OvenCavityOperationalState, MicrowaveOvenMode) rows are
+ * present here, every row of the table since batch 8:
  *
  *   OperationalState OperationalState, CurrentPhase           batch 4
  *   Chime SelectedChime, Enabled                              batch 4
@@ -577,7 +592,7 @@ struct instance_served_attr {
 };
 
 /*
- * Fifty-one rows: Basic Information's four integer attributes on the
+ * Fifty-six rows: Basic Information's four integer attributes on the
  * root node (ruling F500), the per-endpoint OperationalState pair, and the
  * per-endpoint Chime pair (both brought in by catalogue batch 4 with the
  * trio and the chime), the RVC's two ModeBase CurrentMode attributes and
@@ -585,8 +600,10 @@ struct instance_served_attr {
  * ElectricalPowerMeasurement push fields (7a-1), MeterIdentification
  * MeterType and the six DeviceEnergyManagement scalars with DEMMode's
  * CurrentMode (7a-2), the six WaterHeaterManagement values with
- * WaterHeaterMode's CurrentMode (7b), and the sixteen EnergyEvse values
- * with EnergyEvseMode's CurrentMode (the EVSE round).
+ * WaterHeaterMode's CurrentMode (7b), the sixteen EnergyEvse values with
+ * EnergyEvseMode's CurrentMode (the EVSE round), and batch 8's three
+ * ModeBase CurrentModes (the refrigerator and cabinet mode, OvenMode,
+ * MicrowaveOvenMode) with the oven cavity's OperationalState pair.
  *
  * The Basic Information strings (VendorName, ProductName, NodeLabel,
  * Location and the rest) and CapabilityMinima are deliberately NOT here:
@@ -724,6 +741,49 @@ static const instance_served_attr k_instance_served[] = {
       chip::app::Clusters::WaterHeaterManagement::Attributes::BoostState::Id },
     { chip::app::Clusters::WaterHeaterMode::Id,
       chip::app::Clusters::WaterHeaterMode::Attributes::CurrentMode::Id },
+    /* RefrigeratorAndTemperatureControlledCabinetMode (batch 8): the RVC
+     * ModeBase pair's rule on the fifth alias, read live from the pool and
+     * refused +MTERR:11 on write. Its ClusterRevision stays out for the same
+     * reason every ModeBase alias's does (the AAI has no revision case, so
+     * the arena seed is the live answer). RefrigeratorAlarm needs no rows at
+     * all, and that is the interesting half: Mask, State and Supported are
+     * plain arena integers that the singleton server itself reads and writes
+     * through the generated Accessors, so an AT+MTATTR read of any of them
+     * already answers exactly what a controller sees. Only State's WRITE
+     * path is diverted, and it is diverted to a different COMMAND
+     * (AT+MTALARM) rather than to a carve-out row here, because what the
+     * diversion buys is the Notify event, not a different value. */
+    { chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id,
+      chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Attributes::
+          CurrentMode::Id },
+    /* OvenMode and OvenCavityOperationalState (batch 8, the heater cabinet):
+     * the ModeBase pair's rule on the sixth alias, and the opstate pair's on
+     * the derived cluster, all read live from the shared pools and refused
+     * +MTERR:11 on write. The cavity's two rows are the RvcOperationalState
+     * rows one cluster over and exist for the same reason: its Instance's
+     * AAI intercepts both scalars, so the arena slots beneath them are inert
+     * shadows. AT+MTOPSTATE and AT+MTMODES are the write paths. The cavity's
+     * ClusterRevision stays out for the WHM reason rather than the ModeBase
+     * one: Instance::Read() serves it, and the seed is a shadow kept equal
+     * to what it serves, so the generic arena read answers the same 1. */
+    { chip::app::Clusters::OvenMode::Id,
+      chip::app::Clusters::OvenMode::Attributes::CurrentMode::Id },
+    /* MicrowaveOvenMode CurrentMode (batch 8), the seventh ModeBase alias
+     * (the EVSE round's EnergyEvseMode row below is the eighth and last).
+     * Note what is NOT here and why, because the microwave is the one
+     * device type where the omissions are the interesting part: the three
+     * MicrowaveOvenControl attributes are Instance-served too, and are
+     * deliberately left to the arena, because AT_MT_SPEC.md 3.17 says a
+     * host reads CookTime and PowerSetting back only through a commissioned
+     * controller; and OperationalState's CountdownTime is left to the arena
+     * because its seeded null and the delegate's NullNullable agree, so both
+     * paths answer +MTERR:5 already. */
+    { chip::app::Clusters::MicrowaveOvenMode::Id,
+      chip::app::Clusters::MicrowaveOvenMode::Attributes::CurrentMode::Id },
+    { chip::app::Clusters::OvenCavityOperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::OperationalState::Id },
+    { chip::app::Clusters::OvenCavityOperationalState::Id,
+      chip::app::Clusters::OperationalState::Attributes::CurrentPhase::Id },
     /* EnergyEvse (the EVSE round), the catalogue's largest carve-out and the
      * simplest to justify: Instance::Read() serves ALL 23 attributes from the
      * delegate and falls through to ember only for ClusterRevision
@@ -975,11 +1035,15 @@ extern "C" int mt_matter_attr_read(uint16_t ep, uint32_t cluster, uint32_t attr,
         case chip::app::Clusters::BasicInformation::Id:
             return mt_basic_info_attr_read_live(attr, out, is_unsigned);
         case chip::app::Clusters::OperationalState::Id:
+        case chip::app::Clusters::OvenCavityOperationalState::Id:
             return mt_opstate_attr_read_live(ep, cluster, attr, out, is_unsigned);
         case chip::app::Clusters::RvcRunMode::Id:
         case chip::app::Clusters::RvcCleanMode::Id:
         case chip::app::Clusters::DeviceEnergyManagementMode::Id:
         case chip::app::Clusters::WaterHeaterMode::Id:
+        case chip::app::Clusters::RefrigeratorAndTemperatureControlledCabinetMode::Id:
+        case chip::app::Clusters::OvenMode::Id:
+        case chip::app::Clusters::MicrowaveOvenMode::Id:
         case chip::app::Clusters::EnergyEvseMode::Id:
             return mt_mb_attr_read_live(ep, cluster, out, is_unsigned);
         case chip::app::Clusters::RvcOperationalState::Id:
@@ -1825,3 +1889,4 @@ extern "C" int mt_matter_valve_state_set(uint16_t ep, uint8_t state, int level)
 #include "mt_matter_sl_b5.inc"
 #include "mt_matter_sl_b7.inc"
 #include "mt_matter_sl_evse.inc"
+#include "mt_matter_sl_b8.inc"

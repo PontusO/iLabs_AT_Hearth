@@ -90,17 +90,17 @@ static const std::array<SmokeCoAlarmServer::ExpressedStateEnum, SmokeCoAlarmServ
  * (platform/esp32c6/main/main.cpp mt_matter_alarm_set()). mt_at.c's
  * cmd_mtalarm only checks the UNION bound 0..11 before calling this (it
  * cannot know which cluster <ep> carries); this bridge dispatches on the
- * cluster the endpoint actually has. ONE cluster on this port, the
- * SmokeCoAlarm branch below; the C6's second (the RefrigeratorAlarm batch 8
- * added there) is not on this port, so the single fall-through at the end,
- * MT_ATTR_ERR_CLUSTER, is the same code the C6 answers for an endpoint
- * carrying neither.
+ * cluster the endpoint actually has. TWO clusters since catalogue batch 8,
+ * which added the RefrigeratorAlarm branch below rather than restructuring
+ * this function, exactly as the pre-batch-8 version of this comment
+ * predicted it would; an endpoint carrying neither still answers
+ * MT_ATTR_ERR_CLUSTER through the single fall-through at the end, the same
+ * code the C6 answers.
  *
  * Field 0 (ExpressedState) is derived by the server from the other fields
  * and never settable directly; rejected here rather than in mt_at.c because
- * field 0 is a legal RefrigeratorAlarm bit on the C6 (batch 8's, not on this
- * port) and the union bound
- * must stay shared (core/include/mt_matter.h:647-651, binding).
+ * field 0 is a legal RefrigeratorAlarm bit on the C6 and the union bound
+ * must stay shared (core/include/mt_matter.h:653-661, binding).
  *
  * Every legal field maps to the matching SmokeCoAlarmServer setter, never a
  * raw attribute write: the setters emit the cluster's spec-mandated events
@@ -224,6 +224,62 @@ extern "C" int mt_matter_alarm_set(uint16_t ep, uint8_t field, uint8_t value)
             srv.SetExpressedStateByPriority(ep, s_alarm_expressed_state_priority);
         }
         return ok ? MT_ATTR_OK : MT_ATTR_ERR_FAILED;
+    }
+
+    /*
+     * Catalogue batch 8: the second cluster arm the pre-batch comment
+     * promised, and it is a different shape from the one above rather than
+     * a tenth case in the same switch.
+     *
+     * <field> is not an attribute selector here, it is an alarm BIT NUMBER
+     * (AT_MT_SPEC.md §3.22, its fridge form): 0 is DoorOpen, the only bit
+     * the Matter spec
+     * defines in any revision through 1.5.1, and 1..7 exist only because the
+     * union bound mt_at.c enforces is 0..11 and this bridge has to narrow it
+     * somewhere. Bits 8..11 are legal for SmokeCoAlarm and out of range
+     * here.
+     *
+     * The Supported check is what makes an in-range but undefined bit
+     * answer +MTERR:1 rather than quietly setting a bit no controller can
+     * interpret. It reads the endpoint's OWN Supported attribute rather than
+     * a compiled-in mask, so a future host-configurable Supported (there is
+     * no AT path for it today; the seed is bit 0) narrows this check with
+     * it.
+     *
+     * ONE CALL, BOTH EFFECTS: SetStateValue() writes State and emits Notify
+     * itself (refrigerator-alarm-server.cpp:115-149), which is the whole
+     * reason AT+MTATTR is not the write path for State. Read-modify-write of
+     * the current State rather than a bare assignment, because <field> names
+     * one bit and the other bits must survive; GetStateValue() answers from
+     * the same arena slot the write lands in.
+     */
+    if (emberAfContainsServer(ep, RefrigeratorAlarm::Id)) {
+        if (field > 7 || value > 1) {
+            return MT_ATTR_ERR_VALUE;
+        }
+        RefrigeratorAlarmServer &srv = RefrigeratorAlarmServer::Instance();
+        const chip::BitMask<RefrigeratorAlarm::AlarmBitmap> bit(
+            static_cast<uint32_t>(1u) << field);
+
+        chip::BitMask<RefrigeratorAlarm::AlarmBitmap> supported;
+        if (srv.GetSupportedValue(ep, &supported) != Status::Success) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        if (!supported.HasAll(bit)) {
+            return MT_ATTR_ERR_VALUE;
+        }
+
+        chip::BitMask<RefrigeratorAlarm::AlarmBitmap> state;
+        if (srv.GetStateValue(ep, &state) != Status::Success) {
+            return MT_ATTR_ERR_FAILED;
+        }
+        if (value != 0) {
+            state.Set(bit);
+        } else {
+            state.Clear(bit);
+        }
+        return (srv.SetStateValue(ep, state) == Status::Success) ? MT_ATTR_OK
+                                                                 : MT_ATTR_ERR_FAILED;
     }
 
     return MT_ATTR_ERR_CLUSTER;
@@ -356,10 +412,9 @@ private:
     }
 
     chip::EndpointId m_ep = chip::kInvalidEndpointId;
-    /* Only the base cluster exists in this catalogue; carried anyway so the
-     * +MTCMD cluster field always comes from the slot, not a literal, and a
-     * future derived-cluster consumer (the oven cavity) reuses this class
-     * unchanged, the C6's shape. */
+    /* The base cluster, or since catalogue batch 8 the oven cavity
+     * (OvenCavityOperationalState), fixed at alloc; the +MTCMD cluster field
+     * always comes from the slot, not a literal, the C6's shape. */
     chip::ClusterId m_cluster = chip::app::Clusters::OperationalState::Id;
 };
 
@@ -502,8 +557,8 @@ extern "C" void mt_matter_opstate_delegate_set_endpoint(void *delegate, uint16_t
  * {0, 1, 2, 0x40 kSeekingCharger, 0x41 kCharging, 0x42 kDocked} for the
  * RVC. A union-legal RVC state (0x40..0x42) on a washer answers
  * MT_ATTR_ERR_VALUE in the base branch, exactly as the C6's does; the
- * oven-cavity branch arrives with its device type in the
- * composed-appliance batch. SetOperationalState() enforces each cluster's
+ * oven-cavity branch serves catalogue batch 8's heater cabinet.
+ * SetOperationalState() enforces each cluster's
  * rule independently (operational-state-server.cpp:101-107, kError or an
  * unsupported state answers CHIP_ERROR_INVALID_ARGUMENT), so a state that
  * slipped both checks would still map to MT_ATTR_ERR_FAILED rather than
