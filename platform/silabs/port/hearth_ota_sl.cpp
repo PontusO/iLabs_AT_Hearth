@@ -121,7 +121,7 @@ void OnPlatformEvent(const ChipDeviceEvent *event, intptr_t)
         CHIP_ERROR err = SystemLayer().StartTimer(kNotifySettle, NotifyAfterSettle, nullptr);
         if (err != CHIP_NO_ERROR) {
             HEARTH_LOGE(TAG, "could not arm the first-run notification timer (%" CHIP_ERROR_FORMAT
-                             "); a pending NotifyUpdateApplied is lost for this boot",
+                             "); a pending NotifyUpdateApplied waits for the next Thread attach",
                         err.Format());
         }
     }

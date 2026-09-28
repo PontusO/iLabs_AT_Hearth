@@ -2506,8 +2506,14 @@ commissioning (the next paragraph says why).
   applying state and target version were lost with it: the first-run
   notification never went out. `hearth_os_restart()` now saves the key map
   (the SDK's `ForceKeyMapSave()`, through `hearth_matter_kvs_flush()`) before
-  every reboot Hearth starts. A reset pin or a power cut inside the window is
-  not covered: on the bench, opening the CPico's port resets the module, and
+  every reboot Hearth starts, and the server's storage saves it at once
+  whenever the OTA requestor writes one of its own keys (`g/o/...`), which is
+  what covers the product's path: after `+MTOTA:APPLY` the host enters the
+  bootloader with the strap and a reset pulse, which no Hearth code sees
+  (found by the round's final review; the bench's row 4.9 reboots with
+  `AT+MTEPAPPLY` and could not show it). Any other reset pin or power cut
+  inside the window is still not covered: on the bench, opening the CPico's
+  port resets the module, and
   doing that within a second of commissioning lost the fabric and left a
   stale operational key that failed every later CASE session until
   `AT+MTFRESET` (graph F631, B632, parked for a later round).

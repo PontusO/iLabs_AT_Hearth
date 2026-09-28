@@ -32,6 +32,8 @@
 
 #include "hearth_matter_init.h"
 
+#include <lib/core/CHIPPersistentStorageDelegate.h>
+
 #include <app/DefaultTimerDelegate.h>
 #include <app/clusters/network-commissioning/network-commissioning.h>
 #include <app/reporting/ReportSchedulerImpl.h>
@@ -42,9 +44,9 @@
 #include <lib/support/logging/CHIPLogging.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/CommissionableDataProvider.h>
-#include <platform/KeyValueStoreManager.h>
 #include <platform/DeviceInfoProvider.h>
 #include <platform/DeviceInstanceInfoProvider.h>
+#include <platform/KeyValueStoreManager.h>
 #include <platform/OpenThread/GenericNetworkCommissioningThreadDriver.h>
 #include <platform/ThreadStackManager.h>
 #include <platform/silabs/efr32/Efr32PsaOperationalKeystore.h>
@@ -55,6 +57,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 
 #include "hearth_log.h"
 #include "hearth_ota_sl.h"
@@ -132,6 +135,54 @@ app::reporting::ReportSchedulerImpl sReportScheduler(&sTimerDelegate);
 
 /* MatterConfig.cpp:299. Static because Server::Init() stores pointers into it. */
 CommonCaseDeviceServerInitParams sInitParams;
+
+/*
+ * The server's persistent storage, with one addition: after any write or
+ * delete of an OTA requestor key ("g/o/...", DefaultStorageKeyAllocator), the
+ * key-value store's key map is saved at once instead of two seconds later
+ * (SL_KVS_SAVE_DELAY_SECONDS). The requestor persists its target version,
+ * provider and update token just before it reports +MTOTA:APPLY, and the host
+ * answers that by holding the bootloader strap and pulsing RESETn, which no
+ * code of ours sees: without this the keys are lost to the reset and the first
+ * boot of the new image never tells the provider. Only the OTA keys, a handful
+ * per update: commissioning writes many keys and keeps the SDK's batching.
+ * Runs on the Matter thread, under the stack lock, like every storage call.
+ */
+class HearthOtaFlushingStorage : public PersistentStorageDelegate
+{
+public:
+    void SetInner(PersistentStorageDelegate *inner) { mInner = inner; }
+
+    CHIP_ERROR SyncGetKeyValue(const char *key, void *buffer, uint16_t &size) override
+    {
+        return mInner->SyncGetKeyValue(key, buffer, size);
+    }
+    CHIP_ERROR SyncSetKeyValue(const char *key, const void *value, uint16_t size) override
+    {
+        CHIP_ERROR err = mInner->SyncSetKeyValue(key, value, size);
+        FlushIfOta(key, err);
+        return err;
+    }
+    CHIP_ERROR SyncDeleteKeyValue(const char *key) override
+    {
+        CHIP_ERROR err = mInner->SyncDeleteKeyValue(key);
+        FlushIfOta(key, err);
+        return err;
+    }
+    bool SyncDoesKeyExist(const char *key) override { return mInner->SyncDoesKeyExist(key); }
+
+private:
+    static void FlushIfOta(const char *key, CHIP_ERROR err)
+    {
+        if (err == CHIP_NO_ERROR && strncmp(key, "g/o/", 4) == 0) {
+            PersistedStorage::KeyValueStoreManagerImpl::ForceKeyMapSave();
+        }
+    }
+
+    PersistentStorageDelegate *mInner = nullptr;
+};
+
+HearthOtaFlushingStorage sOtaFlushingStorage;
 
 void LockOpenThreadTask(void)
 {
@@ -256,6 +307,14 @@ CHIP_ERROR hearth_matter_init(const char *ble_name)
 
         ReturnErrorOnFailure(sInitParams.InitializeStaticResourcesBeforeServerInit()); /* :349 */
 
+        /* FOTA: the server's storage, which the OTA requestor persists
+         * through, saves the key map at once for the requestor's keys
+         * (HearthOtaFlushingStorage above). Everything
+         * InitializeStaticResourcesBeforeServerInit() already handed the
+         * inner delegate keeps it. */
+        sOtaFlushingStorage.SetInner(sInitParams.persistentStorageDelegate);
+        sInitParams.persistentStorageDelegate = &sOtaFlushingStorage;
+
         /* :350, and it must come AFTER the line above: the provider is
          * constructed around the persistent storage delegate that call
          * installs. Server::Init() fails outright on a null dataModelProvider
@@ -305,9 +364,15 @@ CHIP_ERROR hearth_matter_init(const char *ble_name)
  * created in it: a fabric committed just before the reboot, or the OTA
  * requestor's applying state and target version, which the host follows with
  * AT+MTEPAPPLY within seconds (bench, 2026-09-28: the first-run notification
- * never went out). Hearth reboots itself only through hearth_os_restart(), so
- * flushing there covers every reboot Hearth starts. A reset pin or a power
- * cut inside the window is not covered.
+ * never went out). This covers every reboot Hearth starts through
+ * hearth_os_restart() (AT+MTEPAPPLY); AT+MTRESET and AT+MTFRESET go through
+ * the SDK's factory reset, which erases the store first. The OTA requestor's
+ * own keys are also saved as they are written (HearthOtaFlushingStorage), so
+ * the host's bootloader entry, a reset pulse no code of ours sees, does not
+ * lose them. Any other reset pin or power cut inside the window is not
+ * covered. Called on the AT parser task without the CHIP stack lock, on
+ * purpose: ForceKeyMapSave() touches no SystemLayer state, only NVM3, and a
+ * reboot must not wait on a Matter thread that may be the reason for it.
  */
 extern "C" void hearth_matter_kvs_flush(void)
 {

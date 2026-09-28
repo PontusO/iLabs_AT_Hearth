@@ -91,7 +91,10 @@ void hearth_os_restart(void)
  * 1 kB against about 63 kB free at +MTREADY cannot starve commissioning.
  * This is the one stated exception to hearth_port.h's first rule, and the
  * size is what tells the two tenants apart: every row stage is larger
- * than STAGE_SMALL_MAX, which the assert below keeps true. */
+ * than STAGE_SMALL_MAX, which the assert below keeps true. The OTA block is
+ * platform/common/hearth_ota_requestor.cpp's kBlockSize (1,024): a larger
+ * block there must raise STAGE_SMALL_MAX with it, or it falls back to a pool
+ * slot. */
 #define STAGE_SLOTS 2
 #define STAGE_BYTES 5632   /* >= sizeof(mt_row_stage_t) (5,608 today); int64 aligned */
 #define STAGE_SMALL_MAX 1024
