@@ -1367,3 +1367,486 @@ extern "C" void mt_matter_evse_register(void *delegate, uint16_t ep, bool with_s
                 (unsigned)ep, err.Format());
     }
 }
+
+/*
+ * ---- the targets store, host side -----------------------------------------
+ *
+ * Locating an endpoint's store answers the two data-model error codes the AT
+ * layer needs: an endpoint that is not in the composition at all
+ * (MT_ROW_ERR_ENDPOINT, +MTERR:2) against one that exists but carries no
+ * EnergyEvse cluster (MT_ROW_ERR_NO_PAYLOAD, +MTERR:4).
+ */
+static int evse_locate(uint16_t ep, HearthEvseDelegate **out)
+{
+    if (emberAfIndexFromEndpoint(ep) == kEmberInvalidEndpointIndex) {
+        return MT_ROW_ERR_ENDPOINT;
+    }
+    if (!emberAfContainsServer(ep, chip::app::Clusters::EnergyEvse::Id)) {
+        return MT_ROW_ERR_NO_PAYLOAD;
+    }
+    HearthEvseDelegate *d = evse_for(ep);
+    if (d == nullptr) {
+        /* Cluster without a pool slot: unreachable after a successful boot
+         * rebuild, since the create path allocates one per EnergyEvse
+         * endpoint and aborts the whole composition when the pool is
+         * exhausted. */
+        return MT_ROW_ERR_NO_PAYLOAD;
+    }
+    *out = d;
+    return MT_ROW_OK;
+}
+
+/*
+ * The merge, and the one function BOTH row paths commit through: the host's
+ * AT+MTROWAPPLY (via mt_matter_evse_targets_apply(), which takes the stack
+ * lock) and the fabric's adjudicated SetTargets (which is already on the CHIP
+ * task holding it, and calls this directly). Two callers, one merge, so the
+ * two paths cannot end up storing different things from the same rows.
+ *
+ * clear_days is the set of days the caller is asking to REPLACE beyond the
+ * ones its rows name. The AT path passes 0 (its rows are the whole request);
+ * the fabric passes the full affected mask from the schedule entries,
+ * row-bearing days included, which is why the fold happens after the grouping
+ * loop rather than inside it.
+ */
+static int evse_targets_apply_locked(uint16_t ep, const mt_row_stage_t *stage, uint8_t clear_days)
+{
+    using namespace chip::app::Clusters::EnergyEvse;
+
+    HearthEvseDelegate *d  = nullptr;
+    int                 rc = evse_locate(ep, &d);
+    if (rc != MT_ROW_OK) {
+        return rc;
+    }
+
+    /*
+     * The stage belongs to this (ep, kind) only when all three agree; when it
+     * does not, the call carries ZERO rows. Do not read stage->row[] outside
+     * that match: the pointer is one of the TWO staging sessions mt_at.c owns
+     * (the AT parser task's s_row_stage, or the CHIP task's s_row_inbound,
+     * which the fabric path passes), and either may hold a set for a
+     * different endpoint entirely. Since ruling DE419 neither is file-static
+     * storage: the host's is allocated per staging session and the inbound
+     * one is committed per composition, so stage may also be NULL, which
+     * mt_matter.h reads as the same instruction as a mismatch.
+     */
+    bool match = (stage != nullptr && stage->active && stage->ep == ep &&
+                  stage->kind == MT_ROW_KIND_EVSE_TARGET && stage->count > 0);
+
+    /*
+     * No rows AND no days named: the documented clear-EVERYTHING request
+     * (mt_matter.h's contract). This is the AT path's clear verb, and only
+     * the AT path reaches it: the fabric passes clear_days from the schedule
+     * entries it was actually sent, and its own "empty list" case never calls
+     * here at all (SetTargets above documents why an empty SetTargets is a
+     * no-op where an AT+MTROWAPPLY count of 0 is a clear).
+     */
+    if (!match && clear_days == 0) {
+        d->clear_store();
+        d->m_loaded = true; /* empty is now the truth, whatever a failed
+                             * earlier load left behind */
+        if (!d->save()) {
+            return MT_ROW_ERR_PERSIST;
+        }
+        return MT_ROW_OK;
+    }
+
+    /*
+     * Rows to merge, or none when only clear_days brought us here. Every loop
+     * below is bounded by this rather than by stage->count, so the "day named
+     * with no targets" case walks the stage zero times and is still a merge,
+     * not a wholesale clear.
+     */
+    uint16_t nrows = match ? stage->count : 0;
+
+    /*
+     * A MERGE needs the stored schedule to be known, and m_loaded false means
+     * a previous load hit a transient KV failure and this store is empty only
+     * because nobody could read it (LoadTargets()). Retry once, and refuse if
+     * it still cannot be read: merging into an assumed-empty store and saving
+     * the result would overwrite a schedule that may be perfectly intact. The
+     * clear path above is deliberately exempt, because there the host is
+     * asking for the stored payload to go away regardless of what it says.
+     */
+    if (!d->m_loaded) {
+        (void)d->LoadTargets();
+        if (!d->m_loaded) {
+            return MT_ROW_ERR_PERSIST;
+        }
+    }
+
+    /*
+     * Pass 1, PURELY READ-ONLY over the stage: group the incoming rows by day
+     * bitmap in first-appearance order and check the two capacities the row
+     * codec cannot see, because mt_rows.c knows nothing about schedules: at
+     * most kEvseMaxDays distinct bitmaps, and at most kEvseMaxPerDay targets
+     * sharing one. mt_rows_validate() has already proven the set dense, in
+     * range, and free of a day bit appearing in two different bitmaps.
+     *
+     * No target storage is built here. 7 x 10 ChargingTargetStructs is about
+     * 1.7 KB and the AT parser task has a 6144-byte stack, the same
+     * arithmetic that made mt_at.c pass the stage by pointer in the first
+     * place; the merge below writes straight into the member store instead.
+     */
+    uint8_t bitmaps[kEvseMaxDays];
+    uint8_t counts[kEvseMaxDays];
+    uint8_t groups   = 0;
+    uint8_t all_bits = 0;
+
+    /*
+     * The SOC-variant rule, the one rule in this pass about a single target
+     * rather than the shape of the set. Instance::ValidateTargets()
+     * (energy-evse-server.cpp) enforces it on the FABRIC path: with the SOC
+     * feature every target MUST carry targetSoC (InvalidCommand otherwise),
+     * and without it targetSoC must be absent or exactly 100 (ConstraintError
+     * otherwise). Nothing enforced it on the AT path, so a host could install
+     * exactly the schedule a controller's SetTargets would have been refused,
+     * and GetTargets would then hand that schedule back to the controller.
+     *
+     * Read from the delegate's stamped feature record, the same honest source
+     * the push branch's gates use: it comes from the identical declared-list
+     * predicate the Instance's own mFeature snapshot does, so this check and
+     * ValidateTargets() cannot disagree. (The C6 asks its endpoint metadata
+     * instead, because esp-matter's FeatureMap copy is authoritative there
+     * and this port's is a seed shadow; the two questions are the same one.)
+     *
+     * THE SPEC SAYS THIS NOW, and it did not when the check was written.
+     * AT_MT_SPEC.md 3.28's kind-1 rules carried only the choice-of-one rule
+     * ("at least one of <soc> and <energy>"), so a host staging a row that
+     * was legal by 3.28 and illegal by this one met an unexplained +MTERR:1.
+     * The sentence was missing, not the check: 3.28 now carries a paragraph
+     * of its own for the variant rule, naming the same +MTERR:1, the same
+     * all-or-nothing timing, and AT+MTEP?'s fourth field as where a host
+     * reads the variant back. The rule was never optional, because without it
+     * a host could install over AT exactly the schedule a controller's
+     * SetTargets would have been refused and GetTargets would hand that
+     * schedule back to the controller; what was missing was saying so.
+     */
+    bool soc_feature = d->has_feature(Feature::kSoCReporting);
+
+    for (uint16_t r = 0; r < nrows; r++) {
+        const mt_row_t *row = &stage->row[r];
+        if (row->nfields != kRowFields || !row->present[kRowDay] || !row->present[kRowTime]) {
+            /* Defensive: mt_rows_stage() canonicalises nfields and refuses a
+             * row missing a mandatory field, so this cannot fire from either
+             * writer. */
+            return MT_ROW_ERR_VALUE;
+        }
+        if (soc_feature) {
+            if (!row->present[kRowSoC]) {
+                return MT_ROW_ERR_VALUE; /* SOC endpoint: SoC is mandatory */
+            }
+        } else if (row->present[kRowSoC] && row->value[kRowSoC] != 100) {
+            /* No SOC feature: the only SoC a target may state is "full",
+             * which is the XML's way of saying "charge it completely" on a
+             * device that cannot report state of charge. */
+            return MT_ROW_ERR_VALUE;
+        }
+        uint8_t bits = (uint8_t)row->value[kRowDay];
+        if (bits == 0 || (bits & (uint8_t)~kEvseAllDaysMask) != 0) {
+            return MT_ROW_ERR_VALUE;
+        }
+        uint8_t g = 0;
+        for (; g < groups; g++) {
+            if (bitmaps[g] == bits) {
+                break;
+            }
+        }
+        if (g == groups) {
+            if (groups >= kEvseMaxDays) {
+                return MT_ROW_ERR_VALUE; /* more than 7 distinct day groups */
+            }
+            if ((bits & all_bits) != 0) {
+                /* This day already belongs to a DIFFERENT bitmap in the same
+                 * set (an identical bitmap would have matched a group above),
+                 * which CHIP answers ConstraintError for. Checked again here
+                 * rather than trusting mt_rows_validate(): this function is
+                 * the last gate before the store, and it serves the fabric
+                 * path too. */
+                return MT_ROW_ERR_VALUE;
+            }
+            bitmaps[groups] = bits;
+            counts[groups]  = 0;
+            groups++;
+        }
+        if (counts[g] >= kEvseMaxPerDay) {
+            return MT_ROW_ERR_VALUE; /* more than 10 targets for one day */
+        }
+        counts[g]++;
+        all_bits = (uint8_t)(all_bits | bits);
+    }
+
+    /*
+     * Fold in the days the caller named that carry no rows, and do it HERE,
+     * after the loop, never inside it: the loop's "this day already belongs
+     * to a different bitmap" check is about the ROWS, and the fabric passes
+     * the full affected mask (row-bearing days included), so folding early
+     * would make every fabric merge reject itself on its own days.
+     *
+     * These are days a controller asked to EMPTY: a schedule entry with a
+     * dayOfWeekForSequence and an empty chargingTargets list, which
+     * ValidateTargets() accepts and CHIP's own reference store clears in both
+     * of its arms. Deriving the mask from the flattened ROWS instead would
+     * drop such a day silently: the user deletes Monday's targets, the device
+     * answers SUCCESS, GetTargets keeps returning them, and the car charges on
+     * a schedule that was deleted.
+     *
+     * Masked to the seven real days so a caller cannot subtract a bit that is
+     * not a day.
+     */
+    all_bits = (uint8_t)(all_bits | (clear_days & kEvseAllDaysMask));
+
+    /*
+     * Last read-only check: how many stored schedules survive the
+     * subtraction, and does the merged result still fit. Provably it always
+     * does (every surviving schedule and every appended group owns at least
+     * one of the seven days, and they are pairwise disjoint), but the check
+     * is made HERE, before anything is mutated, because the alternative to a
+     * provable invariant is not an assertion halfway through a merge: that
+     * would leave the store half-rewritten with no way back.
+     */
+    {
+        uint8_t survivors = 0;
+        for (uint8_t i = 0; i < d->m_schedule_count; i++) {
+            if ((d->day_bits(i) & (uint8_t)~all_bits) != 0) {
+                survivors++;
+            }
+        }
+        if ((uint16_t)survivors + groups > kEvseMaxDays) {
+            return MT_ROW_ERR_VALUE;
+        }
+    }
+
+    /*
+     * Pass 2, the mutation, which can no longer fail. Subtract every day the
+     * incoming set mentions from what is stored (dropping a stored schedule
+     * that loses all of its days), then append the incoming groups. Days the
+     * set never mentioned are untouched, which is the whole point. A day in
+     * all_bits with no group of its own is subtracted and never re-appended,
+     * which is exactly how an emptied day ends up empty.
+     */
+    d->subtract_days(all_bits);
+
+    uint8_t first_new = d->m_schedule_count;
+    for (uint8_t g = 0; g < groups; g++) {
+        uint8_t slot = (uint8_t)(first_new + g);
+        d->set_day_bits(slot, bitmaps[g]);
+        d->m_target_count[slot] = 0;
+    }
+    d->m_schedule_count = (uint8_t)(first_new + groups);
+
+    for (uint16_t r = 0; r < nrows; r++) {
+        const mt_row_t *row  = &stage->row[r];
+        uint8_t         bits = (uint8_t)row->value[kRowDay];
+        uint8_t         slot = first_new;
+        for (uint8_t g = 0; g < groups; g++) {
+            if (bitmaps[g] == bits) {
+                slot = (uint8_t)(first_new + g);
+                break;
+            }
+        }
+        Structs::ChargingTargetStruct::Type t;
+        t.targetTimeMinutesPastMidnight = (uint16_t)row->value[kRowTime];
+        if (row->present[kRowSoC]) {
+            t.targetSoC.SetValue((chip::Percent)row->value[kRowSoC]);
+        }
+        if (row->present[kRowEnergy]) {
+            t.addedEnergy.SetValue(row->value[kRowEnergy]);
+        }
+        d->m_targets[slot][d->m_target_count[slot]] = t;
+        d->m_target_count[slot]++;
+    }
+    d->refresh_views();
+
+    /*
+     * Persist. A failure here is reported rather than rolled back: the live
+     * data model already carries the new schedule and a controller reading
+     * GetTargets would see it, so the honest report is "applied but not
+     * durable", which is what MT_ROW_ERR_PERSIST (+MTERR:7) says.
+     */
+    if (!d->save()) {
+        return MT_ROW_ERR_PERSIST;
+    }
+    return MT_ROW_OK;
+}
+
+extern "C" int mt_matter_evse_targets_apply(uint16_t ep, const mt_row_stage_t *stage)
+{
+    chip::DeviceLayer::StackLock lock;
+    /* clear_days 0: the host's rows ARE the whole request, so the only days
+     * this merge replaces are the ones its rows name, and a stage that does
+     * not match becomes the documented clear. */
+    return evse_targets_apply_locked(ep, stage, 0);
+}
+
+extern "C" int mt_matter_evse_targets_total(uint16_t ep, uint16_t *total)
+{
+    chip::DeviceLayer::StackLock lock;
+    if (total != nullptr) {
+        *total = 0;
+    }
+    HearthEvseDelegate *d  = nullptr;
+    int                 rc = evse_locate(ep, &d);
+    if (rc != MT_ROW_OK) {
+        return rc;
+    }
+    if (total != nullptr) {
+        *total = d->row_total();
+    }
+    return MT_ROW_OK;
+}
+
+extern "C" int mt_matter_evse_targets_get(uint16_t ep, uint16_t idx, mt_row_t *out,
+                                          uint16_t *total)
+{
+    using namespace chip::app::Clusters::EnergyEvse;
+    chip::DeviceLayer::StackLock lock;
+
+    if (total != nullptr) {
+        *total = 0;
+    }
+    HearthEvseDelegate *d  = nullptr;
+    int                 rc = evse_locate(ep, &d);
+    if (rc != MT_ROW_OK) {
+        return rc;
+    }
+    uint16_t n = d->row_total();
+    if (total != nullptr) {
+        *total = n;
+    }
+    if (out == nullptr) {
+        return MT_ROW_OK;
+    }
+    if (idx >= n) {
+        /* The caller checks idx against mt_matter_rows_total() first
+         * (mt_matter.h), so this is defence against a caller that did not.
+         * Value, not a data-model code: the endpoint and its payload both
+         * exist, the index does not. */
+        return MT_ROW_ERR_VALUE;
+    }
+
+    /* Walk the flattened (schedule, target) sequence to idx, the same
+     * flattening SetTargets uses in the other direction. */
+    uint16_t seen = 0;
+    for (uint8_t i = 0; i < d->m_schedule_count; i++) {
+        if (idx - seen >= d->m_target_count[i]) {
+            seen = (uint16_t)(seen + d->m_target_count[i]);
+            continue;
+        }
+        const Structs::ChargingTargetStruct::Type &t = d->m_targets[i][idx - seen];
+        memset(out, 0, sizeof(*out));
+        out->nfields            = kRowFields;
+        out->present[kRowDay]   = true;
+        out->value[kRowDay]     = d->day_bits(i);
+        out->present[kRowTime]  = true;
+        out->value[kRowTime]    = t.targetTimeMinutesPastMidnight;
+        if (t.targetSoC.HasValue()) {
+            out->present[kRowSoC] = true;
+            out->value[kRowSoC]   = t.targetSoC.Value();
+        }
+        if (t.addedEnergy.HasValue()) {
+            out->present[kRowEnergy] = true;
+            out->value[kRowEnergy]   = t.addedEnergy.Value();
+        }
+        return MT_ROW_OK;
+    }
+    return MT_ROW_ERR_VALUE; /* unreachable: idx < n was checked above */
+}
+
+/*
+ * AT+MTFRESET only. The schedule is USER DATA, so a factory reset is the one
+ * thing that removes it (mt_matter.h's contract and the section comment's
+ * asymmetry note).
+ *
+ * RAM first, so a failing KV erase still leaves the running device with no
+ * schedule rather than one it cannot forget; AT+MTFRESET reboots immediately
+ * afterwards either way.
+ *
+ * The KV sweep walks every endpoint id THIS PORT CAN EVER ASSIGN (1 through
+ * kServiceableEndpoints, mt_devtype_create()'s counter) rather than only the
+ * live delegates, because the residue this has to clear is exactly the key
+ * left behind when a composition changed and a former EVSE endpoint id became
+ * something else. The C6 erases its whole NVS namespace in one call; this
+ * platform's KV port offers per-key delete only, and the id space is small
+ * and bounded, so the sweep is the equivalent. A not-found key (return 1) is
+ * not a failure.
+ */
+extern "C" int mt_matter_evse_targets_erase_all(void)
+{
+    chip::DeviceLayer::StackLock lock;
+
+    for (size_t i = 0; i < s_evse_next; i++) {
+        s_evse_delegates[i]->clear_store();
+        s_evse_delegates[i]->m_loaded = true;
+    }
+
+    int rc = 0;
+    for (uint16_t ep = 1; ep <= kServiceableEndpoints; ep++) {
+        char key[16];
+        evse_key_for(ep, key, sizeof(key));
+        if (hearth_kv_delete(MT_EVSE_KV_NS, key) < 0) {
+            HEARTH_LOGE("matter", "erasing charging targets for endpoint %u failed", (unsigned)ep);
+            rc = -1;
+        }
+    }
+    if (rc == 0) {
+        HEARTH_LOGI("matter", "charging targets erased");
+    }
+    return rc;
+}
+
+/*
+ * ---- the mt_matter_rows_* dispatchers -------------------------------------
+ *
+ * The per-kind switch mt_matter.h describes, and the reason it takes NO lock
+ * of its own: kind 1 forwards to mt_matter_evse_targets_*() above, each of
+ * which takes StackLock, and StackLock wraps a plain LockChipStack()/Unlock()
+ * pair rather than a recursive mutex, so taking it here as well would
+ * DEADLOCK against the callee rather than merely be redundant. A future row
+ * kind whose handler calls into CHIP directly from inside one of these
+ * switches, instead of forwarding to its own locking bridge, must take the
+ * lock at that call site. Do not "fix" these by wrapping the switch.
+ *
+ * An unknown kind answers MT_ROW_ERR_KIND (+MTERR:3), which mt_at.c's own
+ * codec check makes unreachable from the AT path; it is the drift alarm for
+ * a kind added to mt_rows.c and not here.
+ */
+extern "C" int mt_matter_rows_apply(uint16_t ep, uint8_t kind, const mt_row_stage_t *stage)
+{
+    switch (kind) {
+    case MT_ROW_KIND_EVSE_TARGET:
+        return mt_matter_evse_targets_apply(ep, stage);
+    default:
+        return MT_ROW_ERR_KIND;
+    }
+}
+
+extern "C" int mt_matter_rows_get(uint16_t ep, uint8_t kind, uint16_t idx, mt_row_t *out,
+                                  uint16_t *total)
+{
+    switch (kind) {
+    case MT_ROW_KIND_EVSE_TARGET:
+        return mt_matter_evse_targets_get(ep, idx, out, total);
+    default:
+        if (out) {
+            memset(out, 0, sizeof(*out));
+        }
+        if (total) {
+            *total = 0;
+        }
+        return MT_ROW_ERR_KIND;
+    }
+}
+
+extern "C" int mt_matter_rows_total(uint16_t ep, uint8_t kind, uint16_t *total)
+{
+    switch (kind) {
+    case MT_ROW_KIND_EVSE_TARGET:
+        return mt_matter_evse_targets_total(ep, total);
+    default:
+        if (total) {
+            *total = 0;
+        }
+        return MT_ROW_ERR_KIND;
+    }
+}
