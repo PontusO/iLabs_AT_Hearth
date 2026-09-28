@@ -1,7 +1,9 @@
 /*
  * mt_devtypes_sl_registry.inc: a fragment of mt_devtypes_sl.cpp, NOT a compile unit.
  *
- * Holds the parenting policy and the registry (nRF 3325-3428, 4402-4641).
+ * Holds the registry (nRF 4402-4641). The parenting policy and the shape
+ * struct (nRF 3325-3428) moved to mt_devtypes_sl_tables_b8.inc with
+ * catalogue batch 8, the nRF's order: they must precede the batch 8 tables.
  * mt_devtypes_sl.cpp #includes it inside its anonymous namespace, in
  * order with the other fragments, so the whole is still one translation
  * unit: file-local names stay file-local and the generated code is the
@@ -9,83 +11,6 @@
  * file fits a small model's context (graph T549, DE550). Do not add it
  * to hearth.slcp.
  */
-
-/* ---- the parenting policy (nRF 3325-3391) ----------------------------- */
-
-/*
- * The five device type ids the PARENTING POLICY names, given names here
- * because they appear in two places that must agree: parent_policy_ok()
- * below and the registry rows themselves. (On the nRF there is a third, the
- * shape maps that render the same policy as cluster sets; those come with
- * the batch that ports the composed appliances.) Every other row in this
- * file keeps its bare hex literal, because no other row's id is read by
- * anything but the lookup.
- */
-constexpr uint32_t kDtRefrigerator          = 0x0070;
-constexpr uint32_t kDtTempControlledCabinet = 0x0071;
-constexpr uint32_t kDtCookSurface           = 0x0077;
-constexpr uint32_t kDtCooktop               = 0x0078;
-constexpr uint32_t kDtOven                  = 0x007B;
-
-/*
- * THE POLICY IS PORTED IN FULL EVEN THOUGH NEITHER RESTRICTED DEVICE TYPE IS
- * BUILT THIS ROUND, and that is the registry policy's whole point: the
- * predicate answers on the AT+MTEP= line, from the row's identity, so a host
- * gets the same +MTERR:1 for a cook surface with no cooktop parent on this
- * image as on the nRF's, months before either image can stand one up.
- *
- * variant is a parameter of the contract (core/include/mt_devtypes.h) and is
- * deliberately unused: neither rule depends on it today. It stays in the
- * signature, and in the compile-time check's enumeration, so a future rule
- * that DOES depend on it needs no plumbing.
- *
- * constexpr for the reason it is on the nRF: shape_domain_matches_policy()
- * below evaluates it over the whole registry at compile time.
- */
-constexpr bool parent_policy_ok(uint32_t devtype_id, uint8_t variant, uint32_t parent_devtype)
-{
-    (void)variant;
-    /* Cook Surface: legal ONLY under a Cooktop. The unparented form is
-     * rejected by the same expression, since no device type id is 0 and
-     * parent_devtype 0 is how the AT layer spells "no parent"
-     * (core/mt/mt_at.c:1903-1905). This is the catalogue's only device type
-     * that REQUIRES a parent. */
-    if (devtype_id == kDtCookSurface) {
-        return parent_devtype == kDtCooktop;
-    }
-    /* Temperature Controlled Cabinet: legal unparented (the standalone rows
-     * earlier compositions declared keep working), or under a Refrigerator
-     * or an Oven and nothing else. Those two are the appliances that give a
-     * child cabinet a coherent conditional cluster set (Cooler, Heater); a
-     * third parent would be a cabinet with no defined set at all, which is
-     * why the policy refuses rather than falling back to the bare shape. */
-    if (devtype_id == kDtTempControlledCabinet) {
-        return parent_devtype == 0 || parent_devtype == kDtRefrigerator ||
-               parent_devtype == kDtOven;
-    }
-    /* Everything else is permissive, including the unparented form: PartsList
-     * simply reflects whatever the host declares and this firmware holds no
-     * opinion about whether the pairing makes sense (AT_MT_SPEC.md 366-370). */
-    return true;
-}
-
-/*
- * A shape is one realised cluster set for one (variant, parent devtype)
- * pair (nRF 3392-3428). Rows whose cluster set does not depend on the parent
- * carry no shapes at all and keep the ep_type / ep_type_v1 pair the registry
- * struct describes; only a row the policy RESTRICTS needs a shape map.
- *
- * NO ROW CARRIES A SHAPE MAP IN THIS BUILD, because the only two rows that
- * ever do are the cabinet and the cook surface, whose cluster sets arrive
- * with nRF batch 8. The struct, the registry member and the selection arm in
- * mt_devtype_create() are carried anyway so that batch adds a TABLE and not
- * a mechanism, and so the two arms stay diffable.
- */
-struct hearth_shape {
-    uint8_t variant;
-    uint32_t parent_devtype;
-    const EmberAfEndpointType *ep_type;
-};
 
 /* ---- the registry (nRF 4402-4641) ------------------------------------- */
 

@@ -303,6 +303,7 @@ namespace {
 #include "mt_devtypes_sl_tables_b4.inc"
 #include "mt_devtypes_sl_tables_b5.inc"
 #include "mt_devtypes_sl_tables_b7.inc"
+#include "mt_devtypes_sl_tables_b8.inc"
 #include "mt_devtypes_sl_registry.inc"
 #include "mt_devtypes_sl_arena.inc"
 #include "mt_devtypes_sl_seeds.inc"
