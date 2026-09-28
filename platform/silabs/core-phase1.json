@@ -1,13 +1,13 @@
 {
   "header": {
     "cgmr": "1.2.0",
-    "fw_repo_head": "85a7cfad1bc9f79adedaffe2e3810e209718a35e",
+    "fw_repo_head": "b478b6d499efd58b0ea6c77aae6868817f59218e",
     "manual_code": "34970112332",
     "net": "+MTNET:THREAD,0,0,0",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "qr_payload": "MT:SAGA4KQS02KA0648G00",
     "ssid": null,
-    "timestamp": "2026-09-28T09:56:17+00:00",
+    "timestamp": "2026-09-28T11:16:12+00:00",
     "transport": "THREAD"
   },
   "results": {

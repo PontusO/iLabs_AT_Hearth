@@ -3,11 +3,11 @@
     "batch": "mg24-batch3",
     "cgmr": "1.2.0",
     "chip_tool": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool",
-    "fw_repo_head": "a9990dfe63c8b84f70bdc8dfae721d28f5137014",
+    "fw_repo_head": "b478b6d499efd58b0ea6c77aae6868817f59218e",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "ssid": null,
-    "timestamp": "2026-09-25T18:22:14+00:00"
+    "timestamp": "2026-09-28T11:01:59+00:00"
   },
   "results": {
     "0x000A door lock ep2 device-type-list carries (10, 3)": "PASS",
@@ -52,6 +52,7 @@
     "commission: QR payload parses": "PASS",
     "commission: chip-tool pairing exits 0": "PASS",
     "commission: onboarding codes captured": "PASS",
+    "commission: paired the board under test (productId=0x8010)": "PASS",
     "compose: +MTREADY after MTEPAPPLY": "PASS",
     "compose: +MTREADY after MTFRESET": "PASS",
     "compose: MTEPAPPLY -> OK": "PASS",

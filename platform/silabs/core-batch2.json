@@ -3,11 +3,11 @@
     "batch": "mg24-batch2",
     "cgmr": "1.2.0",
     "chip_tool": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool",
-    "fw_repo_head": "c6bd3a00ca769371d4c753a4c881591349a9b278",
+    "fw_repo_head": "b478b6d499efd58b0ea6c77aae6868817f59218e",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "ssid": null,
-    "timestamp": "2026-09-24T23:03:53+00:00"
+    "timestamp": "2026-09-28T11:00:51+00:00"
   },
   "results": {
     "0x002B fan ep5 +MTATTR:5,514,2,70 on the AT link": "PASS",
@@ -71,6 +71,7 @@
     "commission: QR payload parses": "PASS",
     "commission: chip-tool pairing exits 0": "PASS",
     "commission: onboarding codes captured": "PASS",
+    "commission: paired the board under test (productId=0x8010)": "PASS",
     "compose: +MTREADY after MTEPAPPLY": "PASS",
     "compose: +MTREADY after MTFRESET": "PASS",
     "compose: MTEPAPPLY -> OK": "PASS",

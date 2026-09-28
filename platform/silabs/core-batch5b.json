@@ -3,11 +3,11 @@
     "batch": "mg24-batch5b",
     "cgmr": "1.2.0",
     "chip_tool": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool",
-    "fw_repo_head": "a266fe6b5cc1635ca13139ff8c4d1eca72649dad",
+    "fw_repo_head": "b478b6d499efd58b0ea6c77aae6868817f59218e",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "ssid": null,
-    "timestamp": "2026-09-27T09:51:40+00:00"
+    "timestamp": "2026-09-28T11:05:36+00:00"
   },
   "results": {
     "0x0074 robotic vacuum cleaner ep2 current-mode rvccleanmode change-to-mode 1 allow ChangeToMode status 0": "PASS",

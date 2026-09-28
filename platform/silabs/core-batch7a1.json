@@ -3,11 +3,11 @@
     "batch": "mg24-batch7a1",
     "cgmr": "1.2.0",
     "chip_tool": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool",
-    "fw_repo_head": "cfc8f77ef182fb17d80b805cd8265e5ce97c1f35",
+    "fw_repo_head": "b478b6d499efd58b0ea6c77aae6868817f59218e",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "ssid": null,
-    "timestamp": "2026-09-27T15:10:25+00:00"
+    "timestamp": "2026-09-28T11:06:22+00:00"
   },
   "results": {
     "0x0017 solar power ep7 device-type-list carries (1296, 1)": "PASS",

@@ -3,11 +3,11 @@
     "batch": "mg24-batch7b",
     "cgmr": "1.2.0",
     "chip_tool": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool",
-    "fw_repo_head": "2bfc63e675ea9ac1c84b07a0f71ce5099a4693cf",
+    "fw_repo_head": "b478b6d499efd58b0ea6c77aae6868817f59218e",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "ssid": null,
-    "timestamp": "2026-09-27T20:10:48+00:00"
+    "timestamp": "2026-09-28T11:08:49+00:00"
   },
   "results": {
     "0x0018 battery storage ep4 active-bat-faults AT write refused AT+MTATTR=4,47,18 -> +MTERR:5": "PASS",

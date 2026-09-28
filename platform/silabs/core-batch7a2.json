@@ -3,11 +3,11 @@
     "batch": "mg24-batch7a2",
     "cgmr": "1.2.0",
     "chip_tool": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/host/chip-tool",
-    "fw_repo_head": "bf417dcbf01f0c2630e1dc058162babfbacbafd9",
+    "fw_repo_head": "b478b6d499efd58b0ea6c77aae6868817f59218e",
     "node_id": "0x4845",
     "port": "/dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00",
     "ssid": null,
-    "timestamp": "2026-09-27T16:26:17+00:00"
+    "timestamp": "2026-09-28T11:07:22+00:00"
   },
   "results": {
     "0x050D device energy management ep4 abs-min-power pushed AT read = -5000000000": "PASS",

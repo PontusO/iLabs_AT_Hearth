@@ -2430,6 +2430,35 @@ that lies.
 
 ## Measured
 
+### The whole catalogue on one image (2026-09-28)
+
+The upward port's close-out, run after catalogue batch 8 on one image built
+at `b478b6d` from a clean tree (**0 warnings**, the development
+discriminator 0xF02): every catalogue proof table and both harness phases,
+back to back, with each result compared row for row against the baseline its
+batch had committed.
+
+| Table | Result | Against its batch's baseline |
+|---|---|---|
+| `mg24-batch1` | 76 passed, 0 failed, 9 not applicable | identical but for the product-id guard row, added to the harness after the batch |
+| `mg24-batch2` | 73 / 0 / 2 | the same |
+| `mg24-batch3` | 55 / 0 / 1 | the same |
+| `mg24-batch4` | 143 / 0 / 6 | the same |
+| `mg24-batch5a` | 76 / 0 / 2 | the same |
+| `mg24-batch5b` | 52 / 0 / 0 | identical |
+| `mg24-batch7a1` | 72 / 0 / 0 | identical |
+| `mg24-batch7a2` | 109 / 0 / 0 | identical |
+| `mg24-batch7b` | 158 / 0 / 3 | identical |
+| `mg24-evse` | 223 / 0 / 0 | identical |
+| `mg24-batch8` | 259 / 0 / 1 | identical |
+| Phase 1 | 296 passed, 0 failed | identical |
+| Phase 2 | 98 passed, 2 failed (B512), 1 n/a | identical |
+
+In all 1,296 proof rows passed and none failed: all 52 device types, proven
+on one image. No "a slot holds 4" line on the console across the run. The
+committed baselines (`core-*.json`) were re-recorded from this run, so every
+one of them now names the same `fw_repo_head`.
+
 Ten sets of figures live here. **"Catalogue batch 2" immediately below is the
 current image**, the batch's bench proof, its two phase re-runs and its memory
 record: it is catalogue batch 1's image plus six device types, five cluster
