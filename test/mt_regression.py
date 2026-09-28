@@ -460,6 +460,10 @@ class Phase2Context:
         self.subscriber_factory = None  # test seam; None means real Subscriber
         self.relink = None        # installed by main(); steps 2.8/2.9 need it
         self.swd_runner = None    # test seam for swd_reset
+        self.swd_argv = None      # the openocd argv swd_reset runs; None
+                                   # means the C6 carrier's built-in
+                                   # OPENOCD_ARGV. main() fills it from
+                                   # --openocd-config (see openocd_argv)
         self.power_cycler = None  # test seam for operator_power_cycle
         self.composition = None   # +MTEP: lines captured by run_phase2
         self.transport = "WIFI"   # set from phase2_gate's detection
@@ -1050,7 +1054,7 @@ def step_2_8_warm_reboot(ctx):
                    res == 0 and lines == ["+MTATTR:1,6,0,1"], tag="P2"):
         raise StepAbort("could not establish the pre-reboot state")
     link.drain(0.3)
-    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))
     if not s.check("2.8 SWD reset, port back", ok, tag="P2"):
         raise StepAbort("bridge did not come back after SWD reset: %s"
                         % detail)
@@ -1288,10 +1292,11 @@ def step_2_13_thread_reboot_reattach(ctx):
 
     So this row keeps only what the bench proved DOES hold across a
     non-factory reboot, with no event-mask dependency at all: the SWD
-    reset (`ctx.relink(lambda: swd_reset(ctx.swd_runner))`, the exact
-    mechanism step 2.8 uses, never touching Matter's factory-reset path,
-    HARDWARE-VERIFIED), the fabric-survived guard (`AT+MTFABRICS?` reads
-    `1` straight after the reboot: F1's self-validating guard,
+    reset (`ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))`,
+    the exact mechanism step 2.8 uses, never touching Matter's
+    factory-reset path, HARDWARE-VERIFIED), the fabric-survived guard
+    (`AT+MTFABRICS?` reads `1` straight after the reboot: F1's
+    self-validating guard,
     HARDWARE-VERIFIED), and the ends-attached assertion (`AT+MTTHREAD?`
     reads back a role in `MT_THREAD_ATTACHED_ROLES` with `<attached>` =
     `1`, HARDWARE-VERIFIED). The ends-attached read is a short bounded
@@ -1316,7 +1321,7 @@ def step_2_13_thread_reboot_reattach(ctx):
         s.not_applicable(name, "WIFI transport: no Thread mesh to "
                          "reattach to")
         return
-    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))
     if not s.check("2.13 SWD reset, port back", ok, tag="P2"):
         raise StepAbort("bridge did not come back after SWD reset: %s"
                         % detail)
@@ -1368,8 +1373,8 @@ def step_2_14_transport_switch(ctx):
     row would test nothing while still reporting PASS on every other
     line -- the exact "check whose input can never arrive" shape B267
     already cost this harness once. The reboot instead uses
-    ctx.relink(lambda: swd_reset(ctx.swd_runner)), the identical
-    non-factory mechanism steps 2.8 and 2.13 use.
+    ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv)), the
+    identical non-factory mechanism steps 2.8 and 2.13 use.
 
     Placement: runs before 2.11, not after, for the same reason 2.13
     does (its own docstring, and TESTING.md's "Runs before 2.11, not
@@ -1412,7 +1417,7 @@ def step_2_14_transport_switch(ctx):
             res == 0 and lines
             and lines[0].split(":", 1)[1].split(",")[1] == other, tag="P2")
     link.drain(0.3)
-    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))
     if not s.check("2.14 SWD reset, port back", ok, tag="P2"):
         raise StepAbort("bridge did not come back after the switch: %s"
                         % detail)
@@ -1445,7 +1450,7 @@ def step_2_14_transport_switch(ctx):
             link.command("AT+MTTRANSPORT=%s" % ctx.transport)[0] == 0,
             tag="P2")
     link.drain(0.3)
-    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner))
+    ok, detail = ctx.relink(lambda: swd_reset(ctx.swd_runner, ctx.swd_argv))
     if not s.check("2.14 restore: SWD reset, port back", ok, tag="P2"):
         raise StepAbort("bridge did not come back after the restore: %s"
                         % detail)
@@ -5807,6 +5812,57 @@ def parse_dataset(text):
     return None
 
 
+OTBR_DBUS = ["busctl", "--system", "get-property",
+             "io.openthread.BorderRouter.wpan0",
+             "/io/openthread/BorderRouter/wpan0",
+             "io.openthread.BorderRouter"]
+
+
+def otbr_dbus_property(prop, runner=None, timeout=10):
+    """One otbr-agent D-Bus property, the sudo-free route on a bench
+    where ot-ctl cannot connect: its socket is root-owned (graph F503;
+    TESTING.md section 7, the Silabs README's Commissioning section).
+    Every `busctl get-property ... --json=short` result, on this bench's
+    systemd 255, comes back wrapped the same way regardless of the D-Bus
+    type: {"type": T, "data": D}. DeviceRole's D is a JSON string
+    ("leader"), ActiveDatasetTlvs's is a JSON byte array ([...]); see
+    _dbus_json_data, role_from_dbus_json and dataset_from_dbus_json,
+    which all read that wrapper rather than assuming a bare value."""
+    argv = OTBR_DBUS + [prop, "--json=short"]
+    if runner is None:
+        runner = lambda argv, timeout: _subprocess_runner(argv, timeout,
+                                                           label="busctl")
+    return runner(argv, timeout)
+
+
+def _dbus_json_data(text):
+    """The 'data' field of one busctl --json=short get-property result,
+    or None on any parse failure (measured on this bench: both DeviceRole
+    and ActiveDatasetTlvs come back as {"type": T, "data": D}, never a
+    bare value)."""
+    try:
+        return json.loads(text)["data"]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def role_from_dbus_json(text):
+    """The lowercased Thread role from otbr-agent's DeviceRole D-Bus
+    property ({"type":"s","data":"leader"} with --json=short), or None."""
+    data = _dbus_json_data(text)
+    return data.strip().lower() if isinstance(data, str) else None
+
+
+def dataset_from_dbus_json(text):
+    """Dataset hex from otbr-agent's ActiveDatasetTlvs D-Bus property
+    ({"type":"ay","data":[...]} with --json=short), or None. The dataset
+    itself is never printed by any caller of this function."""
+    data = _dbus_json_data(text)
+    if not isinstance(data, list):
+        return None
+    return "".join("%02x" % b for b in data) or None
+
+
 TESTS = []
 
 
@@ -5987,14 +6043,38 @@ OPENOCD_ARGV = ["openocd", "-f", "interface/cmsis-dap.cfg",
                 "-c", "init; reset run; shutdown"]
 
 
-def swd_reset(runner=None):
-    """Reset the RP2350 over SWD (graph N22). The bridge sketch's setup()
-    then pulses PIN_ESP_RST, so this is the RP2350-driven warm C6 reboot
-    TESTING.md 2.8 names. The 1200-baud touch reset is NOT equivalent:
-    it drops the bridge into BOOTSEL."""
+def openocd_argv(config=None):
+    """The argv swd_reset runs, built once in main() and carried on the
+    context.
+
+    With no --openocd-config this is OPENOCD_ARGV unchanged, the C6
+    carrier's contract: the probe is on the Challenger's RP2350 and the
+    bridge sketch's setup() pulses the C6's reset line.
+
+    A carrier whose probe sits on the co-processor's OWN SWD takes its own
+    openocd config file instead, which is where the adapter selection, the
+    transport and the target belong: on the iLabs CPico carrier there are
+    TWO CMSIS-DAP probes on this bench, so `interface/cmsis-dap.cfg` alone
+    picks one at random (`platform/silabs/mg24-swd.cfg` names the right one
+    by serial). Only the two `-f` arguments move; the reset command itself
+    is the same one for every carrier, so a config that resets something
+    other than the co-processor is a config bug, not a harness fork."""
+    if config is None:
+        return list(OPENOCD_ARGV)
+    return ["openocd", "-f", config, "-c", "init; reset run; shutdown"]
+
+
+def swd_reset(runner=None, argv=None):
+    """Reset the co-processor over SWD (graph N22). On the C6 carrier the
+    argv resets the RP2350 and the bridge sketch's setup() then pulses
+    PIN_ESP_RST, so this is the RP2350-driven warm C6 reboot TESTING.md 2.8
+    names. The 1200-baud touch reset is NOT equivalent: it drops the bridge
+    into BOOTSEL. `argv` (from openocd_argv) lets a carrier whose probe is
+    on the module's own SWD reset the module directly; None keeps the C6
+    argv."""
     runner = runner or subprocess.run
     try:
-        proc = runner(OPENOCD_ARGV, capture_output=True, text=True,
+        proc = runner(argv or OPENOCD_ARGV, capture_output=True, text=True,
                       timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
@@ -6003,8 +6083,71 @@ def swd_reset(runner=None):
     return True, ""
 
 
+# The DTR/RTS contract at the AT port is a property of the BRIDGE, not of
+# the co-processor, and the two bridges on this bench are opposites.
+#
+# On the Challenger's RP2350 (the espnow bridge) DTR asserted is what the
+# firmware expects, and pyserial's default open asserts it, which is why the
+# C6 phases never had to think about it. On the CPico bridge, in front of the
+# nRF54L15 and now in front of the MGM240PA32VNA3 on the iLabs carrier, DTR
+# asserted HOLDS THE MODULE IN RESET and RTS asserted drives the recovery
+# strap: opening the port pyserial's way returns zero bytes and reads exactly
+# like dead hardware.
+#
+# Backported from the FOTA round's branch, dev/fota-firmware at 38f5975,
+# where it was introduced by 15362e8. NOT from main: main is at 1842af3 and
+# carries none of this, because dev/fota-firmware is unmerged. So both
+# branches carry it until that merge.
+#
+# The CODE is byte-identical between the two branches: BRIDGE_LINES,
+# open_at_port, make_relink, the cpico block in main() and KNOWN_MODELS.
+# Three PROSE regions differ and will conflict at the merge: this comment
+# block; the --bridge argparse help text (this branch says "every C6 phase"
+# and names the MGM240P, the FOTA branch says "every phase before Phase 4"
+# and names only the nRF54L15); and wait_boot_marker's docstring (the FOTA
+# version cites a report path under the gitignored SDD workspace, dropped
+# here). Resolve all three by keeping one side whole: neither wording is
+# wrong, and neither describes behaviour the other lacks.
+#
+# The contract itself is written down in fw/flash.py,
+# platform/nrf54l15/README.md "Everyday flashing" and
+# platform/silabs/README.md "Uploading an application: fw/flash.py"; this
+# branch predates all of it, and the MG24 skeleton cannot be reached over
+# the CPico without it.
+BRIDGE_LINES = {
+    "challenger": {"dtr": True, "rts": True},
+    "cpico": {"dtr": False, "rts": False},
+}
+
+
+def open_at_port(path, serial_mod, bridge="challenger", baud=115200):
+    """Open the AT port with the bridge's DTR/RTS contract applied BEFORE
+    the open, not after: on the CPico an open that asserts DTR even briefly
+    pulses the module's reset, and the boot that follows eats the first
+    command sent to it."""
+    lines = BRIDGE_LINES.get(bridge, BRIDGE_LINES["challenger"])
+    port = serial_mod.Serial()
+    port.port = path
+    port.baudrate = baud
+    port.timeout = 0.05
+    port.dtr = lines["dtr"]
+    port.rts = lines["rts"]
+    port.open()
+    port.dtr = lines["dtr"]
+    port.rts = lines["rts"]
+    return port
+
+
+def wait_boot_marker(link, timeout=25.0):
+    """Eat the +MTREADY that follows a reset-on-open before any command goes
+    out. A command sent too early is answered BY +MTREADY and is otherwise
+    lost, and the mode it was setting silently stays where it was."""
+    return link.await_urc(r"\+MTREADY$", timeout=timeout)
+
+
 def make_relink(link, port_path, settle=1.0, pump=2.5, deadline_s=30.0,
-                path_exists=None, sleep=None, serial_mod=None):
+                path_exists=None, sleep=None, serial_mod=None,
+                bridge="challenger"):
     """Close the port, run action() while it is closed, wait for the
     device path to come back (SWD reset and power cycles re-enumerate
     USB), reopen and swap the transport in place. Use the by-id path as
@@ -6041,7 +6184,7 @@ def make_relink(link, port_path, settle=1.0, pump=2.5, deadline_s=30.0,
             if not path_exists(port_path):
                 continue
             try:
-                cand = serial_mod.Serial(port_path, 115200, timeout=0.05)
+                cand = open_at_port(port_path, serial_mod, bridge)
             except (serial_mod.SerialException, OSError):
                 sleep(0.2)
                 continue
@@ -6091,10 +6234,22 @@ def operator_power_cycle(port_path, printer=flush_print,
     return True, ""
 
 
+# The AT+CGMM model string is a PLATFORM fact (hearth_port_model(), spec 3.1):
+# each port answers its own chip. The gate accepts exactly these and nothing
+# else, so an ESP-NOW image, a stale build or a board on the wrong port still
+# aborts before any phase runs. A new platform adds its string here in the
+# same change that adds its hearth_port_model() arm.
+KNOWN_MODELS = (
+    "ESP32-C6 Hearth",
+    "nRF54L15 Hearth",
+    "nRF54LM20A Hearth",
+    "MGM240P Hearth",
+)
+
 GATE_REFERENCE_QR = "MT:Y.K9042C00KA0648G00"
 
 
-def _transport_gate(chip, args, link, otctl):
+def _transport_gate(chip, args, link, otctl, dbus=otbr_dbus_property):
     """Shared preflight body for Phase 2 and Phase 3: detects the
     transport from the device and branches, WiFi needs credentials,
     Thread needs a live border router and its active dataset (design
@@ -6105,10 +6260,21 @@ def _transport_gate(chip, args, link, otctl):
 
     Factored out of phase2_gate (T5 task 4) so Phase 3's gate reuses this
     exact logic instead of copy-pasting it: phase2_gate's own self-tests
-    are the guard that the extraction changed nothing observable."""
+    are the guard that the extraction changed nothing observable.
+
+    On a bench where ot-ctl's socket is root-owned (graph F503), the
+    Thread branch falls back to otbr-agent's own D-Bus property for the
+    role and, if needed, the dataset: `dbus` is the same kind of test
+    seam `otctl` is, and a caller that never passes it gets the real
+    otbr_dbus_property. When ot-ctl answers, dbus is never called."""
     if shutil.which("openocd") is None:
         return ("openocd not on PATH: the 2.8 warm reboot resets the "
                 "RP2350 over SWD (see graph N22)", None, None)
+    cfg = getattr(args, "openocd_config", None)
+    if cfg and not os.path.isfile(cfg):
+        return ("--openocd-config %s does not exist; the first SWD reset "
+                "is step 2.8, deep in a destructive phase, so this is "
+                "checked at the door" % cfg, None, None)
     transport = getattr(args, "transport", None)
     if transport is None:
         res, lines = cmd_retry(link, "AT+MTNET?")
@@ -6122,20 +6288,34 @@ def _transport_gate(chip, args, link, otctl):
     if transport == "THREAD":
         rc, out = otctl(["state"], args.ot_ctl)
         if rc != 0:
-            return ("otbr-agent is not answering (ot-ctl state failed): "
-                    "start it per the T4 runbook (graph F36: run "
-                    "otbr-agent directly, D-Bus policy required)",
-                    transport, None)
-        lines = (out or "").strip().splitlines()
-        role = (lines[0] if lines else "<empty>").strip().lstrip("> ")
+            if dbus is otbr_dbus_property and shutil.which("busctl") is None:
+                return ("otbr-agent's control socket is closed to this user "
+                        "(ot-ctl state failed) and busctl is not on PATH, so "
+                        "the D-Bus fallback cannot run either", transport, None)
+            drc, dout = dbus("DeviceRole")
+            if drc != 0:
+                return ("otbr-agent is not answering (ot-ctl state "
+                        "failed): start it per the T4 runbook (graph "
+                        "F36: run otbr-agent directly, D-Bus policy "
+                        "required); D-Bus DeviceRole also failed: %s"
+                        % dout, transport, None)
+            role = role_from_dbus_json(dout) or "<empty>"
+            role_source = "busctl DeviceRole"
+        else:
+            lines = (out or "").strip().splitlines()
+            role = (lines[0] if lines else "<empty>").strip().lstrip("> ")
+            role_source = "ot-ctl state"
         if role not in ("leader", "router", "child"):
-            return ("the Thread network is down (ot-ctl state: %s); "
-                    "bring it up before a Thread phase 2 run" % role,
-                    transport, None)
+            return ("the Thread network is down (%s: %s); "
+                    "bring it up before a Thread phase 2 run"
+                    % (role_source, role), transport, None)
         dataset = getattr(args, "dataset", None)
         if not dataset:
             rc, out = otctl(["dataset", "active", "-x"], args.ot_ctl)
             dataset = parse_dataset(out) if rc == 0 else None
+        if not dataset:
+            drc, dout = dbus("ActiveDatasetTlvs")
+            dataset = dataset_from_dbus_json(dout) if drc == 0 else None
         if not dataset:
             return ("no usable Thread dataset (ot-ctl dataset active -x "
                     "gave nothing; set MT_DATASET to override)",
@@ -6161,7 +6341,7 @@ def _transport_gate(chip, args, link, otctl):
     return None, transport, dataset
 
 
-def phase2_gate(chip, args, link, otctl=otctl_run):
+def phase2_gate(chip, args, link, otctl=otctl_run, dbus=otbr_dbus_property):
     """Phase-2-only preflight, before anything destructive: the shared
     transport/chip-tool checks (_transport_gate) plus nothing else, since
     Phase 2's own destructive precondition (a factory-fresh-or-restorable
@@ -6170,11 +6350,13 @@ def phase2_gate(chip, args, link, otctl=otctl_run):
     otctl is a test seam, in the same style as ChipTool's injectable
     runner: production call sites never pass it, so the real otctl_run
     runs against the real binary; self-tests substitute a callable with
-    the same (args, binary) -> (rc, out) signature."""
-    return _transport_gate(chip, args, link, otctl)
+    the same (args, binary) -> (rc, out) signature. dbus is the same kind
+    of seam for the otbr-agent D-Bus fallback _transport_gate uses when
+    ot-ctl cannot connect."""
+    return _transport_gate(chip, args, link, otctl, dbus=dbus)
 
 
-def phase3_gate(chip, args, link, otctl=otctl_run):
+def phase3_gate(chip, args, link, otctl=otctl_run, dbus=otbr_dbus_property):
     """Phase-3-only preflight: the same shared transport/chip-tool checks
     as Phase 2 (design spec T5 section 4.1: "same code path as Phase 2's
     gate"), so the two transports (and Thread's border-router liveness
@@ -6186,8 +6368,8 @@ def phase3_gate(chip, args, link, otctl=otctl_run):
     gate's job stays "is this bench usable at all", not "is state already
     clean".
 
-    otctl is the same test seam phase2_gate takes."""
-    return _transport_gate(chip, args, link, otctl)
+    otctl and dbus are the same test seams phase2_gate takes."""
+    return _transport_gate(chip, args, link, otctl, dbus=dbus)
 
 
 def phase0(link, header):
@@ -6206,8 +6388,8 @@ def phase0(link, header):
         return ("wrong personality: this board runs the ESP-NOW firmware; "
                 "reflash Hearth with python3 fw/flash.py --build-dir "
                 "build_wifi --port <port> --bridge espnow")
-    if model != "ESP32-C6 Hearth":
-        return "unexpected model: %r" % model
+    if model not in KNOWN_MODELS:
+        return "unexpected model: %r (known: %s)" % (model, ", ".join(KNOWN_MODELS))
     res, lines = link.command("AT+CGMR")
     if res != 0 or not lines:
         return "AT+CGMR failed"
@@ -6272,8 +6454,9 @@ def register_phase1_positive():
     p("ATE1/ATE0 echo on and off", t_echo_on_off)
     p("CGMI -> iLabs Electronics",
       expect_ok("AT+CGMI", line_re=r"iLabs Electronics"))
-    p("CGMM -> ESP32-C6 Hearth",
-      expect_ok("AT+CGMM", line_re=r"ESP32-C6 Hearth"))
+    p("CGMM -> a known Hearth model",
+      expect_ok("AT+CGMM",
+                line_re=r"^(" + "|".join(re.escape(m) for m in KNOWN_MODELS) + r")$"))
     p("CGMR equals MTVER? field", t_cgmr_matches_mtver)
     p("MTVER? emits +MTVER:", expect_ok("AT+MTVER?", line_re=r"\+MTVER:.+"))
     p("MTSTATE? format", expect_ok("AT+MTSTATE?",
@@ -8086,6 +8269,23 @@ def main(argv=None):
                                            "/tmp/mt-regression"))
     ap.add_argument("--ssid", default=os.environ.get("MT_SSID"))
     ap.add_argument("--psk", default=os.environ.get("MT_PSK"))
+    ap.add_argument("--bridge", choices=sorted(BRIDGE_LINES),
+                    default=os.environ.get("MT_BRIDGE", "challenger"),
+                    help="the DTR/RTS contract at the AT port, which is a "
+                         "property of the bridge board: challenger asserts "
+                         "both (the default, every C6 phase), cpico clears "
+                         "both (asserting DTR there holds the nRF54L15 or "
+                         "the MGM240P in reset)")
+    ap.add_argument("--openocd-config", dest="openocd_config",
+                    default=os.environ.get("MT_OPENOCD_CONFIG"),
+                    help="openocd config file for the SWD reset steps 2.8, "
+                         "2.13 and 2.14 use. The default resets an RP2350 "
+                         "through interface/cmsis-dap.cfg, which is the C6 "
+                         "carrier's contract (the bridge's setup() pulses "
+                         "the C6 reset). A carrier whose probe is on the "
+                         "co-processor's own SWD passes its own config: "
+                         "platform/silabs/mg24-swd.cfg for the iLabs CPico "
+                         "carrier with an MGM240P")
     ap.add_argument("--node-id", type=lambda x: int(x, 0), default=0x4845,
                     help="node id chip-tool assigns at pairing")
     ap.add_argument("--max-endpoints", type=int, default=None,
@@ -8129,12 +8329,18 @@ def main(argv=None):
 
     import serial
     try:
-        port = serial.Serial(args.port, 115200, timeout=0.05)
+        port = open_at_port(args.port, serial, args.bridge)
     except serial.SerialException as exc:
         print("ABORT: cannot open %s: %s" % (args.port, exc))
         return 2
 
     link = ATLink(port)
+    if args.bridge == "cpico":
+        # This bridge resets the module on open; phase0's AT would race the
+        # boot. Nothing is lost by waiting: the marker is queued either way.
+        if wait_boot_marker(link) is None:
+            print("  (no +MTREADY within 25 s of opening the port; "
+                  "continuing, the gate will say whether the link is alive)")
     header = {
         "port": args.port,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -8170,7 +8376,8 @@ def main(argv=None):
             res, _ = link.command("AT+MTTRANSPORT?")
             ctx.image = "combined" if res == 0 else transport.lower()
             ctx.dataset = dataset
-            ctx.relink = make_relink(link, args.port)
+            ctx.swd_argv = openocd_argv(args.openocd_config)
+            ctx.relink = make_relink(link, args.port, bridge=args.bridge)
             ctx.chip2 = ChipTool(args.chip_tool, args.storage + "-f2")
             ctx.chip2.wipe_storage()
             run_phase2(ctx)

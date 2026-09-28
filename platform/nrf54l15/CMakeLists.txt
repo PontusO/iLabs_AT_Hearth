@@ -328,9 +328,16 @@ if(CONFIG_CHIP)
   # via app/util/attribute-storage.h, and that codegen dir was only ever added
   # to the matter-data-model target's own include path, not app's; mirrors
   # ZAP_PARENT_DIR in the template sample's CMakeLists.txt.
-  target_include_directories(app PRIVATE src src/default_zap ${MATTER_COMMON})
+  # ../chip is the +MTEVT mapping shared with the MGM240P arm
+  # (platform/chip/mt_chip_events.{h,cpp}). It sits outside this platform
+  # directory on purpose: it names stock CHIP symbols only, so both Thread
+  # ports compile the same file and the two arms cannot drift apart. It is
+  # inside the CONFIG_CHIP guard because that is the only configuration in
+  # which those symbols exist.
+  target_include_directories(app PRIVATE src src/default_zap ../chip ${MATTER_COMMON})
   target_sources(app PRIVATE
     src/main.cpp
+    ../chip/mt_chip_events.cpp
     port/mt_matter_stub.c
     port/mt_matter_zephyr.cpp
     port/mt_devtypes_zephyr.cpp

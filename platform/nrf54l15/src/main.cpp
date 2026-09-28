@@ -21,6 +21,10 @@ extern "C" {
 #include "mt_devtypes.h"
 #include "mt_matter.h"
 }
+/* Outside the extern "C" block above on purpose: this header is C++ and
+ * returns CHIP_ERROR. platform/chip/mt_chip_events.{h,cpp} is the +MTEVT
+ * mapping shared with the MGM240P arm. */
+#include "mt_chip_events.h"
 #include "mt_port_ids.h"
 
 LOG_MODULE_REGISTER(hearth_main, LOG_LEVEL_INF);
@@ -122,6 +126,33 @@ int main(void)
     {
         chip::DeviceLayer::StackLock lock;
         emberAfEndpointEnableDisable(kCatalogueEndpointId, false);
+
+        /*
+         * The +MTEVT sources, under the same lock: AddEventHandler,
+         * SetAppDelegate and AddFabricDelegate all touch stack-owned state
+         * from a task that is not the CHIP event loop. It has to be after
+         * the server has started (the window manager and the fabric table
+         * exist only then) and before mt_at_start(), so the window the
+         * server opened during its own init is already tracked when the
+         * boot marker goes out. Nothing the handler or the delegates emit
+         * can precede +MTREADY: mt_at_event() goes through mt_at_urc()'s
+         * s_at_up guard.
+         *
+         * Nrf::Matter::PrepareServer() sets no initParams.appDelegate
+         * (matter_init.cpp sets testEventTriggerDelegate,
+         * endpointNativeParams, the two keystores, the group data provider
+         * and the data model provider, and nothing else), so
+         * SetAppDelegate replaces nothing here. AddEventHandler is
+         * additive to Nordic's own DefaultEventHandler, registered at
+         * matter_init.cpp:351.
+         */
+        CHIP_ERROR evt_err = mt_chip_events_register();
+        if (evt_err != CHIP_NO_ERROR) {
+            /* Not fatal, unlike a failed server start: the AT surface still
+             * answers every command and the host falls back to polling
+             * AT+MTSTATE?. Say which error, loudly. */
+            LOG_ERR("event registration failed: %" CHIP_ERROR_FORMAT, evt_err.Format());
+        }
     }
 
     rebuild_composition();
@@ -139,6 +170,10 @@ int main(void)
     mt_meter_register_all();
 
     mt_at_start();
+
+    /* The boot replay of +MTEVT:0, after the marker and with no lock held:
+     * it reads mt_matter_state(), which takes the stack lock itself. */
+    mt_chip_events_after_ready();
 
     while (true) {
         Nrf::DispatchNextTask();

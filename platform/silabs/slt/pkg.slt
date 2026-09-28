@@ -1,0 +1,17 @@
+# Hearth MG24 port: the Silabs command-line toolchain, pinned.
+# Simplicity SDK 2025.12.3 with Silicon Labs Matter 2.8.1-1.5 (the extension
+# release whose own dependency graph names 2025.12.3).
+version = "0"
+
+[dependency]
+# SDKs
+simplicity-sdk = "2025.12.3"
+matter_extension = "2.8.1"
+wiseconnect = "4.0.2"
+# Tools
+cmake = "3.30.2"
+gcc-arm-none-eabi = "12.2.rel1"
+ninja = "1.12.1"
+zap = "2026.06.17"
+slc-cli = "6.0.23"
+commander = "1.24.3"

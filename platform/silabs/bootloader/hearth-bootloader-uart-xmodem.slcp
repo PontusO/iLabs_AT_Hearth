@@ -1,0 +1,42 @@
+project_name: hearth-bootloader-uart-xmodem
+package: bootloader
+quality: production
+label: Hearth Bootloader - UART XMODEM (MGM240PA32VNA)
+description: >
+  The Hearth project's Gecko Bootloader for the MGM240PA32VNA3 on the iLabs
+  RP2350 carrier. Standalone UART XMODEM bootloader on the module's PA05 (TX)
+  and PA06 (RX) at 115200 8N1, no flow control, entered either because the
+  application slot holds no valid image or because the recovery strap on PC00
+  (module pin 22) is held low through reset. Derived from the Simplicity SDK
+  sample bootloader-uart-xmodem; the two config headers below carry the
+  carrier's pin map, which the bare module target leaves unset.
+
+component:
+  - id: bootloader_core
+  - id: bootloader_crc
+  - id: bootloader_aes_sha_ecdsa
+  - id: bootloader_delay_driver
+  - id: bootloader_gpio_activation
+  - id: bootloader_image_parser
+  - id: bootloader_token_management
+  - id: bootloader_serial_driver
+  - id: bootloader_xmodem_parser
+  - id: bootloader_uart_xmodem
+  - id: bootloader_debug
+
+configuration:
+  - name: SL_VCOM_ENABLE
+    value: 0
+
+config_file:
+  - override:
+      component: bootloader_gpio_activation
+      file_id: btl_gpio_activation_cfg
+    path: config/btl_gpio_activation_cfg.h
+  - override:
+      component: bootloader_uart_driver
+      file_id: btl_uart_driver_cfg
+    path: config/btl_uart_driver_cfg.h
+
+post_build:
+  profile: bootloader_series_2

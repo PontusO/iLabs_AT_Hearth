@@ -820,9 +820,12 @@ void mt_matter_mwoc_delegate_set_endpoint(void *delegate, uint16_t ep);
  * is bounded only by the composition itself (MT_COMP_MAX_ENDPOINTS,
  * mt_composition.h). The nRF port did not get that round's delegate reclaim
  * and still enforces MT_MEAS_MAX below as a real family acceptance cap on its
- * own fixed EPM/PowerTopology delegate pools (mt_matter_zephyr.cpp).
+ * own fixed EPM/PowerTopology delegate pools (mt_matter_zephyr.cpp); the
+ * Silicon Labs MG24 port enforces the same cap as its documented admission
+ * maximum for the family (catalogue batch 7a-1, its pools in
+ * platform/silabs/port/mt_matter_sl_b7.inc).
  */
-#define MT_MEAS_MAX 8  /* nRF-only: measurement-capable endpoints per composition */
+#define MT_MEAS_MAX 8  /* nRF and MG24: measurement-capable endpoints per composition */
 
 /*
  * AT+MTMEAS field ids, the wire contract task 3 documents in AT_MT_SPEC.md
@@ -943,9 +946,10 @@ void mt_matter_meas_delegate_set_endpoint(void *delegate, uint16_t ep);
  * only by the composition itself (MT_COMP_MAX_ENDPOINTS, mt_composition.h).
  * The nRF port did not get that round's delegate reclaim and still enforces
  * MT_WHM_MAX below as a real family acceptance cap on its own fixed WHM
- * delegate pool (mt_matter_zephyr.cpp).
+ * delegate pool (mt_matter_zephyr.cpp); the Silicon Labs MG24 port adopts the
+ * same cap as its documented admission maximum (catalogue batch 7b).
  */
-#define MT_WHM_MAX 4  /* nRF-only: WaterHeaterManagement endpoints per composition */
+#define MT_WHM_MAX 4  /* nRF and MG24: WaterHeaterManagement endpoints per composition */
 
 /*
  * AT+MTMEAS field ids for the WaterHeaterManagement cluster (0x0094), the
@@ -1024,9 +1028,10 @@ void *mt_matter_whm_delegate_alloc(uint16_t ep);
  * (MT_COMP_MAX_ENDPOINTS, mt_composition.h). The nRF port did not get that
  * round's delegate reclaim and still enforces MT_DEM_MAX below as a real
  * family acceptance cap on its own fixed DEM delegate pool
- * (mt_matter_zephyr.cpp).
+ * (mt_matter_zephyr.cpp); the Silicon Labs MG24 port adopts the same cap as
+ * its documented admission maximum (catalogue batch 7a-2).
  */
-#define MT_DEM_MAX 4  /* nRF-only: DeviceEnergyManagement endpoints per composition */
+#define MT_DEM_MAX 4  /* nRF and MG24: DeviceEnergyManagement endpoints per composition */
 
 /*
  * AT+MTMEAS field ids for the DeviceEnergyManagement cluster (0x0098), the

@@ -1,0 +1,489 @@
+# hearth.slcp - the Hearth application for the MGM240PA32VNA3.
+#
+# THE SOURCE LIST OF RECORD FOR core/ IS core/sources.cmake. The seven
+# core/ paths below are that file's HEARTH_CORE_SOURCES written out in
+# slc's syntax, because slc reads no CMake; the two must agree, and a
+# source added there must be added here in the same commit.
+# test/host/check_slcp_sources.py enforces that agreement.
+#
+# Generate and build (platform/silabs/README.md, "Building"):
+#
+#   source platform/silabs/toolchain.env
+#   platform/silabs/fw/sdk-prepare.sh          # once per SDK install
+#   slc generate -d <builddir> --sdk-package-path "$SISDK_ROOT" \
+#       --sdk-package-path "$MATTER_EXT_ROOT" \
+#       -p platform/silabs/hearth.slcp --with MGM240PA32VNA \
+#       --generator-timeout=180 -o makefile
+#   POST_BUILD_EXE=$(which commander) make all -C <builddir> -f hearth.Makefile -j8
+#
+# TWO --sdk-package-path arguments since round 2: the Simplicity SDK and the
+# Matter extension. That is the form the extension's own slc/build.sh uses
+# (line 353); one path alone cannot resolve the sdk_extension below.
+#
+# --with MGM240PA32VNA, the MODULE id, never the BRD2704A board id: that
+# board carries the MGM240P*B* part and its image RAIL-asserts on this
+# module (README, "Do not build for BRD2704A"). hearth_port_model()
+# #errors on anything but MGM240PA32VNA, so a wrong target fails here
+# rather than on the bench.
+
+project_name: hearth
+package: platform
+quality: production
+label: Hearth - AT+MT co-processor (MGM240PA32VNA)
+description: >
+  The Hearth AT+MT co-processor for the MGM240PA32VNA3 on the iLabs RP2350
+  carrier: the portable core/ engine, the Simplicity SDK downward port
+  (FreeRTOS, EUSART0 on PA05/PA06 for the AT link, USART0 TX on PA00 for the
+  console, NVM3 for the key-value store), Hearth's own data model, and the
+  Matter stack over Thread and BLE. Round 2 task 3 starts the stack before
+  +MTREADY, task 4 answers the commissioning, network and Thread surface from
+  the running stack, and task 5 rebuilds the stored endpoint composition as
+  dynamic endpoints at boot.
+
+sdk_extension:
+  # Silicon Labs Matter 2.8.1-1.5, prepared and patched into $MATTER_EXT_ROOT
+  # by fw/sdk-prepare.sh. The id and version are matter.slce's, verbatim.
+  - id: matter
+    version: "2.8.1"
+    vendor: silabs
+
+source:
+  - path: src/main.cpp
+  # Hearth's own Matter bring-up: the load-bearing half of the sample's
+  # SilabsMatterConfig::InitMatter() without the sample's AppTask. It lives in
+  # the port and not in src/ because it is platform code, like everything else
+  # here that names an SDK symbol.
+  - path: port/hearth_matter_init.cpp
+  # The FreeRTOS fault hooks and the ARM fault handlers, a verbatim copy of the
+  # extension's examples/platform/silabs/SoftwareFaultReports.cpp. Copied into
+  # the repository rather than referenced because slc resolves these paths
+  # relative to THIS file and there is no portable relative path from here to
+  # $MATTER_EXT_ROOT; src/sdk/README.md carries the origin, the staleness check
+  # and why silabs_utils.cpp did not come with it. Without this file
+  # vApplicationStackOverflowHook, vApplicationMallocFailedHook and
+  # HardFault_Handler are the SDK's weak stubs and a fault is a silent hang.
+  # The samples get it from matter_platform_mg, which this project drops.
+  - path: src/sdk/SoftwareFaultReports.cpp
+  - path: port/hearth_port_sl.c
+  - path: port/hearth_ring.c
+  - path: port/hearth_kvid.c
+  # The ported half of the mt_matter.h bridge: the nRF port's sections
+  # transferred one round at a time. Round 2 task 4 is its first, the
+  # commissioning state, network and Thread answers; mt_matter_stub.c below
+  # holds whatever has not moved yet, and test/host's check_decls.py proves
+  # every declaration is defined in exactly one of the two.
+  - path: port/mt_matter_sl.cpp
+  - path: port/mt_matter_stub.c
+  # The device-type side of the upward port, round 2 task 5: the 52-row
+  # registry, the endpoint block arena, the external attribute store, the two
+  # device types this round builds and the ember external-attribute callbacks.
+  # mt_devtypes_stub.c below is now empty and kept only so the .slcp, the host
+  # Makefile's silabs-stubs target and check_decls.py keep naming the same
+  # pair; its own comment says what deleting it would cost.
+  - path: port/mt_devtypes_sl.cpp
+  - path: port/mt_devtypes_stub.c
+  # The +MTEVT mapping, shared with the nRF arm (platform/chip/, not port/,
+  # because it names stock CHIP symbols only and no SDK of either vendor).
+  # It is the C6's app_event_cb() over stock CHIP's device events, plus the
+  # commissioning-window AppDelegate and the FabricTable::Delegate that stock
+  # CHIP uses where esp-matter's fork posts device events. Not covered by
+  # check_slcp_sources.py, which reads the ../../core/ paths alone.
+  - path: ../chip/mt_chip_events.cpp
+  # core/: mirrors core/sources.cmake, which is authoritative.
+  - path: ../../core/at/at_parser.c
+  - path: ../../core/mt/mt_at.c
+  - path: ../../core/mt/mt_cmdbox.c
+  - path: ../../core/mt/mt_composition.c
+  - path: ../../core/mt/mt_comp_store.c
+  - path: ../../core/mt/mt_rows.c
+  - path: ../../core/mt/mt_transport.c
+
+include:
+  - path: ../../core/include
+  - path: port
+  # mt_chip_events.h, beside its .cpp above.
+  - path: ../chip
+  # src/ is on the include path for one file: CHIPProjectConfig.h. CHIP finds
+  # it by NAME (the extension's slc/inc/system/SystemBuildConfig.h defines
+  # CHIP_PROJECT_CONFIG_INCLUDE as <CHIPProjectConfig.h>), which is the same
+  # way the stock lighting-app's is found.
+  - path: src
+
+config_file:
+  # The data model. slc runs ZAP over this file and writes the result into the
+  # build directory's autogen/zap-generated/, which is what the build compiles.
+  # data_model/zap-generated/ in this repository is the committed record of that
+  # same output, produced by fw/zap-regen.sh from the same generator, the same
+  # templates and this same file. The two were compared file by file and agree
+  # except for three inert privilege rows in access.h that depend on zap's
+  # persistent state database; README, "Data model", has the comparison.
+  - path: data_model/hearth.zap
+    directory: common
+    file_id: zap_config
+  # The Thread child table, 16 rather than the SDK's 10, so that the two Thread
+  # ports of this product answer the same (DE412). A project's own config/
+  # directory is NOT picked up by slc on its own: this stanza is what binds the
+  # header to the component that owns the file_id, exactly as the bootloader
+  # project's two stanzas do. ot_stack_ftd owns it; ot_stack_mtd and
+  # ot_stack_rcp declare the same file_id and are not in this build.
+  - override:
+      component: ot_stack_ftd
+      file_id: openthread_features
+    path: config/sl_openthread_features_config.h
+
+define:
+  # Single-transport image: the combined-image command surface is compiled
+  # out (spec 3.12.2).
+  - name: MT_COMBINED_IMAGE
+    value: "0"
+  # The four the Silicon Labs Matter samples carry and the stack needs:
+  # the PSA/SE crypto backend rather than the software one, newlib's small
+  # reentrant structure, and NVM3 sized for Matter's key domain. The first two
+  # are compile-time contracts inside CHIP; the last two must agree with the
+  # .nvm region the linker reserves.
+  - name: CHIP_CRYPTO_PLATFORM
+    value: "1"
+  - name: _WANT_REENT_SMALL
+    value: "1"
+  - name: NVM3_DEFAULT_NVM_SIZE
+    value: "40960"
+  - name: NVM3_DEFAULT_MAX_OBJECT_SIZE
+    value: "4092"
+
+component:
+  # sl_main, the SDK's mandated entry point since SiSDK 2025.12: it owns
+  # main(), and src/main.cpp provides its app_init_early()/app_init() hooks.
+  # sl_system, which this project used in round 1, is deprecated and its
+  # kernel implementation declares conflicts: sl_main, so the Matter stack
+  # (whose components list sl_main) forced the move rather than offered it.
+  - id: sl_main
+  # Without this the image links at 0x08000000, on top of the project's own
+  # Gecko Bootloader, and there is nothing in the build that says so: it
+  # compiles, it produces a .gbl, and the bootloader writes it over itself.
+  # bootloader_interface moves FLASH to ORIGIN 0x08006000 in the generated
+  # linker file and pulls in bootloader_app_properties, which is what
+  # `commander gbl create --app` needs.
+  - id: bootloader_interface
+  - id: device_init
+  - id: clock_manager
+  - id: freertos
+  # No freertos_heap_4 since round 2 task 2: matter_platform_mg REQUIRES
+  # freertos_heap_3, and the two are exclusive (both provide freertos_heap), so
+  # slc refuses a project carrying heap_4 and the Matter platform at once.
+  # heap_3 forwards pvPortMalloc() to the C library's malloc(), which the SDK's
+  # linker wraps into sl_memory_manager's .memory_manager_heap. The consequence
+  # is not only which allocator runs: THERE IS NO SEPARATE FREERTOS HEAP ANY
+  # MORE. configTOTAL_HEAP_SIZE is gone from the configuration below because
+  # heap_3 does not read it, and xPortGetFreeHeapSize() is gone from
+  # src/main.cpp because heap_3.c does not define it.
+  - id: emlib_cmu
+  - id: emlib_core
+  - id: emlib_eusart
+  - id: emlib_gpio
+  - id: emlib_usart
+  - id: nvm3_default
+  # NVM3-backed dynamic tokens. The Bluetooth stack stores its identity
+  # address in one, and on device_series_2 this component requires
+  # wireless_stack, which matter_ble brings.
+  - id: common_token_manager_dynamic
+  # Round 2 task 6: the SDK's "Tiny printf" (third_party, MIT, the mpaland
+  # implementation), which REPLACES printf, sprintf, snprintf, vsnprintf,
+  # vprintf and puts image-wide.
+  #
+  # It is here for one capability newlib-nano does not have: the `ll` length
+  # modifier. The ARM GNU 12.2 toolchain's newlib-nano is compiled without
+  # _WANT_IO_LONG_LONG, so its printf family does not know `ll` at all. It
+  # consumes `%l`, meets a second `l`, treats that as an unknown conversion
+  # and prints the remainder literally, so `%llu` puts the two characters
+  # `lu` on the wire where the number should be. Nothing fails and nothing
+  # warns. Bench-confirmed on this part before this component was added:
+  # AT+MTATTR=1,6,0 answered `+MTATTR:1,6,0,lu`.
+  #
+  # AT+MTATTR is the first AT command on this image to print a 64-bit value
+  # and AT_MT_SPEC.md 3.8 makes the full width binding ("<val> is full-width
+  # 64-bit decimal ... so 18446744073709551615 round-trips on a u64
+  # attribute"); core/mt/mt_at.c formats it with %llu / %lld through the
+  # port's hearth_link_write_line(), a plain vsnprintf(). The same gap was
+  # eating CHIP's PRIx64 node and fabric ids and OpenThread's extended
+  # addresses, silently, since round 1, which is why the fix is at the
+  # formatter and not at the one call site.
+  #
+  # REJECTED, with the evidence, because the next person here will think of
+  # it: slc's `nano_c_libs: disabled` toolchain option, which drops
+  # --specs=nano.specs and links the full newlib. It builds warning-free and
+  # its printf is correct, but the image HARD FAULTS during Server::Init,
+  # before +MTREADY. Full newlib's memcpy performs unaligned word accesses
+  # this part traps (UsageFault UNALIGNED, CFSR 0x01000000, PC in memcpy+0x78,
+  # LR in nvm3_halFlashReadWords+0x2c), and nvm3_hal_flash.c:159-167 calls
+  # memcpy precisely and only when the source or destination is NOT
+  # word-aligned, which is the path newlib-nano's byte-wise memcpy was
+  # quietly surviving. It also cost 68,972 B of flash. Do not re-try it
+  # without solving the NVM3 memcpy fault first.
+  #
+  # What this component does NOT change: the allocator, memcpy and the rest
+  # of libc stay newlib-nano's. Only the formatting family is replaced, and
+  # `_putchar` (which only bare printf/puts reach, and the port calls
+  # neither) goes to the default iostream, which is this image's console.
+  #
+  # WHERE IT DISAGREES WITH newlib-nano, read out of the component's own
+  # source ($SISDK_ROOT/printf/printf.c) rather than assumed. One of these is
+  # a fault and the rest are cosmetic:
+  #
+  #  - A NULL `%s` ARGUMENT IS DEREFERENCED AND FAULTS. `case 's'` takes the
+  #    pointer and hands it straight to `_strnlen_s()` (printf.c:801-804,
+  #    :177-182), which reads `*s` with no NULL check. newlib printed
+  #    "(null)". So a NULL string in ANY log line in this image, the SDK's,
+  #    CHIP's or OpenThread's, is now a hard fault rather than an ugly line.
+  #    Nothing in core/ or in this port passes one: every `%s` argument is a
+  #    string literal, a fixed-size buffer, or a value already NULL-guarded at
+  #    the call site (core/mt/mt_at.c:1715-1719 tests mt_thread_role_name()'s
+  #    NULL return and substitutes a number; :1646-1651 and :2180-2186 branch
+  #    on the optional argument instead of formatting it). The SDK, CHIP and
+  #    OpenThread call sites were NOT audited. A guard belongs to the
+  #    qualification round, and there are two ways to give it: patch the
+  #    component under sdk-patches/ to print "(null)", or audit the call
+  #    sites. Patching is the cheaper and more honest of the two.
+  #  - `%n` and `%a` are unimplemented: the default arm prints the conversion
+  #    character itself (printf.c:851-854). Nothing in this image uses either.
+  #  - `%p` is uppercase hex, zero-padded to the pointer width, with NO `0x`
+  #    prefix (printf.c:828-830, which sets FLAGS_ZEROPAD | FLAGS_UPPERCASE
+  #    and width 8). CHIP logs pointers with %p; the lines are still readable,
+  #    they just look different from every earlier build's.
+  #  - `%f` above PRINTF_MAX_FLOAT (1e9, printf.c:86-88) switches to
+  #    exponential (:366) instead of printing the long decimal form.
+  - id: printf
+
+  # ------------------------------------------------------- the Matter stack ---
+  # The set the samples carry minus everything this product does not have or
+  # does not want: no matter_shell (a shipping image has no console input path,
+  # board contract item 6), no matter_ota_support or matter_ota_requestor (the
+  # update story is host-driven serial flashing, FIRMWARE_UPDATE_SPEC.md, and
+  # both OTA clusters are disabled in the data model), no LCD, buttons or LEDs
+  # (this carrier has none), no matter_lighting and none of the sample's
+  # application files: Hearth's own main.cpp provides the hooks and the port
+  # provides the callbacks.
+  - id: matter
+  # `efr32` is the CHIP platform layer for this part: PlatformManagerImpl,
+  # BLEManagerImpl, ThreadStackManagerImpl, ConfigurationManagerImpl,
+  # KeyValueStoreManagerImpl, CHIPMem-Platform, Logging, the PSA keystore.
+  #
+  # It is listed INSTEAD of matter_platform_mg, which is what the samples list
+  # and which requires it. matter_platform_mg additionally compiles the sample
+  # application framework: BaseApplication.cpp and MatterConfig.cpp, which
+  # include "AppConfig.h", "AppEvent.h" and <AppTask.h> and call
+  # AppTask::GetAppTask().StartAppTask(). Those headers and that class are the
+  # sample application's, and a Hearth image that supplied them would be
+  # carrying the sample's button, LED, LCD and app-event framework to satisfy a
+  # bootstrap it does not use. Measured, not assumed: with matter_platform_mg in
+  # the project the build stops at
+  #   BaseApplication.cpp:25:10: fatal error: AppEvent.h: No such file or directory
+  # Hearth's own Matter bootstrap (the equivalent of
+  # SilabsMatterConfig::AppInit(), which MatterConfig.cpp is the reference for)
+  # belongs in the port, and arrives with task 3.
+  #
+  # The component block below is matter_platform_mg's own `requires:` list for
+  # device_series_2, minus what this project already lists: without the wrapper
+  # component nothing else pulls them in.
+  - id: efr32
+  - id: sleeptimer
+  - id: dmadrv
+  - id: mpu
+  - id: udelay
+  - id: component_catalog
+  - id: rail_lib_multiprotocol
+  - id: hal_wdog
+  - id: gpiointerrupt
+  - id: emlib
+  - id: matter_ble
+  - id: matter_thread
+  - id: matter_crypto
+  - id: matter_gatt_static
+  - id: matter_provision_default
+  - id: app_common
+  # There is deliberately no rail_util_pti, which every Silicon Labs Matter
+  # sample lists and which the brief for this task carried over. It was in those
+  # samples' lists because matter_platform_mg requires it and their dev kits
+  # route the Packet Trace Interface pins; this carrier does not (board contract
+  # table), and with matter_platform_mg dropped nothing else requires it. On the
+  # bare MGM240PA32VNA target the generated config sets SL_RAIL_UTIL_PTI_MODE to
+  # SL_RAIL_PTI_MODE_DISABLED and leaves the pin block unset, so the component
+  # compiled in as one disabled peripheral and the build's ONLY warning:
+  #   config/sl_rail_util_pti_config.h:56:2: warning: #warning "RAIL PTI
+  #   peripheral not configured"
+  # Round 1 made a warning-free build a checked property of this project
+  # (README, "Building"); a warning about pins nobody configured, for a mode
+  # that is off, is not worth spending it on.
+  # Demanded by `matter`, which requires the api `configuration_over_swo`.
+  # This component provides that api and NOTHING else: it exists to override
+  # the Simplicity SDK's own configuration_over_swo, which pulls in iostream_rtt
+  # and therefore SEGGER RTT. Without it slc stops with "iostream_rtt from
+  # silabs.simplicity_sdk needs segger_rtt" and offers matter_segger_rtt or
+  # segger_rtt, both of which would add a second log sink this product does not
+  # want. The samples list it for the same reason.
+  - id: matter_configuration_over_swo
+  # Demanded, transitively, by matter_provision_default: that component requires
+  # iostream_rtt (its provisioning channel can run over RTT), and iostream_rtt
+  # requires segger_rtt, which nothing in the Simplicity SDK provides on its own
+  # here. This is the extension's own SEGGER RTT component and is what the
+  # samples list. matter_provision_default is not optional: `matter` requires the
+  # api matter_provision, and the only other provider (matter_provision_flash)
+  # requires iostream_rtt too.
+  #
+  # It is also where CHIP's own log output goes. src/platform/silabs/Logging.cpp
+  # writes to SEGGER RTT unless SILABS_LOG_OUT_UART is 1, and setting that would
+  # need matter_uart, the SDK's UART driver, on a peripheral Hearth drives
+  # itself. So CHIP logs land in an RTT buffer, readable over SWD and on neither
+  # of this board's two UARTs, which is the right default for a product whose AT
+  # link must carry nothing but the AT protocol.
+  - id: matter_segger_rtt
+
+  # The cluster servers the data model declares. One component per enabled
+  # cluster; a cluster enabled in data_model/hearth.zap with no component here
+  # is metadata with nothing serving it.
+  - id: matter_access_control
+  - id: matter_administrator_commissioning
+  - id: matter_basic_information
+  - id: matter_descriptor
+  # Catalogue batch 7a-2 (2026-09-27): the utility meter and device energy
+  # management. No SDK patch: neither is code-driven; DEMMode's server is
+  # mode-base-server.cpp in matter_mode_base.
+  - id: matter_device_energy_management
+  # Catalogue batch 7a-1 (2026-09-27): the measurement family. No SDK patch:
+  # none of the three is code-driven (the EEM instance-pool patch is already
+  # applied).
+  - id: matter_electrical_energy_measurement
+  - id: matter_electrical_power_measurement
+  # The EVSE round (2026-09-28): the energy EVSE. No SDK patch: EnergyEvse
+  # is not code-driven (CHI-only, its Instance registers its own CHI and
+  # AAI); EnergyEvseMode rides matter_mode_base.
+  - id: matter_energy_evse
+  # Catalogue batch 4 (2026-09-26): the smoke/CO and power-source clusters.
+  # No SDK patch: none code-driven (F554).
+  - id: matter_chime
+  - id: matter_mode_select
+  - id: matter_operational_state
+  - id: matter_power_source
+  - id: matter_smoke_co_alarm
+  # Catalogue batch 3 (2026-09-25): the command-verdict clusters. Neither is
+  # code-driven (no CodegenIntegration, no static-cluster-config include), so
+  # no SDK patch. DoorLock's per-endpoint state lives in the SDK's own
+  # mEndpointCtx array; the port runs its InitEndpoint from a strong
+  # emberAfDoorLockClusterInitCallback. The valve's delegate comes from the
+  # port's cluster-object arena. matter_lock (the example lock app and its
+  # NVM3 credential keys) is deliberately NOT included.
+  - id: matter_door_lock
+  - id: matter_general_commissioning
+  - id: matter_general_diagnostics
+  - id: matter_group_key_mgmt
+  - id: matter_groups
+  - id: matter_identify
+  - id: matter_network_commissioning
+  - id: matter_on_off
+  - id: matter_power_topology
+  # Catalogue batch 5a (2026-09-26): the pump and the switch.
+  # No SDK patch: neither cluster is code-driven.
+  - id: matter_pump_configuration_and_control
+  - id: matter_refrigerator_alarm        # catalogue batch 8
+  - id: matter_switch
+  # Catalogue batch 1 (2026-09-22): the three clusters of the batch that have a
+  # server. LevelControl for the dimmable light and plug (commands MoveToLevel
+  # and friends), BooleanState for the four sensors (a code-driven cluster; the
+  # port bridges the arena into it, see MatterPostAttributeChangeCallback), and
+  # OccupancySensing (its Instance class links and is never constructed here,
+  # so the ember path serves it, as on the nRF).
+  - id: matter_air_quality
+  - id: matter_boolean_state
+  # Catalogue batch 2 (2026-09-24): the five server-interaction clusters. All
+  # five are ember-served on dynamic endpoints (no CodegenIntegration, no
+  # static-cluster-config include, so no SDK patch): ColorControl for the two
+  # colour lights (its server init is run by the port's
+  # emberAfColorControlClusterInitCallback override), Thermostat and
+  # WindowCovering (each registers an attribute access interface that answers
+  # ClusterRevision only), FanControl (nothing: its FanMode/PercentSetting
+  # coupling is functions-array-bound and the host owns it), AirQuality (its
+  # Instance class links and is never constructed here; the FeatureMap comes
+  # from mt_air_quality_feature_mask()).
+  - id: matter_color_control
+  - id: matter_fan_control
+  - id: matter_level_control
+  - id: matter_meter_identification
+  # Catalogue batch 8 (2026-09-28): the composed appliances. No SDK patch:
+  # none of the seven clusters is code-driven; the four mode/opstate aliases
+  # ride matter_mode_base and matter_operational_state.
+  - id: matter_microwave_oven_control
+  # Catalogue batch 5b (2026-09-27): the robotic vacuum; no SDK patch: none of
+  # RvcRunMode, RvcCleanMode, RvcOperationalState is code-driven.
+  - id: matter_mode_base
+  - id: matter_occupancy_sensor
+  - id: matter_operational_credentials
+  - id: matter_software_diagnostics
+  - id: matter_temperature_control       # catalogue batch 8
+  - id: matter_thread_network_diagnostics
+  - id: matter_thermostat
+  - id: matter_valve_configuration_and_control
+  # Catalogue batch 7b (2026-09-27): the water heater. No SDK patch:
+  # WaterHeaterManagement is not code-driven, WaterHeaterMode rides
+  # matter_mode_base, and battery storage adds no cluster.
+  - id: matter_water_heater_management
+  - id: matter_window_covering
+  # There is deliberately no matter_temperature_measurement: no such component
+  # exists, and none is needed. The same holds for Relative Humidity, Pressure,
+  # Illuminance and Flow Measurement (catalogue batch 1): no component, no
+  # cluster server directory, served out of ember attribute storage. None of
+  # these have a cluster server in connectedhomeip at all (src/app/clusters/
+  # has no directory for any of them) and no row in the extension's own
+  # cluster-to-component-dependencies.json. Asking slc for any of them fails
+  # the generate outright: "Referenced project component
+  # matter_temperature_measurement not in framework".
+  #
+  # Two clusters this data model enables on endpoint 0 have a component that is
+  # NOT listed here: Diagnostic Logs (matter_diagnostic_logs) and Wi-Fi Network
+  # Diagnostics (matter_wifi_network_diagnostics). Neither is a link error, the
+  # generated callback-stub.cpp defines every cluster init callback weakly, so
+  # both advertise metadata with no server behind them. They are kept enabled
+  # because the data model is the nRF54L15 arm's and the two Thread ports must
+  # answer the same; whether a Thread-only product should carry Wi-Fi
+  # diagnostics at all is a wire-surface question for BOTH arms and belongs to
+  # the qualification round, not to this one.
+
+toolchain_settings:
+  # src/main.cpp and the Matter port's .cpp files; the same option and value
+  # the extension's own slc/apps/lighting-app/thread/lighting-app.slcp sets.
+  - option: cxx_standard
+    value: gnu++17
+
+configuration:
+  # configTOTAL_HEAP_SIZE was here through round 1 and round 2 task 1, at
+  # 24,576. It is gone rather than raised: under freertos_heap_3 (see the
+  # component list) there is no ucHeap array for it to size, and a configuration
+  # entry that nothing reads is worse than no entry, because the next person to
+  # tune memory here would tune it. The free-heap figure at +MTREADY, now the
+  # memory manager's, is in the README's "Measured" section.
+  # The C stack, shared by sl_main_init() before the scheduler and by every
+  # ISR afterwards. Under sl_main with a kernel the SDK picks 1,024 B
+  # (memory_manager_region.slcc chooses a different config file per entry
+  # point); every Silicon Labs Matter sample raises it to 4,608, and the
+  # Matter stack's interrupt handlers are why. Round 2 task 1 measured the
+  # drop to 1,024 and flagged that the first task to add an interrupt-driven
+  # stack should raise it. This is that task.
+  - name: SL_STACK_SIZE
+    value: "4608"
+  # OpenThread runs under CHIP's own task here, not its own app or CLI task.
+  - name: SL_OPENTHREAD_ENABLE_APP_TASK
+    value: 0
+  - name: SL_OPENTHREAD_ENABLE_CLI_TASK
+    value: 0
+  # The sample's Bluetooth RTOS event handler stack, series 2 value.
+  - name: SL_BT_RTOS_EVENT_HANDLER_STACK_SIZE
+    value: "1536"
+  # The key exchanges CASE and PASE need from mbedTLS, and the buffer
+  # assumption the PSA driver layer is built with. All four are the samples'.
+  - name: SL_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
+    value: 1
+    condition: [matter_thread_cert_libs]
+  - name: SL_MBEDTLS_KEY_EXCHANGE_PSK_ENABLED
+    value: 1
+  - name: SL_MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS
+    value: 1
+  - name: CIRCULAR_QUEUE_LEN_MAX
+    value: 16

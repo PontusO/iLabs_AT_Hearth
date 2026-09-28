@@ -375,7 +375,8 @@ class TestEchoAndRaw(unittest.TestCase):
 
 
 from mt_regression import (Suite, capture_header, write_baseline, phase0,
-                           otctl_run, parse_dataset)
+                           otctl_run, parse_dataset, otbr_dbus_property,
+                           role_from_dbus_json, dataset_from_dbus_json)
 
 
 class TestSuite(unittest.TestCase):
@@ -445,6 +446,28 @@ class TestPhase0(unittest.TestCase):
     def test_dead_link_aborts(self):
         problem = phase0(scripted_link({}), {})
         self.assertIn("AT", problem)
+
+    def test_accepts_every_known_hearth_model(self):
+        # The gate is per-platform: an nRF or Silabs image answers its own
+        # chip. Each known model must pass the same gate the C6 passes.
+        from mt_regression import KNOWN_MODELS
+        self.assertIn("ESP32-C6 Hearth", KNOWN_MODELS)
+        self.assertIn("nRF54L15 Hearth", KNOWN_MODELS)
+        self.assertIn("nRF54LM20A Hearth", KNOWN_MODELS)
+        self.assertIn("MGM240P Hearth", KNOWN_MODELS)
+        for model in KNOWN_MODELS:
+            replies = dict(self.HEALTHY)
+            replies[b"AT+CGMM\r\n"] = model.encode() + b"\r\nOK\r\n"
+            header = {}
+            self.assertIsNone(phase0(scripted_link(replies), header), model)
+
+    def test_rejects_a_model_not_in_the_known_set(self):
+        replies = dict(self.HEALTHY)
+        replies[b"AT+CGMM\r\n"] = b"Some Other Radio\r\nOK\r\n"
+        problem = phase0(scripted_link(replies), {})
+        self.assertIsNotNone(problem)
+        self.assertIn("unexpected model", problem)
+        self.assertIn("MGM240P Hearth", problem)  # the message lists what is known
 
 
 from mt_regression import add_test, TESTS, main, exit_code
@@ -625,9 +648,20 @@ class FlakySerial:
         b"AT+CGMR\r\n": b"0.1.0\r\nOK\r\n",
     }
 
-    def __init__(self, port, baudrate, timeout=0.05):
+    def __init__(self, port=None, baudrate=115200, timeout=0.05):
+        # open_at_port() builds an unopened port, sets the bridge's DTR/RTS
+        # contract on it and only then opens it, so the double has to accept
+        # that shape as well as the old positional one.
         self.rx = b""
         self.armed = False
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.dtr = None
+        self.rts = None
+
+    def open(self):
+        pass
 
     def write(self, data):
         if data == b"AT+CGMR\r\n":
@@ -1072,6 +1106,42 @@ class TestOtCtl(unittest.TestCase):
         self.assertIn("ot-ctl timed out", out)
 
 
+class TestOtbrDbus(unittest.TestCase):
+    """otbr_dbus_property's parsers, against the shape actually measured
+    on this bench (systemd 255): `busctl get-property ... --json=short`
+    wraps every property the same way, {"type": T, "data": D}, never a
+    bare value. (T3's brief assumed DeviceRole came back as a bare quoted
+    string; the bench proof showed otherwise, so both parsers read the
+    same wrapper ActiveDatasetTlvs was already known to use.)"""
+
+    def test_role_from_dbus_json(self):
+        self.assertEqual(
+            role_from_dbus_json('{"type":"s","data":"leader"}'), "leader")
+
+    def test_role_from_dbus_json_garbage_is_none(self):
+        self.assertIsNone(role_from_dbus_json("Failed to get property"))
+
+    def test_dataset_from_dbus_json(self):
+        self.assertEqual(
+            dataset_from_dbus_json('{"type":"ay","data":[1,2,3]}'),
+            "010203")
+
+    def test_dataset_from_dbus_json_garbage_is_none(self):
+        self.assertIsNone(dataset_from_dbus_json("Failed to get property"))
+
+    def test_otbr_dbus_property_argv(self):
+        calls = []
+
+        def runner(argv, timeout):
+            calls.append(argv)
+            return 0, '{"type":"s","data":"leader"}'
+
+        rc, out = otbr_dbus_property("DeviceRole", runner=runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0][-2:], ["DeviceRole", "--json=short"])
+        self.assertEqual(calls[0][0], "busctl")
+
+
 class TestUrcHistory(unittest.TestCase):
     def test_history_survives_drain(self):
         link, _ = link_with_reply(b"+MTEVT:0\r\n+MTATTR:0,40,2,1\r\nOK\r\n")
@@ -1295,17 +1365,24 @@ class TestPhase2GateTransport(unittest.TestCase):
         self.assertEqual(dataset, parse_dataset(ds_text))
 
     def test_thread_dead_otbr_aborts(self):
+        """Both routes down: ot-ctl and the D-Bus fallback. A fake dbus is
+        required here (not just a fake otctl) so this stays a self-test
+        rather than spawning a real busctl when ot-ctl fails."""
         link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
 
         def fake_otctl(cmd_args, binary):
             return 1, "Error: no such device\n"
+
+        def fake_dbus(prop, runner=None):
+            return 1, "Failed to get property"
 
         with tempfile.TemporaryDirectory() as d:
             chip = self._healthy_chip(d)
             with mock.patch("mt_regression.shutil.which",
                             return_value="/usr/local/bin/openocd"):
                 problem, transport, dataset = phase2_gate(
-                    chip, self._args(), link, otctl=fake_otctl)
+                    chip, self._args(), link, otctl=fake_otctl,
+                    dbus=fake_dbus)
         self.assertIsNotNone(problem)
         self.assertIn("otbr-agent", problem)
         self.assertEqual(transport, "THREAD")
@@ -1394,6 +1471,92 @@ class TestPhase2GateTransport(unittest.TestCase):
         self.assertEqual(transport, "THREAD")
         self.assertEqual(dataset, parse_dataset(ds_text))
         self.assertNotIn("AT+MTNET?", link.sent)
+
+    def test_gate_falls_back_to_dbus_when_otctl_cannot_connect(self):
+        """otbr-agent's D-Bus property answers the role and the dataset
+        when ot-ctl's socket is root-owned (graph F503; the Silabs
+        README's Commissioning section is the bench recipe this mirrors).
+        Only 'state' reaches otctl; the dataset fetch is never attempted
+        against a binary already known to be unreachable."""
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+        calls = []
+
+        def fake_otctl(cmd_args, binary):
+            calls.append(tuple(cmd_args))
+            return 1, "connect session failed: Permission denied"
+
+        def fake_dbus(prop, runner=None):
+            if prop == "DeviceRole":
+                return 0, '{"type":"s","data":"leader"}'
+            return 0, '{"type":"ay","data":[1,2,3]}'
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), link, otctl=fake_otctl,
+                    dbus=fake_dbus)
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertEqual(dataset, "010203")
+        self.assertIn(("state",), calls)
+
+    def test_gate_reports_both_paths_when_dbus_fails_too(self):
+        """Neither route works: the message names both, so the operator
+        does not have to guess which one to chase."""
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+
+        def fake_otctl(cmd_args, binary):
+            return 1, "connect session failed: Permission denied"
+
+        def fake_dbus(prop, runner=None):
+            return 1, "Failed to get property"
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), link, otctl=fake_otctl,
+                    dbus=fake_dbus)
+        self.assertIsNotNone(problem)
+        self.assertIn("ot-ctl", problem)
+        self.assertIn("D-Bus", problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertIsNone(dataset)
+
+    def test_gate_prefers_otctl_when_it_works(self):
+        """A healthy ot-ctl is the whole path: D-Bus is never touched, so
+        this gate behaves exactly as it did before the fallback existed
+        whenever the bench's own ot-ctl actually connects."""
+        link = FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+        ds_text = fixture("otctl_dataset_active.txt")
+
+        def fake_otctl(cmd_args, binary):
+            if cmd_args == ["state"]:
+                return 0, "leader\r\nDone\r\n"
+            if cmd_args == ["dataset", "active", "-x"]:
+                return 0, ds_text
+            raise AssertionError("unexpected ot-ctl call: %r" % (cmd_args,))
+
+        seen = []
+
+        def fake_dbus(prop, runner=None):
+            seen.append(prop)
+            return 0, '{"type":"s","data":"leader"}'
+
+        with tempfile.TemporaryDirectory() as d:
+            chip = self._healthy_chip(d)
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/local/bin/openocd"):
+                problem, transport, dataset = phase2_gate(
+                    chip, self._args(), link, otctl=fake_otctl,
+                    dbus=fake_dbus)
+        self.assertIsNone(problem)
+        self.assertEqual(transport, "THREAD")
+        self.assertEqual(dataset, parse_dataset(ds_text))
+        self.assertEqual(seen, [])
 
 
 from mt_regression import phase3_gate, _transport_gate
@@ -1507,10 +1670,162 @@ class TestPhase3Gate(unittest.TestCase):
         self.assertEqual(r2, r3)
 
 
-from mt_regression import swd_reset, operator_power_cycle
+class TestTransportGateDoorChecks(unittest.TestCase):
+    """Task 1 (catalogue batch 1, 2026-09-22): the deferred minors from the
+    parity round's final review. A typo in --openocd-config used to surface
+    deep inside a destructive phase instead of at the door, and the Thread
+    branch's D-Bus fallback message did not say which source (ot-ctl or
+    busctl) answered the role it is complaining about."""
+
+    def _args(self, **kw):
+        base = {"ssid": None, "psk": None, "transport": "THREAD",
+                "dataset": "deadbeef", "ot_ctl": "/fake/ot-ctl",
+                "openocd_config": None}
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    @staticmethod
+    def _chip(d):
+        runner = FakeChipRunner(
+            [(0, fixture("chiptool_parse_setup_payload.txt"))])
+        binary = os.path.join(d, "chip-tool")
+        open(binary, "w").close()
+        os.chmod(binary, 0o755)
+        return ChipTool(binary, d, runner=runner)
+
+    @staticmethod
+    def _link_thread():
+        return FakeLink(commands={"AT+MTNET?": (0, ["+MTNET:THREAD,0,0,0"])})
+
+    @staticmethod
+    def _otctl_ok(cmd_args, binary):
+        if cmd_args == ["state"]:
+            return 0, "leader\r\nDone\r\n"
+        if cmd_args == ["dataset", "active", "-x"]:
+            return 0, fixture("otctl_dataset_active.txt")
+        raise AssertionError("unexpected ot-ctl call: %r" % (cmd_args,))
+
+    def test_missing_openocd_config_is_a_door_message(self):
+        """A typo in --openocd-config used to surface at step 2.8."""
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args(openocd_config="/nonexistent/carrier.cfg")
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/bin/openocd"):
+                problem, _, _ = _transport_gate(
+                    self._chip(d), args, self._link_thread(), self._otctl_ok)
+        self.assertIn("--openocd-config /nonexistent/carrier.cfg does not exist",
+                      problem)
+
+    def test_role_message_names_busctl_when_dbus_answered(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args()
+            with mock.patch("mt_regression.shutil.which",
+                            return_value="/usr/bin/x"):
+                problem, _, _ = _transport_gate(
+                    self._chip(d), args, self._link_thread(),
+                    otctl=lambda a, b: (1, "connect session failed"),
+                    dbus=lambda prop: (0, '{"type":"s","data":"detached"}'))
+        self.assertIn("busctl DeviceRole: detached", problem)
+        self.assertNotIn("ot-ctl state:", problem)
+
+    def test_busctl_absent_is_a_gate_message_not_link_lost(self):
+        """Only when the REAL D-Bus route is in use: a fake dbus seam must
+        not be gated on the host's PATH."""
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args()
+
+            def which(name):
+                return None if name == "busctl" else "/usr/bin/" + name
+
+            with mock.patch("mt_regression.shutil.which", side_effect=which):
+                problem, _, _ = _transport_gate(
+                    self._chip(d), args, self._link_thread(),
+                    otctl=lambda a, b: (1, "connect session failed"))
+        self.assertIn("busctl is not on PATH", problem)
+
+
+from mt_regression import (swd_reset, openocd_argv, OPENOCD_ARGV,
+                           operator_power_cycle)
+
+
+class TestOpenocdArgv(unittest.TestCase):
+    """The 2.8/2.13/2.14 SWD reset is carrier-specific: on the C6 rig the
+    probe is on the RP2350 bridge, on the iLabs CPico carrier it is on the
+    MGM240P's own SWD, and this bench carries two CMSIS-DAP probes that
+    both answer as a Cortex-M33, so the adapter has to be named. The
+    config file carries all of that; the harness only chooses which -f to
+    pass."""
+
+    def test_no_config_is_the_c6_argv_unchanged(self):
+        self.assertEqual(openocd_argv(), list(OPENOCD_ARGV))
+        self.assertEqual(openocd_argv(None), list(OPENOCD_ARGV))
+        self.assertIn("target/rp2350.cfg", OPENOCD_ARGV)
+
+    def test_no_config_returns_a_copy(self):
+        """A step that mutated the returned list must not rewrite the
+        module constant for the rest of the run."""
+        got = openocd_argv()
+        got.append("scribble")
+        self.assertNotIn("scribble", OPENOCD_ARGV)
+
+    def test_config_replaces_only_the_f_arguments(self):
+        argv = openocd_argv("platform/silabs/mg24-swd.cfg")
+        self.assertEqual(argv, ["openocd", "-f",
+                                "platform/silabs/mg24-swd.cfg",
+                                "-c", "init; reset run; shutdown"])
+        # The reset command itself is the same for every carrier: a
+        # config that resets the wrong board is a config bug, not a
+        # second reset mechanism.
+        self.assertEqual(argv[-1], OPENOCD_ARGV[-1])
+        self.assertNotIn("target/rp2350.cfg", argv)
+
+    def test_the_shipped_carrier_configs_exist_and_name_their_target(self):
+        """Both Thread carriers ship an openocd config, and a run given a
+        path that is not there fails at the FIRST SWD reset, which is
+        step 2.8, a long way into a destructive phase. This pins the two
+        files against a rename and pins the two facts every carrier
+        config has to carry: an `adapter serial` (this bench has two
+        CMSIS-DAP probes that both answer as a Cortex-M33, so an
+        unnamed adapter resets whichever enumerated first) and the
+        module's own target rather than the C6 rig's RP2350."""
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for rel, target in (
+                ("platform/silabs/mg24-swd.cfg", "target/silabs/xg24.cfg"),
+                ("platform/nrf54l15/ophelia-swd.cfg",
+                 "target/nordic/nrf54l.cfg")):
+            path = os.path.join(repo, rel)
+            self.assertTrue(os.path.exists(path), "missing: %s" % rel)
+            with open(path) as fh:
+                body = fh.read()
+            self.assertIn(target, body, rel)
+            self.assertIn("adapter serial", body, rel)
+            self.assertNotIn("target/rp2350.cfg", body, rel)
+            self.assertEqual(
+                openocd_argv(rel),
+                ["openocd", "-f", rel, "-c", "init; reset run; shutdown"])
 
 
 class TestSwdReset(unittest.TestCase):
+    def test_argv_override_is_what_runs(self):
+        calls = []
+        def runner(argv, capture_output, text, timeout):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        ok, _ = swd_reset(runner=runner,
+                          argv=openocd_argv("platform/silabs/mg24-swd.cfg"))
+        self.assertTrue(ok)
+        self.assertEqual(calls[0][2], "platform/silabs/mg24-swd.cfg")
+
+    def test_argv_none_keeps_the_c6_argv(self):
+        """The C6 rig passes no --openocd-config and must be byte-for-byte
+        unaffected by the carrier hook."""
+        calls = []
+        def runner(argv, **kw):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        swd_reset(runner=runner, argv=None)
+        self.assertEqual(calls[0], OPENOCD_ARGV)
+
     def test_argv_and_success(self):
         calls = []
         def runner(argv, capture_output, text, timeout):
@@ -1591,10 +1906,17 @@ class TestMakeRelink(unittest.TestCase):
     bogus link loss. The relink must catch the bounce itself."""
 
     class _QuietPort:
-        """Open port that stays silent: the pump window passes clean."""
+        """Open port that stays silent: the pump window passes clean.
+        open()/dtr/rts exist because open_at_port() configures the bridge's
+        line contract on an unopened port before opening it."""
         def __init__(self, rx=b""):
             self.rx = rx
             self.closed = False
+            self.dtr = None
+            self.rts = None
+
+        def open(self):
+            pass
 
         def read(self, n=1):
             chunk, self.rx = self.rx[:n], self.rx[n:]
@@ -1611,7 +1933,7 @@ class TestMakeRelink(unittest.TestCase):
         transport (returned) or an Exception instance (raised)."""
         seq = list(opens)
 
-        def serial_ctor(path, baud, timeout):
+        def serial_ctor(*args, **kwargs):
             item = seq.pop(0)
             if isinstance(item, Exception):
                 raise item
@@ -2688,6 +3010,33 @@ class TestStep28(unittest.TestCase):
         self.assertTrue(relink_called[0][0])
         self.assertTrue(swd_calls,
                         "step must reach swd_reset via ctx.swd_runner")
+
+    def test_context_argv_reaches_openocd(self):
+        """The carrier's openocd config is only useful if the step hands
+        ctx.swd_argv to swd_reset: a step that kept calling
+        swd_reset(ctx.swd_runner) alone would silently reset the C6 rig's
+        RP2350 target on every carrier."""
+        link = FakeLink(self._commands())
+        swd_calls = []
+
+        def fake_swd_runner(argv, **kw):
+            swd_calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def relink(action):
+            ok, detail = action()
+            if ok:
+                link.push_urcs(["+MTREADY"])
+            return ok, detail
+
+        ctx = fresh_ctx(link)
+        ctx.relink = relink
+        ctx.swd_runner = fake_swd_runner
+        ctx.swd_argv = openocd_argv("platform/silabs/mg24-swd.cfg")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_2_8_warm_reboot(ctx)
+        self.assertEqual(ctx.suite.failed, 0)
+        self.assertEqual(swd_calls[0], ctx.swd_argv)
 
     def test_relink_failure_aborts(self):
         link = FakeLink(self._commands())
@@ -8507,6 +8856,83 @@ class TestPhase3EndpointCap(unittest.TestCase):
         msg = self._refuses(["--port", "/dev/nope", "--phase", "1",
                              "--max-endpoints", "20"])
         self.assertIn("--phase 3 only", msg)
+
+
+from mt_regression import BRIDGE_LINES, open_at_port, wait_boot_marker
+
+
+class FakeSerialPort:
+    """serial.Serial double that records the ORDER of its line writes
+    against the open, which is the only thing open_at_port() has to get
+    right."""
+
+    def __init__(self):
+        self.port = None
+        self.baudrate = None
+        self.timeout = None
+        self.dtr = None
+        self.rts = None
+        self.opened = False
+        self.order = []
+
+    def __setattr__(self, name, value):
+        if name in ("dtr", "rts") and "order" in self.__dict__:
+            self.order.append((name, value, self.__dict__.get("opened")))
+        object.__setattr__(self, name, value)
+
+    def open(self):
+        self.opened = True
+        self.order.append(("open", None, True))
+
+    def read(self, n):
+        return b""
+
+
+class FakeSerialModule:
+    SerialException = OSError
+
+    def Serial(self, *a, **kw):
+        return FakeSerialPort()
+
+
+class TestBridgeContract(unittest.TestCase):
+    """The DTR/RTS contract is a property of the bridge, and the bench's two
+    bridges are opposites: asserting DTR at the CPico holds the nRF54L15 or
+    the MGM240P in reset and the port answers nothing at all, which reads
+    like dead hardware."""
+
+    def test_challenger_asserts_both(self):
+        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "challenger")
+        self.assertTrue(p.dtr)
+        self.assertTrue(p.rts)
+
+    def test_cpico_clears_both(self):
+        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "cpico")
+        self.assertFalse(p.dtr)
+        self.assertFalse(p.rts)
+
+    def test_the_lines_are_set_before_the_open_not_after(self):
+        # An open that asserts DTR even briefly pulses the module's reset,
+        # so setting the lines afterwards is too late.
+        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "cpico")
+        first_open = [i for i, (n, _, _) in enumerate(p.order) if n == "open"][0]
+        before = [(n, v) for n, v, _ in p.order[:first_open]]
+        self.assertIn(("dtr", False), before)
+        self.assertIn(("rts", False), before)
+
+    def test_an_unknown_bridge_falls_back_to_the_default_contract(self):
+        p = open_at_port("/dev/serial/by-id/x", FakeSerialModule(), "nonsense")
+        self.assertEqual((p.dtr, p.rts), (True, True))
+
+    def test_both_bridges_are_offered_on_the_command_line(self):
+        self.assertEqual(sorted(BRIDGE_LINES), ["challenger", "cpico"])
+
+    def test_wait_boot_marker_consumes_the_ready(self):
+        ft = FakeTransport()
+        ft.rx = b"+MTREADY\r\n"
+        link = ATLink(ft, default_timeout=0.2)
+        self.assertEqual(wait_boot_marker(link, timeout=1.0), "+MTREADY")
+        self.assertIsNone(wait_boot_marker(link, timeout=0.1))
 
 
 if __name__ == "__main__":
