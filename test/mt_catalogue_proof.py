@@ -39,7 +39,11 @@ CHIP_CLUSTERS = {"onoff", "levelcontrol", "booleanstate", "occupancysensing",
                  "meteridentification", "deviceenergymanagement",
                  "deviceenergymanagementmode",
                  "waterheatermanagement", "waterheatermode",
-                 "energyevse", "energyevsemode"}
+                 "energyevse", "energyevsemode",
+                 "temperaturecontrol", "refrigeratoralarm",
+                 "refrigeratorandtemperaturecontrolledcabinetmode", "ovenmode",
+                 "ovencavityoperationalstate", "microwaveovenmode", "microwaveovencontrol",
+                 "identify"}
 
 # The MG24 Hearth build's product id. Two Hearth boards on the bench share
 # discriminator 0xF00, so chip-tool's BLE scan can pair the other one
@@ -96,7 +100,7 @@ def _check(cluster, attr, chip_attr, at_value, parse="int", controller=None,
             "urc_chip_attr": urc_chip_attr, "at_cmd": at_cmd}
 
 def _multi(devtype, name, revision, chip_cluster, checks, extra_reads=(),
-           setup=(), variant=None, extra_types=()):
+           setup=(), variant=None, extra_types=(), parent=None):
     """The batch 2+ row shape; setup (batch 4) is a
     ("setup", [at_cmd format strings], (cluster_arg, attr_arg, [substrings]))
     tuple, or None: run once before the type's checks, each AT line must
@@ -104,11 +108,14 @@ def _multi(devtype, name, revision, chip_cluster, checks, extra_reads=(),
     substring (AT_MT_SPEC 3.20/3.23's set-only list stores). variant (batch
     7a-1) stages "<devtype>,<variant>"; extra_types is a list of (devtype_hex,
     revision) pairs the endpoint's DeviceTypeList must also carry (the heat
-    pump's and solar power's 0x0011 and 0x0510)."""
+    pump's and solar power's 0x0011 and 0x0510). parent (catalogue batch 8) is
+    the table ROW index of this row's parent: the row is staged as
+    "<devtype>,<variant>,<parent staging index>" (row i is staging index
+    i + 1, endpoint i + 2), AT_MT_SPEC 3.9's parent syntax."""
     return {"devtype": devtype, "name": name, "revision": revision,
             "chip_cluster": chip_cluster, "checks": list(checks),
             "extra_reads": list(extra_reads), "setup": setup,
-            "variant": variant, "extra_types": list(extra_types)}
+            "variant": variant, "extra_types": list(extra_types), "parent": parent}
 
 def _type(devtype, name, revision, chip_cluster, cluster, attr, chip_attr,
           at_value, parse="int", controller=None, extra_reads=()):
@@ -807,10 +814,16 @@ def composition_for(batch):
     # A row's variant (batch 7a-1) is AT+MTEP's second parameter
     # (AT_MT_SPEC 3.9); AT+MTEP? prints it back the same way, so staging
     # and the readback both carry "<devtype>,<variant>".
-    return [(1, ANCHOR_DEVTYPE)] + [
-        (i + 2, t["devtype"] if t.get("variant") is None
-         else "%s,%d" % (t["devtype"], t["variant"]))
-        for i, t in enumerate(BATCHES[batch])]
+    # Catalogue batch 8: a row with a parent stages "<devtype>,<variant>,
+    # <parent staging index>" (the variant 0 when the row has none), and
+    # AT+MTEP? prints the same three fields back whenever a parent exists.
+    def staged(i, t):
+        if t.get("parent") is not None:
+            return "%s,%d,%d" % (t["devtype"], t.get("variant") or 0, t["parent"] + 1)
+        if t.get("variant") is None:
+            return t["devtype"]
+        return "%s,%d" % (t["devtype"], t["variant"])
+    return [(1, ANCHOR_DEVTYPE)] + [(i + 2, staged(i, t)) for i, t in enumerate(BATCHES[batch])]
 
 def rows_for(batch):
     return BATCHES[batch]
@@ -968,7 +981,9 @@ def print_plan(batch):
                         "no +MTCMD for the command" if answer == "none"
                         else "+MTCMD:%d,%d answered %s" % (fcl, fcmd, ans))
                 else:
-                    kind, args, (u_cluster, u_attr, u_val) = c["controller"]
+                    kind, args, (u_cluster, u_attr, u_val) = c["controller"][:3]
+                    if len(c["controller"]) > 3:
+                        args = list(args) + list(c["controller"][3])
                     # The write's args already carry the "write" kind word
                     # ("write percent-setting 70"); printing the kind in front
                     # of them doubles it, so the command text stands alone.
@@ -1060,6 +1075,24 @@ def prove_endpoint(link, chip, s, node, ep, t):
                 prefix += " set-targets %s" % c["controller"][1]
         prove_check(link, chip, s, node, ep, t, c, prefix)
     for extra in t["extra_reads"]:
+        if extra[0] == "parts-list":
+            # Catalogue batch 8: the composed structure. The parent's
+            # Descriptor PartsList must name exactly its children, as
+            # endpoint offsets from this one, in creation order.
+            want = [ep + k for k in extra[1]]
+            rc, out = chip.run(["descriptor", "read", "parts-list", node, str(ep)], timeout=30)
+            s.check("%s ep%d parts-list = %s" % (tag, ep, want),
+                    rc == 0 and H.parse_parts_list(out) == want)
+            continue
+        if extra[0] == "server-list":
+            # Catalogue batch 8: the shape proof. The endpoint serves every
+            # cluster in the first list and none in the second.
+            rc, out = chip.run(["descriptor", "read", "server-list", node, str(ep)], timeout=30)
+            ids = H.parse_accepted_command_list(out)
+            s.check("%s ep%d server-list carries %s and lacks %s" % (tag, ep, extra[1], extra[2]),
+                    rc == 0 and all(x in ids for x in extra[1])
+                    and not any(x in ids for x in extra[2]))
+            continue
         if extra[0] == "read-event":
             rc, out = chip.run([t["chip_cluster"], "read-event", extra[1], node, str(ep)], timeout=30)
             # chip-tool prints the event under its Matter name
@@ -1327,10 +1360,11 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         ctx = types.SimpleNamespace(chip=chip, chip_call=None)
         # The EVSE round: positional fields before the destination and the
         # flags after it, as the verdict kind builds them.
+        ncc = want.get("cluster", cc)
         if want.get("positional"):
-            argv = [cc] + args + [node, str(ep)]
+            argv = [ncc] + args + [node, str(ep)]
         else:
-            argv = [cc] + args[:1] + [node, str(ep)] + args[1:]
+            argv = [ncc] + args[:1] + [node, str(ep)] + args[1:]
         handle = H.invoke_chip(ctx, argv + list(want.get("flags", ())), timeout=30)
         fwd = link.await_urc(r"^\+MTCMD:\d+,%d,%d,\d+(,|$)" % (ep, c["cluster"]), 3.0)
         s.check("%s no +MTCMD within 3s" % prefix, fwd is None)
@@ -1372,10 +1406,14 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         # A command with positional fields (batch 7a-2's PowerAdjustRequest:
         # Power, Duration, Cause) takes them BEFORE the destination, the
         # mode_verdict order; want["positional"] says so.
+        # want["cluster"] (catalogue batch 8): the invoke's chip-tool cluster
+        # when it differs from the attribute the write step anchors on (the
+        # microwave's cooking commands, anchored on OperationalState).
+        vcc = want.get("cluster", cc)
         if want.get("positional"):
-            argv = [cc] + args + [node, str(ep)]
+            argv = [vcc] + args + [node, str(ep)]
         else:
-            argv = [cc] + args[:1] + [node, str(ep)] + args[1:]
+            argv = [vcc] + args[:1] + [node, str(ep)] + args[1:]
         # want["flags"] (the EVSE round): words after the destination, the
         # timed-invoke flag a positional command cannot carry in args.
         handle = H.invoke_chip(ctx, argv + list(want.get("flags", ())), timeout=30)
@@ -1412,13 +1450,18 @@ def prove_check(link, chip, s, node, ep, t, c, prefix):
         # PowerAdjustActive, 3, on an allowed PowerAdjustRequest, with no
         # host push).
         for aattr, aval in want.get("after", ()):
-            rc, out = chip.run([cc, "read", aattr, node, str(ep)], timeout=30)
+            rc, out = chip.run([want.get("cluster", cc), "read", aattr, node, str(ep)], timeout=30)
             s.check("%s %s = %s after" % (prefix, aattr, aval),
                     rc == 0 and H.parse_int_attr(out) == aval)
     else:
-        kind, args, (ucl, uat, uval) = c["controller"]
+        kind, args, (ucl, uat, uval) = c["controller"][:3]
+        # Catalogue batch 8: an optional fourth element, words after the
+        # destination (SetTemperature's --TargetTemperature and
+        # --TargetTemperatureLevel are optional arguments, which chip-tool
+        # parses after the mandatory ones).
+        flags = list(c["controller"][3]) if len(c["controller"]) > 3 else []
         link.drain(0.2)
-        rc, out = chip.run([cc] + args + [node, str(ep)], timeout=30)
+        rc, out = chip.run([cc] + args + [node, str(ep)] + flags, timeout=30)
         s.check("%s controller %s exits 0" % (prefix, " ".join(args)), rc == 0)
         got = link.await_urc(r"\+MTATTR:%d,%d,%d,%d$" % (ep, ucl, uat, uval), 10.0)
         s.check("%s +MTATTR:%d,%d,%d,%d on the AT link" % (prefix, ep, ucl, uat, uval), got is not None)
