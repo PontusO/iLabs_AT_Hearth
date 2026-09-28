@@ -3489,5 +3489,164 @@ class TestEvseRowNames(unittest.TestCase):
         for name in _PINNED_EVSE:
             self.assertIn(name, names, "missing pinned row: %s" % name)
 
+# Catalogue batch 8 (design spec section 4): the composed appliances; parents
+# in the composition, the parts-list and server-list reads, command flags
+# after the destination, and the verdict's cluster override.
+
+def _b8_row(name):
+    return [t for t in P.BATCHES["mg24-batch8"] if t["name"] == name][0]
+
+
+class _RunRecChip(_RecordingChip):
+    """_RecordingChip that also records every synchronous run's argv (the
+    command kind and the after reads go through run(), not chip_call)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.runs = []
+
+    def run(self, args, timeout=None):
+        self.runs.append(list(args))
+        return super().run(args, timeout=timeout)
+
+
+class TestBatch8Table(unittest.TestCase):
+    def test_composition_carries_parents_as_staging_indexes(self):
+        self.assertEqual(P.composition_for("mg24-batch8"),
+                         [(1, "0x0100"), (2, "0x0078"), (3, "0x0077,0,1"), (4, "0x0077,1,1"),
+                          (5, "0x007B"), (6, "0x0071,0,4"), (7, "0x0071,1,4"), (8, "0x0070"),
+                          (9, "0x0071,0,7"), (10, "0x0071,1,7"), (11, "0x0071"), (12, "0x0071,1"),
+                          (13, "0x007A"), (14, "0x0079")])
+
+    def test_every_parent_is_a_legal_parent_row(self):
+        rows = P.BATCHES["mg24-batch8"]
+        for t in rows:
+            if t.get("parent") is None:
+                continue
+            parent = rows[t["parent"]]["devtype"]
+            if t["devtype"] == "0x0077":
+                self.assertEqual(parent, "0x0078")
+            else:
+                self.assertEqual(t["devtype"], "0x0071")
+                self.assertIn(parent, ("0x0070", "0x007B"))
+
+    def test_revisions_and_clusters(self):
+        rows = P.BATCHES["mg24-batch8"]
+        self.assertEqual([t["revision"] for t in rows], [1, 2, 2, 2, 5, 5, 2, 5, 5, 5, 5, 1, 2])
+        for name in ("temperaturecontrol", "refrigeratoralarm",
+                     "refrigeratorandtemperaturecontrolledcabinetmode", "ovenmode",
+                     "ovencavityoperationalstate", "microwaveovenmode", "microwaveovencontrol"):
+            self.assertIn(name, P.CHIP_CLUSTERS)
+        for t in rows:
+            self.assertIn(t["chip_cluster"], P.CHIP_CLUSTERS)
+            for c in t["checks"]:
+                if c["chip_cluster"]:
+                    self.assertIn(c["chip_cluster"], P.CHIP_CLUSTERS)
+                ctl = c["controller"]
+                if ctl and ctl[0] in ("verdict", "no_forward"):
+                    want = ctl[4] if ctl[0] == "verdict" else ctl[2]
+                    if "cluster" in want:
+                        self.assertIn(want["cluster"], P.CHIP_CLUSTERS)
+
+    def test_every_shape_is_staged_once(self):
+        comp = [dt for _ep, dt in P.composition_for("mg24-batch8")[1:]]
+        cabinets = [dt for dt in comp if dt.startswith("0x0071")]
+        self.assertEqual(sorted(cabinets), sorted(["0x0071,0,4", "0x0071,1,4", "0x0071,0,7",
+                                                   "0x0071,1,7", "0x0071", "0x0071,1"]))
+        self.assertEqual([dt for dt in comp if dt.startswith("0x0077")], ["0x0077,0,1", "0x0077,1,1"])
+
+
+class TestPartsAndServerLists(unittest.TestCase):
+    def _run(self, extra, text):
+        t = P._multi("0x0078", "cooktop", 1, "onoff", [], extra_reads=[extra])
+        s = _FakeSuite()
+        P.prove_endpoint(_EvseLink(), _TextChip(text), s, "0x4845", 2, t)
+        return {n: ok for n, ok in s.results if "parts-list" in n or "server-list" in n}
+
+    def test_parts_list_matches_its_offsets(self):
+        got = self._run(("parts-list", [1, 2]), "[TOO]   PartsList: 2 entries\n[TOO]     [1]: 3\n[TOO]     [2]: 4\n")
+        self.assertEqual(got, {"0x0078 cooktop ep2 parts-list = [3, 4]": True})
+
+    def test_a_missing_child_fails_the_parts_list(self):
+        got = self._run(("parts-list", [1, 2]), "[TOO]     [1]: 3\n")
+        self.assertFalse(got["0x0078 cooktop ep2 parts-list = [3, 4]"])
+
+    def test_server_list_needs_every_present_and_no_absent(self):
+        text = "[TOO]     [1]: 29 (Descriptor)\n[TOO]     [2]: 6 (OnOff)\n"
+        name = "0x0078 cooktop ep2 server-list carries [6, 29] and lacks [3]"
+        self.assertTrue(self._run(("server-list", [6, 29], [3]), text)[name])
+        self.assertFalse(self._run(("server-list", [6, 29], [3]),
+                                   text + "[TOO]     [3]: 3 (Identify)\n")[name])
+        self.assertFalse(self._run(("server-list", [6, 29], [3]), "[TOO]     [1]: 29 (Descriptor)\n")[name])
+
+
+class TestCommandFlags(unittest.TestCase):
+    def test_flags_follow_the_destination(self):
+        t = _b8_row("cook surface, number")
+        c = t["checks"][0]
+        chip = _TextChip("[TOO]   TemperatureSetpoint: 5\n")
+        s = _FakeSuite()
+        P.prove_check(_FakeLink(), chip, s, "0x4845", 3, t, c, "P")
+        self.assertIn(["temperaturecontrol", "set-temperature", "0x4845", "3", "--TargetTemperature", "5"],
+                      chip.argvs)
+
+
+class TestVerdictClusterOverride(unittest.TestCase):
+    def test_the_invoke_and_the_after_reads_use_the_override(self):
+        t = _b8_row("microwave oven")
+        c = t["checks"][0]
+        link = _VerdictLink()
+        chip = _RunRecChip(link=link, ep=14, cluster=95, command=0, seq=7, payload=[0, 90, 80, 0],
+                           before=0, after=90)
+        saved = H._threaded_chip_call
+        H._threaded_chip_call = chip.chip_call
+        try:
+            s = _FakeSuite()
+            P.prove_check(link, chip, s, "0x4845", 14, t, c, "P")
+        finally:
+            H._threaded_chip_call = saved
+        self.assertEqual(chip.argvs[0][:2], ["microwaveovencontrol", "set-cooking-parameters"])
+        self.assertIn(["microwaveovencontrol", "read", "cook-time", "0x4845", "14"], chip.runs)
+        self.assertIn(["operationalstate", "read", "operational-state", "0x4845", "14"], chip.runs)
+        self.assertTrue(dict(s.results)["P forward 95/0 answered allow"])
+
+
+_PINNED_B8 = [
+    "0x0078 cooktop ep2 parts-list = [3, 4]",
+    "0x0078 cooktop ep2 server-list carries [6, 29] and lacks [3]",
+    "0x007B oven ep5 parts-list = [6, 7]",
+    "0x0070 refrigerator ep8 parts-list = [9, 10]",
+    "0x0070 refrigerator ep8 notify event count 2",
+]
+
+
+class TestBatch8RowNames(unittest.TestCase):
+    def _fake_run_names(self):
+        comp = P.composition_for("mg24-batch8")
+        names = []
+        for (ep, _dt), t in zip(comp[1:], P.rows_for("mg24-batch8")):
+            link = _EvseLink()
+            chip = _RecordingChip(link=link, ep=ep, cluster=95, command=0, seq=7,
+                                  devtype=t["devtype"], revision=t["revision"])
+            saved = H._threaded_chip_call
+            H._threaded_chip_call = chip.chip_call
+            try:
+                s = _FakeSuite()
+                P.prove_endpoint(link, chip, s, "0x4845", ep, t)
+            finally:
+                H._threaded_chip_call = saved
+            names += [n for n, _ in s.results] + [n for n, _ in s.na]
+        return names
+
+    def test_no_duplicate_name(self):
+        names = self._fake_run_names()
+        self.assertEqual(len(names), 242)
+        self.assertEqual(len(names), len(set(names)), [n for n in names if names.count(n) > 1][:5])
+
+    def test_the_pinned_names_occur(self):
+        names = set(self._fake_run_names())
+        for name in _PINNED_B8:
+            self.assertIn(name, names, "missing pinned row: %s" % name)
+
 if __name__ == "__main__":
     unittest.main()
