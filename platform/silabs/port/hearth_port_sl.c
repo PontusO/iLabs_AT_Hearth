@@ -9,7 +9,9 @@
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "FreeRTOS.h"
@@ -57,26 +59,49 @@ const char *hearth_port_model(void)
 /* ---- OS ------------------------------------------------------------ */
 void hearth_os_sleep_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
+/* hearth_matter_init.cpp: saves the CHIP key-value store's key map now. */
+void hearth_matter_kvs_flush(void);
+
 void hearth_os_restart(void)
 {
+    /* The CHIP key-value store saves its key map two seconds late; a reboot
+     * inside that window loses the keys created in it (the reason is at
+     * hearth_matter_kvs_flush()). */
+    hearth_matter_kvs_flush();
     /* Let the OK that precedes a restart leave the wire first (two
      * character times at 115200 is under 200 us; 5 ms is generous). */
     vTaskDelay(pdMS_TO_TICKS(5));
     NVIC_SystemReset();
 }
 
-/* ---- bulk working memory (ruling DE419) ----------------------------- *
- * A dedicated two-slot static pool, not a heap. hearth_port.h asks that
- * staging memory come from somewhere the Matter stack neither allocates
- * from nor contends for, and that "nothing else uses it" be a property the
- * build maintains rather than a fact about one link. A pool nothing else
- * can reach satisfies that by construction: CHIP's allocator, FreeRTOS's
- * heap and libc malloc all stay untouched by this path, and the contract's
- * "at most two live" is the pool's size. NULL when both slots are taken. */
+/* ---- bulk working memory (rulings DE419 and DE624) ------------------ *
+ * Two tenants with opposite shapes. Row staging (mt_row_stage_t, 5,608 B)
+ * gets a dedicated two-slot static pool, not a heap: hearth_port.h asks
+ * that staging memory come from somewhere the Matter stack neither
+ * allocates from nor contends for, and a pool nothing else can reach
+ * satisfies that by construction; the contract's "at most two live" is the
+ * pool's size.
+ *
+ * The firmware-over-the-air relay's one block (1,024 B, held for a whole
+ * download) comes from the heap instead, sl_memory_manager's, which is
+ * also CHIP's (DE624, the user, 2026-09-28). The pool cannot hold it: an
+ * EVSE's inbound row stage keeps one slot for the whole boot and AT+MTROW
+ * takes the other, so a download would fail or AT+MTROW would. The heap
+ * costs nothing while no update runs (the FOTA spec's section 8.4), and
+ * 1 kB against about 63 kB free at +MTREADY cannot starve commissioning.
+ * This is the one stated exception to hearth_port.h's first rule, and the
+ * size is what tells the two tenants apart: every row stage is larger
+ * than STAGE_SMALL_MAX, which the assert below keeps true. The OTA block is
+ * platform/common/hearth_ota_requestor.cpp's kBlockSize (1,024): a larger
+ * block there must raise STAGE_SMALL_MAX with it, or it falls back to a pool
+ * slot. */
 #define STAGE_SLOTS 2
 #define STAGE_BYTES 5632   /* >= sizeof(mt_row_stage_t) (5,608 today); int64 aligned */
+#define STAGE_SMALL_MAX 1024
 _Static_assert(sizeof(mt_row_stage_t) <= STAGE_BYTES,
               "grow STAGE_BYTES: mt_row_stage_t no longer fits a staging slot");
+_Static_assert(sizeof(mt_row_stage_t) > STAGE_SMALL_MAX,
+              "a row stage would now be served from the heap: revisit DE624");
 static uint8_t s_stage_pool[STAGE_SLOTS][STAGE_BYTES] __attribute__((aligned(8)));
 static bool    s_stage_used[STAGE_SLOTS];
 
@@ -87,6 +112,16 @@ static bool    s_stage_used[STAGE_SLOTS];
 
 void *hearth_stage_alloc(size_t bytes)
 {
+    if (bytes <= STAGE_SMALL_MAX) {
+        void *small = malloc(bytes);
+        /* hearth_port.h promises int64_t alignment; refuse rather than
+         * hand out a block that breaks it. */
+        if (small != NULL && ((uintptr_t)small & 7u) != 0) {
+            free(small);
+            return NULL;
+        }
+        return small;
+    }
     if (bytes > STAGE_BYTES) return NULL;
     void *block = NULL;
     CORE_irqState_t crit = CORE_EnterAtomic();
@@ -100,11 +135,13 @@ void *hearth_stage_alloc(size_t bytes)
 void hearth_stage_free(void *block)
 {
     if (block == NULL) return;
+    bool pooled = false;
     CORE_irqState_t crit = CORE_EnterAtomic();
     for (int i = 0; i < STAGE_SLOTS; i++) {
-        if (block == s_stage_pool[i]) { s_stage_used[i] = false; break; }
+        if (block == s_stage_pool[i]) { s_stage_used[i] = false; pooled = true; break; }
     }
     CORE_ExitAtomic(crit);
+    if (!pooled) free(block);   /* outside the atomic section: free() may lock */
 }
 
 /* ---- tasks / semaphores -------------------------------------------- */

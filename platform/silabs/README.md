@@ -449,11 +449,12 @@ that could not stay".
 
 ### The components, and the three that could not stay
 
-Task 2's component set is the Silicon Labs Matter samples' minus the shell, the
-OTA support and requestor, the LCD, the buttons and LEDs, and the lighting
-application. `hearth.slcp` carries the reasoning next to each line; three
-entries are worth repeating here, because each was a build failure and not a
-preference.
+Task 2's component set is the Silicon Labs Matter samples' minus the shell,
+the OTA support (the requestor returned with the FOTA round, see "What
+firmware over the air costs"), the LCD, the buttons and LEDs, and the
+lighting application. `hearth.slcp` carries the reasoning next to each line;
+three entries are worth repeating here, because each was a build failure and
+not a preference.
 
 - **`matter_platform_mg` could not stay.** It is what every sample lists, and it
   compiles the sample APPLICATION framework alongside the platform layer:
@@ -566,7 +567,10 @@ why the two arms' models are comparable. What task 2 changed:
   device type left the root node advertising device type 0x0012 whose mandatory
   cluster 0x002A is absent, which a certification tool reads as a broken
   declaration and a controller can see the moment the stack runs. Endpoint 0 is
-  never disabled, so this one was not cosmetic.
+  never disabled, so this one was not cosmetic. **Since the FOTA round
+  (2026-09-28) both clusters are enabled and device type 0x0012 is back,
+  ahead of 0x0016 as on the nRF: `FIXED_DEVICE_TYPES` reads
+  `{{0x00000012,1},{0x00000016,4},{0x00000101,3}}`.**
 - **Endpoint 240's device type 0x0101 (dimmable light) is left as it is**,
   originally with Level Control disabled under it. It was the same shape of
   inconsistency and deliberately not the same problem: this endpoint is the
@@ -824,9 +828,10 @@ Three steps of the sample are deliberately absent:
   called it (`ThreadStackManagerImpl.cpp:184`) from `sl_ot_rtos_stack_init()`,
   which `sl_main_second_stage_init()` runs before `app_init()`. A second call
   is not idempotent: `CHIPMem-Platform.cpp:82-87` `abort()`s on it.
-- **`GetPlatform().VerifyIfUpdated()`** clears an NVM3 key only the Matter OTA
-  image processor writes, and this product's update story is host-driven serial
-  flashing (`FIRMWARE_UPDATE_SPEC.md`), so the call could only ever be a no-op.
+- **`GetPlatform().VerifyIfUpdated()`** clears an NVM3 key only the SDK's
+  efr32 OTA image processor writes, and that processor is not compiled: the
+  FOTA round's requestor relays every block to the host instead
+  (`port/hearth_ota_sl.cpp`), so the call could only ever be a no-op.
 - **`AppTask::GetAppTask().StartAppTask()`**, `BaseApplication::sAppDelegate`,
   the shell, the LCD, RPC, tracing, ICD and the Wi-Fi arms: the sample's
   application layer, which this product does not have.
@@ -2429,6 +2434,109 @@ harness's observed-rather-than-trusted power cycle is right, and it is the hub
 that lies.
 
 ## Measured
+
+### What firmware over the air costs (2026-09-28)
+
+The FOTA round's MG24 arm (spec
+`superpowers/specs/2026-09-28-fota-mg24-design.md` in the docs repository,
+plan `2026-09-28-fota-mg24.md`) gave this port the
+same OTA requestor the C6 and the nRF run: CHIP's generic requestor, driver,
+storage and BDX downloader from the SDK's `matter_ota_requestor` component,
+and the image processor shared in `platform/common/hearth_ota_requestor.cpp`,
+which relays every downloaded block to the host over the AT link. The SDK's
+own `matter_ota_support` is absent: its efr32 processor writes a Gecko
+storage slot, the xG24 slot starts at 0x080EA000, inside this application,
+and the image store is the host, which flashes this module back through the
+uart-xmodem bootloader (`fw/flash.py` is the PC-side equivalent). What the
+port adds is `port/hearth_ota_sl.cpp` (the version seam: a
+`ConfigurationManager` subclass answering the host-declared product version,
+installed before `InitChipStack()`), three calls in
+`port/hearth_matter_init.cpp`, the two OTA clusters and device type 0x0012
+on endpoint 0, and a heap-served 1 KB block buffer (ruling DE624: the two
+row-staging slots cannot hold it once an EVSE keeps one for the whole boot).
+
+**Figures**, the image built at `dcfc7af` in a fresh
+`~/silabs/work/hearth-matter-ota-dcfc7af` from a clean tree, **0 warnings**,
+with the development discriminator 0xF02, against catalogue batch 8's record:
+
+| | Batch 8 (`85a7cfa`) | FOTA (`dcfc7af`) | Delta |
+|---|---|---|---|
+| `.text` | 990,164 B | 1,025,252 B | +35,088 B |
+| `.bss` | 149,528 B | 150,488 B | +960 B |
+| Free heap at `+MTREADY` | 63,392 B | 62,328 B | -1,064 B |
+| `.gbl` | | 1,029,712 B, 8,044 XMODEM blocks, 114 s | |
+
+The shipped image is `76985ee`, the final review's fix wave on top, built
+the same way in `~/silabs/work/hearth-matter-ota-76985ee` (**0 warnings**):
+`.text` 1,025,460 B, `.data` 3,544 B, `.bss` unchanged, `.gbl` 1,029,928 B;
+its free heap was not re-measured. On it: Phase 4 64/64 both with
+`AT+MTEPAPPLY` and with an SWD reset in row 4.9, Phase 1 296/0, Phase 2
+98/2/1 and catalogue batch 8 259/0/1, every row identical to the committed
+baselines.
+
+The `.bss` delta is the requestor's statics, the same shape the nRF measured:
+`sRequestor` 592, `sDownloader` 224, `sProcessor` 64, `sSoftwareVersion` 40,
+`sDriver` 32, `sStorage` 8, `sConfigMgr` 4, `sModeEnabled` 1 (965 B, from
+`arm-none-eabi-nm --size-sort`). In flight, a download adds the 1,024 B block
+from the heap plus the allocator's header, held from `PrepareDownload` until
+the attempt ends, and BDX's packet buffers; nothing is held while no update
+runs. The image now ends at about 0x081015F4 against NVM3 at 0x08174000,
+about 460 KiB of headroom.
+
+**Proof on that one image**: the eleven catalogue tables 1,296 passed, 0
+failed, 24 not applicable, every row identical to the committed baselines
+(endpoint 0's new cluster and device type moved none); Phase 1 296/0 and
+Phase 2 98/2/1, row for row as before; **Phase 4 64/64**, row for row the
+nRF's `test/baselines/thread-ota.json`, recorded as `core-phase4.json`:
+
+```
+$ export MT_OTA_IMAGE_TOOL=~/esp/esp-matter/connectedhomeip/connectedhomeip/src/app/ota_image_tool.py
+$ python3 test/mt_regression.py \
+      --port /dev/serial/by-id/usb-iLabs_CPico_2350_5203321CE65EDFA5-if00 \
+      --bridge cpico --openocd-config platform/silabs/mg24-swd.cfg \
+      --node-id 0x4845 --phase 4 --include-ota \
+      --ota-provider ~/esp/esp-matter/connectedhomeip/connectedhomeip/out/provider/chip-ota-provider-app \
+      --ota-image-tool "$MT_OTA_IMAGE_TOOL" \
+      --baseline platform/silabs/core-phase4.json
+```
+
+Phase 4 never commissions: the module must already be on the bench fabric,
+and it must have been left alone for at least two seconds after the
+commissioning (the next paragraph says why).
+
+**What the bench found on the way**, three things, each now fixed or guarded:
+
+- **The key-value store saves its key map two seconds late.** The Silicon
+  Labs `KeyValueStoreManagerImpl` defers the save by
+  `SL_KVS_SAVE_DELAY_SECONDS` (2), so a reset inside that window loses every
+  key created in it. After an apply, the host declares the new version and
+  reboots the module with `AT+MTEPAPPLY` within seconds, and the requestor's
+  applying state and target version were lost with it: the first-run
+  notification never went out. `hearth_os_restart()` now saves the key map
+  (the SDK's `ForceKeyMapSave()`, through `hearth_matter_kvs_flush()`) before
+  every reboot Hearth starts, and the server's storage saves it at once
+  whenever the OTA requestor writes one of its own keys (`g/o/...`), which is
+  what covers the product's path: after `+MTOTA:APPLY` the host enters the
+  bootloader with the strap and a reset pulse, which no Hearth code sees
+  (found by the round's final review, then shown on the bench: Phase 4 with
+  row 4.9's reboot replaced by an SWD reset of the module, the AT link left
+  open, lost the notification on `dcfc7af` and passes 64/64 on `76985ee`).
+  Any other reset pin or power cut inside the window is still not covered:
+  on the bench, opening the CPico's port resets the module, and doing that
+  within a second of commissioning lost the fabric and left a
+  stale operational key that failed every later CASE session until
+  `AT+MTFRESET` (graph F631, B632, parked for a later round).
+- **The first-run notification waits for Thread.** The event loop runs for
+  seconds before this module attaches, and a `NotifyUpdateApplied` sent
+  before then fails and is never retried (the shared code clears the applying
+  state before it sends). `hearth_ota_sl.cpp` sends it ten seconds after
+  `kThreadConnectivityChange` reports the attach.
+- **A reused `slc` build directory builds a stale data model.** `slc`
+  copies `data_model/hearth.zap` into the build directory once and never
+  refreshes it, so the first image after the endpoint 0 change served the old
+  endpoint 0 and answered the announce with `UNSUPPORTED_CLUSTER`. One fresh
+  build directory per commit; after any ZAP change, check
+  `<builddir>/autogen/zap-generated/endpoint_config.h` before flashing.
 
 ### The whole catalogue on one image (2026-09-28)
 
@@ -5759,16 +5867,18 @@ the staged EVSE row since the EVSE round. Phase 1 is 296/0.
 
 | Open item | Owner |
 |---|---|
-| **This branch has not been rebased onto `dev/fota-firmware`**, which is where the user ruled it lands (graph **DE484**). Against the merge base `1842af3` that branch adds four declarations to `core/include/mt_matter.h` (`mt_matter_ota_set_mode`, `mt_matter_ota_block_acked`, `mt_matter_ota_staged`, `mt_matter_swver_set`), which `port/mt_matter_stub.c` has to answer or `check_decls.py` reads 61/65 and the image does not link; it adds `core/mt/mt_ota.c` to `core/sources.cmake`, which `hearth.slcp` has to list or `check_slcp_sources.py` fails; and it edits `test/host/Makefile`'s `TESTS` and its `run:` recipe, both of which this branch also edits (`run: all boundary silabs-stubs`), so that one is a textual conflict whose resolution is to keep both sides | **the user's call; the batch rounds continue on this branch by the 2026-09-18 ruling (DE484)**. None of the three is discovered at merge time: each has a check on this branch that names it. This round's own forecast: the branch carries seventeen pre-existing conflict hunks against `dev/fota-firmware` in four files (`platform/nrf54l15/CMakeLists.txt`, `test/host/Makefile`, `test/mt_regression.py`, `test/test_mt_regression.py`), none of them in this round's own hunks; once the rebase lands, `_transport_gate`'s two new door checks also gate `phase4_gate` (safe, both default through `getattr`); the twenty harness names `test/mt_catalogue_proof.py` imports all exist on that branch; and the ARCHITECTURE.md 8.x decision log still owes an entry for four MG24 rounds |
+| **Resolved 2026-09-28.** The branch merged into `main` (`85a9321`) and `dev/fota-firmware` was rebased onto it; the FOTA round gave this port its four OTA entry points and `core/mt/mt_ota.c` in `hearth.slcp`, and `check_decls.py` reads 65/65 ("What firmware over the air costs") | closed |
 
 ### Still owned elsewhere
 
 Signing, secure boot and the SE debug lock stay **pre-ship** (round 1 spec
 section 7, stage 2). Thread-arm baselines under `test/baselines/`,
 ARCHITECTURE 8.21 and the host library's variant table stay with the
-**qualification round**. Matter OTA stays never: the field update story is
-host-driven serial flashing (`FIRMWARE_UPDATE_SPEC.md`). Raising the memory
-tier above `kServiceableEndpoints` 16 is the **MG26 round**'s.
+**qualification round**. Field updates arrived with the FOTA round
+(2026-09-28): the requestor relays each block to the host, which stages the
+bundle and flashes this module back through the uart-xmodem bootloader ("What
+firmware over the air costs"). Raising the memory tier above
+`kServiceableEndpoints` 16 is the **MG26 round**'s.
 
 ## What round 1 leaves open
 

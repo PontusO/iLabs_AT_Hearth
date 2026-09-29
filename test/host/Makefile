@@ -4,7 +4,7 @@
 CORE   = ../../core
 CFLAGS = -std=c11 -Wall -Wextra -Werror -g -I$(CORE)/include -DMT_HOST_TEST -DMT_COMBINED_IMAGE=0
 
-TESTS = test_mt_composition test_mt_transport test_mt_cmdbox test_mt_rows test_mt_stores test_mt_store_index test_hearth_ring
+TESTS = test_mt_composition test_mt_transport test_mt_cmdbox test_mt_rows test_mt_stores test_mt_store_index test_hearth_ring test_mt_ota
 
 all: $(TESTS)
 
@@ -25,6 +25,9 @@ test_mt_stores: test_mt_stores.c port_stub.c
 
 test_mt_store_index: test_mt_store_index.c ../../platform/esp32c6/main/mt_store_index.c
 	$(CC) $(CFLAGS) -I../../platform/esp32c6/main -o $@ $^
+
+test_mt_ota: test_mt_ota.c $(CORE)/mt/mt_ota.c port_stub.c
+	$(CC) $(CFLAGS) -DPORT_STUB_NO_LINK -o $@ $^
 
 boundary:
 	@! /usr/bin/grep -rnE '#include .*(freertos|FreeRTOS|esp_|nvs|sdkconfig|driver/|zephyr|sli?_|em_|gecko|nvm3|SEGGER|rail)' $(CORE) \
@@ -53,6 +56,7 @@ run: all boundary silabs-stubs
 	./test_mt_stores
 	./test_mt_store_index
 	./test_hearth_ring
+	./test_mt_ota
 
 clean:
 	rm -f $(TESTS)

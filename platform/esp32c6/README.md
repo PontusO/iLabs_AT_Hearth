@@ -87,6 +87,169 @@ combined image chooses its stack at runtime with `AT+MTTRANSPORT`, stores
 the choice, and reboots into it. Its endpoint capacity is lower when WiFi is
 the active transport: see below.
 
+### A stale `sdkconfig` silently beats your `sdkconfig.defaults`
+
+An existing `sdkconfig` wins over `sdkconfig.defaults`, so changing a default
+does nothing to a build directory that already has one, and the build is
+perfectly happy about it. This is not only the `build_thread` trap: in the FOTA
+round it bit **all three** variants at once, each carrying a
+`# CONFIG_ENABLE_OTA_REQUESTOR is not set` line from an earlier session, and
+the resulting images looked plausible (they grew by about 34 kB instead of
+about 49, because Hearth's own files link either way while esp-matter's
+requestor init is compiled out and endpoint 0 never gets the cluster).
+
+Whenever a `sdkconfig.defaults*` edit is supposed to change an image, move the
+build directory's `sdkconfig` aside, let the build regenerate it, and diff the
+two, so nothing local is lost silently:
+
+Mind where each variant's file lives: `build_wifi` uses the default location,
+`./sdkconfig` at the platform root, while the other two keep theirs inside
+their build directory because `SDKCONFIG` is redirected there.
+
+```sh
+cd platform/esp32c6
+mv sdkconfig sdkconfig.stale                       # the wifi build's
+idf.py -B build_wifi reconfigure                   # regenerates it
+diff sdkconfig.stale sdkconfig                     # expect ONLY the intended symbol
+grep -n 'CONFIG_ENABLE_OTA_REQUESTOR' sdkconfig
+
+mv build_thread/sdkconfig build_thread/sdkconfig.stale
+idf.py -B build_thread -D SDKCONFIG=build_thread/sdkconfig \
+  -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.thread" \
+  reconfigure
+diff build_thread/sdkconfig.stale build_thread/sdkconfig
+```
+
+and the same again for `build_combined` with its own overlay. Deleting instead
+of moving works too and throws away any local tuning without saying so, which
+is why the recipe moves and diffs. In the round that found this, the diff came
+back with the intended symbol and nothing else in all three variants, which is
+the answer you want before you trust the rebuilt image.
+
+## Firmware over the air
+
+The C6 runs the Matter OTA Requestor and has **no image store of its own**:
+every downloaded block is announced to the host, pulled over the AT link and
+acknowledged, and the host stages the bundle, judges it, and flashes the C6
+back over serial recovery. The single app partition is unchanged by that, and
+the C6 never reboots itself on apply. The wire contract is `AT_MT_SPEC.md`
+sections 3.30 to 3.33; the round record is `ARCHITECTURE.md` section 8.21.
+
+**What this port wires.** `CONFIG_ENABLE_OTA_REQUESTOR=y` in all three
+variants makes esp-matter add the Requestor and Provider client clusters to
+endpoint 0. The requestor, driver, downloader and Hearth's image processor are
+`platform/common/hearth_ota_requestor.cpp` (shared with the nRF port);
+`main/hearth_ota_esp.cpp` is the C6's own half. It is wired from `app_main`
+**immediately after `esp_matter::start()` returns**, under the CHIP stack lock,
+not on `kServerReady`: esp-matter starts a requestor of its own on
+`kDnssdInitialized`, which comes first, and whoever loses that race is a silent
+no-op whose download would go to an OTA partition this firmware does not have.
+The console says which one won, every boot:
+
+```
+I (617) hearth_ota_esp: product version 65541 "1.4.1" in force
+I (1777) hearth_ota: OTA requestor wired, mode 0
+```
+
+`kServerReady` keeps one job, the `NotifyUpdateApplied` that follows an
+applied update: the driver's own first-run path fires 1.7 s into boot, when no
+network and no CASE session exist yet.
+
+**Where the version comes from: the host, not this image.** `AT+MTSWVER`
+declares it, `core/` persists it under `mt_cfg` (`swver`, `swverstr`), and a
+`ConfigurationManager` subclass installed with `SetConfigurationMgr()` before
+`esp_matter::start()` answers it. That subclass is the whole of the value
+change: esp-matter creates Basic Information's two version attributes
+`MANAGED_INTERNALLY`, so an attribute write is refused, and CHIP answers every
+read out of `ConfigurationMgr()`. So a controller sees the declared version
+live, with no reboot, and the compile-time `0` is never what anybody reads.
+The requestor, however, latches the version at `Init()`, so **a version
+declared after boot reaches `QueryImage` only from the next boot**. FOTA is
+also off at every boot: the mode is not persisted, `AT+MTOTA?` reads `0` after
+every reset, and only a host that enables it gets any `+MTOTA` line at all.
+
+**What a bench operator types.** The host side of a transfer, in order:
+
+```
+AT+MTSWVER=65540,"1.4.0"     declare the running product version, then reboot
+AT+MTOTA=1                   enable; +MTERR:8 means this image has no requestor
+AT+MTOTA?                    -> +MTOTA:1,IDLE,0,wifi   (mode,state,percent,variant)
+                             ... announce a provider from chip-tool ...
+                             URC +MTOTA:QUERYING / AVAILABLE,65541 / DOWNLOADING,0
+                             URC +MTOTA:BLOCK,<seq>,<len>
+AT+MTOTAGET=<seq>            -> +MTOTABLK lines (96 bytes each), then OK
+AT+MTOTAACK=<seq>            -> OK, and the next block is requested
+                             URC +MTOTA:DOWNLOADED  (after the LAST ack)
+AT+MTOTASTAGED=1             the bundle verified -> URC +MTOTA:APPLY
+AT+MTOTASTAGED=0,<reason>    refused -> +MTOTA:ERROR,cancelled, then IDLE
+AT+MTOTA=0                   abort anything in flight and go quiet
+```
+
+A block that is not acknowledged within 5 s aborts the transfer with
+`+MTOTA:ERROR,abort`, and **every terminal `ERROR` is followed by a closing
+`+MTOTA:IDLE`**. `AT+MTOTA=2` queries the `DefaultOTAProviders` attribute and
+only that one, so it needs `chip-tool otasoftwareupdaterequestor write
+default-otaproviders` first; an announcement does not fill that list.
+
+**Running the bench phase against this port.** Phase 4 of the regression
+harness is the same procedure, scored and baselined, with the harness playing
+the host (`TESTING.md` section 9):
+
+```sh
+export MT_OTA_IMAGE_TOOL=~/esp/esp-matter/connectedhomeip/connectedhomeip/src/app/ota_image_tool.py
+python3 test/mt_regression.py \
+  --port $(ls /dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_*-if00) \
+  --phase 4 --include-ota \
+  --ota-provider ~/esp/esp-matter/connectedhomeip/connectedhomeip/out/provider/chip-ota-provider-app \
+  --ota-image-tool "$MT_OTA_IMAGE_TOOL"
+```
+
+Without `--include-ota` every row reports `[SKIP]` and the run still exits 0.
+The phase does not commission and does not wipe the chip-tool storage, so run
+Phase 2 first on a factory-fresh device. The baseline is
+`test/baselines/wifi-ota.json`, 64 rows, recorded 2026-09-07 on `build_wifi`.
+The full 20,562-byte test image (21 blocks) relayed in **8.888 s** at 115200
+on that run, host loop included, which the AT link and not the radio sets: a
+block leaves as eleven `+MTOTABLK` lines of up to 192 hex digits. Raise the
+link with `AT+MTBAUD` for a real bundle.
+
+### What firmware over the air costs
+
+`CONFIG_ENABLE_OTA_REQUESTOR` was `n` from the single-app-partition switch
+(2026-07-28) until the FOTA round turned it back on for all three images. The
+requestor downloads; the host stores and flashes, so the single app partition
+stays and the C6 never reboots itself on apply. Measured on 2026-09-07, before
+at commit `eb28dd1` (requestor off) and after at `843e8b4` (requestor on plus
+`platform/common/hearth_ota_requestor.cpp` and `main/hearth_ota_esp.cpp`, the
+review fixes included), each build directory reconfigured from a clean tree
+first; the figure is
+`idf.py`'s own `ilabs_at_hearth.bin binary size`:
+
+| build directory | before, eb28dd1 | after, 843e8b4 | cost |
+|---|---|---|---|
+| `build_wifi` | 1,829,728 | 1,879,216 | +49,488 |
+| `build_thread` | 1,730,992 | 1,781,056 | +50,064 |
+| `build_combined` | 2,125,632 | 2,176,080 | +50,448 |
+
+The three agree within a kilobyte, which is what you would expect of a cost
+that is entirely CHIP's OTA requestor, BDX downloader and the relay glue, and
+nothing transport-specific. It also matches, in the opposite direction, the
+"~45 KB on its own" the 2026-07-28 note recorded for dropping the requestor.
+
+Free heap at startup on `build_wifi`, the line the firmware logs every boot,
+on the same one-endpoint composition (a single dimmable light, `0x0100`) both
+times:
+
+| | free heap at startup |
+|---|---|
+| before, eb28dd1 | 140,980 |
+| after, 843e8b4 | 138,960 and 138,976 on two boots |
+
+So about 2 KB, against a boot-to-boot spread of a few hundred bytes on this
+bench. The block buffer is NOT in that figure: it is a `hearth_stage_alloc()`
+block taken when a download starts and given back when it ends, so the idle
+cost is the statics only.
+
 ## Device type implementation notes
 
 The 52-row catalogue (see the top-level README for the table) is

@@ -1,0 +1,14 @@
+# chip-ota-provider-app stdout, as the harness sees it through the pipe:
+# the startup banner it prints before it is reachable, and the post-apply
+# notification check 4.9 reads back out of the log. Trimmed to the lines
+# the harness actually matches, and the update token is redacted: a real
+# one is a 30-character hex run and no such run belongs in a committed
+# file (CLAUDE.md's credential rule).
+[SVR] Server initialization complete
+[DL] CHIP task running
+[SVR] Server Listening...
+[ZCL] OTA Provider received QueryImage
+[SWU] Query Image: Update available
+[BDX] Transfer completed, got BlockAckEOF
+[ZCL] OTA Provider received NotifyUpdateApplied
+[SWU] HandleNotifyUpdateApplied: token: <redacted>, version: 65541

@@ -334,11 +334,14 @@ if(CONFIG_CHIP)
   # ports compile the same file and the two arms cannot drift apart. It is
   # inside the CONFIG_CHIP guard because that is the only configuration in
   # which those symbols exist.
-  target_include_directories(app PRIVATE src src/default_zap ../chip ${MATTER_COMMON})
+  target_include_directories(app PRIVATE src src/default_zap ../chip ${MATTER_COMMON}
+    ${CMAKE_CURRENT_LIST_DIR}/../common)
   target_sources(app PRIVATE
     src/main.cpp
     ../chip/mt_chip_events.cpp
     port/mt_matter_stub.c
+    port/hearth_ota_nrf.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../common/hearth_ota_requestor.cpp
     port/mt_matter_zephyr.cpp
     port/mt_devtypes_zephyr.cpp
     ${MATTER_COMMON}/app/matter_init.cpp

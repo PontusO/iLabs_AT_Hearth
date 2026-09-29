@@ -21,7 +21,7 @@
 # wiring that lets the host choose is later work.
 #
 # Built starting from sdkconfig.defaults.thread (it already carries the
-# OpenThread platform settings and restates CONFIG_ENABLE_OTA_REQUESTOR=n
+# OpenThread platform settings and restates CONFIG_ENABLE_OTA_REQUESTOR
 # per F38) with the WiFi station enables from sdkconfig.defaults ADDED
 # rather than the Thread-only radio line kept: both stacks must actually
 # compile for the patchset's guarded code paths to be exercised at all.
@@ -77,9 +77,13 @@ CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_EXT_ADV=n
 CONFIG_BT_NIMBLE_HCI_EVT_BUF_SIZE=70
 
-# No Matter OTA Requestor, restated per F38 same as sdkconfig.defaults.thread:
-# this firmware has one app partition and is flashed by the host over serial
-# (see partitions.csv and FIRMWARE_UPDATE_SPEC.md). sdkconfig.defaults already
-# sets it to n; restated here so a future edit to the base file cannot quietly
-# re-enable it for the combined image alone.
-CONFIG_ENABLE_OTA_REQUESTOR=n
+# Matter OTA Requestor on, for the FOTA relay (docs: 2026-09-07-fota-design):
+# the requestor downloads, the host stores and flashes, so the single app
+# partition stays. The processor never reboots the C6 on apply; the host does
+# the applying. Restated here, like the negative it replaces, so a future edit
+# to the base file cannot quietly change it for the combined image alone.
+# CONFIG_OTA_AUTO_REBOOT_ON_APPLY governs the STOCK ESP32 image processor,
+# which this firmware does not use; the Hearth processor has no reboot in it
+# at all, so the symbol is belt rather than braces.
+CONFIG_ENABLE_OTA_REQUESTOR=y
+CONFIG_OTA_AUTO_REBOOT_ON_APPLY=n

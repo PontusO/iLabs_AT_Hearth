@@ -57,8 +57,15 @@ void hearth_os_restart(void);
  *     about one link, not a property a build maintains, and no compiler
  *     will notice when it stops being true. hearth_port_zephyr.c carries
  *     the worked example.
+ *     One stated exception: the MG24 serves the 1 KB OTA block from the
+ *     SDK heap (DE624; hearth_port_sl.c says why the pool cannot hold it
+ *     and why 1 KB cannot starve the stack).
  *   - Blocks are a few kilobytes each (one mt_row_stage_t, currently about
- *     5.6 KB) and at most two are live at once.
+ *     5.6 KB) and at most two are live at once. Row staging is no longer the
+ *     only tenant: the firmware-over-the-air relay takes one much smaller
+ *     block (a single 1 KB Matter OTA block) and holds it for the whole of a
+ *     download, so an implementation must expect a long-lived small block
+ *     alongside the short-lived large ones.
  *   - Alignment must suit any scalar, int64_t included.
  *   - Callable from more than one task, so the implementation must be
  *     thread-safe. It is never called from an ISR and never with a
@@ -116,7 +123,8 @@ int hearth_link_set_flowctrl(int mode);
  */
 #define HEARTH_CRIT_CMDBOX 0
 #define HEARTH_CRIT_ROWS   1
-#define HEARTH_CRIT_COUNT  2
+#define HEARTH_CRIT_OTA    2
+#define HEARTH_CRIT_COUNT  3
 
 void hearth_crit_enter(int id);
 void hearth_crit_exit(int id);

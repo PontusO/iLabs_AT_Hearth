@@ -16,6 +16,11 @@
  * on proving that mt_matter.h's declarations have exactly one definition
  * across this file and mt_matter_sl.cpp. The banners stay so each section
  * can be found by the same name in both files.
+ *
+ * The FOTA quartet (`mt_matter_ota_set_mode`, `mt_matter_ota_block_acked`,
+ * `mt_matter_ota_staged`, `mt_matter_swver_set`) was never stubbed here: the
+ * first three live in `platform/common/hearth_ota_requestor.cpp`, the fourth
+ * in `hearth_ota_sl.cpp`, and `check_decls.py` counts both files.
  */
 
 /* ---- commissioning state and identity ----------------------------------- */

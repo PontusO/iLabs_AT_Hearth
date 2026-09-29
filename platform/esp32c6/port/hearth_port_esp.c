@@ -77,6 +77,7 @@ void hearth_sem_give(hearth_sem_t sem)
 static portMUX_TYPE s_crit[HEARTH_CRIT_COUNT] = {
     portMUX_INITIALIZER_UNLOCKED,
     portMUX_INITIALIZER_UNLOCKED,
+    portMUX_INITIALIZER_UNLOCKED,
 };
 
 void hearth_crit_enter(int id) { taskENTER_CRITICAL(&s_crit[id]); }

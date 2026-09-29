@@ -123,6 +123,8 @@ int main(void)
      *   the EVSE's charging-target store (the EVSE round, the MG24's
      *   mt_matter_sl_evse.inc): hearth_kv_get_blob/set_blob/delete(
      *       MT_EVSE_KV_NS "mt_evse", "t<ep>" for ep 1..16)
+     *   the product version (FOTA, core/mt/mt_ota.c): hearth_kv_get_blob/
+     *   set_blob(MT_OTA_NVS_NAMESPACE "mt_cfg", "swver" and "swverstr")
      * A newly persisted pair must be added here too. */
     const char *pairs[][2] = {
         {"mt_ep", "comp"}, {"mt_cfg", "transport"},
@@ -130,6 +132,7 @@ int main(void)
         {"mt_evse", "t5"}, {"mt_evse", "t6"}, {"mt_evse", "t7"}, {"mt_evse", "t8"},
         {"mt_evse", "t9"}, {"mt_evse", "t10"}, {"mt_evse", "t11"}, {"mt_evse", "t12"},
         {"mt_evse", "t13"}, {"mt_evse", "t14"}, {"mt_evse", "t15"}, {"mt_evse", "t16"},
+        {"mt_cfg", "swver"}, {"mt_cfg", "swverstr"},
     };
     size_t np = sizeof(pairs) / sizeof(pairs[0]);
     for (size_t i = 0; i < np; i++)

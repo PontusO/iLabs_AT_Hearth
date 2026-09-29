@@ -49,9 +49,6 @@
  * forwards those two device types need.
  */
 
-#include <stddef.h>
-#include <string.h>
-
 #include "mt_matter.h"
 
 /* mt_matter_switch_click() left this file in catalogue batch 5, when the
@@ -147,3 +144,10 @@
  * deleted, because that proof is a property of the build and not of any one
  * round: a header entry point added tomorrow has a place to be stubbed while
  * its implementation is written. */
+
+/* The firmware-over-the-air quartet left this file in the FOTA round, when
+ * the port grew a Matter OTA requestor whose image store is the host: the
+ * three mt_matter_ota_* shims are real in platform/common/hearth_ota_
+ * requestor.cpp, shared with the C6, and mt_matter_swver_set() is real in
+ * port/hearth_ota_nrf.cpp against the ConfigurationManager that serves the
+ * host-declared product version to Basic Information. */

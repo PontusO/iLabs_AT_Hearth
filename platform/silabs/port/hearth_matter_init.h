@@ -52,3 +52,10 @@ CHIP_ERROR hearth_matter_init(const char *ble_name);
  * or the first line through it is dropped.
  */
 void hearth_matter_log_route_init(void);
+
+/*
+ * Save the CHIP key-value store's key map now. extern "C", for
+ * hearth_port_sl.c's hearth_os_restart(), which declares it itself because
+ * this header is C++ only; defined in hearth_matter_init.cpp, which says why.
+ */
+extern "C" void hearth_matter_kvs_flush(void);

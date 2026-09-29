@@ -89,12 +89,17 @@ source:
   # CHIP uses where esp-matter's fork posts device events. Not covered by
   # check_slcp_sources.py, which reads the ../../core/ paths alone.
   - path: ../chip/mt_chip_events.cpp
+  # Firmware over the air (FOTA round, 2026-09-28): the CHIP half shared with
+  # the C6 and the nRF, and this port's version seam and wiring point.
+  - path: ../common/hearth_ota_requestor.cpp
+  - path: port/hearth_ota_sl.cpp
   # core/: mirrors core/sources.cmake, which is authoritative.
   - path: ../../core/at/at_parser.c
   - path: ../../core/mt/mt_at.c
   - path: ../../core/mt/mt_cmdbox.c
   - path: ../../core/mt/mt_composition.c
   - path: ../../core/mt/mt_comp_store.c
+  - path: ../../core/mt/mt_ota.c
   - path: ../../core/mt/mt_rows.c
   - path: ../../core/mt/mt_transport.c
 
@@ -103,6 +108,8 @@ include:
   - path: port
   # mt_chip_events.h, beside its .cpp above.
   - path: ../chip
+  # hearth_ota_requestor.h, beside its .cpp above.
+  - path: ../common
   # src/ is on the include path for one file: CHIPProjectConfig.h. CHIP finds
   # it by NAME (the extension's slc/inc/system/SystemBuildConfig.h defines
   # CHIP_PROJECT_CONFIG_INCLUDE as <CHIPProjectConfig.h>), which is the same
@@ -256,9 +263,9 @@ component:
   # ------------------------------------------------------- the Matter stack ---
   # The set the samples carry minus everything this product does not have or
   # does not want: no matter_shell (a shipping image has no console input path,
-  # board contract item 6), no matter_ota_support or matter_ota_requestor (the
-  # update story is host-driven serial flashing, FIRMWARE_UPDATE_SPEC.md, and
-  # both OTA clusters are disabled in the data model), no LCD, buttons or LEDs
+  # board contract item 6), no matter_ota_support (its efr32 image processor
+  # writes a Gecko storage slot, and the image store is the host:
+  # superpowers/specs/2026-09-28-fota-mg24-design.md), no LCD, buttons or LEDs
   # (this carrier has none), no matter_lighting and none of the sample's
   # application files: Hearth's own main.cpp provides the hooks and the port
   # provides the callbacks.
@@ -336,6 +343,12 @@ component:
   # of this board's two UARTs, which is the right default for a product whose AT
   # link must carry nothing but the AT protocol.
   - id: matter_segger_rtt
+
+  # FOTA round (2026-09-28): the OTA Software Update Requestor server and
+  # CHIP's generic requestor, driver, storage and BDX downloader, with no
+  # platform image processor (matter_ota_support stays out, see the Matter
+  # stack block above). Not code-driven, no SDK patch.
+  - id: matter_ota_requestor
 
   # The cluster servers the data model declares. One component per enabled
   # cluster; a cluster enabled in data_model/hearth.zap with no component here
