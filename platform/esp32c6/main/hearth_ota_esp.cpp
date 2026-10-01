@@ -147,3 +147,85 @@ extern "C" int mt_matter_swver_set(uint32_t version, const char *str)
     }
     return 0;
 }
+
+/*
+ * B665: the requestor is Hearth's, on every C6 image. esp-matter would install
+ * its own from its kDnssdInitialized handler (esp_matter_ota_requestor_start),
+ * and on the combined image (platform DNS-SD with WiFi compiled in:
+ * mdns_init() calls its init callback synchronously) that event is posted
+ * during Server::Init(), before esp_matter::start() returns: Hearth's wiring
+ * in app_main then won or
+ * lost a race for the stack lock (lost 14 of 14 uncommissioned boots and 3 of
+ * 10 commissioned ones on the combined image, bench 2026-10-01). The SDK patch
+ * sdk-patches/esp-matter/0002-hearth-app-owned-ota-requestor.patch makes
+ * esp-matter's start a no-op when this answers 1, so the wiring in app_main
+ * is the only one there is. A strong definition, so it overrides the patch's
+ * weak declaration on every image.
+ */
+extern "C" int mt_app_owns_ota_requestor(void)
+{
+    return 1;
+}
+
+namespace {
+
+/*
+ * How long after the network comes up before the first-run NotifyUpdateApplied
+ * goes out. The notification needs a CASE session to the provider, so the
+ * provider's address has to resolve and a route has to exist: on WiFi that
+ * follows the IPv6 address within a second or two; on Thread the OMR address
+ * (SLAAC) and the SRP registration follow the attach, the same ten seconds the
+ * MG24 port settles for (hearth_ota_sl.cpp).
+ */
+constexpr System::Clock::Seconds32 kNotifySettleWifi{ 5 };
+constexpr System::Clock::Seconds32 kNotifySettleThread{ 10 };
+
+void NotifyAfterSettle(System::Layer *, void *)
+{
+    hearth::ota_requestor_server_ready();
+}
+
+void ArmNotify(System::Clock::Seconds32 settle)
+{
+    SystemLayer().CancelTimer(NotifyAfterSettle, nullptr);
+    CHIP_ERROR err = SystemLayer().StartTimer(settle, NotifyAfterSettle, nullptr);
+    if (err != CHIP_NO_ERROR) {
+        HEARTH_LOGE(TAG, "could not arm the first-run notification timer (%" CHIP_ERROR_FORMAT
+                         "); a pending NotifyUpdateApplied waits for the next network event",
+                    err.Format());
+    }
+}
+
+} // namespace
+
+/*
+ * Matter thread, from app_event_cb(). The first-run NotifyUpdateApplied waits
+ * for the network, not for kServerReady: on the WiFi image the two coincide
+ * (minimal mDNS posts kDnssdInitialized, and with it kServerReady, only once an
+ * address exists), but on the combined image kServerReady arrives about a
+ * second before the WiFi address and long before a Thread attach, and
+ * a notification sent then fails and is never retried (the shared code clears
+ * the applying state before it sends). The requestor is wired well before the
+ * earliest of these timers fires, so the driver's ConfirmCurrentImage() lambda
+ * has set the pending flag by then. ota_requestor_server_ready() is one-shot:
+ * later addresses and attaches are no-ops once it has run.
+ */
+void hearth_ota_network_event(const ChipDeviceEvent *event)
+{
+    switch (event->Type) {
+    case DeviceEventType::kInterfaceIpAddressChanged:
+        if (event->InterfaceIpAddressChanged.Type == InterfaceIpChangeType::kIpV6_Assigned) {
+            ArmNotify(kNotifySettleWifi);
+        }
+        break;
+    case DeviceEventType::kThreadConnectivityChange:
+        if (event->ThreadConnectivityChange.Result == kConnectivity_Established) {
+            ArmNotify(kNotifySettleThread);
+        } else if (event->ThreadConnectivityChange.Result == kConnectivity_Lost) {
+            SystemLayer().CancelTimer(NotifyAfterSettle, nullptr);
+        }
+        break;
+    default:
+        break;
+    }
+}

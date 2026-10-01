@@ -1,0 +1,27 @@
+diff --git a/components/esp_matter/esp_matter_ota.cpp b/components/esp_matter/esp_matter_ota.cpp
+index e733a7a..6c45d9f 100644
+--- a/components/esp_matter/esp_matter_ota.cpp
++++ b/components/esp_matter/esp_matter_ota.cpp
+@@ -89,9 +89,22 @@ static esp_err_t esp_matter_ota_override_impl(const esp_matter_ota_requestor_imp
+ }
+ #endif // CONFIG_ENABLE_OTA_REQUESTOR
+ 
++#if CONFIG_ENABLE_OTA_REQUESTOR
++/* Hearth: an application that wires its own requestor defines this (weak;
++ * absent means esp-matter owns the requestor, the upstream behaviour). This
++ * function runs from the kDnssdInitialized handler, and with the platform
++ * DNS-SD backend that event is posted during Server::Init(), before
++ * esp_matter::start() returns, so the application could not reliably be the
++ * first to call SetRequestorInstance() (Hearth B665). */
++extern "C" int mt_app_owns_ota_requestor(void) __attribute__((weak));
++#endif
++
+ void esp_matter_ota_requestor_start(void)
+ {
+ #if CONFIG_ENABLE_OTA_REQUESTOR
++    if (&mt_app_owns_ota_requestor != nullptr && mt_app_owns_ota_requestor()) {
++        return;
++    }
+     VerifyOrReturn(chip::GetRequestorInstance() == nullptr);
+ 
+     chip::SetRequestorInstance(&gRequestorCore);

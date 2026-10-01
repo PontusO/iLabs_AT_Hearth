@@ -477,9 +477,12 @@ namespace hearth {
 void ota_requestor_init()
 {
     /*
-     * The port is racing its SDK for chip::SetRequestorInstance() (see the
-     * header), and the loser of that race is a silent no-op. Say so out loud
-     * HERE, which is where losing it is actually observable: once
+     * A port whose SDK installs a requestor of its own must keep it from doing
+     * so (the C6 does, by an SDK patch; see the header), because whoever calls
+     * chip::SetRequestorInstance() second is a silent no-op. This check is
+     * the tripwire for that going wrong (an SDK bump that moves the call, a
+     * port that forgets): say so out loud HERE, which is where it is
+     * actually observable: once
      * SetRequestorInstance(&sRequestor) below has run there is nobody left to
      * have beaten us, so a check after it never fires. From this early return
      * on, the shims below refuse every AT+MTOTA command with -1, which
