@@ -66,9 +66,10 @@ idf.py -B build_thread -D SDKCONFIG=build_thread/sdkconfig \
   build
 ```
 
-The combined image additionally needs the SDK patchset, because runtime
-transport selection is not something esp-matter or CHIP offer. Two patches,
-pinned to the SDK commits this firmware builds against (`21aa3d1` for
+Every image needs the SDK patchset, and the combined image depends on all of
+it: runtime transport selection is not something esp-matter or CHIP offer,
+and the requestor has to be Hearth's (B665, below). Three patches, pinned to
+the SDK commits this firmware builds against (`21aa3d1` for
 esp-matter, `b87051a9` for the nested connectedhomeip checkout), live in
 `sdk-patches/` and are applied by a script that refuses outright if either
 checkout has moved off its pin, so an SDK bump forces a deliberate
@@ -81,8 +82,14 @@ idf.py -B build_combined -D SDKCONFIG=build_combined/sdkconfig \
   build
 ```
 
-The patches are inert in the other two builds: each preprocesses the guard
-away, since only one network stack's Kconfig symbol is set in either. The
+The two transport patches (`0001-*`) are inert in the other two builds: each
+preprocesses the guard away, since only one network stack's Kconfig symbol is
+set in either. `esp-matter/0002-hearth-app-owned-ota-requestor.patch` acts on
+every image: it stops esp-matter installing a requestor of its own when the
+application defines `mt_app_owns_ota_requestor()`, which
+`main/hearth_ota_esp.cpp` does. An image built from an unpatched tree still
+links; without it the WiFi image happens to win the race and the combined
+image does not. The
 combined image chooses its stack at runtime with `AT+MTTRANSPORT`, stores
 the choice, and reboots into it. Its endpoint capacity is lower when WiFi is
 the active transport: see below.
@@ -140,20 +147,28 @@ variants makes esp-matter add the Requestor and Provider client clusters to
 endpoint 0. The requestor, driver, downloader and Hearth's image processor are
 `platform/common/hearth_ota_requestor.cpp` (shared with the nRF port);
 `main/hearth_ota_esp.cpp` is the C6's own half. It is wired from `app_main`
-**immediately after `esp_matter::start()` returns**, under the CHIP stack lock,
-not on `kServerReady`: esp-matter starts a requestor of its own on
-`kDnssdInitialized`, which comes first, and whoever loses that race is a silent
-no-op whose download would go to an OTA partition this firmware does not have.
-The console says which one won, every boot:
+**immediately after `esp_matter::start()` returns**, under the CHIP stack lock.
+esp-matter would start a requestor of its own on `kDnssdInitialized`, whose
+download would go to an OTA partition this firmware does not have, and
+whichever calls `SetRequestorInstance()` second is a silent no-op. Wiring
+first was the original answer, and it is a race: on the combined image the
+event is posted during `Server::Init()` (its platform DNS-SD backend's
+`mdns_init()` answers synchronously), and Hearth lost on every
+uncommissioned boot and 3 of 10 commissioned ones (B665, 2026-10-01). The SDK
+patch above removes esp-matter's start instead. The console says which one is
+wired, every boot; an `E hearth_ota: another OTA requestor was registered
+first` line means the patch is missing:
 
 ```
 I (617) hearth_ota_esp: product version 65541 "1.4.1" in force
 I (1777) hearth_ota: OTA requestor wired, mode 0
 ```
 
-`kServerReady` keeps one job, the `NotifyUpdateApplied` that follows an
-applied update: the driver's own first-run path fires 1.7 s into boot, when no
-network and no CASE session exist yet.
+The `NotifyUpdateApplied` that follows an applied update waits for the
+network: the driver's own first-run path fires 1.7 s into boot, when no network
+and no CASE session exist yet, and so does `kServerReady` on the combined
+image. It goes out 5 s after an IPv6 address (WiFi) or 10 s after a Thread
+attach (`hearth_ota_network_event()`), the same settle the MG24 port uses.
 
 **Where the version comes from: the host, not this image.** `AT+MTSWVER`
 declares it, `core/` persists it under `mt_cfg` (`swver`, `swverstr`), and a

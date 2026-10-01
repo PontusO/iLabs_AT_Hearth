@@ -222,6 +222,7 @@
  * header of its own, the way this file already declares the mt_*_register_all
  * helpers it calls once from app_main. */
 void hearth_swver_install();
+void hearth_ota_network_event(const chip::DeviceLayer::ChipDeviceEvent *event);
 
 static const char *TAG = "mt_main";
 
@@ -662,6 +663,9 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         break;
     case DeviceEventType::kInterfaceIpAddressChanged:
         mt_at_event(MT_EVT_INTERFACE_IP_CHANGED, nullptr);
+        /* B665: the first-run NotifyUpdateApplied rides the network, not
+         * kServerReady (hearth_ota_esp.cpp). */
+        hearth_ota_network_event(event);
         break;
     case DeviceEventType::kOperationalNetworkStarted:
         mt_at_event(MT_EVT_OPERATIONAL_NETWORK_STARTED, nullptr);
@@ -670,11 +674,10 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         mt_at_event(MT_EVT_DNSSD_INITIALIZED, nullptr);
         break;
     case DeviceEventType::kServerReady:
-        /* FOTA round task 3: the first point in a boot where the requestor can
-         * actually reach a provider. A first run of a freshly applied bundle
-         * sends its NotifyUpdateApplied from here; every other boot this is a
-         * no-op. */
-        hearth::ota_requestor_server_ready();
+        /* Not where the first-run NotifyUpdateApplied goes out any more
+         * (B665): with the platform DNS-SD backend this event arrives before
+         * the network does. hearth_ota_network_event() sends it, from the
+         * IPv6 address and Thread attach cases. */
         mt_at_event(MT_EVT_SERVER_READY, nullptr);
         break;
 
@@ -718,6 +721,8 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     case DeviceEventType::kThreadConnectivityChange:
         mt_at_event(MT_EVT_THREAD_CONNECTIVITY,
                     event->ThreadConnectivityChange.Result == kConnectivity_Established ? "1" : "0");
+        /* B665: arms (or cancels) the first-run NotifyUpdateApplied. */
+        hearth_ota_network_event(event);
         /* Thread interface down: forget the last reported role token, so a
          * genuine return to that same role after the interface comes back is
          * reported rather than swallowed as a repeat (design spec 2.2).
@@ -6848,35 +6853,39 @@ extern "C" void app_main(void)
     }
 
     /*
-     * FOTA round task 3: wire the Hearth OTA requestor, HERE and not from
-     * app_event_cb()'s kServerReady case, which is where an application would
-     * normally do this. esp-matter installs a requestor of its own from its
-     * kDnssdInitialized handler (esp_matter_core.cpp's
-     * device_callback_internal -> esp_matter_ota_requestor_start), and
-     * kServerReady is only POSTED while that handler runs (Server.cpp's
-     * CheckServerReadyEvent), so a kServerReady hook always loses the race and
-     * silently leaves the ESP32 image processor in charge, which would write
-     * to an OTA partition this firmware does not have. Both sides guard on
-     * chip::GetRequestorInstance() being null, so whoever is first wins:
-     * esp_matter::start() returns only once Server::Init() has completed on
-     * the CHIP task (chip_init() blocks on a task notification), so calling it
-     * here is both legal and first by a wide margin.
+     * FOTA round task 3: wire the Hearth OTA requestor, here, under the CHIP
+     * stack lock (this is app_main, not the CHIP task). esp_matter::start()
+     * returns only once Server::Init() has completed on the CHIP task
+     * (chip_init() blocks on a task notification), so the Server the
+     * requestor binds to is ready.
      *
-     * ChipStackLock, not ScheduleWork: this is app_main, not the CHIP task,
-     * and the race being closed is with a handler that runs under that lock.
+     * esp-matter would install a requestor of its own from its
+     * kDnssdInitialized handler (esp_matter_core.cpp's device_callback_internal
+     * -> esp_matter_ota_requestor_start), with the ESP32 image processor that
+     * writes to an OTA partition this firmware does not have. The original
+     * design (2026-09-07) beat it to chip::SetRequestorInstance() by wiring
+     * here, on the reasoning that the event comes later. That holds only with
+     * minimal mDNS (the WiFi image), which posts the event once an address
+     * exists, and with the Thread image's SRP client, which posts it after an
+     * SRP update. The combined image uses the platform DNS-SD backend with
+     * WiFi compiled in, where mdns_init() calls its init callback
+     * synchronously, so the event is posted DURING Server::Init() and is
+     * already queued when start() returns, in either transport: this call
+     * then lost the race for the lock on 14 of 14 uncommissioned and 3 of 10
+     * commissioned boots of the combined image (B665, bench 2026-10-01).
+     * The race is gone, not won: the SDK patch
+     * 0002-hearth-app-owned-ota-requestor.patch makes esp-matter's start a
+     * no-op when the application defines mt_app_owns_ota_requestor()
+     * (hearth_ota_esp.cpp does), so this is the only wiring. The check in
+     * ota_requestor_init() that refuses when another requestor got there
+     * first stays as the tripwire for an SDK bump that moves the call.
      *
-     * WHY THE SECOND CALL CAN BE DEFERRED to app_event_cb()'s kServerReady
-     * case, which the nRF port could not do (see hearth_ota_nrf.cpp's
-     * InitBasicOTARequestor): DefaultOTARequestorDriver::Init() does not call
-     * ConfirmCurrentImage() inline, it posts a SystemLayer().ScheduleLambda()
-     * that does, and that lambda is what sets the flag
-     * ota_requestor_server_ready() acts on. Winning SetRequestorInstance()
-     * here is precisely the proof that kDnssdInitialized has not been
-     * dispatched yet (esp-matter installs its own requestor from that
-     * handler), and kServerReady is only posted from inside it, by
-     * Server::CheckServerReadyEvent. So the driver's lambda is already in the
-     * event queue before the kServerReady that our hook rides on is posted,
-     * and the queue is ordered: the flag is set by the time the hook reads it.
+     * The first-run NotifyUpdateApplied does NOT ride kServerReady, which the
+     * combined image's backend brings forward to before the network is up
+     * (kServerReady is posted from the kDnssdInitialized handling); it waits for
+     * an IPv6 address or a Thread attach plus a settle time
+     * (hearth_ota_network_event()). The driver's ConfirmCurrentImage()
+     * lambda, posted inside ota_requestor_init() below, has long run by then.
      */
     {
         ChipStackLock lock;
