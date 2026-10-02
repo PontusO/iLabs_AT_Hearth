@@ -371,6 +371,29 @@ acceptance run, which drives real controller traffic, the criterion the rig
 uses). These figures ship with the firmware; the library's `fw/README.md`
 and its bundled images move to them when a release is cut.
 
+**Re-measured on the 1.3.0 images (2026-10-02).** The FOTA round turned the
+OTA requestor on in every variant, and 1.3.0 also turns the CHIP shell off
+(it was never linked, so that moves nothing). Measured with
+`test/mt_endpoint_cap.py` on the release images, `build_{wifi,thread,combined}`
+at `32799fe`, the first N entries of the harness's Phase 3 composition, BLE
+resident, every trial commissioned and passing the operational criterion:
+
+| image, active transport | 1 endpoint | 24 | 28 |
+|---|---|---|---|
+| `build_wifi`, WiFi | 138,100 | 100,816 | 80,960 |
+| `build_thread`, Thread | | | 150,848 |
+| `build_combined`, Thread | | | 74,136 |
+| `build_combined`, WiFi | 98,796 | 61,360 | **41,364** |
+
+The tightest row, the combined image WiFi-active at 28, reads 41,364 bytes
+free against 45,156 to 45,288 at 1.2.0: the requestor costs about 3.9 KB
+there, and the image still clears the 24,000-byte floor by about 17 KB, so
+every variant still serves the full table. The Thread rows were measured at
+28 only: each trial starts with a factory reset and commissions again, and
+on this bench a re-keyed Thread device cannot be commissioned again on the
+same border router until its old SRP registration is cleared (`ARCHITECTURE.md`
+8.26, B684), so one trial per Thread row was the cost-effective point.
+
 Heap moves with the SDK, with cluster gates and with any
 `sdkconfig.defaults*` edit, so re-measure with the rig rather than
 re-deriving. The user-facing version of this, aimed at somebody choosing a
