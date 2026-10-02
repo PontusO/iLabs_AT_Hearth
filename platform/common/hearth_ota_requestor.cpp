@@ -100,6 +100,21 @@ public:
         mHeaderParser.Init();
         /* Not synchronously: BeginPrepareDownload() is still on the stack. */
         return SystemLayer().ScheduleLambda([this] {
+            /* B685, the other ordering: the connection callback ran before
+             * the cancel, so the check above passed, and the cancel landed
+             * while this lambda was queued. Its EndDownload() found nothing
+             * in progress (the downloader was still preparing) and the
+             * requestor is idle now. Failing the preparation resets the
+             * downloader without sending the BDX ReceiveInit and without an
+             * Abort(), so no state line goes out for an attempt that is
+             * already over. */
+            OTARequestorInterface *r = GetRequestorInstance();
+            if (r == nullptr ||
+                r->GetCurrentUpdateState() != OTARequestorInterface::OTAUpdateStateEnum::kDownloading) {
+                HEARTH_LOGW(TAG, "refusing a download the requestor no longer owns");
+                mDownloader->OnPreparedForDownload(CHIP_ERROR_CONNECTION_ABORTED);
+                return;
+            }
             mt_ota_on_state(MT_OTA_DOWNLOADING, "0");
             mDownloader->OnPreparedForDownload(CHIP_NO_ERROR);
         });
