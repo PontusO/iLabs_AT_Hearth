@@ -15,8 +15,11 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0xC000
 
-# Enable chip shell
-CONFIG_ENABLE_CHIP_SHELL=y
+# The CHIP shell is off (CRA P-04, 2026-10-02). The firmware never launched it,
+# so nothing was linked, but a debug interpreter switched on in the shipped
+# configuration is the wrong default; a developer who wants it turns it on
+# here and calls esp_matter::console::init().
+CONFIG_ENABLE_CHIP_SHELL=n
 
 CONFIG_ENABLE_WIFI_AP=n
 
