@@ -71,6 +71,21 @@ public:
     CHIP_ERROR PrepareDownload() override
     {
         VerifyOrReturnError(mDownloader != nullptr, CHIP_ERROR_INCORRECT_STATE);
+        /* B685: CHIP's DownloadUpdate() records kDownloading and only then
+         * connects to the provider. A cancel (AT+MTOTA=0) that lands in
+         * between resets the requestor to idle, but the connection callback
+         * queued before it still starts the transfer, because StartDownload()
+         * does not check again. Refuse a download the requestor no longer
+         * owns, before anything is reported or the cause latch is re-armed:
+         * the BDX ReceiveInit only goes out once this succeeds,
+         * StartDownload() closes its exchange on the error, and the
+         * requestor, already idle, raises no further state change. */
+        OTARequestorInterface *req = GetRequestorInstance();
+        if (req == nullptr ||
+            req->GetCurrentUpdateState() != OTARequestorInterface::OTAUpdateStateEnum::kDownloading) {
+            HEARTH_LOGW(TAG, "refusing a download the requestor no longer owns");
+            return CHIP_ERROR_INCORRECT_STATE;
+        }
         if (mBuf == nullptr) {
             mBuf = static_cast<uint8_t *>(hearth_stage_alloc(kBlockSize));
         }
