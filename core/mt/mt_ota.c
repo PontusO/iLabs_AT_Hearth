@@ -189,6 +189,16 @@ static const char *variant_token(void)
 
 void mt_ota_on_state(mt_ota_state_t state, const char *detail)
 {
+    /* B685: a disabled relay is silent (spec 3.31), and that covers its state
+     * as well as its URCs. AT+MTOTA=0 answers before the platform's cancel
+     * runs on the Matter thread, and a download the requestor had already
+     * queued can still start and fail after it; recording those lines would
+     * leave AT+MTOTA? reading something other than IDLE with nothing left to
+     * close it, and the spec's "0, then 1, then 2" would be refused as busy.
+     * AT+MTOTA=0 has already set IDLE and dropped any pending block. */
+    if (!s_mode) {
+        return;
+    }
     s_state = state;
     if (state == MT_OTA_DOWNLOADING && detail != NULL) {
         s_percent = (uint8_t)strtoul(detail, NULL, 10);
@@ -199,9 +209,6 @@ void mt_ota_on_state(mt_ota_state_t state, const char *detail)
     }
     if (state == MT_OTA_IDLE || state == MT_OTA_ERROR || state == MT_OTA_DISCONTINUED) {
         drop_pending();
-    }
-    if (!s_mode) {
-        return;
     }
     if (detail != NULL && *detail != '\0') {
         urc("+MTOTA:%s,%s", mt_ota_state_name(state), detail);

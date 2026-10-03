@@ -71,6 +71,21 @@ public:
     CHIP_ERROR PrepareDownload() override
     {
         VerifyOrReturnError(mDownloader != nullptr, CHIP_ERROR_INCORRECT_STATE);
+        /* B685: CHIP's DownloadUpdate() records kDownloading and only then
+         * connects to the provider. A cancel (AT+MTOTA=0) that lands in
+         * between resets the requestor to idle, but the connection callback
+         * queued before it still starts the transfer, because StartDownload()
+         * does not check again. Refuse a download the requestor no longer
+         * owns, before anything is reported or the cause latch is re-armed:
+         * the BDX ReceiveInit only goes out once this succeeds,
+         * StartDownload() closes its exchange on the error, and the
+         * requestor, already idle, raises no further state change. */
+        OTARequestorInterface *req = GetRequestorInstance();
+        if (req == nullptr ||
+            req->GetCurrentUpdateState() != OTARequestorInterface::OTAUpdateStateEnum::kDownloading) {
+            HEARTH_LOGW(TAG, "refusing a download the requestor no longer owns");
+            return CHIP_ERROR_INCORRECT_STATE;
+        }
         if (mBuf == nullptr) {
             mBuf = static_cast<uint8_t *>(hearth_stage_alloc(kBlockSize));
         }
@@ -85,6 +100,21 @@ public:
         mHeaderParser.Init();
         /* Not synchronously: BeginPrepareDownload() is still on the stack. */
         return SystemLayer().ScheduleLambda([this] {
+            /* B685, the other ordering: the connection callback ran before
+             * the cancel, so the check above passed, and the cancel landed
+             * while this lambda was queued. Its EndDownload() found nothing
+             * in progress (the downloader was still preparing) and the
+             * requestor is idle now. Failing the preparation resets the
+             * downloader without sending the BDX ReceiveInit and without an
+             * Abort(), so no state line goes out for an attempt that is
+             * already over. */
+            OTARequestorInterface *r = GetRequestorInstance();
+            if (r == nullptr ||
+                r->GetCurrentUpdateState() != OTARequestorInterface::OTAUpdateStateEnum::kDownloading) {
+                HEARTH_LOGW(TAG, "refusing a download the requestor no longer owns");
+                mDownloader->OnPreparedForDownload(CHIP_ERROR_CONNECTION_ABORTED);
+                return;
+            }
             mt_ota_on_state(MT_OTA_DOWNLOADING, "0");
             mDownloader->OnPreparedForDownload(CHIP_NO_ERROR);
         });

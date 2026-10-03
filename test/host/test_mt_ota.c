@@ -350,6 +350,33 @@ static void test_staged(void)
     s_staged_rc = 0;
 }
 
+/* B685 (bench 2026-10-02, C6 Thread image): AT+MTOTA=0 answers before the
+ * platform's cancel runs on the Matter thread, and a download the requestor
+ * had already queued can still start and fail after it. Its state lines
+ * arrive with the mode at 0. A disabled relay is silent (spec 3.31), so they
+ * must neither raise a URC nor move the state AT+MTOTA? reports, or the
+ * spec's "AT+MTOTA=0, then AT+MTOTA=1, then AT+MTOTA=2" is refused as busy. */
+static void test_mode0_ignores_late_events(void)
+{
+    mt_ota_init();
+    s_set_mode_rc = 0;
+    run("MTOTA", AT_SET, "1");
+    mt_ota_on_state(MT_OTA_QUERYING, NULL);
+    mt_ota_on_state(MT_OTA_AVAILABLE, "65541");
+    check("b685: MTOTA=0 mid-attempt -> OK", run("MTOTA", AT_SET, "0") == AT_R_OK && mt_ota_mode() == 0);
+    int urcs = s_urc_count;
+    mt_ota_on_state(MT_OTA_DOWNLOADING, "0");
+    mt_ota_on_state(MT_OTA_ERROR, "abort");
+    check("b685: late state lines after MTOTA=0 raise no URC", s_urc_count == urcs);
+    cap_reset();
+    check("b685: MTOTA? still reads 0,IDLE,0",
+          run("MTOTA", AT_QUERY, NULL) == AT_R_OK && last_line_is("+MTOTA:0,IDLE,0,thread"));
+    check("b685: MTOTA=1 again -> OK", run("MTOTA", AT_SET, "1") == AT_R_OK && mt_ota_mode() == 1);
+    s_set_mode_last = -99;
+    check("b685: MTOTA=2 after 0 then 1 -> OK (spec 3.31)",
+          run("MTOTA", AT_SET, "2") == AT_R_OK && s_set_mode_last == 2);
+}
+
 int main(void)
 {
     printf("\n===== mt_ota tests =====\n");
@@ -361,6 +388,7 @@ int main(void)
     test_block_relay();
     test_block_chunking();
     test_staged();
+    test_mode0_ignores_late_events();
     printf("\n===== RESULT: %d passed, %d failed =====\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

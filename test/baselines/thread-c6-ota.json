@@ -14,15 +14,15 @@
       "provider": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/provider/chip-ota-provider-app",
       "provider_sha256": "7ebf85f4 4c3ca6d0 215e79b7 b77950f2 7f71cc2b 22cb62df 62857b1b 593df607",
       "transfer_seconds": {
-        "4.6 full relay": 13.357,
-        "4.8 apply relay": 10.977
+        "4.6 full relay": 11.091,
+        "4.8 apply relay": 10.924
       },
       "vendor_id": "0xFFF1"
     },
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-10-02T14:43:58+00:00",
+    "timestamp": "2026-10-02T12:25:05+00:00",
     "transport": "THREAD"
   },
   "results": {

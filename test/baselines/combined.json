@@ -1,13 +1,14 @@
 {
   "header": {
-    "cgmr": "1.2.0",
-    "fw_repo_head": "ff3f989f67625f4dc40db7d468b43fa31575368c",
+    "cgmm": "ESP32-C6 Hearth",
+    "cgmr": "1.3.0",
+    "fw_repo_head": "32799fe432295091e9f5cc81670dd70da6f382e5",
     "manual_code": "34970112332",
     "net": "+MTNET:WIFI,1,0,0",
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-09-04T20:24:33+00:00",
+    "timestamp": "2026-10-02T14:21:32+00:00",
     "transport": "WIFI"
   },
   "results": {
@@ -15,7 +16,7 @@
     "ATE1/ATE0 echo on and off": "PASS",
     "CGMI -> iLabs Electronics": "PASS",
     "CGMI? -> ERROR": "PASS",
-    "CGMM -> ESP32-C6 Hearth": "PASS",
+    "CGMM -> a known Hearth model": "PASS",
     "CGMR equals MTVER? field": "PASS",
     "CR, LF and CRLF all terminate": "PASS",
     "MTALARM no args -> ERROR": "PASS",

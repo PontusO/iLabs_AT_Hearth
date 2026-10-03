@@ -1,8 +1,8 @@
 {
   "header": {
     "cgmm": "ESP32-C6 Hearth",
-    "cgmr": "1.2.0",
-    "fw_repo_head": "ee59d02e96d7ca908ec7276620aeee70495862aa",
+    "cgmr": "1.3.0",
+    "fw_repo_head": "32799fe432295091e9f5cc81670dd70da6f382e5",
     "manual_code": "34970112332",
     "net": "+MTNET:WIFI,1,1,0",
     "node_id": "0x4845",
@@ -14,15 +14,15 @@
       "provider": "/home/pontus/esp/esp-matter/connectedhomeip/connectedhomeip/out/provider/chip-ota-provider-app",
       "provider_sha256": "7ebf85f4 4c3ca6d0 215e79b7 b77950f2 7f71cc2b 22cb62df 62857b1b 593df607",
       "transfer_seconds": {
-        "4.6 full relay": 8.888,
-        "4.8 apply relay": 9.064
+        "4.6 full relay": 8.831,
+        "4.8 apply relay": 8.497
       },
       "vendor_id": "0xFFF1"
     },
     "port": "/dev/serial/by-id/usb-iLabs_Challenger_2350_WiFi_BLE_83C29C7F51EC55B4-if00",
     "qr_payload": "MT:Y.K9042C00KA0648G00",
     "ssid": null,
-    "timestamp": "2026-09-07T13:10:18+00:00",
+    "timestamp": "2026-10-02T14:18:13+00:00",
     "transport": "WIFI"
   },
   "results": {
